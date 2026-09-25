@@ -634,7 +634,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .zone-shape.area polygon { fill: rgb(245 158 11 / .14); stroke: #f59e0b; stroke-dasharray: 5 4; }
 .zone-shape.draft.area polyline { stroke: #f59e0b; }
 .swatch.area { background: rgb(245 158 11 / .4); border: 2px dashed #f59e0b; }
-.area-badge { background: color-mix(in srgb, #f59e0b 20%, transparent); color: var(--text); text-transform: none; }
+.area-badge { background: color-mix(in srgb, #f59e0b 20%, transparent); color: var(--text); text-transform: none; white-space: nowrap; border-radius: 6px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.event-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.event-foot .badge { white-space: nowrap; }
 
 /* event viewer: details column */
 .detail-side { gap: 0; }

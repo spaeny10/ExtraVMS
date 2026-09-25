@@ -209,9 +209,24 @@ export const useConnection = () => useSyncExternalStore(conn.subscribe, conn.get
 /** Banner shown when the NVR can't be reached (browser offline, or the live socket down for a while). */
 export function OfflineBanner() {
   const c = useConnection();
-  const [, tick] = useState(0);
-  useEffect(() => { const t = setInterval(() => tick((x) => x + 1), 5000); return () => clearInterval(t); }, []);
-  const down = !c.online || (!c.ws && Date.now() - c.lastData > 8000);
+  const [apiDown, setApiDown] = useState(false);
+  useEffect(() => {
+    // The live socket can drop on its own (proxies, sleeping phones) while the API is fine: only say the NVR is
+    // unreachable when a real request fails.
+    let stop = false;
+    const probe = async () => {
+      if (c.online && !c.ws && Date.now() - c.lastData > 8000) {
+        try {
+          const r = await fetch("/api/system", { cache: "no-store" });
+          if (!stop) { setApiDown(!r.ok); if (r.ok) connection.data(); }
+        } catch { if (!stop) setApiDown(true); }
+      } else if (!stop) setApiDown(false);
+    };
+    probe();
+    const t = setInterval(probe, 10000);
+    return () => { stop = true; clearInterval(t); };
+  }, [c.online, c.ws, c.lastData]);
+  const down = !c.online || apiDown;
   if (!down) return null;
   const ago = Math.round((Date.now() - c.lastData) / 60000);
   return (
