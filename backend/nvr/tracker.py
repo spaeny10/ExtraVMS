@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 from . import zones
 from .config import settings
+from . import cells
 from .db import db
 from .ingest import MetaFrame, RuleEvent
 
@@ -69,6 +70,7 @@ class Tracker:
                 t.event_id = db.create_event(
                     camera_id=t.camera_id, track_id=t.object_id, camera_class=t.label,
                     camera_conf=t.max_conf, start_ts=t.first_ts, path=t.path, status="open",
+                    cells=cells.for_event(t.path),
                 )
                 log.info("[%s] event %s opened: %s track %s", t.camera_id, t.event_id, t.label, t.object_id)
 
@@ -93,7 +95,7 @@ class Tracker:
             if t.event_id is None:
                 continue  # too short / never entered a zone: noise
             db.update_event(t.event_id, end_ts=t.last_ts, path=t.path, rules=t.rules,
-                            camera_conf=t.max_conf, status="pending")
+                            camera_conf=t.max_conf, status="pending", cells=cells.for_event(t.path))
             log.info("[%s] event %s closed after %.1fs (%d samples)", t.camera_id, t.event_id,
                      t.last_ts - t.first_ts, len(t.path))
             await self.on_closed(t.event_id)

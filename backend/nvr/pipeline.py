@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import cv2
 
-from . import baseline, identities, journeys, policy, vlmroute, zones
+from . import baseline, cells, identities, journeys, policy, vlmroute, zones
 from . import synopsis as vlm
 from .config import settings
 from .db import db
@@ -99,6 +99,7 @@ class Pipeline:
         self.verifier = await loop.run_in_executor(self.gpu, Verifier)
         asyncio.create_task(self._reid_backfill(), name="reid-backfill")
         asyncio.create_task(self._vehicle_backfill(), name="vehicle-backfill")
+        asyncio.create_task(self._cells_backfill(), name="cells-backfill")
         while True:
             event_id = await self.verify_q.get()
             try:
@@ -183,6 +184,15 @@ class Pipeline:
         for r in rows:
             await self.journey_q.put(r["id"])
         return len(rows)
+
+    async def _cells_backfill(self) -> None:
+        """One-time: region cells for events recorded before the paint-a-region filter existed."""
+        try:
+            n = await asyncio.to_thread(cells.backfill)
+            if n:
+                log.info("region cells: backfilled %d events", n)
+        except Exception:
+            log.exception("region cells backfill failed")
 
     async def _vehicle_backfill(self) -> None:
         """One-time: CLIP fingerprints for vehicles verified before they existed (from their saved crops)."""

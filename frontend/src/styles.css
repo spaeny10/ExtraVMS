@@ -682,3 +682,18 @@ body:has(.drag-ghost) { cursor: grabbing; user-select: none; }
 .rule-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 4px 0; }
 .rule-row input { flex: 1 1 160px; min-width: 120px; }
 .d-line.rule-broken { color: var(--danger, #e5484d); }
+
+/* paint a region (RegionPaint.tsx): canvas over the video's picture; tools pill; badges */
+.region-canvas { position: absolute; pointer-events: none; z-index: 2; display: block; }
+.region-canvas.editing { pointer-events: auto; touch-action: none; cursor: crosshair; }
+.region-tools { position: absolute; left: 6px; bottom: 6px; z-index: 3; display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  padding: 4px 8px; background: rgb(0 0 0 / .7); border-radius: 8px; color: #fff; font-size: 12px; }
+.region-tools .muted-on-dark { opacity: .75; }
+.sync-tile.painting, .tile.painting { cursor: crosshair; touch-action: none; }
+.sync-tile.painting .sync-bar { z-index: 4; }
+.sync-bar { z-index: 4; }
+.sync-paint.on, .tile-bar .on { color: var(--accent); }
+.region-badge { display: inline-flex; gap: 2px; align-items: center; color: var(--accent); font-size: 12px; }
+.region-badge .linkish { color: inherit; }
+.region-chip { display: inline-flex; gap: 6px; align-items: center; background: color-mix(in srgb, var(--accent) 18%, transparent); border-color: var(--accent); }
+.region-chip .linkish { color: var(--accent); }

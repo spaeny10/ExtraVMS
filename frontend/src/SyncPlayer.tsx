@@ -1,5 +1,7 @@
+import { RegionBadge, RegionOverlay } from "./RegionPaint";
 import { useEffect, useRef, useState } from "react";
 import { playbackUrl } from "./api";
+import type { Camera } from "./api";
 import { CHUNK, isBuffered, spanAt, useLatestFrame, type Span } from "./playback";
 
 export type TileStatus = "idle" | "paused" | "playing" | "buffering" | "gap";
@@ -15,7 +17,7 @@ const TICK_MS = 250;
  */
 export function SyncTile({
   cam, name, spans, clockRef, playing, speed, scrubbing, scrubT, previewWidth, active, soloed,
-  onSolo, onSelect, statusRef, dragging, dropTarget, onDragPointerDown,
+  onSolo, onSelect, statusRef, dragging, dropTarget, onDragPointerDown, camera,
 }: {
   cam: string; name: string; spans: Span[] | undefined; clockRef: React.RefObject<number | null>;
   playing: boolean; speed: number; scrubbing: boolean; scrubT: number | null; previewWidth: number;
@@ -23,6 +25,8 @@ export function SyncTile({
   dragging?: boolean; dropTarget?: boolean;
   /** pointerdown that may become a reorder drag; fromGrip = started on the ⠿ handle (touch-friendly) */
   onDragPointerDown?: (e: React.PointerEvent, fromGrip: boolean) => void;
+  /** the camera record, so a painted region can be saved as a named place */
+  camera?: Camera;
   statusRef: React.RefObject<Record<string, TileStatus>>;
 }) {
   const video = useRef<HTMLVideoElement>(null);
@@ -117,9 +121,10 @@ export function SyncTile({
   };
 
   const label = { idle: "", paused: "", playing: "", buffering: "Buffering…", gap: "No recording" }[status];
+  const [painting, setPainting] = useState(false);
 
   return (
-    <div className={`sync-tile ${active ? "active" : ""} ${dragging ? "dragging" : ""} ${dropTarget ? "drop-target" : ""}`}
+    <div className={`sync-tile ${active ? "active" : ""} ${dragging ? "dragging" : ""} ${dropTarget ? "drop-target" : ""} ${painting ? "painting" : ""}`}
       data-cam={cam} onClick={onSelect} onDoubleClick={onSolo} title="Drag to reorder · double-click to isolate"
       onPointerDown={(e) => onDragPointerDown?.(e, false)}>
       {chunk && (
@@ -147,11 +152,15 @@ export function SyncTile({
         </div>
       )}
       {status === "gap" && !frames.shot && <div className="sync-gap">No recording at this time</div>}
+      <RegionOverlay cam={cam} videoRef={video} editing={painting} onDone={() => setPainting(false)} camera={camera} />
       <div className="sync-bar">
         {onDragPointerDown && <span className="sync-grip" title="Drag to reorder" onPointerDown={(e) => { e.stopPropagation(); onDragPointerDown(e, true); }}>⠿</span>}
         <span className="sync-name">{name}</span>
         {label && <span className={`sync-status ${status}`}>{label}</span>}
         <span className="spacer" />
+        {!painting && <RegionBadge cam={cam} onEdit={() => setPainting(true)} />}
+        <button className={`ghost small sync-paint ${painting ? "on" : ""}`} title="Paint a region: show only events that passed through it"
+          onClick={(e) => { e.stopPropagation(); setPainting((p) => !p); }}>✎</button>
         <button className={`ghost small sync-solo ${soloed ? "on" : ""}`} title={soloed ? "Back to the grid (0)" : "Isolate this camera"}
           onClick={(e) => { e.stopPropagation(); onSolo(); }}>🔍</button>
       </div>

@@ -296,7 +296,7 @@ async def list_events(camera: str | None = None, status: str | None = None, labe
     if before_id:
         where.append("id<?"); params.append(before_id)
     sql = ("SELECT id, camera_id, track_id, camera_class, camera_conf, start_ts, end_ts, status, yolo_class, "
-           "yolo_conf, yolo_hits, snapshot, clip, synopsis, threat, priority, anomaly, anomaly_json, watched, areas, policy, error, corrected_at, feedback, "
+           "yolo_conf, yolo_hits, snapshot, clip, synopsis, threat, priority, anomaly, anomaly_json, watched, areas, policy, cells, error, corrected_at, feedback, "
            "EXISTS(SELECT 1 FROM locks WHERE locks.event_id = events.id) AS locked, journey_id, "
            "(SELECT COUNT(DISTINCT je.value) FROM journeys, json_each(journeys.cameras) je WHERE journeys.id = events.journey_id) AS journey_cameras FROM events"
            + (f" WHERE {' AND '.join(where)}" if where else "") + " ORDER BY id DESC LIMIT ?")
@@ -778,7 +778,7 @@ async def unlock_event(event_id: int):
 @app.get("/api/recordings/{camera_id}")
 async def recordings(camera_id: str, start: float | None = None, end: float | None = None):
     spans = await mediamtx.recording_spans(camera_id, start, end)
-    events = db.all("SELECT id, camera_class, yolo_class, yolo_conf, start_ts, end_ts, status, threat, priority, anomaly, journey_id, "
+    events = db.all("SELECT id, camera_class, yolo_class, yolo_conf, start_ts, end_ts, status, threat, priority, anomaly, journey_id, cells, "
                     "json_extract(feedback, '$.verdict') AS verdict, synopsis IS NOT NULL AS has_synopsis FROM events "
                     "WHERE camera_id=? AND start_ts>=? AND start_ts<=? ORDER BY start_ts",
                     [camera_id, start or 0, end or time.time()])

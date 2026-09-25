@@ -1,14 +1,19 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 /**
  * WebRTC (WHEP) player for a MediaMTX path.
  * onUnsupported fires when the browser can't decode the stream's codec (e.g. H.265 main streams),
  * so the caller can fall back to the H.264 sub stream.
  */
-export function WhepPlayer({ path, port, className, onUnsupported, showSize = false }: {
+export function WhepPlayer({ path, port, className, onUnsupported, showSize = false, videoRef, children }: {
   path: string; port: number; className?: string; onUnsupported?: () => void; showSize?: boolean;
+  /** receives the <video> element (e.g. for an overlay that needs its real aspect ratio) */
+  videoRef?: React.MutableRefObject<HTMLVideoElement | null>;
+  /** overlays rendered inside the player box */
+  children?: ReactNode;
 }) {
-  const video = useRef<HTMLVideoElement>(null);
+  const video = useRef<HTMLVideoElement | null>(null);
+  const setVideo = (el: HTMLVideoElement | null) => { video.current = el; if (videoRef) videoRef.current = el; };
   const [state, setState] = useState<"connecting" | "playing" | "error">("connecting");
   const [size, setSize] = useState<string>("");
   const unsupported = useRef(onUnsupported);
@@ -99,7 +104,7 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
   return (
     <div className={`player ${className ?? ""}`}>
       <video
-        ref={video}
+        ref={setVideo}
         autoPlay
         muted
         playsInline
@@ -110,6 +115,7 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
       />
       {state !== "playing" && <div className="player-state">{state === "connecting" ? "Connecting…" : "Reconnecting…"}</div>}
       {showSize && size && state === "playing" && <div className="player-size">{size}</div>}
+      {children}
     </div>
   );
 }

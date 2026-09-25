@@ -6,6 +6,8 @@ import { EventDetail } from "./EventDetail";
 import type { TimelineFocus } from "./nav";
 import { LIVE_LAG, fmtClock, nowS, spanAt, useLatestFrame, type Span } from "./playback";
 import { SyncTile, type TileStatus } from "./SyncPlayer";
+import { encodeCells, regionPass, regions, useRegions } from "./region";
+import { timelineHash } from "./nav";
 
 type Marker = TimelineEvent;
 type Filter = {
@@ -714,11 +716,20 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
   };
 
   // ---- filtered events (shown cameras only) & stepping between them
+  const regionMap = useRegions();  // painted regions per camera (region.ts)
   const filtered = useMemo(() => {
     const out: Record<string, Marker[]> = {};
-    for (const [id, lane] of Object.entries(lanes)) out[id] = lane.events.filter((e) => matches(e, filter));
+    for (const [id, lane] of Object.entries(lanes)) out[id] = lane.events.filter((e) => matches(e, filter) && regionPass(e, regionMap[id]));
     return out;
-  }, [lanes, filter]);
+  }, [lanes, filter, regionMap]);
+  // the share link carries the focused event (or playhead) and the painted region of the selected camera
+  const shareLink = () => {
+    const rc = regionMap[cam] ? cam : Object.keys(regionMap)[0];
+    const region = rc ? { cam: rc, cells: encodeCells(regionMap[rc]) } : null;
+    const hash = focus ? timelineHash(focus.cam, focus.eventId, !!focus.members, focus.start, region)
+      : timelineHash(cam, 0, false, playhead ?? undefined, region);
+    navigator.clipboard?.writeText(location.origin + location.pathname + hash).then(() => toast.success("Link copied")).catch(() => {});
+  };
   const tileKey = tileIds.join(",");
   const allFiltered = useMemo(
     () => Object.entries(filtered).filter(([id]) => tileIds.includes(id))
@@ -843,6 +854,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
                 dragging={dragId === id}
                 dropTarget={dropId === id && dragId !== id}
                 onDragPointerDown={(e, fromGrip) => startTileDrag(id, camName(id), e, fromGrip)}
+                camera={cameras.find((c) => c.id === id)}
               />
             ))}
           </div>
@@ -941,6 +953,13 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
         <label className="row small" title="Draw lines between sightings of the same person on different cameras">
           <input type="checkbox" checked={showJourneys} onChange={(e) => { setShowJourneys(e.target.checked); saveNumber("timelineShowJourneys", e.target.checked ? 1 : 0); }} /> Show journeys
         </label>
+        {Object.keys(regionMap).map((id) => (
+          <span key={id} className="chip on region-chip" title="Only events that passed through the painted region on this camera are shown (✎ on the tile to edit)">
+            ▦ region on {camName(id)}
+            <button className="linkish" onClick={shareLink} title="Copy a link that includes this region">link</button>
+            <button className="linkish" aria-label="Clear region" onClick={() => regions.set(id, null)}>✕</button>
+          </span>
+        ))}
         <span className="spacer" />
         <span className="muted small">{inView} matching in view</span>
         <button className="ghost small" onClick={() => jumpToEvent(-1)} title="Previous matching event ([)">◀ Prev event</button>
@@ -956,7 +975,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
           <span className="spacer" />
           <button className="ghost small" onClick={replayFocus} title={`Play from ${FOCUS_PREROLL_S} s before`}>↺ Replay{focus.eventId ? " event" : ""}</button>
           {focus.eventId ? <button className="ghost small" onClick={() => setOpen(focus.eventId)}>Details</button> : null}
-          <button className="ghost small" onClick={() => navigator.clipboard?.writeText(location.href).catch(() => {})} title="Copy a link to this event on the Timeline">Copy link</button>
+          <button className="ghost small" onClick={shareLink} title="Copy a link to this event on the Timeline (includes a painted region)">Copy link</button>
           <button className="ghost small" onClick={() => onClearFocus?.()} aria-label="Clear focus">✕</button>
         </div>
       )}

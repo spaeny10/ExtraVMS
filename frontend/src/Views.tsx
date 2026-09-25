@@ -8,6 +8,9 @@ import { PolicyForm, RetentionPanel } from "./RetentionPanel";
 import { QwenFeedbackInfo } from "./QwenFeedbackInfo";
 import { NeighborsEditor } from "./Neighbors";
 import { Skeleton, errorText, swipeHandlers, toast, useIsPhone } from "./ui";
+import { RegionBadge, RegionOverlay } from "./RegionPaint";
+import { regionPass, regions, useRegions } from "./region";
+import { useRef } from "react";
 
 /* ------------------------------------------------------------------ Live */
 
@@ -21,8 +24,45 @@ function loadQuality(): Record<string, Quality> {
   }
 }
 
+/** One live camera: the WHEP player with the paint-a-region overlay and the tile bar. */
+function LiveTile({ c, hd, port, active, onUnsupported, bar, phone, onSwipe }: {
+  c: Camera; hd: boolean; port: number; active?: NvrEvent; onUnsupported?: () => void; bar: React.ReactNode; phone?: boolean; onSwipe?: (dir: -1 | 1) => void;
+}) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [painting, setPainting] = useState(false);
+  return (
+    <div className={`tile ${active ? "alerting" : ""} ${painting ? "painting" : ""}`} {...(phone && onSwipe && !painting ? swipeHandlers(onSwipe) : {})}>
+      <WhepPlayer key={`${c.id}-${hd ? "hd" : "sd"}`} path={hd ? c.id : `${c.id}_sub`} port={port} showSize className={hd ? "hd" : ""}
+        onUnsupported={onUnsupported} videoRef={videoRef}>
+        <RegionOverlay cam={c.id} videoRef={videoRef} editing={painting} onDone={() => setPainting(false)} camera={c} fallbackAspect={hd ? 2592 / 1520 : 4 / 3} />
+      </WhepPlayer>
+      <div className="tile-bar">
+        {bar}
+        {!painting && <RegionBadge cam={c.id} onEdit={() => setPainting(true)} />}
+        <button className={`ghost small ${painting ? "on" : ""}`} title="Paint a region: the activity feed shows only events that passed through it"
+          onClick={() => setPainting((p) => !p)}>✎</button>
+      </div>
+    </div>
+  );
+}
+
+/** The activity feed filtered by painted regions, with a note and a way to clear them. */
+function RegionNote({ cameras }: { cameras: Camera[] }) {
+  const regionMap = useRegions();
+  const ids = Object.keys(regionMap);
+  if (!ids.length) return null;
+  return (
+    <p className="muted small">
+      Filtered by the painted region on {ids.map((id) => cameras.find((c) => c.id === id)?.name ?? id).join(", ")} ·{" "}
+      <button className="linkish" onClick={() => ids.forEach((id) => regions.set(id, null))}>Clear</button>
+    </p>
+  );
+}
+
 export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: number; recent: NvrEvent[] }) {
   const [focus, setFocus] = useState<string | null>(null);
+  const regionMap = useRegions();
+  const feed = recent.filter((e) => regionPass(e, regionMap[e.camera_id]));
   const [open, setOpen] = useState<number | null>(null);
   // SD = H.264 sub stream (light, plays everywhere); HD = the recorded H.265 main stream.
   const [quality, setQualityState] = useState<Record<string, Quality>>(loadQuality);
@@ -58,20 +98,16 @@ export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: n
     const go = (dir: -1 | 1) => setPhoneCam((i) => (i + dir + cameras.length) % cameras.length);
     return (
       <div className="live-phone">
-        <div className={`tile ${active ? "alerting" : ""}`} {...swipeHandlers(go)}>
-          <WhepPlayer key={`${c.id}-${hd ? "hd" : "sd"}`} path={hd ? c.id : `${c.id}_sub`} port={port} showSize className={hd ? "hd" : ""}
-            onUnsupported={hd ? () => setHdUnsupported(true) : undefined} />
-          <div className="tile-bar">
-            <span className={`dot ${c.status?.stream_ready ? "ok" : "bad"}`} />
-            <span>{c.name}</span>
-            {active && <span className={`label-chip ${active.camera_class}`}>{active.camera_class}</span>}
-            <span className="spacer" />
-            <div className="segmented small-seg">
-              <button className={!hd ? "active" : ""} onClick={() => setQuality({ ...quality, [c.id]: "sd" })}>SD</button>
-              <button className={hd ? "active" : ""} disabled={hdUnsupported} onClick={() => setQuality({ ...quality, [c.id]: "hd" })}>HD</button>
-            </div>
+        <LiveTile c={c} hd={hd} port={port} active={active} phone onSwipe={go} onUnsupported={hd ? () => setHdUnsupported(true) : undefined} bar={<>
+          <span className={`dot ${c.status?.stream_ready ? "ok" : "bad"}`} />
+          <span>{c.name}</span>
+          {active && <span className={`label-chip ${active.camera_class}`}>{active.camera_class}</span>}
+          <span className="spacer" />
+          <div className="segmented small-seg">
+            <button className={!hd ? "active" : ""} onClick={() => setQuality({ ...quality, [c.id]: "sd" })}>SD</button>
+            <button className={hd ? "active" : ""} disabled={hdUnsupported} onClick={() => setQuality({ ...quality, [c.id]: "hd" })}>HD</button>
           </div>
-        </div>
+        </>} />
         {cameras.length > 1 && (
           <div className="live-strip" role="tablist">
             {cameras.map((x, i) => (
@@ -85,8 +121,10 @@ export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: n
         <p className="muted small center">Swipe the picture or tap a thumbnail to switch cameras.</p>
         <aside className="live-feed">
           <h3>Latest activity</h3>
+          <RegionNote cameras={cameras} />
           {recent.length === 0 && <p className="muted">Nothing yet.</p>}
-          {recent.slice(0, 12).map((e) => <EventCard key={e.id} e={e} cameraName={name(e.camera_id)} onOpen={() => setOpen(e.id)} />)}
+          {recent.length > 0 && feed.length === 0 && <p className="muted">Nothing recent passed through the painted region.</p>}
+          {feed.slice(0, 12).map((e) => <EventCard key={e.id} e={e} cameraName={name(e.camera_id)} onOpen={() => setOpen(e.id)} />)}
         </aside>
         {open !== null && <EventDetail id={open} cameraName={name} onClose={() => setOpen(null)} />}
       </div>
@@ -108,27 +146,17 @@ export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: n
             const active = recent.find((e) => e.camera_id === c.id && (e.status === "open" || e.status === "pending"));
             const hd = q(c.id) === "hd";
             return (
-              <div key={c.id} className={`tile ${active ? "alerting" : ""}`} onDoubleClick={() => setFocus(focus ? null : c.id)}>
-                <WhepPlayer
-                  key={hd ? "hd" : "sd"}
-                  path={hd ? c.id : `${c.id}_sub`}
-                  port={port}
-                  showSize
-                  className={hd ? "hd" : ""}
-                  onUnsupported={hd ? () => setHdUnsupported(true) : undefined}
-                />
-                <div className="tile-bar">
-                  <span className={`dot ${c.status?.stream_ready ? "ok" : "bad"}`} title={c.status?.stream_ready ? "Recording" : "Offline"} />
-                  <span>{c.name}</span>
-                  {active && <span className={`label-chip ${active.camera_class}`}>{active.camera_class}</span>}
-                  <span className="spacer" />
-                  <div className="segmented small-seg" title="Stream quality for this camera">
-                    <button className={!hd ? "active" : ""} onClick={() => setQuality({ ...quality, [c.id]: "sd" })}>SD</button>
-                    <button className={hd ? "active" : ""} disabled={hdUnsupported} onClick={() => setQuality({ ...quality, [c.id]: "hd" })}>HD</button>
-                  </div>
-                  <button className="ghost small" onClick={() => setFocus(focus ? null : c.id)}>{focus ? "Grid" : "Expand"}</button>
+              <LiveTile key={c.id} c={c} hd={hd} port={port} active={active} onUnsupported={hd ? () => setHdUnsupported(true) : undefined} bar={<>
+                <span className={`dot ${c.status?.stream_ready ? "ok" : "bad"}`} title={c.status?.stream_ready ? "Recording" : "Offline"} />
+                <span>{c.name}</span>
+                {active && <span className={`label-chip ${active.camera_class}`}>{active.camera_class}</span>}
+                <span className="spacer" />
+                <div className="segmented small-seg" title="Stream quality for this camera">
+                  <button className={!hd ? "active" : ""} onClick={() => setQuality({ ...quality, [c.id]: "sd" })}>SD</button>
+                  <button className={hd ? "active" : ""} disabled={hdUnsupported} onClick={() => setQuality({ ...quality, [c.id]: "hd" })}>HD</button>
                 </div>
-              </div>
+                <button className="ghost small" onClick={() => setFocus(focus ? null : c.id)}>{focus ? "Grid" : "Expand"}</button>
+              </>} />
             );
           })}
           {cameras.length === 0 && <div className="empty">No cameras yet. Add one under Cameras.</div>}
@@ -136,8 +164,10 @@ export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: n
       </div>
       <aside className="live-feed">
         <h3>Latest activity</h3>
+        <RegionNote cameras={cameras} />
         {recent.length === 0 && <p className="muted">Nothing yet.</p>}
-        {recent.slice(0, 12).map((e) => (
+        {recent.length > 0 && feed.length === 0 && <p className="muted">Nothing recent passed through the painted region.</p>}
+        {feed.slice(0, 12).map((e) => (
           <EventCard key={e.id} e={e} cameraName={name(e.camera_id)} onOpen={() => setOpen(e.id)} />
         ))}
       </aside>

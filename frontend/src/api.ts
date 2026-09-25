@@ -99,6 +99,7 @@ export type NvrEvent = {
   watched?: string | null;
   /** named areas (zones of type "area") the object walked into */
   areas?: { name: string; from: number; to: number }[] | null;
+  cells?: string | null; // 32x18 grid cells the object crossed (region.ts filter)
   error: string | null;
   corrected_at?: number | null;
   feedback?: Feedback | null;
@@ -116,7 +117,7 @@ export type NvrEvent = {
   clip_start?: number | null;
 };
 
-export type TimelineEvent = Pick<NvrEvent, "id" | "camera_class" | "yolo_class" | "yolo_conf" | "start_ts" | "end_ts" | "status" | "threat" | "priority" | "anomaly" | "journey_id"> & {
+export type TimelineEvent = Pick<NvrEvent, "id" | "camera_class" | "yolo_class" | "yolo_conf" | "start_ts" | "end_ts" | "status" | "threat" | "priority" | "anomaly" | "journey_id" | "cells"> & {
   verdict: Verdict | null;
   has_synopsis: number;
 };

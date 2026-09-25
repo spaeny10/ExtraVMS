@@ -13,16 +13,22 @@ type Nav = { openInTimeline: (e: TimelineTarget) => void };
 export const NavContext = createContext<Nav>({ openInTimeline: () => {} });
 export const useNav = () => useContext(NavContext);
 
-/** #timeline?cam=cam1&event=123[&journey=1]  or  #timeline?cam=cam1&t=1790270080 (a moment) */
-export function parseTimelineHash(hash: string): { cam: string | null; event: number | null; journey: boolean; t: number | null } | null {
+export type HashRegion = { cam: string; cells: string };
+
+/** #timeline?cam=cam1&event=123[&journey=1]  or  #timeline?cam=cam1&t=1790270080 (a moment);
+ *  either may carry &region=<cam>:<96 base64url chars> (a painted region filter, region.ts) */
+export function parseTimelineHash(hash: string): { cam: string | null; event: number | null; journey: boolean; t: number | null; region: HashRegion | null } | null {
   if (!hash.startsWith("#timeline")) return null;
   const q = new URLSearchParams(hash.split("?")[1] ?? "");
   const ev = Number(q.get("event"));
   const t = Number(q.get("t"));
+  const reg = q.get("region") ?? "";
+  const m = /^([a-z0-9_]{1,32}):([A-Za-z0-9_-]{96})$/.exec(reg);
   return { cam: q.get("cam"), event: Number.isFinite(ev) && ev > 0 ? ev : null, journey: q.get("journey") === "1",
-    t: Number.isFinite(t) && t > 0 ? t : null };
+    t: Number.isFinite(t) && t > 0 ? t : null, region: m ? { cam: m[1], cells: m[2] } : null };
 }
 
-export const timelineHash = (cam: string, eventId: number, journey = false, t?: number) =>
-  eventId ? `#timeline?cam=${encodeURIComponent(cam)}&event=${eventId}${journey ? "&journey=1" : ""}`
-    : `#timeline?cam=${encodeURIComponent(cam)}&t=${Math.round(t ?? 0)}`;
+export const timelineHash = (cam: string, eventId: number, journey = false, t?: number, region?: HashRegion | null) =>
+  (eventId ? `#timeline?cam=${encodeURIComponent(cam)}&event=${eventId}${journey ? "&journey=1" : ""}`
+    : `#timeline?cam=${encodeURIComponent(cam)}${t ? `&t=${Math.round(t)}` : ""}`)
+  + (region ? `&region=${encodeURIComponent(region.cam)}:${region.cells}` : "");

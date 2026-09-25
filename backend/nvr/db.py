@@ -229,6 +229,7 @@ MIGRATIONS = [
     ("cameras", "synopsis_labels", "TEXT"),        # JSON ["person","vehicle"]: what Qwen describes here; NULL = site default
     ("cameras", "policies", "TEXT"),               # JSON list of site rules (policy.py)
     ("events", "policy", "TEXT"),                  # JSON {kind, text, priority}: the site rule this event breaks
+    ("events", "cells", "TEXT"),                   # base64url 32x18 bitmap of grid cells the object's feet crossed (cells.py)
     ("events", "clip_start", "REAL"),
     ("events", "synopsis_original", "TEXT"),   # Qwen's JSON before the user corrected it
     ("events", "corrected_at", "REAL"),

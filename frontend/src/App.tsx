@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { decodeCells, regions } from "./region";
 import { api, subscribe, type Camera, type NvrEvent } from "./api";
 import { EventsView } from "./Events";
 import { CamerasView, LiveView, SystemView } from "./Views";
@@ -82,6 +83,7 @@ export default function App() {
   // Deep link: #timeline?cam=cam1&event=123
   useEffect(() => {
     const target = parseTimelineHash(location.hash);
+    if (target?.region) regions.set(target.region.cam, decodeCells(target.region.cells)); // painted region in the link
     if (target?.event) {
       const id = target.event;
       // a journey link restores all its sightings, not just the one event
