@@ -26,6 +26,7 @@ class Pipeline:
         self.rule_events: asyncio.Queue = asyncio.Queue(maxsize=1000)
         self.verify_q: asyncio.Queue[int] = asyncio.Queue()
         self.synopsis_q: asyncio.Queue[int] = asyncio.Queue()
+        self.synopsis_pending: set[int] = set()  # queued or being written now; the UI shows "Qwen is writing…"
         self.journey_q: asyncio.Queue[int] = asyncio.Queue()
         self.tracker = Tracker(self.verify_q.put)
         self.gpu = ThreadPoolExecutor(max_workers=1, thread_name_prefix="yolo")
@@ -46,10 +47,24 @@ class Pipeline:
         return self.clip
 
     # ---- live updates for the UI
+    def annotate(self, e: dict) -> dict:
+        """Add live pipeline state the DB doesn't hold."""
+        e["synopsis_pending"] = e["id"] in self.synopsis_pending
+        return e
+
+    def queue_synopsis(self, event_id: int) -> bool:
+        """Ask Qwen for a synopsis once; a second request while it's queued or running is ignored."""
+        if event_id in self.synopsis_pending:
+            return False
+        self.synopsis_pending.add(event_id)
+        self.synopsis_q.put_nowait(event_id)
+        return True
+
     def publish(self, event_id: int) -> None:
         e = db.event(event_id)
         if not e:
             return
+        self.annotate(e)
         for q in list(self.subscribers):
             if q.qsize() < 100:
                 q.put_nowait({"type": "event", "event": e})
@@ -127,7 +142,7 @@ class Pipeline:
         if a.get("reasons"):
             log.info("event %s unusual %.2f: %s", event_id, a["score"], "; ".join(a["reasons"]))
         if self.wants_synopsis(db.event(event_id)) or a.get("score", 0) >= settings.anomaly_synopsis_min:
-            await self.synopsis_q.put(event_id)
+            self.queue_synopsis(event_id)
         else:
             await self.reindex(event_id)  # no VLM for this label: index the YOLO tags for search
 
@@ -143,6 +158,8 @@ class Pipeline:
             except Exception as ex:
                 log.exception("synopsis %s failed", event_id)
                 db.update_event(event_id, error=f"synopsis: {ex}")
+            finally:
+                self.synopsis_pending.discard(event_id)
             self.publish(event_id)
             # Link across cameras after the synopsis, so Qwen can also compare both descriptions.
             await self.journey_q.put(event_id)
@@ -332,7 +349,7 @@ class Pipeline:
         for r in db.all("SELECT id FROM events WHERE camera_id=? AND status='verified' AND synopsis IS NULL "
                         "AND error IS NULL ORDER BY start_ts DESC", [camera_id]):
             if self.wants_synopsis(db.event(r["id"])):
-                self.synopsis_q.put_nowait(r["id"])
+                self.queue_synopsis(r["id"])
                 n += 1
         if n:
             log.info("[%s] queued %d events for Qwen", camera_id, n)
@@ -350,4 +367,4 @@ class Pipeline:
             if r["status"] in ("open", "pending"):
                 self.verify_q.put_nowait(r["id"])
             else:
-                self.synopsis_q.put_nowait(r["id"])
+                self.queue_synopsis(r["id"])

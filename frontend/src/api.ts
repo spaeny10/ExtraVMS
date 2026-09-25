@@ -80,6 +80,7 @@ export type NvrEvent = {
   yolo_class: string | null;
   yolo_conf: number | null;
   yolo_hits: number | null;
+  synopsis_pending?: boolean; // Qwen is queued or writing the synopsis right now
   snapshot: string | null;
   clip: string | null;
   synopsis: string | null;

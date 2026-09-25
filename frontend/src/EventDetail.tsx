@@ -271,10 +271,10 @@ function Details({ e, setE, notes, onUnsave, seek }: {
             {s && !editing && <button className="ghost small" onClick={() => setEditing(true)}>Edit</button>}
             {!s && !editing && <button className="ghost small" onClick={() => setEditing(true)}>Write one</button>}
             {canGenerate && !editing && (
-              <button className="ghost small" onClick={async () => {
+              <button className="ghost small" disabled={e.synopsis_pending} onClick={async () => {
                 if (e.corrected_at && !await confirmDialog("Replace your corrected synopsis?", { message: "Qwen will write a new one; your correction is lost.", confirmLabel: "Regenerate", danger: true })) return;
                 await api.generateSynopsis(e.id); toast.info("Qwen is writing a new synopsis…"); api.event(e.id).then(setE);
-              }}>{s ? "Regenerate" : "Generate with Qwen"}</button>
+              }}>{e.synopsis_pending ? "Qwen is writing…" : s ? "Regenerate" : "Generate with Qwen"}</button>
             )}
           </div>
         </div>

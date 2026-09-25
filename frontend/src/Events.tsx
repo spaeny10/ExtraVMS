@@ -18,10 +18,11 @@ export function StatusBadge({ e }: { e: Pick<NvrEvent, "status" | "threat"> }) {
   return <span className={`badge status-${e.status}`}>{STATUS_LABEL[e.status]}</span>;
 }
 
-/** Qwen synopses are generated for people only; other labels show the YOLO verification result. */
+/** What to show in place of a synopsis: Qwen's progress, or the YOLO result for labels Qwen skips. */
 export function placeholder(e: NvrEvent): string {
   if (e.status === "verified") {
-    if (e.camera_class !== "person") return `${e.yolo_class ?? e.camera_class} confirmed by YOLO in ${e.yolo_hits ?? 0} frames.`;
+    if (e.synopsis_pending) return "Qwen is writing a synopsis…";
+    if (e.camera_class !== "person") return e.error ?? `${e.yolo_class ?? e.camera_class} confirmed by YOLO in ${e.yolo_hits ?? 0} frames.`;
     return e.error ?? "Writing synopsis…";
   }
   if (e.status === "rejected") return "YOLO did not confirm the camera detection.";

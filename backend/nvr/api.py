@@ -295,6 +295,7 @@ async def list_events(camera: str | None = None, status: str | None = None, labe
         r["feedback"] = json.loads(r["feedback"]) if r["feedback"] else None
         r["anomaly_json"] = json.loads(r["anomaly_json"]) if r["anomaly_json"] else None
         r["areas"] = json.loads(r["areas"]) if r["areas"] else None
+        state.pipeline.annotate(r)
     return rows
 
 
@@ -304,7 +305,7 @@ async def get_event(event_id: int):
     if not e:
         raise HTTPException(404)
     e["lock"] = db.one("SELECT * FROM locks WHERE event_id=?", [event_id])
-    return e
+    return state.pipeline.annotate(e)
 
 
 def _event_file(event_id: int, name: str) -> Path:
@@ -403,7 +404,7 @@ async def generate_synopsis(event_id: int):
         raise HTTPException(400, "no keyframes for this event; reprocess it first")
     db.update_event(event_id, synopsis=None, synopsis_json=None, synopsis_original=None, corrected_at=None,
                     threat=None, error=None)
-    await state.pipeline.synopsis_q.put(event_id)
+    state.pipeline.queue_synopsis(event_id)
     state.pipeline.publish(event_id)
     return {"ok": True}
 

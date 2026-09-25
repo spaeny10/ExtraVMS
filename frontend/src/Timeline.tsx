@@ -127,7 +127,11 @@ function loadConfig(): LayoutConfig {
 
 export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras: Camera[]; focus?: TimelineFocus | null; onClearFocus?: () => void }) {
   const [view, setView] = useState<View>(() => clampView(nowS() - 3600, nowS() + 300));
-  const [cam, setCam] = useState(cameras[0]?.id ?? "");
+  // the selected camera (large tile in the 3-camera layout) starts as the first camera of the saved order
+  const [cam, setCam] = useState(() => {
+    const first = loadConfig().order?.find((id) => cameras.some((c) => c.id === id));
+    return first ?? cameras[0]?.id ?? "";
+  });
   const [lanes, setLanes] = useState<Record<string, Lane>>({});
   const [playhead, setPlayhead] = useState<number | null>(null);
   const [playing, setPlaying] = useState(false);
@@ -196,15 +200,67 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cameras, (config.order ?? []).join(",")]);
   const orderedCams = allIds.map((id) => cameras.find((c) => c.id === id)!).filter(Boolean);
-  const [dragId, setDragIdState] = useState<string | null>(null);
+  const [dragId, setDragId] = useState<string | null>(null);
   const [dropId, setDropId] = useState<string | null>(null);
-  const dragRef = useRef<string | null>(null); // the id being dragged, readable inside the same event burst
-  const setDragId = (id: string | null) => { dragRef.current = id; setDragIdState(id); };
+  const [ghost, setGhost] = useState<{ name: string; x: number; y: number } | null>(null);
+  const allIdsRef = useRef(allIds);
+  allIdsRef.current = allIds;
   const moveCamera = (from: string, to: string) => {
     if (from === to) return;
-    const ids = allIds.filter((id) => id !== from);
-    ids.splice(ids.indexOf(to), 0, from);
+    // the dragged camera takes the target's slot (works in both directions while dragging live)
+    const all = allIdsRef.current;
+    const ids = all.filter((id) => id !== from);
+    ids.splice(all.indexOf(to), 0, from);
     setConfig((c) => ({ ...c, order: ids }));
+  };
+  // Tile drag: mouse drags start after 8px of movement anywhere on the tile (a plain click still selects);
+  // touch drags start at once from the ⠿ grip so the page can still scroll. The tiles reorder as you move.
+  const tileDrag = useRef<{ id: string; name: string; x0: number; y0: number; started: boolean } | null>(null);
+  const justDragged = useRef(false);
+  const heroRef = useRef({ hero: false, cam: "" });
+  const startTileDrag = (id: string, name: string, e: React.PointerEvent, fromGrip: boolean) => {
+    if (e.pointerType === "mouse" ? e.button !== 0 : !fromGrip) return;
+    if ((e.target as HTMLElement).closest("button")) return;
+    tileDrag.current = { id, name, x0: e.clientX, y0: e.clientY, started: false };
+    const begin = (x: number, y: number) => {
+      tileDrag.current!.started = true;
+      setDragId(id);
+      setGhost({ name, x, y });
+    };
+    const move = (ev: PointerEvent) => {
+      const d = tileDrag.current;
+      if (!d) return;
+      if (!d.started) {
+        if (Math.hypot(ev.clientX - d.x0, ev.clientY - d.y0) < 8) return;
+        begin(ev.clientX, ev.clientY);
+      }
+      ev.preventDefault();
+      setGhost({ name, x: ev.clientX, y: ev.clientY });
+      const el = document.elementsFromPoint(ev.clientX, ev.clientY).find((x) => (x as HTMLElement).dataset?.cam) as HTMLElement | undefined;
+      const over = el?.dataset.cam ?? null;
+      setDropId(over && over !== d.id ? over : null);
+      if (!over || over === d.id) return;
+      // in the 3-camera layout the large tile is the selected camera: dropping there makes this one large
+      if (heroRef.current.hero && over === heroRef.current.cam) setCam(d.id);
+      moveCamera(d.id, over);
+    };
+    const end = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+      if (tileDrag.current?.started) {
+        justDragged.current = true;
+        setTimeout(() => { justDragged.current = false; }, 100);
+      }
+      tileDrag.current = null;
+      setDragId(null);
+      setDropId(null);
+      setGhost(null);
+    };
+    window.addEventListener("pointermove", move, { passive: false });
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
+    if (fromGrip) begin(e.clientX, e.clientY);
   };
   const isPhone = useIsPhone();
   const autoSolo = useRef(false);
@@ -755,6 +811,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
   const { cols, hero } = tileLayout(tileIds.length, box.w, box.h);
   // the selected camera takes the large slot in the 3-camera layout
   const orderedTiles = hero && tileIds.includes(cam) ? [cam, ...tileIds.filter((id) => id !== cam)] : tileIds;
+  heroRef.current = { hero, cam };
   const previewWidth = solo || tileIds.length === 1 ? 960 : 640;
   const selectedLayout = layouts.find((l) => l.id === layoutId);
 
@@ -781,18 +838,16 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
                 active={id === cam && tileIds.length > 1}
                 soloed={solo === id}
                 onSolo={() => toggleSolo(id)}
-                onSelect={() => setCam(id)}
+                onSelect={() => { if (!justDragged.current) setCam(id); }}
                 statusRef={statusRef}
                 dragging={dragId === id}
                 dropTarget={dropId === id && dragId !== id}
-                onDragStart={() => setDragId(id)}
-                onDragOver={() => { const d = dragRef.current; if (d && d !== id) setDropId(id); }}
-                onDrop={() => { const d = dragRef.current; if (d) moveCamera(d, id); setDragId(null); setDropId(null); }}
-                onDragEnd={() => { setDragId(null); setDropId(null); }}
+                onDragPointerDown={(e, fromGrip) => startTileDrag(id, camName(id), e, fromGrip)}
               />
             ))}
           </div>
         )}
+        {ghost && <div className="drag-ghost" style={{ left: ghost.x, top: ghost.y }}>{ghost.name}</div>}
         {playhead == null && tileIds.length > 0 && (
           <div className="tl-empty muted overlay-hint">{message || (COARSE ? "Tap the timeline to play. Pinch to zoom, drag to pan, drag the playhead to scrub."
                             : "Click the timeline to play. Scroll to zoom, drag to pan, drag the playhead to scrub.")}</div>
