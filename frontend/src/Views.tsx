@@ -181,14 +181,19 @@ export function CamerasView({ cameras, port, reload }: { cameras: Camera[]; port
       </div>
       <table className="table">
         <thead>
-          <tr><th>Camera</th><th>Address</th><th>Stream</th><th>Metadata</th><th>ONVIF events</th><th>Zones</th><th>Retention</th><th /></tr>
+          <tr><th>Camera</th><th>Address</th><th>Stream</th><th>Bitrate</th><th>Metadata</th><th>ONVIF events</th><th>Zones</th><th>Retention</th><th /></tr>
         </thead>
         <tbody>
           {cameras.map((c) => (
             <tr key={c.id} className={c.enabled ? "" : "muted"}>
               <td><strong>{c.name}</strong> <span className="muted small">{c.id}</span></td>
               <td>{c.host}</td>
-              <td><Health ok={c.status?.stream_ready} /> {c.status?.tracks?.join(", ")}</td>
+              <td><Health ok={c.status?.stream_ready} /> {c.status?.tracks?.join(", ")}
+                {c.status?.health?.problems?.length ? <div className="small error">{c.status.health.problems.join("; ")}</div> : null}</td>
+              <td title="Main stream now · estimated recording per day (from the last hour)">
+                {c.status?.health?.bitrate_mbps != null ? `${c.status.health.bitrate_mbps.toFixed(1)} Mbps` : "—"}
+                {c.status?.health?.gb_per_day != null && <div className="muted small">~{c.status.health.gb_per_day} GB/day</div>}
+              </td>
               <td><Health ok={c.status?.metadata} /></td>
               <td><Health ok={c.status?.onvif_events} /></td>
               <td>{zoneSummary(c.zones)}</td>

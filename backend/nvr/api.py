@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import assistant, backup, baseline, footage, frames, identities, journeys, keep, mediamtx, retention, zones
+from . import assistant, backup, baseline, footage, frames, health, identities, journeys, keep, mediamtx, retention, zones
 from . import synopsis as vlm
 from . import vlmroute
 from .config import ROOT, settings
@@ -38,6 +38,7 @@ class State:
     ingests: dict[str, CameraIngest] = {}
     tasks: list[asyncio.Task] = []
     footage: footage.Indexer
+    health: health.StreamHealth
 
 
 state = State()
@@ -72,6 +73,7 @@ async def lifespan(app: FastAPI):
     state.mtx.write_config(db.cameras(enabled_only=True))
     p = state.pipeline
     state.footage = footage.Indexer(p)
+    state.health = health.StreamHealth()
     assistant.ctx.pipeline, assistant.ctx.footage = p, state.footage
     state.tasks = [asyncio.create_task(coro, name=name) for name, coro in [
         ("mediamtx", state.mtx.run()),
@@ -87,6 +89,7 @@ async def lifespan(app: FastAPI):
         ("footage-index", state.footage.run()),
         ("briefings", assistant.briefing_loop(p)),
         ("backup", backup.backup_loop()),
+        ("stream-health", state.health.run()),
     ]]
     await asyncio.sleep(1.5)  # let MediaMTX bind before readers connect
     sync_cameras()
@@ -146,6 +149,7 @@ async def list_cameras():
             "recording": bool(p.get("ready")) and c["enabled"],
             "tracks": [t if isinstance(t, str) else t.get("codec") for t in p.get("tracks", [])],
             **(ing.status() if ing else {}),
+            "health": state.health.camera(c["id"]),
         }})
     return out
 
@@ -956,7 +960,8 @@ async def home(since: float | None = None):
         st = ing.status() if ing else {}
         cams.append({"id": c["id"], "name": c["name"], "stream_ready": bool(status.get(c["id"], {}).get("ready")),
                      "metadata": bool(st.get("metadata")), "metadata_last": st.get("metadata_last") or None,
-                     "onvif_events": bool(st.get("onvif_events")), "today": today.get(c["id"], {})})
+                     "onvif_events": bool(st.get("onvif_events")), "today": today.get(c["id"], {}),
+                     "health": state.health.camera(c["id"])})
     b = db.one("SELECT id, headline, period_start, period_end, created_at, model FROM briefings ORDER BY created_at DESC LIMIT 1")
     rec = shutil.disk_usage(settings.recordings_dir)
     p = state.pipeline

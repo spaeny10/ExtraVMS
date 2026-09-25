@@ -45,7 +45,8 @@ export function HomeView({ cameras, onGo }: { cameras: Camera[]; onGo: (tab: "Li
   const problems: string[] = [];
   for (const c of h.cameras) {
     if (!c.stream_ready) problems.push(`${c.name} is not recording`);
-    else if (c.metadata_last && h.now - c.metadata_last > 1800) problems.push(`${c.name}: no detections for ${Math.round((h.now - c.metadata_last) / 60)} min`);
+    for (const p of c.health?.problems ?? []) problems.push(`${c.name}: ${p}`);
+    if (c.stream_ready && c.metadata_last && h.now - c.metadata_last > 1800) problems.push(`${c.name}: no detections for ${Math.round((h.now - c.metadata_last) / 60)} min`);
   }
   if (h.retention_alert) problems.push("Retention can't hold the continuous window (disk full)");
   if (!h.yolo_ready) problems.push("YOLO is still loading");
@@ -84,7 +85,8 @@ export function HomeView({ cameras, onGo }: { cameras: Camera[]; onGo: (tab: "Li
                   <td><span className={`dot ${c.stream_ready ? "ok" : "bad"}`} /> {c.name}</td>
                   <td>
                     {Object.entries(c.today).map(([k, n]) => `${n} ${k}${n === 1 ? "" : "s"}`).join(", ") || "quiet"}
-                    <span className="muted small"> · last detection {c.metadata_last ? ago(c.metadata_last) : "never"}</span>
+                    <span className="muted small"> · last detection {c.metadata_last ? ago(c.metadata_last) : "never"}
+                      {c.health?.bitrate_mbps != null && ` · ${c.health.bitrate_mbps.toFixed(1)} Mbps`}</span>
                   </td>
                 </tr>
               ))}

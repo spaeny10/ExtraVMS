@@ -42,7 +42,14 @@ export type Camera = {
     metadata?: boolean;
     metadata_last?: number;
     onvif_events?: boolean;
+    health?: StreamHealth;
   };
+};
+
+/** From MediaMTX metrics, sampled every 10 s (backend/nvr/health.py). */
+export type StreamHealth = {
+  sampled: boolean; bitrate_mbps: number | null; sub_bitrate_mbps: number | null; gb_per_day: number | null;
+  stalled_s: number | null; frames_in_error_1h: number; metadata_reader: boolean | null; problems: string[];
 };
 
 export type EventStatus = "open" | "pending" | "verified" | "rejected" | "error" | "masked";
@@ -193,7 +200,7 @@ export type FootageStatus = {
 };
 
 /* ---- Home */
-export type HomeCamera = { id: string; name: string; stream_ready: boolean; metadata: boolean; metadata_last: number | null; onvif_events: boolean; today: Record<string, number> };
+export type HomeCamera = { id: string; name: string; stream_ready: boolean; metadata: boolean; metadata_last: number | null; onvif_events: boolean; today: Record<string, number>; health: StreamHealth };
 export type HomeData = {
   now: number; since: number; new_since: number; attention: NvrEvent[]; recent: NvrEvent[]; cameras: HomeCamera[];
   briefing: { id: number; headline: string; period_start: number; period_end: number; created_at: number } | null;
