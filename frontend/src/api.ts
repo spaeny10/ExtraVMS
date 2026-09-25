@@ -246,8 +246,8 @@ export const api = {
     req<NvrEvent[]>(`/api/events?${qs(p)}`),
   event: (id: number) => req<NvrEvent>(`/api/events/${id}`),
   reprocess: (id: number) => req(`/api/events/${id}/reprocess`, { method: "POST" }),
-  search: (q: string, camera?: string, minYolo?: number) =>
-    req<NvrEvent[]>(`/api/search?${qs({ q, camera, min_yolo: minYolo || undefined })}`),
+  search: (q: string, camera?: string, minYolo?: number, since?: number) =>
+    req<NvrEvent[]>(`/api/search?${qs({ q, camera, min_yolo: minYolo || undefined, since })}`),
   footageSearch: (q: string, camera?: string, since?: number) =>
     req<FootageMoment[]>(`/api/footage/search?${qs({ q, camera, since })}`),
   footageVerify: (b: { camera_id: string; ts: number; tile: number; q: string }) =>

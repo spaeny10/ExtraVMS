@@ -16,7 +16,7 @@
   ],
   "shortcuts": [
     { "name": "Live", "url": "/#live", "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }] },
-    { "name": "Ask the NVR", "url": "/#ask", "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }] },
+    { "name": "Find / Ask", "url": "/#find", "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }] },
     { "name": "Timeline", "url": "/#timeline", "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192" }] }
   ]
 }

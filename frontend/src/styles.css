@@ -531,3 +531,13 @@ h3.spaced { margin-top: 18px; }
 .identity-events { margin-top: 6px; }
 .identity-known { margin-top: 8px; }
 @media (max-width: 700px) { .identity { grid-template-columns: 1fr; } .identity-body { padding: 0 10px 10px; } .identity-cover { max-height: 180px; } }
+
+/* Find (search + ask) */
+.find { display: flex; flex-direction: column; gap: 12px; }
+.find h3 { margin: 4px 0 8px; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.find .search-bar { display: flex; gap: 8px; }
+.find .search-bar input { flex: 1; }
+.ask-btn { background: color-mix(in srgb, var(--accent) 22%, var(--panel)); color: var(--text); border: 1px solid color-mix(in srgb, var(--accent) 50%, var(--border)); }
+.find-answer { display: flex; flex-direction: column; gap: 10px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border)); border-radius: 10px; background: color-mix(in srgb, var(--accent) 4%, var(--panel)); }
+.find-threads { display: flex; flex-wrap: wrap; gap: 6px; }
+.find-threads .chip { display: inline-flex; align-items: center; gap: 4px; }

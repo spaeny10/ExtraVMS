@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { api, fmtTime, type BaselineCamera, type FootageStatus, type RemoteStatus, type Camera, type FeedbackStats, type NvrEvent, type RetentionPolicy, type SystemInfo, type Zone } from "./api";
-import { ConfidenceSlider, loadNumber, saveNumber } from "./ConfidenceSlider";
 import { EventCard } from "./Events";
 import { EventDetail } from "./EventDetail";
 import { WhepPlayer } from "./WhepPlayer";
@@ -8,7 +7,6 @@ import { ZoneEditor } from "./ZoneEditor";
 import { PolicyForm, RetentionPanel } from "./RetentionPanel";
 import { QwenFeedbackInfo } from "./QwenFeedbackInfo";
 import { NeighborsEditor } from "./Neighbors";
-import { FootageResults } from "./FootageSearch";
 
 /* ------------------------------------------------------------------ Live */
 
@@ -92,86 +90,6 @@ export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: n
           <EventCard key={e.id} e={e} cameraName={name(e.camera_id)} onOpen={() => setOpen(e.id)} />
         ))}
       </aside>
-      {open !== null && <EventDetail id={open} cameraName={name} onClose={() => setOpen(null)} />}
-    </div>
-  );
-}
-
-/* ------------------------------------------------------------------ Search */
-
-export function SearchView({ cameras }: { cameras: Camera[] }) {
-  const [q, setQ] = useState("");
-  const [results, setResults] = useState<NvrEvent[] | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [open, setOpen] = useState<number | null>(null);
-  const [minYolo, setMinYolo] = useState(() => loadNumber("minYolo.search"));
-  // "events" searches what the cameras flagged; "footage" searches every recorded frame (image-text index)
-  const [mode, setMode] = useState<"events" | "footage">(() => (loadNumber("searchFootage", 0) === 1 ? "footage" : "events"));
-  const [fCam, setFCam] = useState("");
-  const [fSince, setFSince] = useState(0); // hours back; 0 = all indexed footage
-  const [nonce, setNonce] = useState(0);
-  const name = (id: string) => cameras.find((c) => c.id === id)?.name ?? id;
-  const run = async (ev?: React.FormEvent, conf = minYolo) => {
-    ev?.preventDefault();
-    if (!q.trim()) return;
-    if (mode === "footage") { setNonce(Date.now()); return; }
-    setBusy(true);
-    try {
-      setResults(await api.search(q, undefined, conf));
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <div className="view">
-      <form className="search-bar" onSubmit={run}>
-        <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="e.g. person in dark hoodie near the gate at night, white pickup truck" />
-        <button type="submit" disabled={busy}>{busy ? "Searching…" : "Search"}</button>
-      </form>
-      <div className="toolbar search-filters">
-        <div className="segmented">
-          {([["events", "Events"], ["footage", "All footage"]] as const).map(([v, l]) => (
-            <button key={v} type="button" className={mode === v ? "active" : ""} onClick={() => {
-              setMode(v); saveNumber("searchFootage", v === "footage" ? 1 : 0);
-              if (q.trim() && v === "footage") setNonce(Date.now());
-            }}>{l}</button>
-          ))}
-        </div>
-        {mode === "events" ? (
-          <ConfidenceSlider value={minYolo} onChange={(v) => {
-            setMinYolo(v);
-            saveNumber("minYolo.search", v);
-            if (results) run(undefined, v);
-          }} />
-        ) : (
-          <>
-            <select value={fCam} onChange={(e) => { setFCam(e.target.value); if (nonce) setNonce(Date.now()); }}>
-              <option value="">All cameras</option>
-              {cameras.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-            </select>
-            <select value={fSince} onChange={(e) => { setFSince(Number(e.target.value)); if (nonce) setNonce(Date.now()); }}>
-              <option value={0}>Any time</option>
-              <option value={1}>Last hour</option>
-              <option value={24}>Last 24 hours</option>
-              <option value={168}>Last 7 days</option>
-            </select>
-          </>
-        )}
-      </div>
-      {mode === "events" ? (
-        <>
-          <p className="muted small">Searches synopses, corrections, saved notes and YOLO labels by meaning and keywords. Mentioning only people or only vehicles limits results to that type.</p>
-          {results && results.length === 0 && <div className="empty">No matching events.</div>}
-          <div className="event-grid">
-            {results?.map((e) => <EventCard key={e.id} e={e} cameraName={name(e.camera_id)} onOpen={() => setOpen(e.id)} />)}
-          </div>
-        </>
-      ) : (
-        <>
-          <p className="muted small">Searches every recorded frame by what it looks like, even where no event was raised (e.g. "white pickup truck", "open gate", "person on a ladder"). Qwen double-checks the top 8 results. The outline shows the part of the view that matched.</p>
-          <FootageResults q={q} nonce={nonce} cameras={cameras} camera={fCam} sinceHours={fSince} />
-        </>
-      )}
       {open !== null && <EventDetail id={open} cameraName={name} onClose={() => setOpen(null)} />}
     </div>
   );
