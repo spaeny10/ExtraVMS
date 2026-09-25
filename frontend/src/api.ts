@@ -152,7 +152,8 @@ export type Journey = {
   links: JourneyLink[];
 };
 
-export type LayoutConfig = { visible: string[] | null; solo: string | null };
+/** order: camera ids in display order (tiles and lanes); cameras not listed follow in their default order */
+export type LayoutConfig = { visible: string[] | null; solo: string | null; order?: string[] | null };
 export type Layout = { id: number; name: string; config: LayoutConfig; created_at: number; updated_at: number };
 
 export type Synopsis = {

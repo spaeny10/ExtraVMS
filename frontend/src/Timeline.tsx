@@ -49,7 +49,7 @@ type Drag =
   | { mode: "pan"; pointer: number; x0: number; view0: View; moved: boolean; cam: string | null }
   | { mode: "select"; pointer: number; cam: string; t0: number };
 
-const ALL_CAMERAS: LayoutConfig = { visible: null, solo: null };
+const ALL_CAMERAS: LayoutConfig = { visible: null, solo: null, order: null };
 const FOCUS_PREROLL_S = 5; // start playback this long before a focused event
 const MIN_RANGE = 60; // 1 minute
 /** touch screen (phone/tablet): changes hints and grab sizes */
@@ -119,7 +119,7 @@ function nextRecording(lanes: Record<string, Lane>, ids: string[], t: number): n
 function loadConfig(): LayoutConfig {
   try {
     const c = JSON.parse(localStorage.getItem("timelineLayoutConfig") ?? "null");
-    return c && typeof c === "object" ? { visible: c.visible ?? null, solo: c.solo ?? null } : ALL_CAMERAS;
+    return c && typeof c === "object" ? { visible: c.visible ?? null, solo: c.solo ?? null, order: c.order ?? null } : ALL_CAMERAS;
   } catch {
     return ALL_CAMERAS;
   }
@@ -188,7 +188,24 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
     reloadLayouts();
   }, []);
 
-  const allIds = cameras.map((c) => c.id);
+  // display order: the layout's order first, then any cameras it doesn't mention
+  const allIds = useMemo(() => {
+    const ids = cameras.map((c) => c.id);
+    const ordered = (config.order ?? []).filter((id) => ids.includes(id));
+    return [...ordered, ...ids.filter((id) => !ordered.includes(id))];
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cameras, (config.order ?? []).join(",")]);
+  const orderedCams = allIds.map((id) => cameras.find((c) => c.id === id)!).filter(Boolean);
+  const [dragId, setDragIdState] = useState<string | null>(null);
+  const [dropId, setDropId] = useState<string | null>(null);
+  const dragRef = useRef<string | null>(null); // the id being dragged, readable inside the same event burst
+  const setDragId = (id: string | null) => { dragRef.current = id; setDragIdState(id); };
+  const moveCamera = (from: string, to: string) => {
+    if (from === to) return;
+    const ids = allIds.filter((id) => id !== from);
+    ids.splice(ids.indexOf(to), 0, from);
+    setConfig((c) => ({ ...c, order: ids }));
+  };
   const isPhone = useIsPhone();
   const autoSolo = useRef(false);
   useEffect(() => {  // a phone can't show a grid of full-resolution streams: one camera at a time
@@ -208,18 +225,19 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
   const visibleIds = allIds.filter((id) => config.visible == null || config.visible.includes(id));
   const solo = config.solo && allIds.includes(config.solo) ? config.solo : null;
   const tileIds = solo ? [solo] : visibleIds;
-  const norm = (c: LayoutConfig) => JSON.stringify({ visible: [...(c.visible ?? allIds)].filter((id) => allIds.includes(id)).sort(), solo: c.solo ?? null });
+  const norm = (c: LayoutConfig) => JSON.stringify({ visible: [...(c.visible ?? allIds)].filter((id) => allIds.includes(id)).sort(), solo: c.solo ?? null,
+    order: (c.order ?? []).filter((id) => allIds.includes(id)) });
   const savedConfig = layoutId ? layouts.find((l) => l.id === layoutId)?.config : ALL_CAMERAS;
   const dirty = savedConfig ? norm(config) !== norm(savedConfig) : false;
 
   const toggleVisible = (id: string) => setConfig((c) => {
     const vis = c.visible ?? allIds;
     const on = vis.includes(id);
-    return { visible: on ? vis.filter((x) => x !== id) : [...vis, id], solo: on && c.solo === id ? null : c.solo };
+    return { ...c, visible: on ? vis.filter((x) => x !== id) : [...vis, id], solo: on && c.solo === id ? null : c.solo };
   });
   const toggleSolo = (id: string) => setConfig((c) => {
     const vis = c.visible ?? allIds;
-    return { visible: vis.includes(id) ? c.visible : [...vis, id], solo: c.solo === id ? null : id };
+    return { ...c, visible: vis.includes(id) ? c.visible : [...vis, id], solo: c.solo === id ? null : id };
   });
   const pickLayout = (id: number) => {
     setLayoutId(id);
@@ -453,7 +471,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
   const [showJourneys, setShowJourneys] = useState(() => loadNumber("timelineShowJourneys", 0) === 1);
   const laneY = (camId: string): number | null => {
     let y = 26; // axis height
-    for (const c of cameras) {
+    for (const c of orderedCams) {
       const h = visibleIds.includes(c.id) ? 34 : 18;
       if (c.id === camId) return visibleIds.includes(c.id) ? y + h / 2 : null;
       y += h;
@@ -765,6 +783,12 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
                 onSolo={() => toggleSolo(id)}
                 onSelect={() => setCam(id)}
                 statusRef={statusRef}
+                dragging={dragId === id}
+                dropTarget={dropId === id && dragId !== id}
+                onDragStart={() => setDragId(id)}
+                onDragOver={() => { const d = dragRef.current; if (d && d !== id) setDropId(id); }}
+                onDrop={() => { const d = dragRef.current; if (d) moveCamera(d, id); setDragId(null); setDropId(null); }}
+                onDragEnd={() => { setDragId(null); setDropId(null); }}
               />
             ))}
           </div>
@@ -783,7 +807,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
 
       {isPhone && cameras.length > 1 && (
         <div className="tl-cam-picker" role="tablist">
-          {cameras.map((c) => (
+          {orderedCams.map((c) => (
             <button key={c.id} role="tab" aria-selected={solo === c.id} className={`chip ${solo === c.id ? "on-person" : ""}`}
               onClick={() => setConfig((cfg) => ({ ...cfg, solo: c.id }))}>{c.name}</button>
           ))}
@@ -910,7 +934,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
       <div className="tl" tabIndex={0}>
         <div className="tl-names">
           <div className="tl-axis-spacer" />
-          {cameras.map((c) => {
+          {orderedCams.map((c) => {
             const shown = visibleIds.includes(c.id);
             const dim = solo != null && solo !== c.id;
             return (
@@ -946,7 +970,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
               </div>
             ))}
           </div>
-          {cameras.map((c) => {
+          {orderedCams.map((c) => {
             const lane = lanes[c.id];
             const shown = visibleIds.includes(c.id);
             const dim = solo != null && solo !== c.id;

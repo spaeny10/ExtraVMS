@@ -15,11 +15,12 @@ const TICK_MS = 250;
  */
 export function SyncTile({
   cam, name, spans, clockRef, playing, speed, scrubbing, scrubT, previewWidth, active, soloed,
-  onSolo, onSelect, statusRef,
+  onSolo, onSelect, statusRef, dragging, dropTarget, onDragStart, onDragOver, onDrop, onDragEnd,
 }: {
   cam: string; name: string; spans: Span[] | undefined; clockRef: React.RefObject<number | null>;
   playing: boolean; speed: number; scrubbing: boolean; scrubT: number | null; previewWidth: number;
   active: boolean; soloed: boolean; onSolo: () => void; onSelect: () => void;
+  dragging?: boolean; dropTarget?: boolean; onDragStart?: () => void; onDragOver?: () => void; onDrop?: () => void; onDragEnd?: () => void;
   statusRef: React.RefObject<Record<string, TileStatus>>;
 }) {
   const video = useRef<HTMLVideoElement>(null);
@@ -116,7 +117,11 @@ export function SyncTile({
   const label = { idle: "", paused: "", playing: "", buffering: "Buffering…", gap: "No recording" }[status];
 
   return (
-    <div className={`sync-tile ${active ? "active" : ""}`} onClick={onSelect} onDoubleClick={onSolo}>
+    <div className={`sync-tile ${active ? "active" : ""} ${dragging ? "dragging" : ""} ${dropTarget ? "drop-target" : ""}`}
+      onClick={onSelect} onDoubleClick={onSolo} draggable={Boolean(onDragStart)} title="Drag to reorder · double-click to isolate"
+      onDragStart={(e) => { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", cam); onDragStart?.(); }}
+      onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; onDragOver?.(); }}
+      onDrop={(e) => { e.preventDefault(); onDrop?.(); }} onDragEnd={onDragEnd}>
       {chunk && (
         <video
           key={chunk.key}
