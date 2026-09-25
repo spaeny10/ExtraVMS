@@ -126,6 +126,8 @@ class Pipeline:
         result = await asyncio.get_running_loop().run_in_executor(
             self.gpu, self.verifier.verify, e, clip, clip_start, self.cameras.get(e["camera_id"], {}).get("zones"))
         reid = result.pop("reid", None)
+        if "path" in result:  # extended into the pre/post-roll: the region cells follow
+            result["cells"] = cells.for_event(result["path"])
         db.update_event(event_id, clip=str(clip.relative_to(settings.data_dir)), error=None, **result)
         if reid:
             db.set_reid(event_id, reid)
@@ -139,6 +141,7 @@ class Pipeline:
         if result["status"] != "verified":
             return
         self.record_areas(event_id)
+        policy.check(event_id, self.cameras.get(e["camera_id"]))  # e.g. an unrecognised person entering by an exterior door
         a = baseline.apply(event_id) or {}
         if a.get("reasons"):
             log.info("event %s unusual %.2f: %s", event_id, a["score"], "; ".join(a["reasons"]))

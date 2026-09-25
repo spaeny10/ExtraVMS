@@ -21,7 +21,7 @@ export function zoneAllowed(x: number, y: number, zones: Zone[]): boolean {
 }
 
 /** A site rule checked by code after Qwen describes a vehicle (backend policy.py). */
-export type SiteRule = { kind: "towing"; asset: string; allowed: string[]; priority: "medium" | "high" };
+export type SiteRule = { kind: "towing" | "entry"; asset?: string; area?: string; allowed: string[]; priority: "medium" | "high" };
 export type BrokenRule = { kind: string; text: string; priority: string };
 
 export type Camera = {

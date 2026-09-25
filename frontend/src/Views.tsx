@@ -284,11 +284,23 @@ export function CamerasView({ cameras, port, reload }: { cameras: Camera[]; port
                   {(edit.policies ?? []).map((r, i) => (
                     <div key={i} className="rule-row">
                       <span className="small">Only</span>
-                      <input value={r.allowed.join(", ")} placeholder="names from People & vehicles, e.g. BIGView truck"
+                      <input value={r.allowed.join(", ")} placeholder={r.kind === "entry" ? "names from People & vehicles, e.g. Shawn" : "names from People & vehicles, e.g. BIGView truck"}
                         onChange={(e) => setEdit({ ...edit, policies: (edit.policies ?? []).map((x, k) => k === i ? { ...x, allowed: e.target.value.split(",").map((s) => s.trim()).filter(Boolean) } : x) })} />
-                      <span className="small">may tow a</span>
-                      <input value={r.asset} placeholder="solar light tower"
-                        onChange={(e) => setEdit({ ...edit, policies: (edit.policies ?? []).map((x, k) => k === i ? { ...x, asset: e.target.value } : x) })} />
+                      {r.kind === "entry" ? (
+                        <>
+                          <span className="small">may enter through</span>
+                          <select value={r.area ?? ""} onChange={(e) => setEdit({ ...edit, policies: (edit.policies ?? []).map((x, k) => k === i ? { ...x, area: e.target.value } : x) })}>
+                            <option value="">choose a named place…</option>
+                            {(edit.zones ?? []).filter((z) => z.type === "area").map((z) => <option key={z.name} value={z.name}>{z.name}</option>)}
+                          </select>
+                        </>
+                      ) : (
+                        <>
+                          <span className="small">may tow a</span>
+                          <input value={r.asset ?? ""} placeholder="solar light tower"
+                            onChange={(e) => setEdit({ ...edit, policies: (edit.policies ?? []).map((x, k) => k === i ? { ...x, asset: e.target.value } : x) })} />
+                        </>
+                      )}
                       <select value={r.priority} onChange={(e) => setEdit({ ...edit, policies: (edit.policies ?? []).map((x, k) => k === i ? { ...x, priority: e.target.value as "medium" | "high" } : x) })}>
                         <option value="high">high priority</option><option value="medium">medium priority</option>
                       </select>
@@ -297,8 +309,9 @@ export function CamerasView({ cameras, port, reload }: { cameras: Camera[]; port
                   ))}
                   <div className="row">
                     <button className="ghost small" onClick={() => setEdit({ ...edit, policies: [...(edit.policies ?? []), { kind: "towing", asset: "", allowed: [], priority: "high" }] })}>+ Towing rule</button>
+                    <button className="ghost small" onClick={() => setEdit({ ...edit, policies: [...(edit.policies ?? []), { kind: "entry", area: "", allowed: [], priority: "high" }] })}>+ Entry rule</button>
                   </div>
-                  <span className="small">Checked by the NVR after Qwen describes each vehicle here: a vehicle towing or hitched to the asset that isn't recognised as one of the named vehicles is flagged, raised to that priority and shown under Needs attention. Name your own trucks in People & vehicles first; an unnamed one trips the rule once.</span>
+                  <span className="small">Towing: checked after Qwen describes each vehicle here — a vehicle towing the asset that isn't a named vehicle is flagged. Entry: checked right after verification — a person whose track starts at that named place (an exterior door) who isn't a named person is flagged. Both raise the event to that priority and show it under Needs attention. Name your own people and trucks in People & vehicles first; an unnamed one trips the rule once.</span>
                 </div>
                 <label className="field">
                   <span>Scene notes for Qwen</span>

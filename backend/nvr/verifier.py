@@ -106,6 +106,31 @@ def best_shift(path: list, frames_boxes: list[tuple[float, list]], allowed: set)
     return best
 
 
+EXTEND_STEP_S = 0.5    # how often to look for the object before the camera first reported it
+
+
+def chain_boxes(start_box, frames_boxes: list[tuple[float, list]], allowed: set) -> list:
+    """Follow the object through frames_boxes (in the order given, i.e. backwards in time for the pre-roll):
+    each step takes the allowed-class box that overlaps or sits nearest the previous one; stops at the first
+    frame without a plausible continuation. Returns [[ts, l, t, r, b, conf], ...] in the order walked."""
+    out, prev = [], tuple(start_box)
+    for ts, boxes in frames_boxes:
+        best, best_score = None, 0.0
+        for b in boxes:
+            if b["cls_id"] not in allowed:
+                continue
+            (px, py), (bx, by) = _centre(prev), _centre(b["box"])
+            near = ((px - bx) ** 2 + (py - by) ** 2) ** 0.5 < 0.12 * (1 + abs(prev[3] - prev[1]))
+            score = iou(prev, b["box"]) + (0.5 if near else 0.0)
+            if (score >= 0.2 or near) and score > best_score:
+                best, best_score = b, score
+        if best is None:
+            break
+        out.append([round(ts, 3), *[round(v, 4) for v in best["box"]], best["conf"]])
+        prev = tuple(best["box"])
+    return out
+
+
 def sample_path(path: list, n: int) -> list:
     """Pick n path entries spread over the track, preferring confident ones."""
     if len(path) <= n:
@@ -225,6 +250,36 @@ class Verifier:
             else:
                 shift = 0.0
         verified = hits >= need
+        # Where did it come from / go to? Cameras often report a person a step or two late, so the doorway
+        # is on the pre-roll but not in the camera's path. Follow the verified object into the pre- and
+        # post-roll with YOLO and extend the path (stored in camera-clock time, i.e. frame time + shift).
+        path_ext = {"before": 0, "after": 0}
+        path = list(event["path"])
+        if verified and path:
+            clip_end = clip_start + (event["end_ts"] or event["start_ts"]) + settings.clip_post_roll - event["start_ts"] + settings.clip_pre_roll
+            first_ts, last_ts = path[0][0] - shift, path[-1][0] - shift
+            before = [t for t in np.arange(first_ts - EXTEND_STEP_S, clip_start + 0.05, -EXTEND_STEP_S)]
+            after = [t for t in np.arange(last_ts + EXTEND_STEP_S, clip_end - 0.05, EXTEND_STEP_S)]
+            targets = [float(t) for t in before + after]
+            extra = grab_frames(clip, clip_start, targets) if targets else {}
+            if extra:
+                ts_extra = [t for t in targets if t in extra]
+                res_extra = self.model.predict([zones.mask_frame(extra[t], zone_list) for t in ts_extra], imgsz=settings.yolo_imgsz,
+                                               conf=settings.yolo_conf, device=settings.yolo_device, verbose=False,
+                                               classes=sorted(PERSON | VEHICLE))
+                by_ts = {}
+                for t, res in zip(ts_extra, res_extra):
+                    bx = [{"cls_id": int(c), "conf": round(float(p), 3), "box": [round(float(v), 4) for v in b]}
+                          for b, c, p in zip(res.boxes.xyxyn.tolist(), res.boxes.cls.tolist(), res.boxes.conf.tolist())]
+                    by_ts[t] = [b for b in bx if zones.allowed(zones.foot(b["box"]), zone_list)]
+                first_box = next((d["match"]["box"] for d in detections if d.get("match")), path[0][1:5])
+                last_box = next((d["match"]["box"] for d in reversed(detections) if d.get("match")), path[-1][1:5])
+                pre = chain_boxes(first_box, [(t, by_ts[t]) for t in before if t in by_ts], allowed)
+                post = chain_boxes(last_box, [(t, by_ts[t]) for t in after if t in by_ts], allowed)
+                for p in pre + post:
+                    p[0] = round(p[0] + shift, 3)  # back to the camera's clock, like the rest of the path
+                path = list(reversed(pre)) + path + post
+                path_ext = {"before": len(pre), "after": len(post)}
         out_dir = event_dir(event["id"])
         # Snapshot: best matching frame, or the middle sample if nothing matched.
         snap_ts, snap_match, snap_cam = best if best else (ts_list[len(ts_list) // 2], None,
@@ -240,9 +295,11 @@ class Verifier:
             "yolo_class": best[1]["cls"] if best else None,
             "yolo_conf": best[1]["conf"] if best else None,
             "yolo_hits": hits,
-            "detections": {"samples": detections, "keyframes": keyframes, "needed": need, "time_shift_s": shift},
+            "detections": {"samples": detections, "keyframes": keyframes, "needed": need, "time_shift_s": shift,
+                           "path_extended": path_ext},
             "snapshot": str(snapshot.relative_to(settings.data_dir)),
             "clip_start": clip_start,
+            **({"path": path} if path_ext["before"] or path_ext["after"] else {}),
         }
 
 

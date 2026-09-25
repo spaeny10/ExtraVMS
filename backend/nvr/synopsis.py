@@ -60,6 +60,31 @@ def describe_motion(path: list) -> str:
     return ", ".join(parts) or "mostly stationary"
 
 
+def _track_fact(event: dict, camera: dict) -> str | None:
+    """Where the NVR first and last saw the object: a named place it was at or beside, else a picture edge."""
+    from . import zones
+    path = event.get("path") or []
+    if len(path) < 2:
+        return None
+    zl = camera.get("zones")
+    x0, y0 = zones.foot(path[0][1:5])
+    x1, y1 = zones.foot(path[-1][1:5])
+    def describe(x, y):
+        place = zones.place_of(x, y, zl)
+        if place:
+            return f"at '{place}'"
+        edge = zones.edge_of(x, y)
+        return f"at the {edge}" if edge else "in the middle of the view"
+    first, last = describe(x0, y0), describe(x1, y1)
+    line = f"Track (from the NVR): first seen {first}; last seen {last}."
+    if first.startswith("at '") and "door" in first.lower():
+        line += (" It appeared at that door, so it came into the building through it: state that plainly "
+                 "('entered through the South door'), don't say it came from the kitchen.")
+    if last.startswith("at '") and "door" in last.lower():
+        line += " It was last seen at that door: it most likely left through it."
+    return line
+
+
 def _zone_fact(event: dict, camera: dict) -> str | None:
     """Which monitored zone YOLO confirmed the object in (cameras with include zones only)."""
     from . import zones
@@ -107,6 +132,9 @@ def event_facts(event: dict, camera: dict) -> str:
     where = _zone_fact(event, camera)
     if where:  # otherwise Qwen tends to call anything with the road behind it "background highway traffic"
         lines.append(where)
+    track = _track_fact(event, camera)
+    if track:  # first/last position, so "came in through the South door" isn't left to guesswork
+        lines.append(track)
     reasons = (event.get("anomaly_json") or {}).get("reasons")
     if reasons:  # learned baseline for this camera; lets the threat judgement account for what's normal here
         lines.append("Unusual for this camera: " + "; ".join(reasons))

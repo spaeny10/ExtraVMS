@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     track_end_gap: float = 2.0              # seconds without the object before the track is closed
     track_max_seconds: float = 60.0         # long tracks are split so synopses stay timely
     camera_clock_offset: float = 0.0        # seconds to add to camera UtcTime to match PC clock
-    clip_pre_roll: float = 3.0
+    clip_pre_roll: float = 5.0             # cameras report a person a step or two late: keep the doorway on the clip
     clip_post_roll: float = 3.0
     recording_lag: float = 3.0              # wait for MediaMTX to flush fMP4 parts before fetching
 

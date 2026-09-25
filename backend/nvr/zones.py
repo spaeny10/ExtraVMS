@@ -26,6 +26,39 @@ def point_in_polygon(x: float, y: float, poly: list[list[float]]) -> bool:
     return inside
 
 
+def dist_to_polygon(x: float, y: float, poly: list[list[float]]) -> float:
+    """0 inside, else the distance to the nearest edge (normalised units)."""
+    if point_in_polygon(x, y, poly):
+        return 0.0
+    best = 9.0
+    for i in range(len(poly)):
+        (x1, y1), (x2, y2) = poly[i], poly[(i + 1) % len(poly)]
+        dx, dy = x2 - x1, y2 - y1
+        t = 0.0 if dx == dy == 0 else max(0.0, min(1.0, ((x - x1) * dx + (y - y1) * dy) / (dx * dx + dy * dy)))
+        best = min(best, ((x - (x1 + t * dx)) ** 2 + (y - (y1 + t * dy)) ** 2) ** 0.5)
+    return best
+
+
+def place_of(x: float, y: float, zones: list[dict] | None, tol: float = 0.05) -> str | None:
+    """The named area a point is in or right next to (within tol), nearest first."""
+    areas = [z for z in normalize(zones) if z["type"] == "area"]
+    best = min(((dist_to_polygon(x, y, z["points"]), z) for z in areas), key=lambda t: t[0], default=None)
+    return (best[1].get("name") or "Area").strip() if best and best[0] <= tol else None
+
+
+def edge_of(x: float, y: float, margin: float = 0.12) -> str | None:
+    """Which edge of the picture a point is at, if any (where a track enters or leaves the view)."""
+    if y >= 1 - margin:
+        return "bottom edge (nearest the camera)"
+    if y <= margin:
+        return "top edge (far end of the view)"
+    if x <= margin:
+        return "left edge"
+    if x >= 1 - margin:
+        return "right edge"
+    return None
+
+
 def normalize(zones: list[dict] | None) -> list[dict]:
     """Valid zones only, with a type (zones saved before exclude existed are include zones)."""
     out = []

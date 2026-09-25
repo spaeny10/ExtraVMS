@@ -118,8 +118,9 @@ def public_camera(c: dict) -> dict:
 # ---------------------------------------------------------------- cameras
 
 class SiteRule(BaseModel):
-    kind: Literal["towing"] = "towing"
-    asset: str = Field("equipment", max_length=80)     # what may only be towed by the allowed vehicles
+    kind: Literal["towing", "entry"] = "towing"
+    asset: str = Field("equipment", max_length=80)     # towing: what may only be towed by the allowed vehicles
+    area: str = Field("", max_length=80)               # entry: the named place (exterior door) people come in through
     allowed: list[str] = []                             # names from People & vehicles
     priority: Literal["medium", "high"] = "high"
 

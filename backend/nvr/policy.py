@@ -1,9 +1,12 @@
 """Site rules the operator writes per camera, checked by code once Qwen has described a vehicle.
 
-Rule shape (cameras.policies, JSON list):
+Rule shapes (cameras.policies, JSON list):
     {"kind": "towing", "asset": "solar light tower", "allowed": ["BIGView truck"], "priority": "high"}
   -> a vehicle Qwen saw towing / hitched to something, whose fingerprint does not match one of the *named*
      vehicles in `allowed` (People & vehicles), breaks the rule.
+    {"kind": "entry", "area": "South Exterior Door", "allowed": ["Shawn"], "priority": "high"}
+  -> a person whose track starts at that named place (an exterior door) and who is not recognised as one of
+     the named people in `allowed` breaks the rule. Checked right after verification (no Qwen needed).
 
 A broken rule is stored on the event (events.policy = {"kind", "text", "priority"}), lifts its priority,
 puts it under Needs attention on Home and into the search index. The rule text is also given to Qwen so its
@@ -19,7 +22,8 @@ from .db import db
 
 log = logging.getLogger("nvr.policy")
 
-KINDS = ("towing",)
+KINDS = ("towing", "entry")
+ENTRY_WINDOW_S = 2.5   # the track must be at the door within this long of its start to count as coming in
 TOWING_RE = re.compile(r"\b(tow(s|ing|ed)?|hitch(ed|ing)?|hauling|pulling (a|the) (trailer|tower))\b", re.I)
 
 
@@ -31,8 +35,8 @@ def rules(camera: dict | None) -> list[dict]:
 
 
 def labels_needed(camera: dict | None) -> set[str]:
-    """Object labels Qwen must describe on this camera for its rules to be checkable."""
-    return {"vehicle"} if rules(camera) else set()
+    """Object labels Qwen must describe on this camera for its rules to be checkable (entry rules need no Qwen)."""
+    return {"vehicle"} if any(r["kind"] == "towing" for r in rules(camera)) else set()
 
 
 def prompt_lines(camera: dict | None) -> str | None:
@@ -40,11 +44,26 @@ def prompt_lines(camera: dict | None) -> str | None:
     out = []
     for r in rules(camera):
         allowed = ", ".join(f"'{n}'" for n in r.get("allowed") or []) or "no vehicle"
+        if r["kind"] == "entry":
+            out.append(f"Site rule from the operator: '{r.get('area', 'the door')}' is an exterior door. Only these known "
+                       f"people may come in through it: {allowed or 'nobody'}. Anyone else entering there is a "
+                       f"{r.get('priority', 'high')} threat; say so in threat_reason.")
+            continue
         out.append(f"Site rule from the operator: the {r.get('asset', 'equipment')}s here belong to the site. "
                    f"Only these known vehicles may tow or hitch up one: {allowed}. A vehicle towing one that is not "
                    f"listed as a known vehicle above is a {r.get('priority', 'high')} threat; say so in threat_reason. "
                    f"Set towing=true only if the vehicle is actually pulling or hitched to something, not merely parked near it.")
     return "\n".join(out) or None
+
+
+def entered_at(e: dict, area: str) -> bool:
+    """The track was at `area` within ENTRY_WINDOW_S of its start (it came in through it)."""
+    path = e.get("path") or []
+    t0 = path[0][0] if path else e["start_ts"]
+    for a in e.get("areas") or []:
+        if a["name"].strip().lower() == area.strip().lower() and a["from"] - t0 <= ENTRY_WINDOW_S:
+            return True
+    return False
 
 
 def is_towing(e: dict) -> bool:
@@ -59,12 +78,22 @@ def check(event_id: int, camera: dict | None = None) -> dict | None:
     """Evaluate the camera's rules for a described vehicle event; store and return the broken rule (or None)."""
     from . import identities
     e = db.event(event_id)
-    if not e or e["status"] != "verified" or e["camera_class"] != "vehicle":
+    if not e or e["status"] != "verified" or e["camera_class"] not in ("vehicle", "person"):
         return None
     camera = camera or db.one("SELECT * FROM cameras WHERE id=?", [e["camera_id"]])
     broken = None
     for r in rules(camera):
-        if r["kind"] == "towing" and is_towing(e):
+        if r["kind"] == "entry" and e["camera_class"] == "person" and entered_at(e, r.get("area", "")):
+            m = identities.match_identity("person", event_id)
+            name = m[0]["name"] if m else None
+            allowed = [a.lower() for a in r.get("allowed") or []]
+            if name and name.lower() in allowed:
+                continue
+            who = f"recognised as '{name}', who is not on the list" if name else "not a recognised person"
+            broken = {"kind": "entry", "priority": r.get("priority", "high"),
+                      "text": f"Entered through {r.get('area')}: {who} (allowed: {', '.join(r.get('allowed') or []) or 'nobody'})"}
+            break
+        if r["kind"] == "towing" and e["camera_class"] == "vehicle" and is_towing(e):
             m = identities.match_identity("vehicle", event_id)
             name = m[0]["name"] if m else None
             allowed = [a.lower() for a in r.get("allowed") or []]
@@ -90,8 +119,8 @@ def recheck(camera_id: str, days: float = 7) -> int:
     import time
     camera = db.one("SELECT * FROM cameras WHERE id=?", [camera_id])
     n = 0
-    for r in db.all("SELECT id FROM events WHERE camera_id=? AND camera_class='vehicle' AND status='verified' "
-                    "AND synopsis IS NOT NULL AND start_ts >= ?", [camera_id, time.time() - days * 86400]):
+    for r in db.all("SELECT id FROM events WHERE camera_id=? AND camera_class IN ('vehicle','person') AND status='verified' "
+                    "AND start_ts >= ?", [camera_id, time.time() - days * 86400]):
         if check(r["id"], camera):
             n += 1
     return n
