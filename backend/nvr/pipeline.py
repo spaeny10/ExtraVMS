@@ -120,6 +120,7 @@ class Pipeline:
                  result.get("yolo_class"), result.get("yolo_hits"))
         if result["status"] != "verified":
             return
+        self.record_areas(event_id)
         a = baseline.apply(event_id) or {}
         if a.get("reasons"):
             log.info("event %s unusual %.2f: %s", event_id, a["score"], "; ".join(a["reasons"]))
@@ -231,6 +232,8 @@ class Pipeline:
         s = e.get("synopsis_json") or {}
         fb = e.get("feedback") or {}
         notes = [m["content"] for m in db.chat(event_id) if m["saved"]]
+        if e.get("areas"):  # named places, so "did anyone use the bathroom" finds "entered Bathroom 2"
+            notes.append("Went to: " + ", ".join(f"entered {a['name']}" for a in e["areas"]))
         an = e.get("anomaly_json") or {}
         if an.get("reasons"):  # so "unusual activity" / "at night" style searches find it
             notes.append("Unusual for this camera: " + "; ".join(an["reasons"]))
@@ -239,6 +242,7 @@ class Pipeline:
             if j and j["synopsis"]:
                 notes.append(j["synopsis"])
         labels = " ".join(filter(None, [
+            *(a["name"] for a in (e.get("areas") or [])),
             e["camera_class"], e["yolo_class"], *s.get("tags", []), *(o.get("type", "") for o in s.get("objects", [])),
             (fb.get("verdict") or "").replace("_", " "), fb.get("correct_class"),
         ]))
@@ -310,6 +314,15 @@ class Pipeline:
             return True
         samples = (e.get("detections") or {}).get("samples", [])
         return any(s.get("match") and zones.allowed(zones.foot(s["match"]["box"]), zl) for s in samples)
+
+    def record_areas(self, event_id: int) -> list[dict]:
+        """Store which named areas (zones of type "area") the object walked into."""
+        e = db.event(event_id)
+        if not e:
+            return []
+        visited = zones.areas_visited(e["path"], (self.cameras.get(e["camera_id"]) or {}).get("zones"))
+        db.update_event(event_id, areas=visited or None)
+        return visited
 
     def queue_missing_synopses(self, camera_id: str) -> int:
         """After a camera's Qwen choice changes: describe its verified, in-zone events that have no synopsis yet."""

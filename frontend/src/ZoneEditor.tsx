@@ -12,7 +12,7 @@ const VB_H = VB_W / ASPECT;
  */
 export function ZoneEditor({ camera, onClose, onSaved }: { camera: Camera; onClose: () => void; onSaved: () => void }) {
   const [zones, setZones] = useState<Zone[]>(() => camera.zones.map((z) => ({ ...z, type: z.type ?? "include", points: [...z.points] })));
-  const [draft, setDraft] = useState<{ type: "include" | "exclude"; points: Pt[] } | null>(null);
+  const [draft, setDraft] = useState<{ type: "include" | "exclude" | "area"; points: Pt[] } | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
   const [cursor, setCursor] = useState<Pt | null>(null);
   const [stillT, setStillT] = useState(() => Date.now() / 1000 - 5);
@@ -61,7 +61,7 @@ export function ZoneEditor({ camera, onClose, onSaved }: { camera: Camera; onClo
     const pts = draft.points.filter((p, i, a) => i === 0 || Math.hypot(p[0] - a[i - 1][0], p[1] - a[i - 1][1]) > 0.004);
     if (pts.length < 3) return;
     const n = zones.filter((z) => z.type === draft.type).length + 1;
-    setZones([...zones, { name: `${draft.type === "exclude" ? "Mask" : "Area"} ${n}`, type: draft.type, points: pts }]);
+    setZones([...zones, { name: `${draft.type === "exclude" ? "Mask" : draft.type === "area" ? "Place" : "Area"} ${n}`, type: draft.type, points: pts }]);
     setSelected(zones.length);
     setDraft(null);
   };
@@ -184,8 +184,15 @@ export function ZoneEditor({ camera, onClose, onSaved }: { camera: Camera; onClo
                 <button className={`ghost ${draft?.type === "include" ? "on" : ""}`} onClick={() => { setSelected(null); setDraft({ type: "include", points: [] }); }}>
                   <span className="swatch include" /> Detect only in area
                 </button>
+                <button className={`ghost ${draft?.type === "area" ? "on" : ""}`} onClick={() => { setSelected(null); setDraft({ type: "area", points: [] }); }}>
+                  <span className="swatch area" /> Name a place
+                </button>
               </div>
-              <p className="muted small">Mask out = ignore that area (e.g. the highway). Detect only in = if any exist, everything outside them is ignored. Masks win where they overlap.</p>
+              <p className="muted small">
+                <strong>Mask out</strong> = ignore that area (e.g. the highway). <strong>Detect only in</strong> = if any exist, everything
+                outside them is ignored. <strong>Name a place</strong> = filters nothing; each sighting records which named places it
+                walked into ("Bathroom 2", "Exit door"), used in synopses, search and Ask.
+              </p>
             </section>
 
             <section>
@@ -198,6 +205,7 @@ export function ZoneEditor({ camera, onClose, onSaved }: { camera: Camera; onClo
                   <select value={z.type} onChange={(e) => setZone(i, { type: e.target.value as Zone["type"] })}>
                     <option value="exclude">Mask out</option>
                     <option value="include">Detect only</option>
+                    <option value="area">Named place</option>
                   </select>
                   <button className="ghost small" onClick={(e) => { e.stopPropagation(); setZones(zones.filter((_, j) => j !== i)); setSelected(null); }} aria-label="Delete zone">✕</button>
                 </div>

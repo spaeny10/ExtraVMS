@@ -1,5 +1,6 @@
 import { connection } from "./ui";
-export type Zone = { name: string; type?: "include" | "exclude"; points: [number, number][] };
+/** include = detect only here; exclude = mask out; area = just a name for a place (never filters) */
+export type Zone = { name: string; type?: "include" | "exclude" | "area"; points: [number, number][] };
 /** [x, y, class, event_id, status] foot point of a recent detection */
 export type DetectionPoint = [number, number, string, number, string];
 
@@ -14,7 +15,7 @@ export function zoneAllowed(x: number, y: number, zones: Zone[]): boolean {
     return inside;
   };
   const valid = zones.filter((z) => z.points.length >= 3);
-  const includes = valid.filter((z) => z.type !== "exclude");
+  const includes = valid.filter((z) => z.type === "include" || z.type === undefined);
   if (includes.length && !includes.some((z) => inPoly(z.points))) return false;
   return !valid.some((z) => z.type === "exclude" && inPoly(z.points));
 }
@@ -89,6 +90,8 @@ export type NvrEvent = {
   anomaly_json?: Anomaly | null;
   /** name of the watched person/vehicle this sighting matched */
   watched?: string | null;
+  /** named areas (zones of type "area") the object walked into */
+  areas?: { name: string; from: number; to: number }[] | null;
   error: string | null;
   corrected_at?: number | null;
   feedback?: Feedback | null;

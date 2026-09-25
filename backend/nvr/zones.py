@@ -1,4 +1,7 @@
-"""Detection zones: include / exclude polygons in normalized (0-1) image coordinates.
+"""Detection zones: include / exclude / area polygons in normalized (0-1) image coordinates.
+
+"area" zones never filter anything: they only name a place ("Bathroom 2", "Exit door") so each event can
+record which places the object walked into (areas_visited).
 
 One rule everywhere (tracker, YOLO verification, past-event masking, the UI preview):
 an object's point is the bottom-centre of its box (where it touches the ground). It is *allowed* if
@@ -29,7 +32,8 @@ def normalize(zones: list[dict] | None) -> list[dict]:
     for z in zones or []:
         pts = z.get("points") or []
         if len(pts) >= 3:
-            out.append({**z, "type": "exclude" if z.get("type") == "exclude" else "include", "points": pts})
+            t = z.get("type")
+            out.append({**z, "type": t if t in ("exclude", "area") else "include", "points": pts})
     return out
 
 
@@ -71,10 +75,31 @@ def mask_frame(img: np.ndarray, zones: list[dict]) -> np.ndarray:
     return out
 
 
+def areas_visited(path: list, zones: list[dict], min_points: int = 2) -> list[dict]:
+    """Named areas a track's feet entered, in order of first entry: [{name, from, to}] (epoch seconds).
+    min_points: samples needed inside, so a box edge brushing a doorway doesn't count."""
+    areas = [z for z in normalize(zones) if z["type"] == "area"]
+    if not areas or not path:
+        return []
+    seen: dict[str, dict] = {}
+    for p in path:
+        x, y = foot(p[1:5])
+        for z in areas:
+            if point_in_polygon(x, y, z["points"]):
+                name = (z.get("name") or "Area").strip()
+                v = seen.setdefault(name, {"name": name, "from": p[0], "to": p[0], "n": 0})
+                v["to"], v["n"] = p[0], v["n"] + 1
+    out = [v for v in seen.values() if v["n"] >= min_points]
+    out.sort(key=lambda v: v["from"])
+    return [{"name": v["name"], "from": round(v["from"], 2), "to": round(v["to"], 2)} for v in out]
+
+
 def draw_outlines(img: np.ndarray, zones: list[dict]) -> np.ndarray:
-    """Thin zone outlines for snapshots (blue = include, red = exclude). Draws in place."""
+    """Thin zone outlines for snapshots (blue = include, red = exclude; areas aren't drawn). Draws in place."""
     h, w = img.shape[:2]
     for z in zones:
+        if z["type"] == "area":
+            continue
         pts = np.array([[int(x * w), int(y * h)] for x, y in z["points"]], dtype=np.int32)
         color = (60, 60, 230) if z["type"] == "exclude" else (230, 150, 50)
         cv2.polylines(img, [pts], True, color, 2, cv2.LINE_AA)

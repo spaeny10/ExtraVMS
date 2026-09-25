@@ -281,6 +281,9 @@ function Details({ e, setE, notes, onUnsave, seek }: {
           <>
             <p>{e.synopsis ?? <span className="muted">{placeholder(e)}</span>}</p>
             {s?.activity && <p className="muted">{s.activity}</p>}
+            {e.areas?.length ? (
+              <p className="small"><strong>Went to:</strong> {e.areas.map((a) => `${a.name} (+${Math.max(0, Math.round(a.from - e.start_ts))} s)`).join(" → ")}</p>
+            ) : null}
             {s?.model && <p className="muted small model-tag" title="Which Qwen model wrote this synopsis">by {s.model}</p>}
             {s?.threat_reason && <p><strong>Threat ({s.threat_level}):</strong> {s.threat_reason}</p>}
             {e.anomaly_json?.reasons?.length ? (

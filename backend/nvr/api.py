@@ -243,8 +243,24 @@ async def apply_zones(camera_id: str):
                 raise
 
     await asyncio.to_thread(write)
-    log.info("[%s] zones applied in %.1fs: %d masked, %d restored", camera_id, time.time() - t0, len(to_mask), len(to_restore))
-    return {"masked": len(to_mask), "restored": len(to_restore)}
+    tagged = await refresh_areas(camera_id)
+    log.info("[%s] zones applied in %.1fs: %d masked, %d restored, %d tagged with areas", camera_id, time.time() - t0,
+             len(to_mask), len(to_restore), tagged)
+    return {"masked": len(to_mask), "restored": len(to_restore), "tagged": tagged}
+
+
+async def refresh_areas(camera_id: str) -> int:
+    """Re-tag this camera's verified events with the named areas they entered, and refresh their search entries."""
+    p = state.pipeline
+    ids = [r["id"] for r in db.all("SELECT id FROM events WHERE camera_id=? AND status='verified'", [camera_id])]
+    n = 0
+    for eid in ids:
+        before = (db.one("SELECT areas FROM events WHERE id=?", [eid]) or {}).get("areas")
+        after = await asyncio.to_thread(p.record_areas, eid)
+        if (json.loads(before) if before else []) != after:
+            await p.reindex(eid)
+            n += 1
+    return n
 
 
 # ---------------------------------------------------------------- events
@@ -270,7 +286,7 @@ async def list_events(camera: str | None = None, status: str | None = None, labe
     if before_id:
         where.append("id<?"); params.append(before_id)
     sql = ("SELECT id, camera_id, track_id, camera_class, camera_conf, start_ts, end_ts, status, yolo_class, "
-           "yolo_conf, yolo_hits, snapshot, clip, synopsis, threat, priority, anomaly, anomaly_json, watched, error, corrected_at, feedback, "
+           "yolo_conf, yolo_hits, snapshot, clip, synopsis, threat, priority, anomaly, anomaly_json, watched, areas, error, corrected_at, feedback, "
            "EXISTS(SELECT 1 FROM locks WHERE locks.event_id = events.id) AS locked, journey_id, "
            "(SELECT COUNT(DISTINCT je.value) FROM journeys, json_each(journeys.cameras) je WHERE journeys.id = events.journey_id) AS journey_cameras FROM events"
            + (f" WHERE {' AND '.join(where)}" if where else "") + " ORDER BY id DESC LIMIT ?")
@@ -278,6 +294,7 @@ async def list_events(camera: str | None = None, status: str | None = None, labe
     for r in rows:
         r["feedback"] = json.loads(r["feedback"]) if r["feedback"] else None
         r["anomaly_json"] = json.loads(r["anomaly_json"]) if r["anomaly_json"] else None
+        r["areas"] = json.loads(r["areas"]) if r["areas"] else None
     return rows
 
 

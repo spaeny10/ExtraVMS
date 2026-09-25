@@ -226,9 +226,10 @@ MIGRATIONS = [
     ("journeys", "model", "TEXT"),              # which Qwen wrote the narrative (local 7B or remote)
     ("identities", "watch", "INTEGER NOT NULL DEFAULT 0"),  # on the watch list: matching sightings get priority
     ("identities", "watch_note", "TEXT NOT NULL DEFAULT ''"),
-    ("events", "watched", "TEXT"),              # name of the watched identity this sighting matched             # none|low|medium|high: max(threat, unusualness), operator wins
+    ("events", "watched", "TEXT"),              # name of the watched identity this sighting matched
+    ("events", "areas", "TEXT"),                # JSON [{name, from, to}]: named areas the object walked into             # none|low|medium|high: max(threat, unusualness), operator wins
 ]
-JSON_FIELDS = ("path", "rules", "detections", "synopsis_json", "synopsis_original", "feedback", "anomaly_json")
+JSON_FIELDS = ("path", "rules", "detections", "synopsis_json", "synopsis_original", "feedback", "anomaly_json", "areas")
 
 
 class Database:
