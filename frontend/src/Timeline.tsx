@@ -179,8 +179,10 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
 
   const allIds = cameras.map((c) => c.id);
   const isPhone = useIsPhone();
+  const autoSolo = useRef(false);
   useEffect(() => {  // a phone can't show a grid of full-resolution streams: one camera at a time
-    if (isPhone && !config.solo && allIds.length) setConfig((c) => ({ ...c, solo: allIds[0] }));
+    if (isPhone && !config.solo && allIds.length) { autoSolo.current = true; setConfig((c) => ({ ...c, solo: allIds[0] })); }
+    else if (!isPhone && autoSolo.current) { autoSolo.current = false; setConfig((c) => ({ ...c, solo: null })); }  // back to the grid on a desktop
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isPhone, allIds.join(",")]);
   const visibleIds = allIds.filter((id) => config.visible == null || config.visible.includes(id));
