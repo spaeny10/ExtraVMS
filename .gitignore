@@ -12,3 +12,4 @@ data/
 runtime/
 models/
 metadata_dump.xml
+.claude/
