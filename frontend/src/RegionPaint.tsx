@@ -28,6 +28,8 @@ export function RegionOverlay({ cam, videoRef, editing, onDone, camera, fallback
   const [mode, setMode] = useState<"paint" | "erase">("paint");
   const [brush, setBrush] = useState(COARSE ? 2 : 1);
   const stroke = useRef<{ erase: boolean } | null>(null);
+  const bitsRef = useRef(bits);  // pointer events arrive faster than renders: paint on the latest bits
+  bitsRef.current = bits;
 
   useEffect(() => { if (!editing) setBits(stored ? new Uint8Array(stored) : new Uint8Array(GRID_W * GRID_H / 8)); }, [stored, editing]);
 
@@ -89,12 +91,13 @@ export function RegionOverlay({ cam, videoRef, editing, onDone, camera, fallback
     if (!c || !rect) return;
     const r = c.getBoundingClientRect();
     const col = Math.floor(((e.clientX - r.left) / r.width) * GRID_W), row = Math.floor(((e.clientY - r.top) / r.height) * GRID_H);
-    const next = new Uint8Array(bits);
+    const next = new Uint8Array(bitsRef.current);
     const rad = brush - 1;
     for (let dr = -rad; dr <= rad; dr++) for (let dk = -rad; dk <= rad; dk++) {
       const rr = row + dr, kk = col + dk;
       if (rr >= 0 && rr < GRID_H && kk >= 0 && kk < GRID_W) setCell(next, cellIndex(kk, rr), !erase);
     }
+    bitsRef.current = next;
     setBits(next);
     return next;
   };
@@ -115,8 +118,8 @@ export function RegionOverlay({ cam, videoRef, editing, onDone, camera, fallback
           paintAt(e, erase);
         }}
         onPointerMove={(e) => { if (stroke.current) { e.preventDefault(); paintAt(e, stroke.current.erase); } }}
-        onPointerUp={(e) => { if (stroke.current) { stroke.current = null; commit(paintAt(e, mode === "erase" || e.button === 2 || e.altKey) ?? bits); } }}
-        onPointerCancel={() => { if (stroke.current) { stroke.current = null; commit(bits); } }}
+        onPointerUp={(e) => { if (stroke.current) { const erase = stroke.current.erase; stroke.current = null; commit(paintAt(e, erase) ?? bitsRef.current); } }}
+        onPointerCancel={() => { if (stroke.current) { stroke.current = null; commit(bitsRef.current); } }}
       />
       {editing && (
         <div className="region-tools" onPointerDown={stop} onClick={stop} onDoubleClick={stop}>
