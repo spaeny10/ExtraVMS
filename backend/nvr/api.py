@@ -499,17 +499,7 @@ async def save_chat_note(event_id: int, msg_id: int, saved: bool = True):
     return db.chat(event_id)
 
 
-PERSON_WORDS = {"person", "people", "man", "men", "woman", "women", "guy", "someone", "somebody", "worker",
-                "workers", "pedestrian", "human", "kid", "child", "children", "boy", "girl", "he", "she", "intruder"}
-VEHICLE_WORDS = {"car", "cars", "truck", "trucks", "pickup", "van", "suv", "vehicle", "vehicles", "bus", "motorcycle",
-                 "bike", "bicycle", "sedan", "trailer", "semi", "jeep"}
-
-
-def query_label(q: str) -> str | None:
-    """Restrict to one class when the query clearly names only people or only vehicles."""
-    words = {w.strip(".,!?'\"").lower() for w in q.split()}
-    person, vehicle = bool(words & PERSON_WORDS), bool(words & VEHICLE_WORDS)
-    return "person" if person and not vehicle else "vehicle" if vehicle and not person else None
+query_label = assistant.query_label
 
 
 @app.get("/api/search")

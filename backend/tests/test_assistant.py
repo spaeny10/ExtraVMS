@@ -103,6 +103,29 @@ def test_last_n_window_and_no_stray_footage_search():
     assert abs(plan[0]["args"]["since"] - (NOW - 2 * 86400)) < 5
 
 
+def test_planner_junk_filters_are_overridden():
+    # the real failure: label=person, priority=high, no text, for a question about trucks
+    raw = {"calls": [{"tool": "search_events", "camera": "cam1", "label": "person", "min_priority": "high"},
+                     {"tool": "search_events", "camera": "cam2", "label": "person", "min_priority": "high"}]}
+    plan = assistant.check_plan(raw, "Did any BigView trucks take a solar trailer", NOW)
+    for c in plan:
+        assert c["args"]["label"] == "vehicle" and c["args"]["min_priority"] is None, c
+        assert c["args"]["text"] == "Did any BigView trucks take a solar trailer", c
+    # priority filter is kept when the question is about unusual activity; listing requests keep an empty text
+    plan = assistant.check_plan({"calls": [{"tool": "search_events", "min_priority": "medium"}]}, "Anything suspicious last night?", NOW)
+    assert plan[0]["args"]["min_priority"] == "medium"
+    plan = assistant.check_plan({"calls": [{"tool": "search_events", "camera": "cam2"}]}, "Show the latest events at the east door", NOW)
+    assert plan[0]["args"]["text"] == ""
+
+
+def test_fallback_search_when_everything_is_empty():
+    empty = [{"tool": "search_events", "args": {"text": "x", "camera": "cam1", "since": at(0), "until": None, "label": "person", "min_priority": "high", "group_by": None}, "count": 0}]
+    fb = assistant.fallback_call(empty, "Did any trucks come by?")
+    assert fb and fb["tool"] == "search_events" and fb["args"]["camera"] is None and fb["args"]["label"] == "vehicle" and fb["args"]["since"] == at(0)
+    assert assistant.fallback_call([{**empty[0], "count": 3}], "q") is None                # something was found
+    assert assistant.fallback_call([{"tool": "search_events", "args": fb["args"], "count": 0}], "Did any trucks come by?") is None  # already tried
+
+
 def test_average_link_counts():
     import numpy as np
     # two tight groups (0.9 inside) that are 0.6 apart, plus one loner at 0.4

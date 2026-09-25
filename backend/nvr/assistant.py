@@ -39,6 +39,23 @@ PRIORITY_RANK = {"any": -1, "none": 0, "low": 1, "medium": 2, "high": 3}
 FALSE_ALARM = "(feedback IS NULL OR json_extract(feedback, '$.verdict') IS NOT 'false_alarm')"
 
 
+PERSON_WORDS = {"person", "people", "man", "men", "woman", "women", "guy", "someone", "somebody", "worker",
+                "workers", "pedestrian", "human", "kid", "child", "children", "boy", "girl", "he", "she", "intruder",
+                "anyone", "anybody", "staff", "visitor", "visitors"}
+VEHICLE_WORDS = {"car", "cars", "truck", "trucks", "pickup", "pickups", "van", "vans", "suv", "vehicle", "vehicles", "bus",
+                 "motorcycle", "bike", "bicycle", "sedan", "trailer", "trailers", "semi", "jeep", "delivery", "ups", "fedex"}
+PRIORITY_WORDS = re.compile(r"\b(unusual|odd|strange|weird|suspicious|threat|threats|priority|important|alarming|"
+                            r"concerning|dangerous|intruder|break[- ]?in|trespass\w*)\b")
+LISTING_WORDS = re.compile(r"^(list|show|what were|what are|latest|recent|last \d+|give me)\b")
+
+
+def query_label(q: str) -> str | None:
+    """Restrict to one class when the text clearly names only people or only vehicles."""
+    words = {w.strip(".,!?'\"").lower() for w in q.split()}
+    person, vehicle = bool(words & PERSON_WORDS), bool(words & VEHICLE_WORDS)
+    return "person" if person and not vehicle else "vehicle" if vehicle and not person else None
+
+
 class Context:
     """Set at startup: the pipeline (Qwen readiness) and the footage indexer."""
     pipeline = None
@@ -130,7 +147,7 @@ PLAN_SCHEMA = {
 }
 
 TOOL_HELP = """Tools (pick 1-3; fill only the fields that tool uses):
-- search_events: find camera events by meaning. text = what happened (e.g. "person carrying a box"). Filters: camera, since, until, label, min_priority. Leave text empty to list the latest events matching the filters.
+- search_events: find camera events by meaning. text = what to look for, in the operator's words (e.g. "BigView truck with a trailer"). Filters: camera, since, until. Only set min_priority if the question asks about unusual or suspicious activity. Leave text empty only to list the latest events.
 - count_events: how many events. Filters: camera, since, until, label. group_by: hour | day | camera | label | none.
 - list_unusual: events that were unusual for their camera (odd time or place, stayed long) or high priority. Filters: camera, since, until.
 - list_journeys: people followed across several cameras (e.g. went outside and came back). Filters: since, until.
@@ -210,12 +227,17 @@ def check_plan(raw: dict, question: str, now: float) -> list[dict]:
             until = min(max(until, oldest), now + 60)
         if since is not None and until is not None and since > until:
             since, until = until, since
+        # The question decides the label and whether priority matters; the planner's guesses are ignored.
+        label = query_label(question)
+        q_low = question.lower()
         args = {"text": (c.get("text") or "").strip()[:200], "camera": match_camera(c.get("camera")), "since": since,
-                "until": until, "label": c.get("label") if c.get("label") in ("person", "vehicle") else None,
-                "min_priority": c.get("min_priority") if c.get("min_priority") in ("low", "medium", "high") else None,
+                "until": until, "label": label,
+                "min_priority": c.get("min_priority") if c.get("min_priority") in ("low", "medium", "high") and PRIORITY_WORDS.search(q_low) else None,
                 "group_by": c.get("group_by") if c.get("group_by") in ("hour", "day", "camera", "label") else None}
         if tool == "search_footage" and not args["text"]:
             args["text"] = question[:200]
+        if tool == "search_events" and not args["text"] and not LISTING_WORDS.search(q_low.strip()):
+            args["text"] = question[:200]  # a real question: search by meaning, don't just list the latest
         key = (tool, json.dumps(args, sort_keys=True))
         if key not in {(o["tool"], json.dumps(o["args"], sort_keys=True)) for o in out}:
             out.append({"tool": tool, "args": args})
@@ -266,7 +288,7 @@ def augment(calls: list[dict], question: str) -> list[dict]:
     base = calls[0]["args"] if calls else {}
     about_records = any(re.search(pat, q) for pat, _ in KEYWORD_TOOLS)
     if "search_footage" not in have and LOOK_FOR.search(q.strip()) and not GENERIC_SUBJECT.search(q) and not about_records:
-        text = next((c["args"]["text"] for c in calls if c["tool"] == "search_events" and c["args"].get("text")), "") or footage_text(question)
+        text = next((c["args"]["text"] for c in calls if c["tool"] == "search_events" and c["args"].get("text") and c["args"]["text"] != question[:200]), "") or footage_text(question)
         if len(text) >= 3:
             calls.append({"tool": "search_footage", "args": {"text": text, "camera": base.get("camera"), "since": base.get("since"),
                                                              "until": base.get("until"), "label": None, "min_priority": None, "group_by": None}})
@@ -534,9 +556,25 @@ TOOL_FUNCS = {"search_events": t_search_events, "count_events": t_count_events, 
               "get_briefing": t_get_briefing}
 
 
-async def run_calls(calls: list[dict], refs: Refs) -> tuple[str, list[dict]]:
+def fallback_call(calls: list[dict], question: str) -> dict | None:
+    """When every lookup came back empty, one plain search of all cameras with the question text (keeping
+    only the time window) usually finds what an over-filtered plan missed."""
+    if any(c["count"] for c in calls):
+        return None
+    since = min((c["args"].get("since") for c in calls if c["args"].get("since") is not None), default=None)
+    args = {"text": question[:200], "camera": None, "since": since, "until": None, "label": query_label(question),
+            "min_priority": None, "group_by": None}
+    key = json.dumps(args, sort_keys=True)
+    if any(c["tool"] == "search_events" and json.dumps(c["args"], sort_keys=True) == key for c in calls):
+        return None
+    return {"tool": "search_events", "args": args}
+
+
+async def run_calls(calls: list[dict], refs: Refs, question: str | None = None) -> tuple[str, list[dict]]:
     blocks, summary = [], []
-    for c in calls:
+    queue = list(calls)
+    while queue:
+        c = queue.pop(0)
         try:
             lines, n = await TOOL_FUNCS[c["tool"]](c["args"], refs)
         except Exception as e:  # a broken lookup shouldn't sink the answer
@@ -544,6 +582,8 @@ async def run_calls(calls: list[dict], refs: Refs) -> tuple[str, list[dict]]:
             lines, n = [f"(lookup failed: {e})"], 0
         blocks.append(f"### {describe_call(c)}\n" + "\n".join(lines))
         summary.append({"tool": c["tool"], "args": c["args"], "label": describe_call(c), "count": n})
+        if not queue and question and (fb := fallback_call(summary, question)):
+            queue.append(fb)
     text = "\n\n".join(blocks)
     if len(text) > MAX_RESULT_CHARS:
         text = text[:MAX_RESULT_CHARS] + "\n(results truncated)"
@@ -589,7 +629,7 @@ async def ask(thread_id: int | None, question: str) -> AsyncIterator[dict]:
         raw = await vlmroute.router.chat_json("assistant", system, text, [], PLAN_SCHEMA, 300, 0.1, "chat")
         calls = check_plan(raw, question, now)
         refs = Refs()
-        results, summary = await run_calls(calls, refs)
+        results, summary = await run_calls(calls, refs, question)
         calls_meta = {"calls": summary, "refs": refs.as_dict(), "planner": raw.get("_model")}
         yield {"type": "calls", **calls_meta}
         messages = [{"role": "system", "content": ANSWER_SYSTEM + " " + _handles_note(refs)},
