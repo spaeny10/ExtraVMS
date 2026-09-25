@@ -65,6 +65,17 @@ const tzShift = (t: number) => -new Date(t * 1000).getTimezoneOffset() * 60;
 const pad = (n: number) => String(n).padStart(2, "0");
 const gridCols = (n: number) => (n <= 1 ? 1 : n <= 4 ? 2 : n <= 9 ? 3 : 4);
 
+/** How to lay out n 16:9 tiles in a box of gridW x availH px.
+ * 3 tiles: one large (2/3 width, two rows tall) plus two stacked beside it, which tiles the box exactly.
+ * Otherwise the fewest columns whose rows still fit the height, so nothing spills under the timeline. */
+function tileLayout(n: number, gridW: number, availH: number): { cols: number; hero: boolean } {
+  if (n <= 1) return { cols: 1, hero: false };
+  if (n === 3 && gridW * 3 / 8 <= availH) return { cols: 3, hero: true };
+  let cols = gridCols(n);
+  while (cols < n && Math.ceil(n / cols) * (gridW / cols) * 9 / 16 > availH) cols++;
+  return { cols, hero: false };
+}
+
 function fmtTick(t: number, step: number): string {
   const d = new Date(t * 1000);
   if (step >= 86400 || (d.getHours() === 0 && d.getMinutes() === 0 && d.getSeconds() === 0))
@@ -709,7 +720,22 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
 
   const nowX = toX(nowS());
   const phX = playhead != null ? toX(playhead) : null;
-  const cols = gridCols(tileIds.length);
+  const gridRef = useRef<HTMLDivElement>(null);
+  const [box, setBox] = useState({ w: 1200, h: 600 });
+  useEffect(() => {
+    const measure = () => {
+      const w = gridRef.current?.offsetWidth ?? window.innerWidth - 32;
+      // what's left for video above the controls, layout bar, filters and lanes (min 240px)
+      const lanesH = 26 + Math.max(1, cameras.length) * 34 + 40;
+      setBox({ w, h: Math.max(240, window.innerHeight - 190 - lanesH) });
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [cameras.length, tileIds.length]);
+  const { cols, hero } = tileLayout(tileIds.length, box.w, box.h);
+  // the selected camera takes the large slot in the 3-camera layout
+  const orderedTiles = hero && tileIds.includes(cam) ? [cam, ...tileIds.filter((id) => id !== cam)] : tileIds;
   const previewWidth = solo || tileIds.length === 1 ? 960 : 640;
   const selectedLayout = layouts.find((l) => l.id === layoutId);
 
@@ -719,8 +745,9 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
         {tileIds.length === 0 ? (
           <div className="tl-empty muted">All cameras are hidden. Turn one on with 👁 next to its name below.</div>
         ) : (
-          <div className="sync-grid" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
-            {tileIds.map((id) => (
+          <div ref={gridRef} className={`sync-grid ${hero ? "hero" : ""}`}
+            style={hero ? undefined : { gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
+            {orderedTiles.map((id) => (
               <SyncTile
                 key={id}
                 cam={id}
