@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import assistant, backup, baseline, footage, frames, health, identities, journeys, keep, mediamtx, retention, zones
+from . import assistant, backup, baseline, footage, frames, health, identities, journeys, keep, mediamtx, policy, retention, zones
 from . import synopsis as vlm
 from . import vlmroute
 from .config import ROOT, settings
@@ -108,7 +108,7 @@ app = FastAPI(title="NewVMS", lifespan=lifespan)
 
 PUBLIC_CAMERA_FIELDS = ("id", "name", "host", "onvif_port", "rtsp_port", "username", "main_path",
                         "sub_path", "enabled", "zones", "retention_days", "scene_notes", "retention_policy",
-                        "synopsis_labels")
+                        "synopsis_labels", "policies")
 
 
 def public_camera(c: dict) -> dict:
@@ -116,6 +116,13 @@ def public_camera(c: dict) -> dict:
 
 
 # ---------------------------------------------------------------- cameras
+
+class SiteRule(BaseModel):
+    kind: Literal["towing"] = "towing"
+    asset: str = Field("equipment", max_length=80)     # what may only be towed by the allowed vehicles
+    allowed: list[str] = []                             # names from People & vehicles
+    priority: Literal["medium", "high"] = "high"
+
 
 class CameraIn(BaseModel):
     id: str = Field(pattern=r"^[a-z0-9_]{1,32}$")
@@ -133,6 +140,7 @@ class CameraIn(BaseModel):
     scene_notes: str = ""
     retention_policy: dict | None = None  # partial override of the site retention policy; None = inherit
     synopsis_labels: list[Literal["person", "vehicle"]] | None = None  # what Qwen describes; None = site default
+    policies: list[SiteRule] = []  # site rules checked after Qwen describes a vehicle (policy.py)
 
 
 @app.get("/api/cameras")
@@ -168,6 +176,8 @@ async def put_camera(camera_id: str, cam: CameraIn):
         state.ingests.pop(camera_id).stop()
     sync_cameras()
     state.pipeline.queue_missing_synopses(camera_id)  # e.g. vehicles just switched on for Qwen
+    if policy.recheck(camera_id):  # rules changed: re-judge this week's described vehicles
+        pass
     return public_camera(next(c for c in db.cameras() if c["id"] == camera_id))
 
 
@@ -286,7 +296,7 @@ async def list_events(camera: str | None = None, status: str | None = None, labe
     if before_id:
         where.append("id<?"); params.append(before_id)
     sql = ("SELECT id, camera_id, track_id, camera_class, camera_conf, start_ts, end_ts, status, yolo_class, "
-           "yolo_conf, yolo_hits, snapshot, clip, synopsis, threat, priority, anomaly, anomaly_json, watched, areas, error, corrected_at, feedback, "
+           "yolo_conf, yolo_hits, snapshot, clip, synopsis, threat, priority, anomaly, anomaly_json, watched, areas, policy, error, corrected_at, feedback, "
            "EXISTS(SELECT 1 FROM locks WHERE locks.event_id = events.id) AS locked, journey_id, "
            "(SELECT COUNT(DISTINCT je.value) FROM journeys, json_each(journeys.cameras) je WHERE journeys.id = events.journey_id) AS journey_cameras FROM events"
            + (f" WHERE {' AND '.join(where)}" if where else "") + " ORDER BY id DESC LIMIT ?")
@@ -295,6 +305,7 @@ async def list_events(camera: str | None = None, status: str | None = None, labe
         r["feedback"] = json.loads(r["feedback"]) if r["feedback"] else None
         r["anomaly_json"] = json.loads(r["anomaly_json"]) if r["anomaly_json"] else None
         r["areas"] = json.loads(r["areas"]) if r["areas"] else None
+        r["policy"] = json.loads(r["policy"]) if r["policy"] else None
         state.pipeline.annotate(r)
     return rows
 
@@ -983,14 +994,15 @@ async def home(since: float | None = None):
     since = since or now - 86400
     day_start = dt.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
     cols = ("id, camera_id, camera_class, start_ts, end_ts, status, yolo_class, yolo_conf, snapshot, synopsis, threat, "
-            "priority, anomaly, anomaly_json, watched, feedback, corrected_at, journey_id, error")
+            "priority, anomaly, anomaly_json, watched, policy, feedback, corrected_at, journey_id, error")
     ok = "status='verified' AND (feedback IS NULL OR json_extract(feedback, '$.verdict') IS NOT 'false_alarm')"
     attention = db.all(f"SELECT {cols} FROM events WHERE {ok} AND start_ts >= ? AND (priority IN ('low','medium','high') "
-                       f"OR COALESCE(anomaly, 0) >= ?) ORDER BY CASE priority WHEN 'high' THEN 3 WHEN 'medium' THEN 2 "
+                       f"OR policy IS NOT NULL OR COALESCE(anomaly, 0) >= ?) ORDER BY CASE priority WHEN 'high' THEN 3 WHEN 'medium' THEN 2 "
                        f"WHEN 'low' THEN 1 ELSE 0 END DESC, COALESCE(anomaly, 0) DESC, start_ts DESC LIMIT 20",
                        [since, baseline.PRIORITY_LOW])
     recent = db.all(f"SELECT {cols} FROM events WHERE {ok} ORDER BY start_ts DESC LIMIT 8")
     for e in attention + recent:
+        e["policy"] = json.loads(e["policy"]) if e.get("policy") else None
         e["anomaly_json"] = json.loads(e["anomaly_json"]) if e["anomaly_json"] else None
         e["feedback"] = json.loads(e["feedback"]) if e["feedback"] else None
     today = {}

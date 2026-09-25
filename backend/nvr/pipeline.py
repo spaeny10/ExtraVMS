@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import cv2
 
-from . import baseline, identities, journeys, vlmroute, zones
+from . import baseline, identities, journeys, policy, vlmroute, zones
 from . import synopsis as vlm
 from .config import settings
 from .db import db
@@ -223,6 +223,7 @@ class Pipeline:
         result["model"] = result.pop("_model", None)  # shown as a small tag in the event viewer
         summary = result.get("summary", "").strip()
         db.update_event(event_id, synopsis=summary, synopsis_json=result, threat=result.get("threat_level"), error=None)
+        policy.check(event_id, camera)          # site rules (who may tow what) now that Qwen has looked
         baseline.apply(event_id, rescore=False)  # threat changed: update priority
         await self.reindex(event_id)
         log.info("event %s synopsis in %.1fs: %s", event_id, time.time() - t0, summary[:120])
@@ -256,6 +257,8 @@ class Pipeline:
         an = e.get("anomaly_json") or {}
         if an.get("reasons"):  # so "unusual activity" / "at night" style searches find it
             notes.append("Unusual for this camera: " + "; ".join(an["reasons"]))
+        if e.get("policy"):  # a broken site rule, so "unknown truck towing" finds it
+            notes.append("Site rule broken: " + e["policy"]["text"])
         if e.get("journey_id"):  # cross-camera narrative, so e.g. "went outside" finds every leg
             j = db.one("SELECT synopsis FROM journeys WHERE id=?", [e["journey_id"]])
             if j and j["synopsis"]:
@@ -320,8 +323,10 @@ class Pipeline:
 
     def synopsis_labels(self, camera_id: str) -> list[str]:
         """What Qwen describes on this camera: its own choice (Cameras -> Edit), else the site default."""
-        own = (self.cameras.get(camera_id) or {}).get("synopsis_labels")
-        return own if own is not None else settings.synopsis_labels
+        cam = self.cameras.get(camera_id) or {}
+        own = cam.get("synopsis_labels")
+        labels = own if own is not None else settings.synopsis_labels
+        return sorted(set(labels) | policy.labels_needed(cam))  # a site rule about vehicles needs them described
 
     def wants_synopsis(self, e: dict | None) -> bool:
         """Qwen describes a verified event if its label is chosen for the camera and, when the camera has include

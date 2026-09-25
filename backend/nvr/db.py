@@ -216,6 +216,8 @@ MIGRATIONS = [
     ("cameras", "scene_notes", "TEXT NOT NULL DEFAULT ''"),
     ("cameras", "retention_policy", "TEXT"),       # JSON partial override of the site policy; NULL = inherit
     ("cameras", "synopsis_labels", "TEXT"),        # JSON ["person","vehicle"]: what Qwen describes here; NULL = site default
+    ("cameras", "policies", "TEXT"),               # JSON list of site rules (policy.py)
+    ("events", "policy", "TEXT"),                  # JSON {kind, text, priority}: the site rule this event breaks
     ("events", "clip_start", "REAL"),
     ("events", "synopsis_original", "TEXT"),   # Qwen's JSON before the user corrected it
     ("events", "corrected_at", "REAL"),
@@ -231,7 +233,7 @@ MIGRATIONS = [
     ("events", "watched", "TEXT"),              # name of the watched identity this sighting matched
     ("events", "areas", "TEXT"),                # JSON [{name, from, to}]: named areas the object walked into             # none|low|medium|high: max(threat, unusualness), operator wins
 ]
-JSON_FIELDS = ("path", "rules", "detections", "synopsis_json", "synopsis_original", "feedback", "anomaly_json", "areas")
+JSON_FIELDS = ("path", "rules", "detections", "synopsis_json", "synopsis_original", "feedback", "anomaly_json", "areas", "policy")
 
 
 class Database:
@@ -280,13 +282,16 @@ class Database:
             c["zones"] = json.loads(c["zones"])
             c["retention_policy"] = json.loads(c["retention_policy"]) if c.get("retention_policy") else None
             c["synopsis_labels"] = json.loads(c["synopsis_labels"]) if c.get("synopsis_labels") else None
+            c["policies"] = json.loads(c["policies"]) if c.get("policies") else []
         return cams
 
     def upsert_camera(self, cam: dict) -> None:
         cols = ["id", "name", "host", "onvif_port", "rtsp_port", "username", "password",
                 "main_path", "sub_path", "enabled", "zones", "retention_days", "scene_notes", "retention_policy",
-                "synopsis_labels"]
+                "synopsis_labels", "policies"]
         data = {**cam, "zones": json.dumps(cam.get("zones", []))}
+        if "policies" in data:
+            data["policies"] = json.dumps(data["policies"] or [])
         if "retention_policy" in data:
             data["retention_policy"] = json.dumps(data["retention_policy"]) if data["retention_policy"] else None
         if "synopsis_labels" in data:

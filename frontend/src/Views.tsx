@@ -249,6 +249,27 @@ export function CamerasView({ cameras, port, reload }: { cameras: Camera[]; port
                   </div>
                   <span className="small">YOLO-verified detections only, and only inside this camera's zones. Unusual events are described either way.</span>
                 </div>
+                <div className="field">
+                  <span>Site rules</span>
+                  {(edit.policies ?? []).map((r, i) => (
+                    <div key={i} className="rule-row">
+                      <span className="small">Only</span>
+                      <input value={r.allowed.join(", ")} placeholder="names from People & vehicles, e.g. BIGView truck"
+                        onChange={(e) => setEdit({ ...edit, policies: (edit.policies ?? []).map((x, k) => k === i ? { ...x, allowed: e.target.value.split(",").map((s) => s.trim()).filter(Boolean) } : x) })} />
+                      <span className="small">may tow a</span>
+                      <input value={r.asset} placeholder="solar light tower"
+                        onChange={(e) => setEdit({ ...edit, policies: (edit.policies ?? []).map((x, k) => k === i ? { ...x, asset: e.target.value } : x) })} />
+                      <select value={r.priority} onChange={(e) => setEdit({ ...edit, policies: (edit.policies ?? []).map((x, k) => k === i ? { ...x, priority: e.target.value as "medium" | "high" } : x) })}>
+                        <option value="high">high priority</option><option value="medium">medium priority</option>
+                      </select>
+                      <button className="ghost small" title="Remove rule" onClick={() => setEdit({ ...edit, policies: (edit.policies ?? []).filter((_, k) => k !== i) })}>✕</button>
+                    </div>
+                  ))}
+                  <div className="row">
+                    <button className="ghost small" onClick={() => setEdit({ ...edit, policies: [...(edit.policies ?? []), { kind: "towing", asset: "", allowed: [], priority: "high" }] })}>+ Towing rule</button>
+                  </div>
+                  <span className="small">Checked by the NVR after Qwen describes each vehicle here: a vehicle towing or hitched to the asset that isn't recognised as one of the named vehicles is flagged, raised to that priority and shown under Needs attention. Name your own trucks in People & vehicles first; an unnamed one trips the rule once.</span>
+                </div>
                 <label className="field">
                   <span>Scene notes for Qwen</span>
                   <textarea rows={5} value={edit.scene_notes ?? ""} onChange={(e) => setEdit({ ...edit, scene_notes: e.target.value })}

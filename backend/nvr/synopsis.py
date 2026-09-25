@@ -28,8 +28,10 @@ SCHEMA = {
         "threat_level": {"type": "string", "enum": ["none", "low", "medium", "high"]},
         "threat_reason": {"type": "string"},
         "tags": {"type": "array", "items": {"type": "string"}},
+        "towing": {"type": "boolean", "description": "a vehicle is pulling or hitched to a trailer/equipment"},
+        "towed": {"type": "string", "description": "what is being towed, if anything"},
     },
-    "required": ["summary", "objects", "activity", "threat_level", "tags"],
+    "required": ["summary", "objects", "activity", "threat_level", "tags", "towing"],
 }
 
 SYSTEM = (
@@ -40,7 +42,8 @@ SYSTEM = (
     "threat_level: none = routine (passer-by, resident, delivery), low = unusual but benign, "
     "medium = suspicious (loitering, checking doors/cars, face concealed at night), high = clear criminal or dangerous act. "
     "A 'Location (confirmed by the NVR)' line says where the object really is and overrides general scene notes "
-    "about background traffic."
+    "about background traffic. For vehicles set towing=true only when the vehicle is pulling or hitched to a trailer "
+    "or equipment (and name it in towed); parked trailers nearby do not count."
 )
 
 
@@ -106,6 +109,10 @@ def event_facts(event: dict, camera: dict) -> str:
     reasons = (event.get("anomaly_json") or {}).get("reasons")
     if reasons:  # learned baseline for this camera; lets the threat judgement account for what's normal here
         lines.append("Unusual for this camera: " + "; ".join(reasons))
+    from . import policy
+    rule = policy.prompt_lines(camera) if event["camera_class"] == "vehicle" else None
+    if rule:  # operator's site rules, e.g. who may tow the solar towers
+        lines.append(rule)
     return "\n".join(lines) + "\n"
 
 

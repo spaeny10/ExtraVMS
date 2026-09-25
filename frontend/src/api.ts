@@ -20,6 +20,10 @@ export function zoneAllowed(x: number, y: number, zones: Zone[]): boolean {
   return !valid.some((z) => z.type === "exclude" && inPoly(z.points));
 }
 
+/** A site rule checked by code after Qwen describes a vehicle (backend policy.py). */
+export type SiteRule = { kind: "towing"; asset: string; allowed: string[]; priority: "medium" | "high" };
+export type BrokenRule = { kind: string; text: string; priority: string };
+
 export type Camera = {
   id: string;
   name: string;
@@ -35,6 +39,7 @@ export type Camera = {
   scene_notes: string;
   /** what Qwen describes on this camera (only detections inside its zones); null = site default (people) */
   synopsis_labels?: ("person" | "vehicle")[] | null;
+  policies?: SiteRule[];
   retention_policy?: Partial<RetentionPolicy> | null;
   status?: {
     stream_ready: boolean;
@@ -81,6 +86,7 @@ export type NvrEvent = {
   yolo_conf: number | null;
   yolo_hits: number | null;
   synopsis_pending?: boolean; // Qwen is queued or writing the synopsis right now
+  policy?: BrokenRule | null; // the site rule this event breaks (policy.py)
   snapshot: string | null;
   clip: string | null;
   synopsis: string | null;

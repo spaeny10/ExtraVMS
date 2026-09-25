@@ -289,6 +289,9 @@ function Details({ e, setE, notes, onUnsave, seek }: {
             {e.areas?.length ? (
               <div className="d-line" title="Named places the person walked into, in order">📍 {e.areas.map((a) => `${a.name} (+${Math.max(0, Math.round(a.from - e.start_ts))} s)`).join(" → ")}</div>
             ) : null}
+            {e.policy ? (
+              <div className="d-line rule-broken" title="A site rule from Settings → Cameras → Site rules">🚫 <strong>Site rule:</strong> {e.policy.text}</div>
+            ) : null}
             {e.anomaly_json?.reasons?.length ? (
               <div className="d-line unusual-why" title="From what this camera normally sees (learned from the last 4 weeks)">
                 ⚠ {e.anomaly_json.reasons.join("; ")}{e.priority && e.priority !== "none" ? ` · priority ${e.priority}` : ""}

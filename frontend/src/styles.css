@@ -677,3 +677,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 body:has(.drag-ghost) { cursor: grabbing; user-select: none; }
 
 .older-hint { margin: 8px 0 0; display: flex; align-items: center; gap: 6px; }
+
+/* site rules (camera editor) and the broken-rule line */
+.rule-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 4px 0; }
+.rule-row input { flex: 1 1 160px; min-width: 120px; }
+.d-line.rule-broken { color: var(--danger, #e5484d); }

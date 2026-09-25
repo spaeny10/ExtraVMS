@@ -191,6 +191,11 @@ def priority(e: dict, anomaly: float | None) -> str | None:
     level = RANK["medium"] if a >= PRIORITY_MEDIUM else RANK["low"] if a >= PRIORITY_LOW else RANK["none"]
     if e.get("watched"):  # a person/vehicle the operator asked to be told about
         level = max(level, RANK["medium"])
+    pol = e.get("policy")
+    if isinstance(pol, str):
+        pol = json.loads(pol)
+    if pol:  # a broken site rule (policy.py) carries its own priority
+        level = max(level, RANK.get(pol.get("priority") or "high", RANK["high"]))
     return LEVELS[max(level, RANK.get(e.get("threat") or "", 0))]
 
 
