@@ -130,8 +130,8 @@ async def link_event(gate, event_id: int) -> int:
         return 0
     confirmed = 0
     for c in candidates(e):
-        if db.one("SELECT 1 FROM event_links WHERE a=? AND b=?", [c["a"], c["b"]]):
-            continue  # already decided (confirmed, rejected or rejected by the operator)
+        if db.one("SELECT 1 FROM event_links WHERE (a=? AND b=?) OR (a=? AND b=?)", [c["a"], c["b"], c["b"], c["a"]]):
+            continue  # already decided in either order (overlapping events qualify both ways)
         ea, eb = db.event(c["a"]), db.event(c["b"])
         ia, ib = _crop_bytes(c["a"]), _crop_bytes(c["b"])
         if not (ea and eb and ia and ib):
