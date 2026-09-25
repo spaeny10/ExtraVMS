@@ -1055,7 +1055,7 @@ async def event_identity(event_id: int):
     if e["camera_class"] not in identities.VEC_TABLE:
         return None
     m = identities.match_identity(e["camera_class"], event_id)
-    return {**{k: v for k, v in m[0].items() if k != "vec"}, "sim": round(m[1], 3)} if m else None
+    return {**{k: v for k, v in m[0].items() if k not in ("vec", "vecs")}, "sim": round(m[1], 3)} if m else None
 
 
 async def _republish(event_ids: list[int]) -> None:
@@ -1079,6 +1079,8 @@ async def create_identity(body: IdentityIn):
     if body.watch:
         ident, changed = await asyncio.to_thread(identities.set_watch, ident["id"], True, body.watch_note)
         await _republish(changed)
+    elif ident["watch"]:  # a new look of someone already watched: mark these sightings now
+        await _republish([i for i in body.event_ids if identities.check_watch(i)])
     return ident
 
 
