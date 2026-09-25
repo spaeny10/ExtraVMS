@@ -326,6 +326,8 @@ async def reprocess(event_id: int):
     e = db.event(event_id)
     if not e:
         raise HTTPException(404)
+    if e["status"] == "open" or e["end_ts"] is None:
+        raise HTTPException(409, "This event is still being tracked; it will be verified as soon as it ends.")
     db.update_event(event_id, status="pending", synopsis=None, synopsis_json=None, synopsis_original=None,
                     corrected_at=None, threat=None, error=None)
     db.unindex_event(event_id)

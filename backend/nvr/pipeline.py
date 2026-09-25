@@ -97,6 +97,8 @@ class Pipeline:
         e = db.event(event_id)
         if not e or e["status"] != "pending":
             return
+        if e["end_ts"] is None:  # queued while still being tracked: the tracker re-queues it when it closes
+            return
         # MediaMTX flushes fMP4 parts every second; wait until the end of the clip is on disk.
         clip_end = e["end_ts"] + settings.clip_post_roll
         wait = clip_end + settings.recording_lag - time.time()
@@ -108,7 +110,7 @@ class Pipeline:
         result = await asyncio.get_running_loop().run_in_executor(
             self.gpu, self.verifier.verify, e, clip, clip_start, self.cameras.get(e["camera_id"], {}).get("zones"))
         reid = result.pop("reid", None)
-        db.update_event(event_id, clip=str(clip.relative_to(settings.data_dir)), **result)
+        db.update_event(event_id, clip=str(clip.relative_to(settings.data_dir)), error=None, **result)
         if reid:
             db.set_reid(event_id, reid)
         if result["status"] == "verified" and e["camera_class"] == "vehicle":

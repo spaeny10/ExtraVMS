@@ -62,7 +62,9 @@ export function EventDetail({ id: initialId, cameraName, onClose }: { id: number
             <button className="ghost" onClick={() => { openInTimeline(e); onClose(); }} title="Show this event on the Timeline, playing from just before it">⏱ Open in Timeline</button>
             <LockControl e={e} onChange={() => api.event(e.id).then(setE)} />
             {e.status === "verified" && <WatchControl e={e} onChange={() => api.event(e.id).then(setE)} />}
-            <button className="ghost" onClick={() => api.reprocess(e.id).then(onClose)} title="Run YOLO verification and the synopsis again">Reprocess</button>
+            {e.status === "open" || e.status === "pending"
+              ? <span className="muted small" title="Verification runs automatically once the event ends">{e.status === "open" ? "Still tracking…" : "Verifying…"}</span>
+              : <button className="ghost" onClick={() => api.reprocess(e.id).then(onClose).catch((err) => toast.error(err))} title="Run YOLO verification and the synopsis again">Reprocess</button>}
             <button className="ghost" onClick={onClose} aria-label="Close">✕</button>
           </div>
         </header>
