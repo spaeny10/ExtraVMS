@@ -724,10 +724,11 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
   const [box, setBox] = useState({ w: 1200, h: 600 });
   useEffect(() => {
     const measure = () => {
-      const w = gridRef.current?.offsetWidth ?? window.innerWidth - 32;
+      const w = gridRef.current?.offsetWidth || window.innerWidth || 1200;
       // what's left for video above the controls, layout bar, filters and lanes (min 240px)
       const lanesH = 26 + Math.max(1, cameras.length) * 34 + 40;
-      setBox({ w, h: Math.max(240, window.innerHeight - 190 - lanesH) });
+      const vh = window.innerHeight || 900; // a hidden/background tab can report 0
+      setBox({ w, h: Math.max(240, vh - 190 - lanesH) });
     };
     measure();
     window.addEventListener("resize", measure);
