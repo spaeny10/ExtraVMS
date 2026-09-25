@@ -29,6 +29,7 @@ export function FindView({ cameras }: { cameras: Camera[] }) {
   const [hours, setHours] = useState(24);
   const [minYolo, setMinYolo] = useState(() => loadNumber("minYolo.search"));
   const [events, setEvents] = useState<NvrEvent[] | null>(null);
+  const [older, setOlder] = useState(0);  // matches before the selected time chip's window
   const [busy, setBusy] = useState(false);
   const [nonce, setNonce] = useState(0);
   const [open, setOpen] = useState<number | null>(null);
@@ -67,6 +68,11 @@ export function FindView({ cameras }: { cameras: Camera[] }) {
     try { setEvents(await api.search(p?.text || t, camera || undefined, conf, s, u)); }
     catch { setEvents([]); }
     setBusy(false);
+    // a time chip is hiding older matches? count them so the page can say so instead of looking empty
+    setOlder(0);
+    if (s && !p?.time_label) {
+      api.search(p?.text || t, camera || undefined, conf).then((all) => setOlder(all.filter((e) => e.start_ts < s).length)).catch(() => {});
+    }
   };
   // filters changed: refresh the results for the current text
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -178,6 +184,12 @@ export function FindView({ cameras }: { cameras: Camera[] }) {
             <div className="event-grid">
               {events?.map((e) => <EventCard key={e.id} e={e} cameraName={name(e.camera_id)} onOpen={() => setOpen(e.id)} />)}
             </div>
+            {events && older > 0 && hours > 0 && !parsed?.time_label && (
+              <p className="muted small older-hint">
+                {older} more before {fmtTime(Date.now() / 1000 - hours * 3600)} ·{" "}
+                <button className="ghost small" onClick={() => setHours(0)}>Show any time</button>
+              </p>
+            )}
           </section>
           {parsed?.footage_text !== null && (
             <section>

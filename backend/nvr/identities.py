@@ -1,7 +1,9 @@
 """Who was on site: group repeated sightings of the same person or vehicle, and let the operator name them.
 
 People are matched by their re-ID fingerprint (reid.py, stored per event in reid_vec); vehicles by a CLIP
-image embedding of their crops (clip.py, stored in vehicle_vec). Sightings in a time window are joined by
+image embedding of their tight crops joined with a colour histogram (stored in vehicle_vec). CLIP alone groups
+vehicles by shape and setting ("pickup in this yard"): a white and a black pickup scored 0.90. The colour part
+pulls them apart while the same truck in different light still matches. Sightings in a time window are joined by
 average-link clustering; confirmed cross-camera journeys always count as the same person.
 
 Named identities ("Shawn", "UPS truck") are a stored centroid; any cluster whose centroid is close enough
@@ -17,34 +19,116 @@ from pathlib import Path
 import numpy as np
 
 from .config import settings
-from .db import db
+from .db import COLOR_DIM, VEHICLE_DIM, db
 
 log = logging.getLogger("nvr.identities")
 
 # same-identity thresholds (cosine). Person: measured on this site, same person 0.8-0.9, different median ~0.65.
-# Vehicle: CLIP image-image; same vehicle ~0.9+, different vehicles of the same type ~0.8.
-GROUP_SIM = {"person": 0.76, "vehicle": 0.88}
-NAME_SIM = {"person": 0.85, "vehicle": 0.88}   # conservative: a wrong name is worse than a missing one (indoor re-ID: different people reach ~0.82)
+# Vehicle: 0.7*CLIP(tight crop) + 0.3*colour, measured on this site: same truck twice 0.885, two white trucks of the
+# same fleet 0.89, white vs black pickup 0.81, white pickup vs white van 0.77.
+GROUP_SIM = {"person": 0.76, "vehicle": 0.86}
+NAME_SIM = {"person": 0.85, "vehicle": 0.87}   # conservative: a wrong name is worse than a missing one (indoor re-ID: different people reach ~0.82)
 VEC_TABLE = {"person": "reid_vec", "vehicle": "vehicle_vec"}
 EVENT_COLS = "id, camera_id, camera_class, start_ts, end_ts, synopsis, snapshot, yolo_class, yolo_conf, priority, anomaly, journey_id, watched"
 
 
 # ---------------------------------------------------------------- vehicle fingerprints (CLIP)
 
-def vehicle_crops(event_id: int) -> list[bytes]:
+CLIP_W, COLOR_W = 0.7, 0.3   # the fingerprint's dot product = CLIP_W*cos(CLIP) + COLOR_W*cos(colour)
+
+
+def _padded_window(box):
+    """The crop window verifier.py saves around a box (same padding formula), in frame coordinates."""
+    l, t, r, b = box
+    pw, ph = (r - l) * 0.6 + 0.03, (b - t) * 0.4 + 0.03
+    return max(0.0, l - pw), max(0.0, t - ph), min(1.0, r + pw), min(1.0, b + ph)
+
+
+def tight_boxes(e: dict) -> dict[str, list[float]]:
+    """crop file -> the vehicle's box inside that crop (0-1). New events store it; for older ones it is derived
+    from the detection sample at the same time, using the verifier's padding formula."""
+    d = e.get("detections") or {}
+    out = {}
+    by_ts = {s["ts"]: s for s in d.get("samples", []) if "ts" in s}
+    for k in d.get("keyframes", []):
+        if k.get("kind") != "crop":
+            continue
+        if k.get("box"):
+            out[k["file"]] = k["box"]
+            continue
+        s = by_ts.get(k.get("ts"))
+        box = (s.get("match") or {}).get("box") if s else None
+        box = box or (s.get("cam_box") if s else None)
+        if not box:
+            continue
+        x1, y1, x2, y2 = _padded_window(box)
+        cw, ch = max(1e-6, x2 - x1), max(1e-6, y2 - y1)
+        out[k["file"]] = [(box[0] - x1) / cw, (box[1] - y1) / ch, (box[2] - x1) / cw, (box[3] - y1) / ch]
+    return out
+
+
+def vehicle_crops(event_id: int, tight: bool = True) -> list[np.ndarray]:
+    """The saved vehicle crops as BGR images, cut to the vehicle itself (a little margin) when tight."""
+    import cv2
     d = settings.data_dir / "events" / str(event_id)
-    return [(d / f"crop_{i}.jpg").read_bytes() for i in range(4) if (d / f"crop_{i}.jpg").exists()]
+    boxes = tight_boxes(db.event(event_id) or {}) if tight else {}
+    imgs = []
+    for i in range(4):
+        p = d / f"crop_{i}.jpg"
+        if not p.exists():
+            continue
+        img = cv2.imdecode(np.frombuffer(p.read_bytes(), np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            continue
+        box = boxes.get(p.name)
+        if box:
+            h, w = img.shape[:2]
+            m = 0.04  # keep a sliver of margin so wheels/mirrors on the box edge stay in
+            x1, y1 = int(max(0.0, box[0] - m) * w), int(max(0.0, box[1] - m) * h)
+            x2, y2 = int(min(1.0, box[2] + m) * w), int(min(1.0, box[3] + m) * h)
+            cut = img[y1:y2, x1:x2]
+            if cut.shape[0] >= 16 and cut.shape[1] >= 16:
+                img = cut
+        imgs.append(img)
+    return imgs
+
+
+def color_hist(bgr: np.ndarray) -> np.ndarray:
+    """48-d colour signature of a vehicle crop: hue x 2 saturation levels for coloured pixels (32) and a
+    brightness histogram for grey/white/black pixels (16). Taken from the central 80% so background matters less."""
+    import cv2
+    h, w = bgr.shape[:2]
+    core = bgr[int(h * 0.1):max(int(h * 0.9), int(h * 0.1) + 1), int(w * 0.1):max(int(w * 0.9), int(w * 0.1) + 1)]
+    hsv = cv2.cvtColor(core, cv2.COLOR_BGR2HSV).reshape(-1, 3).astype(np.float32)
+    hue, sat, val = hsv[:, 0], hsv[:, 1], hsv[:, 2]
+    chroma = (sat > 60) & (val > 40)
+    out = np.zeros(COLOR_DIM, np.float32)
+    if chroma.any():
+        hb = np.minimum((hue[chroma] / 180 * 16).astype(int), 15)
+        sb = (sat[chroma] > 140).astype(int)
+        np.add.at(out, hb * 2 + sb, 1.0)
+    if (~chroma).any():
+        vb = np.minimum((val[~chroma] / 256 * 16).astype(int), 15)
+        np.add.at(out, 32 + vb, 1.0)
+    out /= max(1.0, float(hsv.shape[0]))
+    out = np.sqrt(out)  # Hellinger-style: softens the dominant bin so cosine reflects the whole palette
+    return out / (np.linalg.norm(out) or 1.0)
+
+
+def vehicle_fingerprint(clip, imgs: list[np.ndarray]) -> np.ndarray:
+    v = clip.embed_images(imgs).mean(axis=0)
+    v /= np.linalg.norm(v) or 1.0
+    c = np.mean([color_hist(i) for i in imgs], axis=0)
+    c /= np.linalg.norm(c) or 1.0
+    return np.concatenate([v * np.sqrt(CLIP_W), c * np.sqrt(COLOR_W)]).astype(np.float32)
 
 
 def embed_vehicle(clip, event_id: int) -> np.ndarray | None:
-    """CLIP fingerprint of a verified vehicle from its saved crops (runs on the GPU executor)."""
-    import cv2
-    imgs = [cv2.imdecode(np.frombuffer(b, np.uint8), cv2.IMREAD_COLOR) for b in vehicle_crops(event_id)]
-    imgs = [i for i in imgs if i is not None]
+    """Fingerprint of a verified vehicle from its saved crops (runs on the GPU executor)."""
+    imgs = vehicle_crops(event_id)
     if not imgs:
         return None
-    v = clip.embed_images(imgs).mean(axis=0)
-    v /= np.linalg.norm(v) or 1.0
+    v = vehicle_fingerprint(clip, imgs)
     db.set_vec("vehicle_vec", event_id, v)
     return v
 
@@ -96,7 +180,7 @@ def _vectors(kind: str, events: list[dict]) -> tuple[list[dict], np.ndarray]:
             have.append(e)
             vecs.append(v)
     if not vecs:
-        return [], np.zeros((0, 512), np.float32)
+        return [], np.zeros((0, VEHICLE_DIM if kind == "vehicle" else 512), np.float32)
     V = np.stack(vecs).astype(np.float64)
     V /= np.linalg.norm(V, axis=1, keepdims=True) + 1e-9
     return have, V

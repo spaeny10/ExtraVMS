@@ -112,13 +112,23 @@ def test_watch_list_marks_matching_sightings():
 
 
 def test_vehicles_use_their_own_table():
-    v = unit(rng.normal(size=512))
-    a = add("cam1", NOW - 900, cls="vehicle", vec=unit(v + rng.normal(0, 0.1 / np.sqrt(512), 512)))
-    b = add("cam1", NOW - 800, cls="vehicle", vec=unit(v + rng.normal(0, 0.1 / np.sqrt(512), 512)))
-    add("cam1", NOW - 700, cls="vehicle", vec=unit(rng.normal(size=512)))
+    D = identities.VEHICLE_DIM  # CLIP + colour histogram
+    v = unit(rng.normal(size=D))
+    a = add("cam1", NOW - 900, cls="vehicle", vec=unit(v + rng.normal(0, 0.1 / np.sqrt(D), D)))
+    b = add("cam1", NOW - 800, cls="vehicle", vec=unit(v + rng.normal(0, 0.1 / np.sqrt(D), D)))
+    add("cam1", NOW - 700, cls="vehicle", vec=unit(rng.normal(size=D)))
     r = identities.clusters("vehicle", NOW - 1000)
     assert sorted(c["sightings"] for c in r["clusters"]) == [1, 2]
     assert {e["id"] for e in max(r["clusters"], key=lambda c: c["sightings"])["events"]} == {a, b}
+
+
+def test_color_hist_separates_white_from_black():
+    white = np.full((60, 120, 3), 235, np.uint8)
+    black = np.full((60, 120, 3), 25, np.uint8)
+    red = np.zeros((60, 120, 3), np.uint8); red[:, :, 2] = 200
+    hw, hb, hr = identities.color_hist(white), identities.color_hist(black), identities.color_hist(red)
+    assert hw @ hb < 0.2 and hw @ hr < 0.2
+    assert identities.color_hist(np.full((60, 120, 3), 225, np.uint8)) @ hw > 0.9  # same colour, slightly darker
 
 
 if __name__ == "__main__":

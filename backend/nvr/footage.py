@@ -58,6 +58,7 @@ class Index:
         self.conn = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
         self.conn.enable_load_extension(True)
         sqlite_vec.load(self.conn)
+        self._typical: dict[tuple[str, int], tuple[float, np.ndarray | None]] = {}
         self.conn.enable_load_extension(False)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(SCHEMA)
@@ -103,10 +104,30 @@ class Index:
                 c.execute(f"DELETE FROM frames WHERE id IN ({marks})", chunk)
             c.execute("COMMIT")
 
+    def typical(self, camera_id: str, tile: int) -> np.ndarray | None:
+        """A sample of the camera's indexed frames for this tile (embeddings, cached 30 min): what the tile usually
+        looks like. Static fixtures (parked trailers, signs) score against every query in every one of these."""
+        key = (camera_id, tile)
+        hit = self._typical.get(key)
+        if hit and time.time() - hit[0] < 1800:
+            return hit[1]
+        ids = [r[0] for r in self.q("SELECT id FROM frames WHERE camera_id=? AND tile=? ORDER BY RANDOM() LIMIT 300", [camera_id, tile])]
+        sample = None
+        if len(ids) >= 20:
+            rows = self.q(f"SELECT embedding FROM frame_vec WHERE rowid IN ({','.join('?' * len(ids))})", ids)
+            sample = np.stack([np.frombuffer(r[0], np.float32) for r in rows])
+        self._typical[key] = (time.time(), sample)
+        return sample
+
     def search(self, vec: np.ndarray, camera_ids: list[str], since: float | None, until: float | None,
-               k: int = 400) -> list[tuple[str, float, int, float]]:
-        """-> [(camera_id, ts, tile, similarity)] best first."""
+               k: int = 400, center: bool = True) -> list[tuple[str, float, int, float]]:
+        """-> [(camera_id, ts, tile, score)] best first.
+        The k nearest frames per camera come from plain similarity. With center=True they are re-ranked by how far
+        above the tile's *usual* similarity to this query they are (a z-score over a sample of that tile's frames),
+        so a fixture that matches the query in every frame of the tile no longer wins: only frames where something
+        extra matches stand out. Cameras and tiles become comparable too."""
         blob = struct.pack(f"{DIM}f", *vec.tolist())
+        v = vec.astype(np.float32)
         out = []
         for cam in camera_ids:
             sql = "SELECT ts, tile, distance FROM frame_vec WHERE embedding MATCH ? AND k = ? AND camera_id = ?"
@@ -115,7 +136,22 @@ class Index:
                 sql += " AND ts >= ?"; params.append(since)
             if until is not None:
                 sql += " AND ts <= ?"; params.append(until)
-            out += [(cam, ts, tile, 1 - dist) for ts, tile, dist in self.q(sql + " ORDER BY distance", params)]
+            rows = self.q(sql + " ORDER BY distance", params)
+            if not rows:
+                continue
+            raw = np.array([1 - r[2] for r in rows], np.float32)
+            score = raw
+            if center:
+                score = np.empty(len(rows), np.float32)
+                for t in set(r[1] for r in rows):
+                    idx = [i for i, r in enumerate(rows) if r[1] == t]
+                    sample = self.typical(cam, t)
+                    if sample is None:
+                        score[idx] = (raw[idx] - 0.2) / 0.03  # no history yet: a typical CLIP text-image spread
+                        continue
+                    usual = sample @ v
+                    score[idx] = (raw[idx] - usual.mean()) / (usual.std() + 1e-3)
+            out += [(cam, r[0], r[1], float(s)) for r, s in zip(rows, score)]
         return sorted(out, key=lambda r: -r[3])
 
     def stats(self) -> dict:

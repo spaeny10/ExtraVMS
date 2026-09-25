@@ -675,3 +675,5 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   background: rgba(0, 0, 0, .8); border: 2px solid var(--accent); border-radius: 8px; box-shadow: 0 12px 32px rgba(0, 0, 0, .45);
   transform: translate(-50%, -50%) rotate(-2deg); }
 body:has(.drag-ghost) { cursor: grabbing; user-select: none; }
+
+.older-hint { margin: 8px 0 0; display: flex; align-items: center; gap: 6px; }

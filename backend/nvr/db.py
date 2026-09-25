@@ -14,7 +14,9 @@ from .config import settings
 
 EMBED_DIM = 768  # nomic-embed-text
 REID_DIM = 512   # OSNet person re-ID
-CLIP_DIM = 512   # OpenCLIP ViT-B-16 (vehicle fingerprints, footage index)
+CLIP_DIM = 512   # OpenCLIP ViT-B-16 (footage index)
+COLOR_DIM = 48   # HSV colour histogram (identities.color_hist)
+VEHICLE_DIM = CLIP_DIM + COLOR_DIM   # vehicle fingerprint: weighted CLIP of the tight crop + colour
 
 # Vector search relevance: nomic embeddings are unit length, so L2 distance ~0.7 is a strong match and
 # ~1.0 is unrelated (measured: "Person working" -> person synopses 0.71-0.85, label-only vehicle docs 1.01).
@@ -163,7 +165,7 @@ CREATE TABLE IF NOT EXISTS journeys (
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS reid_vec USING vec0(embedding float[{REID_DIM}]);
-CREATE VIRTUAL TABLE IF NOT EXISTS vehicle_vec USING vec0(embedding float[{CLIP_DIM}]);  -- CLIP fingerprint of a verified vehicle
+CREATE VIRTUAL TABLE IF NOT EXISTS vehicle_vec USING vec0(embedding float[{VEHICLE_DIM}]);  -- fingerprint of a verified vehicle (identities.py)
 
 -- Named people and vehicles (identities.py): a centroid fingerprint the operator has put a name to.
 CREATE TABLE IF NOT EXISTS identities (
@@ -242,6 +244,11 @@ class Database:
         self.conn.enable_load_extension(False)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
+        # vehicle fingerprints changed width (CLIP only -> CLIP + colour): drop the old table, the backfill refills it
+        old = self.conn.execute("SELECT sql FROM sqlite_master WHERE name='vehicle_vec'").fetchone()
+        if old and f"float[{VEHICLE_DIM}]" not in old[0]:
+            self.conn.execute("DROP TABLE vehicle_vec")
+            self.conn.execute("DELETE FROM identities WHERE kind='vehicle' AND length(embedding) != ?", [VEHICLE_DIM * 4])
         self.conn.executescript(SCHEMA)
         for table, col, definition in MIGRATIONS:
             cols = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}

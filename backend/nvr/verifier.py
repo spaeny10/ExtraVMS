@@ -302,5 +302,9 @@ def save_keyframes(out_dir: Path, frames: dict, detections: list) -> list[dict]:
             crop = cv2.resize(crop, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
         name = f"crop_{i}.jpg"
         cv2.imwrite(str(out_dir / name), crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
-        keyframes.append({"file": name, "ts": d["ts"], "kind": "crop"})
+        # the object's box inside this padded crop (0-1), so re-ID can cut the tight crop later
+        cw, ch = max(1, x2 - x1), max(1, y2 - y1)
+        box = [round(max(0.0, (l * w - x1) / cw), 4), round(max(0.0, (t * h - y1) / ch), 4),
+               round(min(1.0, (r * w - x1) / cw), 4), round(min(1.0, (b * h - y1) / ch), 4)]
+        keyframes.append({"file": name, "ts": d["ts"], "kind": "crop", "box": box})
     return keyframes
