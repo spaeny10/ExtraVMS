@@ -53,7 +53,7 @@ function RegionNote({ cameras }: { cameras: Camera[] }) {
   if (!ids.length) return null;
   return (
     <p className="muted small">
-      Filtered by the painted region on {ids.map((id) => cameras.find((c) => c.id === id)?.name ?? id).join(", ")} ·{" "}
+      Showing only {ids.map((id) => cameras.find((c) => c.id === id)?.name ?? id).join(" and ")} events that passed through the painted region ·{" "}
       <button className="linkish" onClick={() => ids.forEach((id) => regions.set(id, null))}>Clear</button>
     </p>
   );
@@ -62,7 +62,22 @@ function RegionNote({ cameras }: { cameras: Camera[] }) {
 export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: number; recent: NvrEvent[] }) {
   const [focus, setFocus] = useState<string | null>(null);
   const regionMap = useRegions();
-  const feed = recent.filter((e) => regionPass(e, regionMap[e.camera_id]));
+  // a painted region scopes the feed to that camera (or cameras): only their events, only through the region.
+  // `recent` is just the last few events site-wide, so fetch a deeper history for the scoped cameras.
+  const regionKey = Object.keys(regionMap).sort().join(",");
+  const scoped = regionKey.length > 0;
+  const [scopedEvents, setScopedEvents] = useState<NvrEvent[]>([]);
+  useEffect(() => {
+    if (!scoped) { setScopedEvents([]); return; }
+    let cancelled = false;
+    Promise.all(regionKey.split(",").map((camera) => api.events({ camera, status: "open,pending,verified", limit: 100 }).catch(() => [] as NvrEvent[])))
+      .then((lists) => { if (!cancelled) setScopedEvents(lists.flat()); });
+    return () => { cancelled = true; };
+  }, [regionKey, scoped]);
+  const pool = scoped
+    ? [...new Map([...scopedEvents, ...recent].map((e) => [e.id, e])).values()].sort((a, b) => b.start_ts - a.start_ts)
+    : recent;
+  const feed = pool.filter((e) => !scoped || (regionMap[e.camera_id] && regionPass(e, regionMap[e.camera_id])));
   const [open, setOpen] = useState<number | null>(null);
   // SD = H.264 sub stream (light, plays everywhere); HD = the recorded H.265 main stream.
   const [quality, setQualityState] = useState<Record<string, Quality>>(loadQuality);
@@ -123,7 +138,7 @@ export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: n
           <h3>Latest activity</h3>
           <RegionNote cameras={cameras} />
           {recent.length === 0 && <p className="muted">Nothing yet.</p>}
-          {recent.length > 0 && feed.length === 0 && <p className="muted">Nothing recent passed through the painted region.</p>}
+          {recent.length > 0 && feed.length === 0 && <p className="muted">Nothing recent on that camera passed through the painted region.</p>}
           {feed.slice(0, 12).map((e) => <EventCard key={e.id} e={e} cameraName={name(e.camera_id)} onOpen={() => setOpen(e.id)} />)}
         </aside>
         {open !== null && <EventDetail id={open} cameraName={name} onClose={() => setOpen(null)} />}
@@ -166,7 +181,7 @@ export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: n
         <h3>Latest activity</h3>
         <RegionNote cameras={cameras} />
         {recent.length === 0 && <p className="muted">Nothing yet.</p>}
-        {recent.length > 0 && feed.length === 0 && <p className="muted">Nothing recent passed through the painted region.</p>}
+        {recent.length > 0 && feed.length === 0 && <p className="muted">Nothing recent on that camera passed through the painted region.</p>}
         {feed.slice(0, 12).map((e) => (
           <EventCard key={e.id} e={e} cameraName={name(e.camera_id)} onOpen={() => setOpen(e.id)} />
         ))}
