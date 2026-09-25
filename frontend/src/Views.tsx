@@ -309,6 +309,23 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 /* ------------------------------------------------------------------ System */
 
+/** One line of a settings group: label, value (+ small note), optional action on the right. */
+function Row({ label, hint, value, sub, action, children }: {
+  label: string; hint?: string; value?: React.ReactNode; sub?: React.ReactNode; action?: React.ReactNode; children?: React.ReactNode;
+}) {
+  return (
+    <div className="sys-row">
+      <div className="sys-label" title={hint}>{label}{hint && <span className="muted"> ⓘ</span>}</div>
+      <div className="sys-value">
+        {value}
+        {sub && <div className="muted small">{sub}</div>}
+        {children}
+      </div>
+      {action && <div className="sys-action">{action}</div>}
+    </div>
+  );
+}
+
 export function SystemView() {
   const [s, setS] = useState<SystemInfo | null>(null);
   const [fb, setFb] = useState<FeedbackStats | null>(null);
@@ -321,68 +338,62 @@ export function SystemView() {
     const t = setInterval(load, 5000);
     return () => clearInterval(t);
   }, []);
-  if (!s) return <div className="view"><div className="stats"><Skeleton lines={2} /><Skeleton lines={2} /><Skeleton lines={2} /></div></div>;
+  if (!s) return <div className="view system"><Skeleton lines={4} /><Skeleton lines={3} /></div>;
   const used = 1 - s.recordings_disk.free_gb / s.recordings_disk.total_gb;
+  const total = Object.values(s.events).reduce((a, b) => a + b, 0);
   return (
-    <div className="view">
-    <div className="stats">
-      <Stat title="Recording disk" value={`${s.recordings_disk.free_gb.toLocaleString()} GB free`} sub={`of ${s.recordings_disk.total_gb.toLocaleString()} GB · ${s.retention_days} days continuous, then AI-selected`}>
-        <div className="meter"><div style={{ width: `${used * 100}%` }} /></div>
-      </Stat>
-      <Stat title="YOLO verifier" value={s.yolo_ready ? "Ready" : "Loading"} sub={`${s.yolo_model} · queue ${s.queues.verify}`} />
-      <Stat title="Qwen synopsis" value={s.vlm_ready ? "Ready" : "Starting / downloading"} sub={`${s.vlm_model} · queue ${s.queues.synopsis}`}
-        action={<QwenFeedbackInfo />} />
-      <Stat title="Events" value={String(Object.values(s.events).reduce((a, b) => a + b, 0))} sub={Object.entries(s.events).map(([k, v]) => `${k} ${v}`).join(" · ")} />
-      {fb && (
-        <Stat title="Synopsis feedback" value={`👍 ${fb.up} · 👎 ${fb.down}`}
-          sub={`${fb.corrected} of ${fb.synopses} synopses corrected${Object.keys(fb.reasons).length ? " · " + Object.entries(fb.reasons).map(([k, v]) => `${k} ${v}`).join(", ") : ""}`} />
-      )}
-      {fb && (
-        <div className="stat">
-          <div className="muted small">Detection verdicts (camera class : pipeline result)</div>
-          {Object.keys(fb.verdicts).length === 0 ? <div className="muted">No verdicts yet</div> : (
-            <table className="kv">
-              <tbody>
-                {Object.entries(fb.verdicts).map(([k, v]) => (
-                  <tr key={k}><td>{k}</td><td>{Object.entries(v).map(([vk, n]) => `${vk.replace("_", " ")} ${n}`).join(" · ")}</td></tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-          <a className="small" href="/api/feedback/export">Export feedback dataset (JSONL)</a>
-        </div>
-      )}
-      <BackupStat s={s} />
-      <BaselineStat />
-      <FootageStat />
-      <RemoteStat />
-    </div>
-    <RetentionPanel />
+    <div className="view system">
+      <section className="sys-group">
+        <h3>Status</h3>
+        <Row label="Recording disk" value={<><strong>{s.recordings_disk.free_gb.toLocaleString()} GB</strong> free of {s.recordings_disk.total_gb.toLocaleString()} GB</>}
+          sub={`${s.retention_days} days continuous, then AI-selected`}>
+          <div className="meter"><div style={{ width: `${used * 100}%` }} /></div>
+        </Row>
+        <Row label="YOLO" value={<><Status ok={s.yolo_ready} /> {s.yolo_ready ? "Ready" : "Loading"} · {s.yolo_model}</>} sub={s.queues.verify ? `${s.queues.verify} waiting` : "queue empty"} />
+        <Row label="Qwen" value={<><Status ok={s.vlm_ready} /> {s.vlm_ready ? "Ready" : "Starting"} · {s.vlm_model}</>} sub={s.queues.synopsis ? `${s.queues.synopsis} waiting` : "queue empty"}
+          action={<QwenFeedbackInfo />} />
+        <RemoteRow />
+        <FootageRow />
+        <BackupRow s={s} />
+      </section>
+
+      <section className="sys-group">
+        <h3>Learning</h3>
+        <Row label="Events" value={<strong>{total.toLocaleString()}</strong>} sub={Object.entries(s.events).map(([k, v]) => `${v} ${k}`).join(" · ")} />
+        {fb && (
+          <Row label="Synopsis feedback" value={<>👍 {fb.up} · 👎 {fb.down} · {fb.corrected} of {fb.synopses} corrected</>}
+            sub={Object.keys(fb.reasons).length ? Object.entries(fb.reasons).map(([k, v]) => `${k} ${v}`).join(", ") : "no reasons given yet"}
+            action={<a className="small" href="/api/feedback/export">Export</a>} />
+        )}
+        {fb && Object.keys(fb.verdicts).length > 0 && (
+          <Row label="Detection verdicts" hint="Camera class : what the operator said it really was"
+            value={Object.entries(fb.verdicts).map(([k, v]) => `${k}: ${Object.entries(v).map(([vk, n]) => `${vk.replace("_", " ")} ${n}`).join(", ")}`).join(" · ")} />
+        )}
+        <BaselineRow />
+      </section>
+
+      <RetentionPanel />
     </div>
   );
 }
 
+const Status = ({ ok }: { ok: boolean }) => <span className={`dot ${ok ? "ok" : "bad"}`} />;
+
 /** Nightly database copy (backup.py): the part of the NVR that can't be re-recorded. */
-function BackupStat({ s }: { s: SystemInfo }) {
-  const [msg, setMsg] = useState("");
+function BackupRow({ s }: { s: SystemInfo }) {
   const [busy, setBusy] = useState(false);
   const last = s.backup?.last;
   const run = async () => {
-    setBusy(true); setMsg("");
-    try { const r = await api.backupNow(); setMsg(`Backed up ${(r.bytes / 1e6).toFixed(1)} MB to ${r.path}`); toast.success("Database backed up"); }
-    catch (e) { setMsg(errorText(e)); toast.error(e); }
+    setBusy(true);
+    try { const r = await api.backupNow(); toast.success(`Backed up ${(r.bytes / 1e6).toFixed(1)} MB`); }
+    catch (e) { toast.error(e); }
     setBusy(false);
   };
   return (
-    <div className="stat">
-      <div className="stat-head">
-        <span className="muted small" title="A consistent copy of the database (synopses, feedback, journeys, names, settings) every night at 03:30; the last 14 are kept. Recordings aren't included: they're replaceable, this isn't.">Database backup ⓘ</span>
-        <button className="ghost small" disabled={busy} onClick={run}>{busy ? "Backing up…" : "Back up now"}</button>
-      </div>
-      <div className="stat-value">{last ? fmtTime(last.at) : "Never"}</div>
-      <div className="muted small">{last ? `${(last.bytes / 1e6).toFixed(1)} MB · ${last.count} copies in ${s.backup?.dir}` : `Nightly at 03:30 into ${s.backup?.dir ?? "the backup folder"}`}</div>
-      {msg && <div className="small">{msg}</div>}
-    </div>
+    <Row label="Database backup" hint="A consistent copy of the database (synopses, feedback, journeys, names, settings) every night at 03:30; the last 14 are kept. Recordings aren't included: they're replaceable, this isn't."
+      value={last ? fmtTime(last.at) : "Never"}
+      sub={last ? `${(last.bytes / 1e6).toFixed(1)} MB · ${last.count} copies in ${s.backup?.dir}` : `Nightly at 03:30 into ${s.backup?.dir ?? "the backup folder"}`}
+      action={<button className="ghost small" disabled={busy} onClick={run}>{busy ? "Backing up…" : "Back up now"}</button>} />
   );
 }
 
@@ -392,9 +403,8 @@ const TASK_LABELS: Record<string, string> = {
 };
 
 /** Optional larger remote Qwen (e.g. RunPod Serverless): status, which tasks use it, spend, and a test. */
-function RemoteStat() {
+function RemoteRow() {
   const [r, setR] = useState<RemoteStatus | null>(null);
-  const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     const load = () => api.remote().then(setR).catch(() => {});
@@ -406,45 +416,39 @@ function RemoteStat() {
   const toggle = async (task: string, on: boolean) =>
     setR(await api.remoteTasks(on ? [...r.tasks, task] : r.tasks.filter((t) => t !== task)));
   const test = async () => {
-    setBusy(true); setMsg("");
+    setBusy(true);
     try {
       const t = await api.remoteTest();
       setR(t.status);
-      setMsg(t.ok ? `OK in ${t.seconds}s (was ${t.was})` : `Failed: ${t.error}`);
-    } catch (e) { setMsg(String(e)); }
+      if (t.ok) toast.success(`Remote model answered in ${t.seconds}s (was ${t.was})`); else toast.error(t.error);
+    } catch (e) { toast.error(e); }
     setBusy(false);
   };
-  const stateLabel = { off: "Not configured", cold: "Cold (scaled to zero)", warm: "Warm", down: "Down (using local)" }[r.state];
+  const stateLabel = { off: "Not configured", cold: "Cold (scaled to zero)", warm: "Warm", down: "Down, using local" }[r.state];
+  const hint = "A larger Qwen on a rented cloud GPU for reasoning-heavy tasks. Everything falls back to the local model automatically. Configure NVR_REMOTE_VLM_URL, NVR_REMOTE_VLM_KEY and NVR_REMOTE_VLM_MODEL in .env.";
+  if (!r.configured) return <Row label="Remote AI" hint={hint} value={stateLabel} sub={`Everything runs on ${r.local_model}`} />;
   return (
-    <div className="stat">
-      <div className="stat-head">
-        <span className="muted small" title="A larger Qwen on a rented cloud GPU for reasoning-heavy tasks. Everything falls back to the local model automatically. Configure NVR_REMOTE_VLM_URL, NVR_REMOTE_VLM_KEY and NVR_REMOTE_VLM_MODEL in .env.">Remote AI ⓘ</span>
-        {r.configured && <button className="ghost small" disabled={busy} onClick={test}>{busy ? "Testing…" : "Test"}</button>}
-      </div>
-      <div className="stat-value">{stateLabel}</div>
-      {!r.configured ? (
-        <div className="muted small">Everything runs on {r.local_model}. Add a RunPod Serverless endpoint in .env to use a larger model for the tasks below.</div>
-      ) : (
-        <>
-          <div className="muted small">{r.model}{r.last_latency_s != null ? ` · last ${r.last_latency_s}s` : ""}{r.last_error && r.state === "down" ? ` · ${r.last_error}` : ""}</div>
-          <div className="remote-tasks">
-            {r.all_tasks.map((t) => (
-              <label key={t} className="row small"><input type="checkbox" checked={r.tasks.includes(t)} onChange={(e) => toggle(t, e.target.checked)} /> {TASK_LABELS[t] ?? t}</label>
-            ))}
-          </div>
-          <div className="muted small">
-            Today: {r.today.requests} requests · ~{Math.round(r.today.billed_s / 60)} GPU-min
-            {r.rate_usd_per_s > 0 ? ` · ~$${r.today.usd.toFixed(2)} of $${r.budget_usd.toFixed(2)} budget` : " · set NVR_REMOTE_RATE_USD_PER_S to enforce a daily budget"}
-          </div>
-        </>
-      )}
-      {msg && <div className="small">{msg}</div>}
-    </div>
+    <Row label="Remote AI" hint={hint} value={<><Status ok={r.state === "warm"} /> {stateLabel} · {r.model}</>}
+      sub={<>
+        {r.today.requests} requests today · ~{Math.round(r.today.billed_s / 60)} GPU-min
+        {r.rate_usd_per_s > 0 ? ` · ~$${r.today.usd.toFixed(2)} of $${r.budget_usd.toFixed(2)}` : ""}
+        {r.last_latency_s != null ? ` · last ${r.last_latency_s}s` : ""}{r.last_error && r.state === "down" ? ` · ${r.last_error}` : ""}
+      </>}
+      action={<button className="ghost small" disabled={busy} onClick={test}>{busy ? "Testing…" : "Test"}</button>}>
+      <details className="small">
+        <summary className="muted">Tasks sent to it</summary>
+        <div className="remote-tasks">
+          {r.all_tasks.map((t) => (
+            <label key={t} className="row small"><input type="checkbox" checked={r.tasks.includes(t)} onChange={(e) => toggle(t, e.target.checked)} /> {TASK_LABELS[t] ?? t}</label>
+          ))}
+        </div>
+      </details>
+    </Row>
   );
 }
 
 /** Progress of the image-text index behind "Search all footage". */
-function FootageStat() {
+function FootageRow() {
   const [f, setF] = useState<FootageStatus | null>(null);
   useEffect(() => {
     const load = () => api.footageStatus().then(setF).catch(() => {});
@@ -452,69 +456,31 @@ function FootageStat() {
     const t = setInterval(load, 10000);
     return () => clearInterval(t);
   }, []);
-  const ago = (s: number) => (s < 120 ? "live" : s < 7200 ? `${Math.round(s / 60)} min behind` : `${(s / 3600).toFixed(1)} h behind`);
+  const ago = (s: number) => (s < 120 ? "up to date" : s < 7200 ? `${Math.round(s / 60)} min behind` : `${(s / 3600).toFixed(1)} h behind`);
+  const cams = f ? Object.entries(f.cameras) : [];
+  const frames = cams.reduce((a, [, c]) => a + c.frames, 0);
+  const worst = cams.reduce((a, [, c]) => Math.max(a, c.cursor ? c.backlog_s : Infinity), 0);
   return (
-    <div className="stat">
-      <div className="stat-head"><span className="muted small" title="Every few seconds of recording is indexed by what it looks like (OpenCLIP on the YOLO GPU), so Search → All footage can find things no camera event covered. Frames where nothing changed are skipped.">Footage search index ⓘ</span></div>
-      {!f ? <Skeleton lines={2} /> : (
-        <table className="kv">
-          <tbody>
-            {Object.entries(f.cameras).map(([cam, c]) => (
-              <tr key={cam}><td>{cam}</td><td>{c.frames.toLocaleString()} frames · {c.cursor ? ago(c.backlog_s) : "starting"}{c.oldest ? ` · since ${fmtTime(c.oldest)}` : ""}</td></tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-      <div className="muted small">{f ? `${f.db_mb.toLocaleString()} MB on the recordings drive${f.model_loaded ? "" : " · model loading"}` : ""}</div>
-    </div>
+    <Row label="Footage index" hint="Every few seconds of recording is indexed by what it looks like (OpenCLIP on the YOLO GPU), so Find can search frames no camera event covered. Frames where nothing changed are skipped."
+      value={!f ? "…" : <>{frames.toLocaleString()} frames · {Number.isFinite(worst) ? ago(worst) : "starting"}</>}
+      sub={f ? `${f.db_mb.toLocaleString()} MB on the recordings drive${f.model_loaded ? "" : " · model loading"}` : undefined} />
   );
 }
 
 /** What the NVR has learned is normal per camera (baseline.py); drives the Unusual badge and Priority. */
-function BaselineStat() {
+function BaselineRow() {
   const [b, setB] = useState<BaselineCamera[] | null>(null);
   const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState("");
   useEffect(() => { api.baseline().then(setB).catch(() => {}); }, []);
   const rebuild = async () => {
-    setBusy(true); setMsg("");
-    try { const r = await api.rebuildBaseline(); setB(r.cameras); setMsg(`Re-scored ${r.scored} events`); }
-    catch (e) { setMsg(String(e)); }
+    setBusy(true);
+    try { const r = await api.rebuildBaseline(); setB(r.cameras); toast.success(`Re-scored ${r.scored} events`); }
+    catch (e) { toast.error(e); }
     setBusy(false);
   };
   return (
-    <div className="stat">
-      <div className="stat-head">
-        <span className="muted small" title="Per camera: what time of day, where in the view, and how long people and vehicles usually stay. Events that break the pattern get an Unusual badge and a higher priority. Rebuilt nightly at 03:00 from the last 4 weeks; false alarms are left out.">What's normal (learned) ⓘ</span>
-        <button className="ghost small" disabled={busy} onClick={rebuild}>{busy ? "Rebuilding…" : "Rebuild"}</button>
-      </div>
-      {!b ? <Skeleton lines={2} /> : (
-        <table className="kv">
-          <tbody>
-            {b.map((c) => (
-              <tr key={c.camera_id}>
-                <td>{c.camera_id}</td>
-                <td>
-                  {c.days.toFixed(1)} days · {Object.entries(c.events).map(([k, n]) => `${n} ${k}`).join(", ") || "no events"}
-                  {" · "}{c.learning ? <span className="muted">learning</span> : c.time_active ? "active" : <span title="Place and dwell are active; time-of-day needs 7 days">partly active</span>}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-      <div className="muted small">{msg || "Time-of-day needs 7 days; place and dwell need 20 events per label."}</div>
-    </div>
-  );
-}
-
-function Stat({ title, value, sub, children, action }: { title: string; value: string; sub: string; children?: React.ReactNode; action?: React.ReactNode }) {
-  return (
-    <div className="stat">
-      <div className="stat-head"><span className="muted small">{title}</span>{action}</div>
-      <div className="stat-value">{value}</div>
-      {children}
-      <div className="muted small">{sub}</div>
-    </div>
+    <Row label="What's normal" hint="Per camera: what time of day, where in the view, and how long people and vehicles usually stay. Events that break the pattern get an Unusual badge and a higher priority. Rebuilt nightly at 03:00 from the last 4 weeks; false alarms are left out. Time-of-day needs 7 days; place and dwell need 20 events per label."
+      value={!b ? "…" : b.map((c) => `${c.camera_id}: ${c.days.toFixed(1)} days, ${Object.values(c.events).reduce((a, n) => a + n, 0)} events, ${c.learning ? "learning" : c.time_active ? "active" : "partly active"}`).join(" · ")}
+      action={<button className="ghost small" disabled={busy} onClick={rebuild}>{busy ? "Rebuilding…" : "Rebuild"}</button>} />
   );
 }
