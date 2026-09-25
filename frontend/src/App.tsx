@@ -2,23 +2,38 @@ import { useCallback, useEffect, useState } from "react";
 import { api, subscribe, type Camera, type NvrEvent } from "./api";
 import { EventsView } from "./Events";
 import { CamerasView, LiveView, SystemView } from "./Views";
+import { Dialogs, Icon, OfflineBanner, Toaster } from "./ui";
 import { FindView } from "./Find";
 import { HomeView } from "./Home";
 import { ThemeToggle } from "./ThemeToggle";
 import { TimelineView } from "./Timeline";
 import { NavContext, parseTimelineHash, timelineHash, type TimelineFocus, type TimelineTarget } from "./nav";
 
-const TABS = ["Home", "Live", "Events", "Find", "Timeline", "Cameras", "System"] as const;
+const TABS = ["Home", "Live", "Events", "Find", "Timeline", "Settings"] as const;
 type Tab = (typeof TABS)[number];
-/** icons for the phone bottom bar */
-const TAB_ICON: Record<Tab, string> = { Home: "⌂", Live: "◉", Events: "☰", Find: "⌕", Timeline: "▭", Cameras: "▣", System: "⚙" };
+const TAB_ICON: Record<Tab, string> = { Home: "home", Live: "live", Events: "events", Find: "find", Timeline: "timeline", Settings: "settings" };
 
 /** "#ask", "#live"... (home-screen shortcuts) open that tab */
 const hashTab = (): Tab | null => {
   const h = location.hash.toLowerCase();
   if (h === "#ask" || h === "#search") return "Find";
+  if (h === "#cameras" || h === "#system") return "Settings";
   return TABS.find((t) => h === `#${t.toLowerCase()}`) ?? null;
 };
+
+/** Cameras and System are configuration, used rarely: one tab, two sections. */
+function SettingsView({ cameras, port, reload }: { cameras: Camera[]; port: number; reload: () => void }) {
+  const [section, setSection] = useState<"cameras" | "system">(() => (location.hash.toLowerCase() === "#system" ? "system" : "cameras"));
+  return (
+    <div className="view settings">
+      <div className="segmented settings-tabs">
+        <button className={section === "cameras" ? "active" : ""} onClick={() => setSection("cameras")}><Icon name="camera" size={16} /> Cameras</button>
+        <button className={section === "system" ? "active" : ""} onClick={() => setSection("system")}><Icon name="settings" size={16} /> System</button>
+      </div>
+      {section === "cameras" ? <CamerasView cameras={cameras} port={port} reload={reload} /> : <SystemView />}
+    </div>
+  );
+}
 
 export default function App() {
   const [tab, setTab] = useState<Tab>(() => {
@@ -106,6 +121,7 @@ export default function App() {
   return (
     <NavContext.Provider value={{ openInTimeline }}>
     <div className="app">
+      <OfflineBanner />
       <header className="topbar">
         <div className="brand">
           <span className="logo" /> NewVMS
@@ -113,7 +129,7 @@ export default function App() {
         <nav>
           {TABS.map((t) => (
             <button key={t} className={tab === t ? "active" : ""} onClick={() => choose(t)}>
-              <span className="tab-icon" aria-hidden="true">{TAB_ICON[t]}</span>
+              <Icon name={TAB_ICON[t]} className="tab-icon" size={20} />
               <span className="tab-label">{t}</span>
             </button>
           ))}
@@ -130,9 +146,10 @@ export default function App() {
         {tab === "Events" && <EventsView cameras={cameras} live={live} />}
         {tab === "Find" && <FindView cameras={cameras} />}
         {tab === "Timeline" && <TimelineView cameras={cameras} focus={focus} onClearFocus={() => { setFocus(null); history.replaceState(null, "", location.pathname); }} />}
-        {tab === "Cameras" && <CamerasView cameras={cameras} port={port} reload={loadCameras} />}
-        {tab === "System" && <SystemView />}
+        {tab === "Settings" && <SettingsView cameras={cameras} port={port} reload={loadCameras} />}
       </main>
+      <Toaster />
+      <Dialogs />
     </div>
     </NavContext.Provider>
   );

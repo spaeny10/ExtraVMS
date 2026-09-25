@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
+import { Icon } from "./ui";
 
 /** auto = follow the OS setting; light / dark = forced (saved per browser). */
 type Theme = "auto" | "light" | "dark";
 const ORDER: Theme[] = ["auto", "light", "dark"];
-const ICON: Record<Theme, string> = { auto: "◐", light: "☀", dark: "☾" };
+const ICON: Record<Theme, string> = { auto: "auto", light: "sun", dark: "moon" };
 const LABEL: Record<Theme, string> = { auto: "Theme: follows your system", light: "Theme: light", dark: "Theme: dark" };
 
 function load(): Theme {
@@ -36,7 +37,7 @@ export function ThemeToggle() {
   };
   return (
     <button className="ghost small theme-toggle" onClick={next} title={`${LABEL[theme]} (click to change)`} aria-label={LABEL[theme]}>
-      {ICON[theme]}
+      <Icon name={ICON[theme]} size={16} />
     </button>
   );
 }

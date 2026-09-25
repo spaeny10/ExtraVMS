@@ -5,6 +5,7 @@ import { ConfidenceSlider, loadNumber, saveNumber } from "./ConfidenceSlider";
 import { EventCard } from "./Events";
 import { EventDetail } from "./EventDetail";
 import { FootageResults } from "./FootageSearch";
+import { SkeletonGrid } from "./ui";
 
 const SUGGESTIONS = [
   "What happened overnight?",
@@ -165,6 +166,7 @@ export function FindView({ cameras }: { cameras: Camera[] }) {
         <>
           <section>
             <h3>Events <span className="muted small">matching "{submitted}"{events ? ` · ${events.length}` : ""}</span></h3>
+            {busy && !events && <SkeletonGrid n={3} />}
             {events && events.length === 0 && <div className="empty">No matching events{hours ? " in this period" : ""}.</div>}
             <div className="event-grid">
               {events?.map((e) => <EventCard key={e.id} e={e} cameraName={name(e.camera_id)} onOpen={() => setOpen(e.id)} />)}

@@ -1,3 +1,4 @@
+import { connection } from "./ui";
 export type Zone = { name: string; type?: "include" | "exclude"; points: [number, number][] };
 /** [x, y, class, event_id, status] foot point of a recent detection */
 export type DetectionPoint = [number, number, string, number, string];
@@ -225,6 +226,7 @@ export type SystemInfo = {
 
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
   const r = await fetch(url, init);
+  connection.data();
   if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
   return r.json();
 }
@@ -403,11 +405,13 @@ export function subscribe(onEvent: (e: NvrEvent) => void, onMessage?: (msg: { ty
     ws = new WebSocket(`${proto}://${location.host}/api/ws`);
     ws.onmessage = (m) => {
       const msg = JSON.parse(m.data);
+      connection.data();
       if (msg.type === "event") onEvent(msg.event);
       else onMessage?.(msg);
     };
-    ws.onopen = () => (retry = 1000);
+    ws.onopen = () => { retry = 1000; connection.ws(true); };
     ws.onclose = () => {
+      connection.ws(false);
       if (!closed) setTimeout(connect, (retry = Math.min(retry * 2, 15000)));
     };
   };

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, fmtTime, media, type Camera, type IdentitiesResult, type IdentityCluster } from "./api";
 import { EventCard } from "./Events";
 import { EventDetail } from "./EventDetail";
+import { confirmDialog, toast } from "./ui";
 
 type Kind = "person" | "vehicle";
 const RANGES: [string, number][] = [["Today", 0], ["24 h", 24], ["3 days", 72], ["7 days", 168]];
@@ -33,13 +34,15 @@ export function IdentitiesView({ cameras }: { cameras: Camera[] }) {
     if (!naming?.name.trim()) return;
     try {
       await api.nameIdentity({ kind, name: naming.name, notes: naming.notes, event_ids: c.events.map((e) => e.id) });
+      toast.success(`Named "${naming.name.trim()}" · will be recognised from now on`);
       setNaming(null);
       load();
-    } catch (e) { setErr(String(e)); }
+    } catch (e) { toast.error(e); }
   };
   const forget = async (c: IdentityCluster) => {
-    if (!c.identity_id || !confirm(`Forget the name "${c.name}"? Future sightings will be unnamed again.`)) return;
+    if (!c.identity_id || !await confirmDialog(`Forget the name "${c.name}"?`, { message: "Future sightings will be unnamed again.", confirmLabel: "Forget", danger: true })) return;
     await api.deleteIdentity(c.identity_id);
+    toast.success(`Forgot "${c.name}"`);
     load();
   };
 

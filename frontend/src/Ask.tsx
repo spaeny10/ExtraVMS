@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, fmtTime, frameUrl, media, subscribe, type AskMeta, type Briefing, type BriefingSettings, type CiteRefs } from "./api";
 import { useNav } from "./nav";
+import { Skeleton, toast } from "./ui";
 
 export function Answer({ text, meta, model, fallback, onEvent, streaming }: {
   text: string; meta: AskMeta | null; model: string | null; fallback?: string; onEvent: (id: number) => void; streaming?: boolean;
@@ -84,8 +85,8 @@ export function BriefingCard({ onEvent, compact }: { onEvent: (id: number) => vo
   }, []);
   const generate = async () => {
     setBusy(true); setErr("");
-    try { await api.generateBriefing(); await load(); setShown(null); }
-    catch (e) { setErr(String(e)); }
+    try { await api.generateBriefing(); await load(); setShown(null); toast.success("Briefing written"); }
+    catch (e) { setErr(String(e)); toast.error(e); }
     setBusy(false);
   };
   const b = list?.find((x) => x.id === shown) ?? list?.[0];
@@ -111,7 +112,7 @@ export function BriefingCard({ onEvent, compact }: { onEvent: (id: number) => vo
         </form>
       )}
       {err && <div className="error small">{err}</div>}
-      {!list ? <div className="muted">Loading…</div> : !b ? (
+      {!list ? <Skeleton lines={3} /> : !b ? (
         <div className="muted">No briefing yet. The first one is written at {cfg?.time ?? "07:00"}, or press Generate now.</div>
       ) : (
         <>

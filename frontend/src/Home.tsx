@@ -3,6 +3,7 @@ import { api, fmtTime, type Camera, type HomeData, type NvrEvent } from "./api";
 import { BriefingCard } from "./Ask";
 import { EventCard } from "./Events";
 import { EventDetail } from "./EventDetail";
+import { Skeleton, SkeletonGrid } from "./ui";
 
 const SEEN_KEY = "homeSeenAt";
 
@@ -22,7 +23,7 @@ const ago = (ts: number) => {
 
 /** The daily entry point: what needs attention since you last looked, who's been on site today, and whether
  * everything is recording. */
-export function HomeView({ cameras, onGo }: { cameras: Camera[]; onGo: (tab: "Live" | "Events" | "System") => void }) {
+export function HomeView({ cameras, onGo }: { cameras: Camera[]; onGo: (tab: "Live" | "Events" | "Settings") => void }) {
   const [seenAt] = useState(loadSeen);
   const [h, setH] = useState<HomeData | null>(null);
   const [err, setErr] = useState("");
@@ -40,7 +41,7 @@ export function HomeView({ cameras, onGo }: { cameras: Camera[]; onGo: (tab: "Li
   }, [seenAt]);
 
   if (err && !h) return <div className="view error">{err}</div>;
-  if (!h) return <div className="view muted">Loading…</div>;
+  if (!h) return <div className="view home"><Skeleton lines={1} /><Skeleton lines={4} /><SkeletonGrid n={3} /></div>;
   const problems: string[] = [];
   for (const c of h.cameras) {
     if (!c.stream_ready) problems.push(`${c.name} is not recording`);
@@ -60,7 +61,7 @@ export function HomeView({ cameras, onGo }: { cameras: Camera[]; onGo: (tab: "Li
           ? <span>All {h.cameras.length} cameras recording · {h.disk.free_gb.toLocaleString()} GB free ({usedPct}% used)</span>
           : <span>{problems.join(" · ")}</span>}
         <span className="spacer" />
-        <button className="ghost small" onClick={() => onGo("System")}>System</button>
+        <button className="ghost small" onClick={() => onGo("Settings")}>Settings</button>
         <button className="ghost small" onClick={() => onGo("Live")}>Live view</button>
       </div>
 

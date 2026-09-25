@@ -7,6 +7,7 @@ import { ZoneEditor } from "./ZoneEditor";
 import { PolicyForm, RetentionPanel } from "./RetentionPanel";
 import { QwenFeedbackInfo } from "./QwenFeedbackInfo";
 import { NeighborsEditor } from "./Neighbors";
+import { Skeleton, errorText, toast } from "./ui";
 
 /* ------------------------------------------------------------------ Live */
 
@@ -268,7 +269,7 @@ export function SystemView() {
     const t = setInterval(load, 5000);
     return () => clearInterval(t);
   }, []);
-  if (!s) return <div className="view muted">Loading…</div>;
+  if (!s) return <div className="view"><div className="stats"><Skeleton lines={2} /><Skeleton lines={2} /><Skeleton lines={2} /></div></div>;
   const used = 1 - s.recordings_disk.free_gb / s.recordings_disk.total_gb;
   return (
     <div className="view">
@@ -316,8 +317,8 @@ function BackupStat({ s }: { s: SystemInfo }) {
   const last = s.backup?.last;
   const run = async () => {
     setBusy(true); setMsg("");
-    try { const r = await api.backupNow(); setMsg(`Backed up ${(r.bytes / 1e6).toFixed(1)} MB to ${r.path}`); }
-    catch (e) { setMsg(String(e)); }
+    try { const r = await api.backupNow(); setMsg(`Backed up ${(r.bytes / 1e6).toFixed(1)} MB to ${r.path}`); toast.success("Database backed up"); }
+    catch (e) { setMsg(errorText(e)); toast.error(e); }
     setBusy(false);
   };
   return (
@@ -403,7 +404,7 @@ function FootageStat() {
   return (
     <div className="stat">
       <div className="stat-head"><span className="muted small" title="Every few seconds of recording is indexed by what it looks like (OpenCLIP on the YOLO GPU), so Search → All footage can find things no camera event covered. Frames where nothing changed are skipped.">Footage search index ⓘ</span></div>
-      {!f ? <div className="muted">Loading…</div> : (
+      {!f ? <Skeleton lines={2} /> : (
         <table className="kv">
           <tbody>
             {Object.entries(f.cameras).map(([cam, c]) => (
@@ -435,7 +436,7 @@ function BaselineStat() {
         <span className="muted small" title="Per camera: what time of day, where in the view, and how long people and vehicles usually stay. Events that break the pattern get an Unusual badge and a higher priority. Rebuilt nightly at 03:00 from the last 4 weeks; false alarms are left out.">What's normal (learned) ⓘ</span>
         <button className="ghost small" disabled={busy} onClick={rebuild}>{busy ? "Rebuilding…" : "Rebuild"}</button>
       </div>
-      {!b ? <div className="muted">Loading…</div> : (
+      {!b ? <Skeleton lines={2} /> : (
         <table className="kv">
           <tbody>
             {b.map((c) => (

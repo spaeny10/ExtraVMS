@@ -1,3 +1,4 @@
+import { confirmDialog, promptDialog, toast } from "./ui";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, fmtTime, type Camera, type KeptSpan, type Layout, type LayoutConfig, type Lock, type TimelineEvent, UNUSUAL_MIN } from "./api";
 import { ConfidenceSlider, loadNumber, saveNumber } from "./ConfidenceSlider";
@@ -202,35 +203,39 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
     if (!l) return saveLayoutAs();
     await api.updateLayout(l.id, { name: l.name, config });
     reloadLayouts();
+    toast.success(`Layout "${l.name}" saved`);
   };
   const saveLayoutAs = async () => {
-    const name = prompt("Name for this layout (e.g. Doors, Perimeter):")?.trim();
+    const name = (await promptDialog("Save layout as", { label: "Name, e.g. Doors or Perimeter" }))?.trim();
     if (!name) return;
     try {
       const l = await api.createLayout({ name, config });
       await reloadLayouts();
       setLayoutId(l.id);
+      toast.success(`Layout "${name}" saved`);
     } catch (e) {
-      alert(String(e).includes("409") ? "A layout with that name already exists." : String(e));
+      toast.error(String(e).includes("409") ? "A layout with that name already exists." : e);
     }
   };
   const renameLayout = async () => {
     const l = layouts.find((x) => x.id === layoutId);
-    const name = l && prompt("Rename layout:", l.name)?.trim();
+    const name = l && (await promptDialog("Rename layout", { initial: l.name, confirmLabel: "Rename" }))?.trim();
     if (!l || !name) return;
     try {
       await api.updateLayout(l.id, { name, config: l.config });
       reloadLayouts();
+      toast.success(`Renamed to "${name}"`);
     } catch (e) {
-      alert(String(e).includes("409") ? "A layout with that name already exists." : String(e));
+      toast.error(String(e).includes("409") ? "A layout with that name already exists." : e);
     }
   };
   const deleteLayout = async () => {
     const l = layouts.find((x) => x.id === layoutId);
-    if (!l || !confirm(`Delete the layout "${l.name}"?`)) return;
+    if (!l || !await confirmDialog(`Delete the layout "${l.name}"?`, { confirmLabel: "Delete", danger: true })) return;
     await api.deleteLayout(l.id);
     setLayoutId(0);
     reloadLayouts();
+    toast.success(`Deleted "${l.name}"`);
   };
 
   // Track width
@@ -474,6 +479,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
   const saveLock = async () => {
     if (!lockPrompt) return;
     await api.createLock({ camera_id: lockPrompt.cam, start_ts: lockPrompt.start, end_ts: lockPrompt.end, note: lockPrompt.note });
+    toast.success("Footage locked · kept until you unlock it");
     setLockPrompt(null);
     setSelection(null);
     load(viewRef.current);
@@ -836,8 +842,8 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
           <span>🔒 Locked {camName(openLock.camera_id)} {fmtClock(openLock.start_ts)} → {fmtClock(openLock.end_ts).slice(-8)}{openLock.note ? ` · ${openLock.note}` : ""}{openLock.event_id ? ` · event #${openLock.event_id}` : ""}</span>
           <button className="ghost" onClick={() => { setView(clampView(openLock.start_ts - 60, openLock.end_ts + 60)); seekTo(openLock.start_ts, openLock.camera_id, true, { noSkip: true, until: openLock.end_ts }); setOpenLock(null); }}>Play</button>
           <button className="ghost" onClick={async () => {
-            if (!confirm("Unlock this range? It will follow the retention policy again.")) return;
-            await api.deleteLock(openLock.id); setOpenLock(null); load(viewRef.current);
+            if (!await confirmDialog("Unlock this range?", { message: "It will follow the retention policy again.", confirmLabel: "Unlock", danger: true })) return;
+            await api.deleteLock(openLock.id); setOpenLock(null); load(viewRef.current); toast.success("Unlocked");
           }}>Unlock</button>
           <button className="ghost" onClick={() => setOpenLock(null)}>Close</button>
         </div>

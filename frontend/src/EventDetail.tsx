@@ -5,6 +5,7 @@ import {
 } from "./api";
 import { StatusBadge, placeholder } from "./Events";
 import { useNav } from "./nav";
+import { Icon, confirmDialog, toast } from "./ui";
 
 const REASONS = ["Wrong object", "Missed detail", "Made something up", "Threat too high", "Threat too low", "Too vague"];
 const VERDICTS: [Verdict, string][] = [["correct", "Correct detection"], ["false_alarm", "False alarm"], ["wrong_class", "Wrong class"]];
@@ -158,8 +159,11 @@ function LockControl({ e, onChange }: { e: NvrEvent; onChange: () => void }) {
   if (e.lock) {
     return (
       <button className="ghost lock-on" title={`Locked${e.lock.note ? `: ${e.lock.note}` : ""}. Footage is kept until unlocked.`}
-        onClick={() => { if (confirm("Unlock? The footage will follow the normal retention policy again.")) api.unlockEvent(e.id).then(onChange); }}>
-        🔒 Locked
+        onClick={async () => {
+          if (!await confirmDialog("Unlock this event's footage?", { message: "It will follow the normal retention policy again.", confirmLabel: "Unlock", danger: true })) return;
+          await api.unlockEvent(e.id); onChange(); toast.success("Unlocked");
+        }}>
+        <Icon name="lock" size={14} /> Locked
       </button>
     );
   }
@@ -194,9 +198,9 @@ function Details({ e, setE, notes, onUnsave, seek }: {
             {s && !editing && <button className="ghost small" onClick={() => setEditing(true)}>Edit</button>}
             {!s && !editing && <button className="ghost small" onClick={() => setEditing(true)}>Write one</button>}
             {canGenerate && !editing && (
-              <button className="ghost small" onClick={() => {
-                if (e.corrected_at && !confirm("Replace your corrected synopsis with a new Qwen synopsis?")) return;
-                api.generateSynopsis(e.id).then(() => api.event(e.id).then(setE));
+              <button className="ghost small" onClick={async () => {
+                if (e.corrected_at && !await confirmDialog("Replace your corrected synopsis?", { message: "Qwen will write a new one; your correction is lost.", confirmLabel: "Regenerate", danger: true })) return;
+                await api.generateSynopsis(e.id); toast.info("Qwen is writing a new synopsis…"); api.event(e.id).then(setE);
               }}>{s ? "Regenerate" : "Generate with Qwen"}</button>
             )}
           </div>

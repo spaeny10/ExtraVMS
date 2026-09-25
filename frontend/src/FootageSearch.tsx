@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, fmtTime, frameUrl, type Camera, type FootageMatch, type FootageMoment } from "./api";
 import { useNav } from "./nav";
+import { SkeletonGrid } from "./ui";
 
 /** How many of the best results Qwen double-checks after they render. */
 const VERIFY_TOP = 8;
@@ -39,7 +40,7 @@ export function FootageResults({ q, nonce, cameras, camera, sinceHours }: { q: s
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nonce, camera, sinceHours]);
 
-  if (busy) return <div className="muted">Searching the recordings…</div>;
+  if (busy) return <SkeletonGrid n={4} />;
   if (err) return <div className="error">{err}</div>;
   if (!results) return null;
   if (!results.length) return <div className="empty">Nothing in the indexed footage looks like that.</div>;
