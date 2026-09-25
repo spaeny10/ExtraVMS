@@ -114,6 +114,8 @@ class Pipeline:
         if result["status"] == "verified" and e["camera_class"] == "vehicle":
             clip = await self.get_clip()
             await asyncio.get_running_loop().run_in_executor(self.gpu, identities.embed_vehicle, clip, event_id)
+        if result["status"] == "verified" and (watched := identities.check_watch(event_id)):
+            log.info("event %s matches watched %s '%s'", event_id, e["camera_class"], watched)
         log.info("event %s %s (yolo %s, %s hits)", event_id, result["status"],
                  result.get("yolo_class"), result.get("yolo_hits"))
         if result["status"] != "verified":

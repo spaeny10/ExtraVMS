@@ -270,7 +270,7 @@ async def list_events(camera: str | None = None, status: str | None = None, labe
     if before_id:
         where.append("id<?"); params.append(before_id)
     sql = ("SELECT id, camera_id, track_id, camera_class, camera_conf, start_ts, end_ts, status, yolo_class, "
-           "yolo_conf, yolo_hits, snapshot, clip, synopsis, threat, priority, anomaly, anomaly_json, error, corrected_at, feedback, "
+           "yolo_conf, yolo_hits, snapshot, clip, synopsis, threat, priority, anomaly, anomaly_json, watched, error, corrected_at, feedback, "
            "EXISTS(SELECT 1 FROM locks WHERE locks.event_id = events.id) AS locked, journey_id, "
            "(SELECT COUNT(DISTINCT je.value) FROM journeys, json_each(journeys.cameras) je WHERE journeys.id = events.journey_id) AS journey_cameras FROM events"
            + (f" WHERE {' AND '.join(where)}" if where else "") + " ORDER BY id DESC LIMIT ?")
@@ -469,6 +469,19 @@ async def post_chat(event_id: int, body: ChatIn):
     camera = p.cameras.get(e["camera_id"], {"name": e["camera_id"]})
     history = [{"role": m["role"], "content": m["content"]} for m in db.chat(event_id)]
     user_id = db.add_chat(event_id, "user", body.message, at=body.at)
+    if INSTRUCTION_RE.search(body.message.lower()):
+        # The chat can't act. Say so from code (the model tends to agree to anything) and point at the real feature.
+        canned = ("I can't watch for anyone or send alerts from this chat; I only see this clip. To be told about this "
+                  + ("person" if e["camera_class"] == "person" else "vehicle")
+                  + " in future, use **Watch this person** at the top of this event: sightings that match their appearance "
+                  "are then raised to medium priority and shown under Needs attention on Home.")
+        msg_id = db.add_chat(event_id, "assistant", canned, frames=[], at=body.at)
+
+        async def canned_stream():
+            yield json.dumps({"type": "user", "id": user_id}) + "\n"
+            yield json.dumps({"type": "delta", "text": canned}) + "\n"
+            yield json.dumps({"type": "done", "id": msg_id}) + "\n"
+        return StreamingResponse(canned_stream(), media_type="application/x-ndjson")
 
     async def stream():
         yield json.dumps({"type": "user", "id": user_id}) + "\n"
@@ -503,6 +516,8 @@ async def save_chat_note(event_id: int, msg_id: int, saved: bool = True):
     return db.chat(event_id)
 
 
+INSTRUCTION_RE = re.compile(r"\b(keep an eye|watch (out )?for|look out for|alert me|notify me|let me know if|tell me (if|when)|"
+                            r"flag (him|her|them|this|that)|track (him|her|them)|remind me|add (him|her|them) to)\b")
 query_label = assistant.query_label
 
 
@@ -937,7 +952,7 @@ async def home(since: float | None = None):
     since = since or now - 86400
     day_start = dt.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
     cols = ("id, camera_id, camera_class, start_ts, end_ts, status, yolo_class, yolo_conf, snapshot, synopsis, threat, "
-            "priority, anomaly, anomaly_json, feedback, corrected_at, journey_id, error")
+            "priority, anomaly, anomaly_json, watched, feedback, corrected_at, journey_id, error")
     ok = "status='verified' AND (feedback IS NULL OR json_extract(feedback, '$.verdict') IS NOT 'false_alarm')"
     attention = db.all(f"SELECT {cols} FROM events WHERE {ok} AND start_ts >= ? AND (priority IN ('low','medium','high') "
                        f"OR COALESCE(anomaly, 0) >= ?) ORDER BY CASE priority WHEN 'high' THEN 3 WHEN 'medium' THEN 2 "
@@ -979,11 +994,31 @@ class IdentityIn(BaseModel):
     name: str = Field(min_length=1, max_length=60)
     event_ids: list[int] = Field(min_length=1, max_length=500)
     notes: str = Field("", max_length=300)
+    watch: bool = False
+    watch_note: str = Field("", max_length=300)
 
 
 class IdentityUpdate(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=60)
     notes: str | None = Field(None, max_length=300)
+    watch: bool | None = None
+    watch_note: str | None = Field(None, max_length=300)
+
+
+@app.get("/api/events/{event_id}/identity")
+async def event_identity(event_id: int):
+    """The named identity this sighting matches, if any (for the Watch button)."""
+    e = _require_event(event_id)
+    if e["camera_class"] not in identities.VEC_TABLE:
+        return None
+    m = identities.match_identity(e["camera_class"], event_id)
+    return {**{k: v for k, v in m[0].items() if k != "vec"}, "sim": round(m[1], 3)} if m else None
+
+
+async def _republish(event_ids: list[int]) -> None:
+    for eid in event_ids:
+        baseline.apply(eid, rescore=False)  # priority now includes the watch flag
+        state.pipeline.publish(eid)
 
 
 @app.get("/api/identities")
@@ -995,9 +1030,13 @@ async def list_identities(kind: Literal["person", "vehicle"] = "person", since: 
 @app.post("/api/identities")
 async def create_identity(body: IdentityIn):
     try:
-        return await asyncio.to_thread(identities.name_cluster, body.kind, body.name, body.event_ids, body.notes)
+        ident = await asyncio.to_thread(identities.name_cluster, body.kind, body.name, body.event_ids, body.notes)
     except ValueError as e:
         raise HTTPException(400, str(e))
+    if body.watch:
+        ident, changed = await asyncio.to_thread(identities.set_watch, ident["id"], True, body.watch_note)
+        await _republish(changed)
+    return ident
 
 
 @app.put("/api/identities/{iid}")
@@ -1005,6 +1044,9 @@ async def put_identity(iid: int, body: IdentityUpdate):
     r = identities.update_identity(iid, body.name, body.notes)
     if not r:
         raise HTTPException(404)
+    if body.watch is not None:
+        r, changed = await asyncio.to_thread(identities.set_watch, iid, body.watch, body.watch_note)
+        await _republish(changed)
     return r
 
 

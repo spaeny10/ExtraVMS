@@ -26,7 +26,7 @@ log = logging.getLogger("nvr.identities")
 GROUP_SIM = {"person": 0.76, "vehicle": 0.88}
 NAME_SIM = {"person": 0.85, "vehicle": 0.88}   # conservative: a wrong name is worse than a missing one (indoor re-ID: different people reach ~0.82)
 VEC_TABLE = {"person": "reid_vec", "vehicle": "vehicle_vec"}
-EVENT_COLS = "id, camera_id, camera_class, start_ts, end_ts, synopsis, snapshot, yolo_class, yolo_conf, priority, anomaly, journey_id"
+EVENT_COLS = "id, camera_id, camera_class, start_ts, end_ts, synopsis, snapshot, yolo_class, yolo_conf, priority, anomaly, journey_id, watched"
 
 
 # ---------------------------------------------------------------- vehicle fingerprints (CLIP)
@@ -103,7 +103,7 @@ def _vectors(kind: str, events: list[dict]) -> tuple[list[dict], np.ndarray]:
 
 
 def named(kind: str) -> list[dict]:
-    rows = db.all("SELECT id, name, kind, notes, embedding, sightings, updated_at FROM identities WHERE kind=? ORDER BY name", [kind])
+    rows = db.all("SELECT id, name, kind, notes, embedding, sightings, updated_at, watch, watch_note FROM identities WHERE kind=? ORDER BY name", [kind])
     for r in rows:
         r["vec"] = np.frombuffer(r.pop("embedding"), dtype=np.float32).astype(np.float64)
     return rows
@@ -163,6 +163,7 @@ def _summary(kind: str, members: list[dict], cams: dict, identity: dict | None, 
     desc = next((e["synopsis"] for e in reversed(members) if e.get("synopsis")), None)
     return {
         "kind": kind, "identity_id": identity["id"] if identity else None, "name": identity["name"] if identity else None,
+        "watch": bool(identity["watch"]) if identity else False,
         "name_sim": round(sim, 3) if identity else None, "fingerprinted": fingerprinted,
         "sightings": len(members), "first_ts": members[0]["start_ts"], "last_ts": members[-1]["end_ts"] or members[-1]["start_ts"],
         "on_site_s": round(sum(max(0.0, (e["end_ts"] or e["start_ts"]) - e["start_ts"]) for e in members)),
@@ -198,7 +199,14 @@ def name_cluster(kind: str, name: str, event_ids: list[int], notes: str = "") ->
     else:
         iid = db.execute_insert("INSERT INTO identities (name, kind, embedding, notes, sightings, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
                                 [name, kind, vec.tobytes(), notes, n, time.time(), time.time()])
-    return db.one("SELECT id, name, kind, notes, sightings, updated_at FROM identities WHERE id=?", [iid])
+    return get_identity(iid)
+
+
+IDENT_COLS = "id, name, kind, notes, sightings, updated_at, watch, watch_note"
+
+
+def get_identity(iid: int) -> dict | None:
+    return db.one(f"SELECT {IDENT_COLS} FROM identities WHERE id=?", [iid])
 
 
 def update_identity(iid: int, name: str | None = None, notes: str | None = None) -> dict | None:
@@ -206,7 +214,54 @@ def update_identity(iid: int, name: str | None = None, notes: str | None = None)
         db.execute("UPDATE identities SET name=?, updated_at=? WHERE id=?", [name.strip(), time.time(), iid])
     if notes is not None:
         db.execute("UPDATE identities SET notes=?, updated_at=? WHERE id=?", [notes, time.time(), iid])
-    return db.one("SELECT id, name, kind, notes, sightings, updated_at FROM identities WHERE id=?", [iid])
+    return get_identity(iid)
+
+
+# ---------------------------------------------------------------- watch list
+
+def match_identity(kind: str, event_id: int) -> tuple[dict, float] | None:
+    """The named identity this sighting's fingerprint matches (above NAME_SIM), if any."""
+    v = db.get_vec(VEC_TABLE[kind], event_id)
+    if v is None:
+        return None
+    v = v.astype(np.float64)
+    v /= np.linalg.norm(v) + 1e-9
+    best, best_sim = None, 0.0
+    for n in named(kind):
+        sim = float(n["vec"] @ v / (np.linalg.norm(n["vec"]) + 1e-9))
+        if sim >= NAME_SIM[kind] and sim > best_sim:
+            best, best_sim = n, sim
+    return (best, best_sim) if best else None
+
+
+def check_watch(event_id: int) -> str | None:
+    """Mark a verified sighting that matches a watched identity (events.watched = name). Returns the name."""
+    e = db.event(event_id)
+    if not e or e["status"] != "verified" or e["camera_class"] not in VEC_TABLE:
+        return None
+    m = match_identity(e["camera_class"], event_id)
+    name = m[0]["name"] if m and m[0]["watch"] else None
+    if (e.get("watched") or None) != name:
+        db.update_event(event_id, watched=name)
+    return name
+
+
+def set_watch(iid: int, watch: bool, note: str | None = None, recheck_hours: float = 24) -> tuple[dict | None, list[int]]:
+    """Turn watching on or off for a name. Recent sightings are re-marked so Home/priority update at once.
+    Returns (identity, ids of events whose mark changed)."""
+    ident = get_identity(iid)
+    if not ident:
+        return None, []
+    db.execute("UPDATE identities SET watch=?, watch_note=COALESCE(?, watch_note), updated_at=? WHERE id=?",
+               [int(watch), note, time.time(), iid])
+    changed = []
+    rows = db.all("SELECT id, watched FROM events WHERE status='verified' AND camera_class=? AND start_ts >= ?",
+                  [ident["kind"], time.time() - recheck_hours * 3600])
+    for r in rows:
+        before = r["watched"]
+        if check_watch(r["id"]) != before:
+            changed.append(r["id"])
+    return get_identity(iid), changed
 
 
 def delete_identity(iid: int) -> None:
@@ -215,13 +270,9 @@ def delete_identity(iid: int) -> None:
 
 def identity_facts(kind: str, event_id: int) -> str | None:
     """For prompts: the name of a known identity this sighting matches, if any."""
-    v = db.get_vec(VEC_TABLE[kind], event_id)
-    if v is None:
+    m = match_identity(kind, event_id)
+    if not m:
         return None
-    v = v.astype(np.float64)
-    v /= np.linalg.norm(v) + 1e-9
-    best = max(((float(n["vec"] @ v / (np.linalg.norm(n["vec"]) + 1e-9)), n) for n in named(kind)), default=(0.0, None), key=lambda x: x[0])
-    if best[1] and best[0] >= NAME_SIM[kind]:
-        n = best[1]
-        return f"Known {kind}: '{n['name']}'" + (f" ({n['notes']})" if n["notes"] else "") + " (matched by appearance)."
-    return None
+    n = m[0]
+    return (f"Known {kind}: '{n['name']}'" + (f" ({n['notes']})" if n["notes"] else "") + " (matched by appearance)."
+            + (f" This {kind} is on the operator's watch list" + (f": {n['watch_note']}" if n["watch_note"] else "") + "." if n["watch"] else ""))

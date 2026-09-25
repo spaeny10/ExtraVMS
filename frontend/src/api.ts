@@ -87,6 +87,8 @@ export type NvrEvent = {
   priority?: Threat | null;
   anomaly?: number | null;
   anomaly_json?: Anomaly | null;
+  /** name of the watched person/vehicle this sighting matched */
+  watched?: string | null;
   error: string | null;
   corrected_at?: number | null;
   feedback?: Feedback | null;
@@ -211,11 +213,11 @@ export type HomeData = {
 /* ---- People & vehicles */
 export type IdentitySighting = Pick<NvrEvent, "id" | "camera_id" | "start_ts" | "end_ts" | "snapshot" | "synopsis" | "priority" | "anomaly" | "yolo_class">;
 export type IdentityCluster = {
-  key: string; kind: "person" | "vehicle"; identity_id: number | null; name: string | null; name_sim: number | null; fingerprinted: boolean;
+  key: string; kind: "person" | "vehicle"; identity_id: number | null; name: string | null; name_sim: number | null; fingerprinted: boolean; watch: boolean;
   sightings: number; first_ts: number; last_ts: number; on_site_s: number; cameras: string[]; cover: number; description: string | null;
   priority: Threat; unusual: boolean; events: IdentitySighting[];
 };
-export type NamedIdentity = { id: number; name: string; kind: string; notes: string; sightings: number; updated_at: number };
+export type NamedIdentity = { id: number; name: string; kind: string; notes: string; sightings: number; updated_at: number; watch: number | boolean; watch_note: string };
 export type IdentitiesResult = { kind: string; since: number; until: number; clusters: IdentityCluster[]; sightings: number; named: NamedIdentity[] };
 
 export type SystemInfo = {
@@ -297,7 +299,9 @@ export const api = {
   baseline: () => req<BaselineCamera[]>("/api/baseline"),
   home: (since: number) => req<HomeData>(`/api/home?${qs({ since })}`),
   identities: (kind: "person" | "vehicle", since: number, camera?: string) => req<IdentitiesResult>(`/api/identities?${qs({ kind, since, camera })}`),
-  nameIdentity: (b: { kind: "person" | "vehicle"; name: string; notes: string; event_ids: number[] }) => req<NamedIdentity>("/api/identities", json("POST", b)),
+  nameIdentity: (b: { kind: "person" | "vehicle"; name: string; notes: string; event_ids: number[]; watch?: boolean; watch_note?: string }) => req<NamedIdentity>("/api/identities", json("POST", b)),
+  watchIdentity: (id: number, watch: boolean, watch_note?: string) => req<NamedIdentity>(`/api/identities/${id}`, json("PUT", { watch, watch_note })),
+  eventIdentity: (id: number) => req<(NamedIdentity & { sim: number }) | null>(`/api/events/${id}/identity`),
   deleteIdentity: (id: number) => req(`/api/identities/${id}`, { method: "DELETE" }),
   backupNow: () => req<{ at: number; path: string; bytes: number }>("/api/backup", { method: "POST" }),
   assistantThreads: () => req<AssistantThread[]>("/api/assistant/threads"),

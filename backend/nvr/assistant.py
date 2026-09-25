@@ -90,6 +90,8 @@ def _event_line(e: dict) -> str:
     if isinstance(an, str):
         an = json.loads(an)
     extra = []
+    if e.get("watched"):
+        extra.append(f"WATCH LIST: {e['watched']}")
     if e.get("priority") and e["priority"] != "none":
         extra.append(f"priority {e['priority']}")
     if an and an.get("reasons"):
@@ -337,7 +339,7 @@ def _where(a: dict, extra: list[str] | None = None) -> tuple[str, list]:
 
 
 EVENT_COLS = ("id, camera_id, camera_class, yolo_class, start_ts, end_ts, synopsis, snapshot, priority, anomaly, "
-              "anomaly_json, feedback, journey_id")
+              "anomaly_json, feedback, journey_id, watched")
 
 
 async def t_search_events(a: dict, refs: Refs) -> tuple[list[str], int]:

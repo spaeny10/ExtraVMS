@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  type NamedIdentity,
   api, askClip, fmtDuration, fmtTime, media,
   type ChatMessage, type Feedback, type Journey, type NvrEvent, type Synopsis, type Threat, type Verdict,
 } from "./api";
@@ -60,6 +61,7 @@ export function EventDetail({ id: initialId, cameraName, onClose }: { id: number
             {e.feedback?.verdict === "false_alarm" && <span className="badge status-error">Marked false alarm</span>}
             <button className="ghost" onClick={() => { openInTimeline(e); onClose(); }} title="Show this event on the Timeline, playing from just before it">⏱ Open in Timeline</button>
             <LockControl e={e} onChange={() => api.event(e.id).then(setE)} />
+            {e.status === "verified" && <WatchControl e={e} onChange={() => api.event(e.id).then(setE)} />}
             <button className="ghost" onClick={() => api.reprocess(e.id).then(onClose)} title="Run YOLO verification and the synopsis again">Reprocess</button>
             <button className="ghost" onClick={onClose} aria-label="Close">✕</button>
           </div>
@@ -159,6 +161,61 @@ function JourneySection({ e, cameraName, onShow, onOpenTimeline }: {
         })}
       </ol>
     </section>
+  );
+}
+
+/** Put the person (or vehicle) in this clip on the watch list: future sightings that match their appearance are
+ * raised to medium priority and shown under Needs attention. Names the fingerprint if it has no name yet. */
+function WatchControl({ e, onChange }: { e: NvrEvent; onChange: () => void }) {
+  const [ident, setIdent] = useState<(NamedIdentity & { sim: number }) | null | undefined>(undefined);
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [note, setNote] = useState("");
+  const isPerson = e.camera_class === "person";
+  useEffect(() => { api.eventIdentity(e.id).then(setIdent).catch(() => setIdent(null)); }, [e.id, e.watched]);
+  if (ident === undefined) return null;
+  const watching = ident?.watch ? ident : null;
+  const stop = async () => {
+    if (!watching) return;
+    await api.watchIdentity(watching.id, false);
+    toast.success(`Stopped watching ${watching.name}`);
+    onChange();
+  };
+  const start = async (ev: React.FormEvent) => {
+    ev.preventDefault();
+    try {
+      if (ident) {
+        await api.watchIdentity(ident.id, true, note);
+        toast.success(`Watching ${ident.name}: matching sightings will be flagged`);
+      } else {
+        if (!name.trim()) return;
+        await api.nameIdentity({ kind: e.camera_class, name: name.trim(), notes: "", event_ids: [e.id], watch: true, watch_note: note });
+        toast.success(`Watching "${name.trim()}": matching sightings will be flagged`);
+      }
+      setOpen(false);
+      onChange();
+    } catch (err) { toast.error(err); }
+  };
+  if (watching) {
+    return <button className="ghost watch-on" title={`On the watch list${watching.watch_note ? `: ${watching.watch_note}` : ""}. Click to stop.`} onClick={stop}>👁 Watching {watching.name}</button>;
+  }
+  return (
+    <span className="watch-control">
+      <button className="ghost" onClick={() => setOpen(!open)} title="Flag future sightings of this person's appearance (clothing, build) as medium priority">
+        👁 Watch this {isPerson ? "person" : "vehicle"}
+      </button>
+      {open && (
+        <form className="watch-form" onSubmit={start}>
+          {ident
+            ? <span>Recognised as <strong>{ident.name}</strong>.</span>
+            : <input autoFocus placeholder={isPerson ? "Name, e.g. blue shirt pink hat" : "Name, e.g. white van"} value={name} onChange={(ev) => setName(ev.target.value)} />}
+          <input placeholder="Why (optional, shown with each sighting)" value={note} onChange={(ev) => setNote(ev.target.value)} />
+          <button type="submit" className="small" disabled={!ident && !name.trim()}>Watch</button>
+          <button type="button" className="ghost small" onClick={() => setOpen(false)}>Cancel</button>
+          <span className="muted small">Matches by appearance, not face; confirm sightings by naming them to sharpen it.</span>
+        </form>
+      )}
+    </span>
   );
 }
 

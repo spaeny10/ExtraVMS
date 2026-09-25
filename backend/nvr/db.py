@@ -223,7 +223,10 @@ MIGRATIONS = [
     ("events", "anomaly", "REAL"),              # 0..1 how unusual for this camera (baseline.py)
     ("events", "anomaly_json", "TEXT"),         # {score, parts, reasons, learning}
     ("events", "priority", "TEXT"),
-    ("journeys", "model", "TEXT"),              # which Qwen wrote the narrative (local 7B or remote)             # none|low|medium|high: max(threat, unusualness), operator wins
+    ("journeys", "model", "TEXT"),              # which Qwen wrote the narrative (local 7B or remote)
+    ("identities", "watch", "INTEGER NOT NULL DEFAULT 0"),  # on the watch list: matching sightings get priority
+    ("identities", "watch_note", "TEXT NOT NULL DEFAULT ''"),
+    ("events", "watched", "TEXT"),              # name of the watched identity this sighting matched             # none|low|medium|high: max(threat, unusualness), operator wins
 ]
 JSON_FIELDS = ("path", "rules", "detections", "synopsis_json", "synopsis_original", "feedback", "anomaly_json")
 

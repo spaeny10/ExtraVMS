@@ -46,6 +46,7 @@ export function EventCard({ e, cameraName, onOpen }: { e: NvrEvent; cameraName: 
           {e.feedback?.verdict === "false_alarm" && <span className="badge status-error">False alarm</span>}
           {e.corrected_at ? <span className="badge" title="Synopsis corrected by an operator">Corrected</span> : null}
           {e.locked ? <span className="badge lock-badge" title="Footage locked: kept regardless of retention">🔒</span> : null}
+          {e.watched ? <span className="badge threat-medium" title="On the watch list">👁 {e.watched}</span> : null}
           {(e.anomaly ?? 0) >= UNUSUAL_MIN ? <span className="badge unusual-badge" title={`Unusual for this camera:\n${(e.anomaly_json?.reasons ?? []).join("\n")}`}>⚠ Unusual</span> : null}
           {e.journey_cameras && e.journey_cameras > 1 ? <span className="badge journey-badge" title="Same person seen on other cameras">🔗 {e.journey_cameras} cams</span> : null}
           {e.yolo_conf != null && <span className="muted small">YOLO {(e.yolo_conf * 100).toFixed(0)}% · cam {((e.camera_conf ?? 0) * 100).toFixed(0)}%</span>}

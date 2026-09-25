@@ -189,6 +189,8 @@ def priority(e: dict, anomaly: float | None) -> str | None:
         return "none"
     a = anomaly or 0.0
     level = RANK["medium"] if a >= PRIORITY_MEDIUM else RANK["low"] if a >= PRIORITY_LOW else RANK["none"]
+    if e.get("watched"):  # a person/vehicle the operator asked to be told about
+        level = max(level, RANK["medium"])
     return LEVELS[max(level, RANK.get(e.get("threat") or "", 0))]
 
 

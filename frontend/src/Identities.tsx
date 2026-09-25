@@ -82,6 +82,7 @@ export function IdentitiesView({ cameras }: { cameras: Camera[] }) {
                 <div className="identity-head">
                   <strong>{c.name ?? (kind === "person" ? `Person ${c.key.slice(1)}` : `Vehicle ${c.key.slice(1)}`)}</strong>
                   {c.name && <span className="badge journey-badge" title={`Recognised (similarity ${c.name_sim})`}>known</span>}
+                  {c.watch && <span className="badge threat-medium" title="On the watch list">👁 watched</span>}
                   {c.priority !== "none" && <span className={`badge threat-${c.priority}`}>{c.priority}</span>}
                   {c.unusual && <span className="badge unusual-badge">⚠ Unusual</span>}
                   {!c.fingerprinted && <span className="muted small" title="An older event with no saved crops">no fingerprint</span>}
@@ -92,6 +93,11 @@ export function IdentitiesView({ cameras }: { cameras: Camera[] }) {
                 {c.description && <p className="identity-desc">{c.description}</p>}
                 <div className="row small">
                   <button className="ghost small" onClick={() => setExpanded(isOpen ? null : c.key)}>{isOpen ? "Hide sightings" : "Show sightings"}</button>
+                  {c.name && c.identity_id && (
+                    <button className="ghost small" onClick={async () => { await api.watchIdentity(c.identity_id!, !c.watch); toast.success(c.watch ? `Stopped watching ${c.name}` : `Watching ${c.name}`); load(); }}>
+                      {c.watch ? "Stop watching" : "👁 Watch"}
+                    </button>
+                  )}
                   {c.name
                     ? <button className="ghost small" onClick={() => forget(c)}>Forget name</button>
                     : <button className="ghost small" onClick={() => setNaming(naming?.key === c.key ? null : { key: c.key, name: "", notes: "" })}>Name…</button>}
@@ -121,7 +127,7 @@ export function IdentitiesView({ cameras }: { cameras: Camera[] }) {
         <details className="muted small identity-known">
           <summary>Known {kind === "person" ? "people" : "vehicles"} ({r.named.length})</summary>
           <ul className="plain">
-            {r.named.map((n) => <li key={n.id}><strong>{n.name}</strong>{n.notes ? ` — ${n.notes}` : ""} · learned from {n.sightings} sightings · {fmtTime(n.updated_at)}
+            {r.named.map((n) => <li key={n.id}><strong>{n.name}</strong>{n.watch ? " 👁" : ""}{n.notes ? ` — ${n.notes}` : ""} · learned from {n.sightings} sightings · {fmtTime(n.updated_at)}
               <button className="linkish small" onClick={async () => { await api.deleteIdentity(n.id); load(); }}>forget</button></li>)}
           </ul>
         </details>

@@ -93,6 +93,24 @@ def test_naming_and_recognition():
     assert not [c for c in identities.clusters("person", NOW - 7200)["clusters"] if c["name"]]
 
 
+def test_watch_list_marks_matching_sightings():
+    from nvr import baseline
+    ident = identities.name_cluster("person", "Pink Hat", ids_b)
+    assert identities.check_watch(ids_b[0]) is None                       # named but not watched
+    ident, changed = identities.set_watch(ident["id"], True, "seen loitering", recheck_hours=48)
+    assert ident["watch"] == 1 and set(changed) >= set(ids_b), changed
+    assert db.event(ids_b[0])["watched"] == "Pink Hat" and db.event(ids_a[0])["watched"] is None
+    assert baseline.priority(db.event(ids_b[0]), 0.0) == "medium"           # watch raises priority
+    new_b = add("cam2", NOW - 5, vec=person_vec(B))
+    assert identities.check_watch(new_b) == "Pink Hat"                    # a new sighting is flagged
+    assert "watch list" in identities.identity_facts("person", new_b)
+    r = identities.clusters("person", NOW - 7200)
+    assert any(c["watch"] for c in r["clusters"] if c["name"] == "Pink Hat")
+    _, changed = identities.set_watch(ident["id"], False, recheck_hours=48)
+    assert db.event(ids_b[0])["watched"] is None and new_b in changed
+    identities.delete_identity(ident["id"])
+
+
 def test_vehicles_use_their_own_table():
     v = unit(rng.normal(size=512))
     a = add("cam1", NOW - 900, cls="vehicle", vec=unit(v + rng.normal(0, 0.1 / np.sqrt(512), 512)))
