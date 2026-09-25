@@ -103,7 +103,7 @@ export type NvrEvent = {
   // detail only
   path?: number[][];
   rules?: { ts: number; topic: string; rule: string | null }[];
-  detections?: { samples: Detection[]; keyframes: { file: string; ts: number; kind: string }[]; needed: number };
+  detections?: { samples: Detection[]; keyframes: { file: string; ts: number; kind: string }[]; needed: number; time_shift_s?: number };
   synopsis_json?: Synopsis | null;
   synopsis_original?: Synopsis | null;
   clip_start?: number | null;

@@ -252,13 +252,17 @@ function Details({ e, setE, notes, onUnsave, seek }: {
   e: NvrEvent; setE: (e: NvrEvent) => void; notes: ChatMessage[]; onUnsave: (m: ChatMessage) => void; seek: (t: number) => void;
 }) {
   const [editing, setEditing] = useState(false);
-  const [showOriginal, setShowOriginal] = useState(false);
   const s = e.synopsis_json;
   const canGenerate = Boolean(e.detections?.keyframes?.length);
+  // Qwen's "activity" line usually restates the summary; show it only when it adds something
+  const activity = s?.activity && !(e.synopsis ?? "").toLowerCase().includes(s.activity.toLowerCase().slice(0, 40)) ? s.activity : null;
+  const tags = s?.tags ?? [];
+  const frames = e.detections?.samples?.length ?? 0;
+  const rules = e.rules?.length ? [...new Set(e.rules.map((r) => r.topic.split("/").slice(-2, -1)[0] || r.topic))] : [];
 
   return (
     <>
-      <section>
+      <section className="d-section">
         <div className="section-head">
           <h3>Synopsis {e.corrected_at ? <span className="badge">Corrected</span> : null}</h3>
           <div className="row">
@@ -279,35 +283,34 @@ function Details({ e, setE, notes, onUnsave, seek }: {
           }} />
         ) : (
           <>
-            <p>{e.synopsis ?? <span className="muted">{placeholder(e)}</span>}</p>
-            {s?.activity && <p className="muted">{s.activity}</p>}
+            <p className="d-summary">{e.synopsis ?? <span className="muted">{placeholder(e)}</span>}</p>
             {e.areas?.length ? (
-              <p className="small"><strong>Went to:</strong> {e.areas.map((a) => `${a.name} (+${Math.max(0, Math.round(a.from - e.start_ts))} s)`).join(" → ")}</p>
+              <div className="d-line" title="Named places the person walked into, in order">📍 {e.areas.map((a) => `${a.name} (+${Math.max(0, Math.round(a.from - e.start_ts))} s)`).join(" → ")}</div>
             ) : null}
-            {s?.model && <p className="muted small model-tag" title="Which Qwen model wrote this synopsis">by {s.model}</p>}
-            {s?.threat_reason && <p><strong>Threat ({s.threat_level}):</strong> {s.threat_reason}</p>}
             {e.anomaly_json?.reasons?.length ? (
-              <p className="unusual-why" title="From what this camera normally sees (learned from the last 4 weeks)">
-                <strong>⚠ Why this stands out:</strong> {e.anomaly_json.reasons.join("; ")}.
-                {e.priority && e.priority !== "none" && <span className="muted"> Priority: {e.priority}.</span>}
-              </p>
+              <div className="d-line unusual-why" title="From what this camera normally sees (learned from the last 4 weeks)">
+                ⚠ {e.anomaly_json.reasons.join("; ")}{e.priority && e.priority !== "none" ? ` · priority ${e.priority}` : ""}
+              </div>
             ) : null}
-            {s?.objects?.length ? (
-              <ul className="plain">
-                {s.objects.map((o, i) => <li key={i}><strong>{o.type}</strong> — {o.description}</li>)}
-              </ul>
-            ) : null}
-            {s?.tags?.length ? <div className="tags">{s.tags.map((t) => <span key={t} className="tag">{t}</span>)}</div> : null}
-            {e.synopsis_original && (
-              <div className="original">
-                <button className="linkish" onClick={() => setShowOriginal(!showOriginal)}>{showOriginal ? "Hide" : "Show"} Qwen's original</button>
-                {showOriginal && (
-                  <div className="muted small">
-                    <p>{e.synopsis_original.summary} <em>(threat: {e.synopsis_original.threat_level})</em></p>
+            {s?.threat_reason && s.threat_level !== "none" && <div className="d-line"><strong>Threat ({s.threat_level}):</strong> {s.threat_reason}</div>}
+            {tags.length > 0 && <div className="tags">{tags.slice(0, 8).map((t) => <span key={t} className="tag">{t}</span>)}{tags.length > 8 && <span className="tag muted">+{tags.length - 8}</span>}</div>}
+            {(activity || s?.objects?.length || s?.model || e.synopsis_original) && (
+              <details className="d-more">
+                <summary className="muted small">More from Qwen</summary>
+                {activity && <p className="muted">{activity}</p>}
+                {s?.objects?.length ? (
+                  <ul className="plain small">
+                    {s.objects.map((o, i) => <li key={i}><strong>{o.type}</strong> — {o.description}</li>)}
+                  </ul>
+                ) : null}
+                {s?.model && <p className="muted small model-tag">written by {s.model}</p>}
+                {e.synopsis_original && (
+                  <div className="original small">
+                    <p className="muted">Qwen's original: {e.synopsis_original.summary} <em>(threat: {e.synopsis_original.threat_level})</em></p>
                     <button className="ghost small" onClick={async () => setE(await api.revertSynopsis(e.id))}>Revert to original</button>
                   </div>
                 )}
-              </div>
+              </details>
             )}
           </>
         )}
@@ -316,7 +319,7 @@ function Details({ e, setE, notes, onUnsave, seek }: {
       <FeedbackBar e={e} setE={setE} />
 
       {notes.length > 0 && (
-        <section>
+        <section className="d-section">
           <h3>Notes</h3>
           {notes.map((m) => (
             <div key={m.id} className="note">
@@ -330,18 +333,76 @@ function Details({ e, setE, notes, onUnsave, seek }: {
         </section>
       )}
 
-      <section>
-        <h3>Verification</h3>
-        <table className="kv">
-          <tbody>
-            <tr><td>Camera</td><td>{e.camera_class} · {((e.camera_conf ?? 0) * 100).toFixed(0)}% · track {e.track_id}</td></tr>
-            <tr><td>YOLO</td><td>{e.yolo_class ?? "—"} {e.yolo_conf != null && `· ${(e.yolo_conf * 100).toFixed(0)}%`}</td></tr>
-            <tr><td>Agreement</td><td>{e.yolo_hits ?? 0} of {e.detections?.samples?.length ?? 0} frames (need {e.detections?.needed ?? "—"})</td></tr>
-            {e.rules?.length ? <tr><td>Rules</td><td>{[...new Set(e.rules.map((r) => r.topic.split("/").slice(-2, -1)[0] || r.topic))].join(", ")}</td></tr> : null}
-          </tbody>
-        </table>
+      <section className="d-section">
+        <details className="d-more">
+          <summary>
+            <h3 className="inline">Verification</h3>
+            <span className="muted small"> camera {e.camera_class} {((e.camera_conf ?? 0) * 100).toFixed(0)}% · YOLO {e.yolo_class ?? "—"}{e.yolo_conf != null ? ` ${(e.yolo_conf * 100).toFixed(0)}%` : ""} · {e.yolo_hits ?? 0}/{frames} frames agree</span>
+          </summary>
+          <table className="kv">
+            <tbody>
+              <tr><td>Camera</td><td>{e.camera_class} · {((e.camera_conf ?? 0) * 100).toFixed(0)}% · track {e.track_id}</td></tr>
+              <tr><td>YOLO</td><td>{e.yolo_class ?? "—"} {e.yolo_conf != null && `· ${(e.yolo_conf * 100).toFixed(0)}%`}</td></tr>
+              <tr><td>Agreement</td><td>{e.yolo_hits ?? 0} of {frames} frames (need {e.detections?.needed ?? "—"}){e.detections?.time_shift_s ? ` · clock shift ${e.detections.time_shift_s} s` : ""}</td></tr>
+              {rules.length > 0 && <tr><td>Rules</td><td>{rules.join(", ")}</td></tr>}
+            </tbody>
+          </table>
+        </details>
       </section>
     </>
+  );
+}
+
+/** One compact row: rate the synopsis, judge the detection, add a note. Detail appears only when needed. */
+function FeedbackBar({ e, setE }: { e: NvrEvent; setE: (e: NvrEvent) => void }) {
+  const fb: Feedback = e.feedback ?? {};
+  const [note, setNote] = useState(fb.note ?? "");
+  const [noteOpen, setNoteOpen] = useState(Boolean(fb.note));
+  const send = async (patch: Feedback) => { setE(await api.feedback(e.id, patch)); toast.success("Feedback saved"); };
+  const toggleReason = (r: string) => {
+    const reasons = new Set(fb.reasons ?? []);
+    if (reasons.has(r)) reasons.delete(r);
+    else reasons.add(r);
+    send({ reasons: [...reasons] });
+  };
+  return (
+    <section className="d-section feedback">
+      <div className="fb-row">
+        <h3 className="inline">Feedback</h3>
+        {e.synopsis && (
+          <span className="fb-group" title="Was the synopsis right?">
+            <button className={`ghost small ${fb.rating === "up" ? "on" : ""}`} onClick={() => send({ rating: fb.rating === "up" ? null : "up" })} aria-label="Good synopsis">👍</button>
+            <button className={`ghost small ${fb.rating === "down" ? "on" : ""}`} onClick={() => send({ rating: fb.rating === "down" ? null : "down" })} aria-label="Bad synopsis">👎</button>
+          </span>
+        )}
+        <span className="fb-group" title="Was the detection right?">
+          {VERDICTS.map(([v, label]) => (
+            <button key={v} className={`ghost small ${fb.verdict === v ? "on" : ""}`} onClick={() => send({ verdict: fb.verdict === v ? null : v })}>{label}</button>
+          ))}
+        </span>
+        {!noteOpen && <button className="linkish small" onClick={() => setNoteOpen(true)}>Add note</button>}
+      </div>
+      {fb.rating === "down" && (
+        <div className="chips">
+          {REASONS.map((r) => (
+            <button key={r} className={`chip ${fb.reasons?.includes(r) ? "on" : ""}`} onClick={() => toggleReason(r)}>{r}</button>
+          ))}
+        </div>
+      )}
+      {fb.verdict === "wrong_class" && (
+        <div className="row small">
+          <span className="muted">Actually a</span>
+          <select value={fb.correct_class ?? ""} onChange={(ev) => send({ correct_class: ev.target.value || null })}>
+            <option value="">choose…</option>
+            {["person", "vehicle", "animal", "shadow / light", "vegetation", "other"].map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </div>
+      )}
+      {noteOpen && (
+        <input className="grow" autoFocus={!fb.note} placeholder="Note (searchable)" value={note} onChange={(ev) => setNote(ev.target.value)}
+          onBlur={() => note !== (fb.note ?? "") && send({ note })} onKeyDown={(ev) => ev.key === "Enter" && (ev.target as HTMLInputElement).blur()} />
+      )}
+    </section>
   );
 }
 
@@ -393,56 +454,6 @@ function SynopsisEditor({ initial, onSave, onCancel }: { initial: Synopsis; onSa
         <button className="ghost" onClick={onCancel}>Cancel</button>
       </div>
     </div>
-  );
-}
-
-function FeedbackBar({ e, setE }: { e: NvrEvent; setE: (e: NvrEvent) => void }) {
-  const fb: Feedback = e.feedback ?? {};
-  const [note, setNote] = useState(fb.note ?? "");
-  const send = async (patch: Feedback) => setE(await api.feedback(e.id, patch));
-  const toggleReason = (r: string) => {
-    const reasons = new Set(fb.reasons ?? []);
-    if (reasons.has(r)) reasons.delete(r);
-    else reasons.add(r);
-    send({ reasons: [...reasons] });
-  };
-  return (
-    <section className="feedback">
-      <h3>Feedback</h3>
-      {e.synopsis && (
-        <div className="row">
-          <span className="muted small">Synopsis</span>
-          <button className={`ghost small ${fb.rating === "up" ? "on" : ""}`} onClick={() => send({ rating: fb.rating === "up" ? null : "up" })} aria-label="Good synopsis">👍</button>
-          <button className={`ghost small ${fb.rating === "down" ? "on" : ""}`} onClick={() => send({ rating: fb.rating === "down" ? null : "down" })} aria-label="Bad synopsis">👎</button>
-        </div>
-      )}
-      {fb.rating === "down" && (
-        <div className="chips">
-          {REASONS.map((r) => (
-            <button key={r} className={`chip ${fb.reasons?.includes(r) ? "on" : ""}`} onClick={() => toggleReason(r)}>{r}</button>
-          ))}
-        </div>
-      )}
-      <div className="row">
-        <span className="muted small">Detection</span>
-        {VERDICTS.map(([v, label]) => (
-          <button key={v} className={`ghost small ${fb.verdict === v ? "on" : ""}`} onClick={() => send({ verdict: fb.verdict === v ? null : v })}>{label}</button>
-        ))}
-      </div>
-      {fb.verdict === "wrong_class" && (
-        <div className="row">
-          <span className="muted small">Actually a</span>
-          <select value={fb.correct_class ?? ""} onChange={(ev) => send({ correct_class: ev.target.value || null })}>
-            <option value="">choose…</option>
-            {["person", "vehicle", "animal", "shadow / light", "vegetation", "other"].map((c) => <option key={c} value={c}>{c}</option>)}
-          </select>
-        </div>
-      )}
-      <div className="row">
-        <input className="grow" placeholder="Note (optional, searchable)" value={note} onChange={(ev) => setNote(ev.target.value)}
-          onBlur={() => note !== (fb.note ?? "") && send({ note })} onKeyDown={(ev) => ev.key === "Enter" && (ev.target as HTMLInputElement).blur()} />
-      </div>
-    </section>
   );
 }
 
