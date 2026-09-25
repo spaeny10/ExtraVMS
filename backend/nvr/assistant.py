@@ -240,6 +240,8 @@ def check_plan(raw: dict, question: str, now: float) -> list[dict]:
             args["text"] = question[:200]
         if tool == "search_events" and not args["text"] and not LISTING_WORDS.search(q_low.strip()):
             args["text"] = question[:200]  # a real question: search by meaning, don't just list the latest
+        if args["text"] and (w := time_window(args["text"], now)):
+            args["text"] = w["text"][:200]  # the time phrase is a filter, not something to search for
         key = (tool, json.dumps(args, sort_keys=True))
         if key not in {(o["tool"], json.dumps(o["args"], sort_keys=True)) for o in out}:
             out.append({"tool": tool, "args": args})
@@ -341,7 +343,7 @@ def augment(calls: list[dict], question: str) -> list[dict]:
     base = calls[0]["args"] if calls else {}
     about_records = any(re.search(pat, q) for pat, _ in KEYWORD_TOOLS)
     if "search_footage" not in have and LOOK_FOR.search(q.strip()) and not GENERIC_SUBJECT.search(q) and not about_records:
-        text = next((c["args"]["text"] for c in calls if c["tool"] == "search_events" and c["args"].get("text") and c["args"]["text"] != question[:200]), "") or footage_text(question)
+        text = footage_text(next((c["args"]["text"] for c in calls if c["tool"] == "search_events" and c["args"].get("text")), "") or question)
         if len(text) >= 3:
             calls.append({"tool": "search_footage", "args": {"text": text, "camera": base.get("camera"), "since": base.get("since"),
                                                              "until": base.get("until"), "label": None, "min_priority": None, "group_by": None}})
@@ -645,6 +647,8 @@ async def run_calls(calls: list[dict], refs: Refs, question: str | None = None) 
         summary.append({"tool": c["tool"], "args": c["args"], "label": describe_call(c), "count": n})
         if not queue and question and (fb := fallback_call(summary, question)):
             queue.append(fb)
+    if any(s["count"] for s in summary):  # a later lookup found something: drop the empty ones so they aren't parroted
+        blocks = [b for b, s in zip(blocks, summary) if s["count"] or not b.rstrip().endswith("No matching events.")]
     text = "\n\n".join(blocks)
     if len(text) > MAX_RESULT_CHARS:
         text = text[:MAX_RESULT_CHARS] + "\n(results truncated)"

@@ -381,18 +381,38 @@ class Database:
         when they are close in absolute terms (unit vectors: L2 < VEC_MAX_DIST) and relative to the best hit.
         """
         scores: dict[int, float] = {}
-        words = [t for t in query.replace('"', " ").lower().split() if t and t not in STOPWORDS]
+        # Filters first, ranking second: otherwise the 200 best matches from all history can all fall outside
+        # "today" (or this camera) and the filter leaves nothing.
+        eligible: set[int] | None = None
+        if camera_id or since or until or label or min_yolo > 0:
+            fw, fp = ["status != 'masked'"], []
+            for col, val in (("camera_id", camera_id), ("camera_class", label)):
+                if val:
+                    fw.append(f"{col}=?"); fp.append(val)
+            if since:
+                fw.append("start_ts>=?"); fp.append(since)
+            if until:
+                fw.append("start_ts<=?"); fp.append(until)
+            if min_yolo > 0:
+                fw.append("yolo_conf>=?"); fp.append(min_yolo)
+            eligible = {r["id"] for r in self.all(f"SELECT id FROM events WHERE {' AND '.join(fw)}", fp)}
+            if not eligible:
+                return []
+        ok = (lambda i: True) if eligible is None else eligible.__contains__
+        words = [t.strip("?.,!:;'") for t in query.replace('"', " ").lower().split()]
+        words = [t for t in words if t and t not in STOPWORDS]
         if words:
             terms = " OR ".join(f'"{t}"' for t in words)
-            for rank, r in enumerate(self.all(
-                    "SELECT rowid FROM events_fts WHERE events_fts MATCH ? ORDER BY rank LIMIT 200", [terms])):
+            rows = self.all("SELECT rowid FROM events_fts WHERE events_fts MATCH ? ORDER BY rank LIMIT 4000", [terms])
+            for rank, r in enumerate([r for r in rows if ok(r["rowid"])][:200]):
                 scores[r["rowid"]] = scores.get(r["rowid"], 0) + 1 / (60 + rank)
         if embedding:
-            hits = self.all("SELECT rowid, distance FROM events_vec WHERE embedding MATCH ? AND k = 200 ORDER BY distance",
-                            [serialize(embedding)])
+            k = 200 if eligible is None else 4096  # sqlite-vec's maximum; the filter is applied to these
+            hits = [h for h in self.all("SELECT rowid, distance FROM events_vec WHERE embedding MATCH ? AND k = ? ORDER BY distance",
+                                        [serialize(embedding), k]) if ok(h["rowid"])]
             if hits:
-                cutoff = min(VEC_MAX_DIST, hits[0]["distance"] + VEC_MAX_GAP)
-                for rank, r in enumerate(h for h in hits if h["distance"] <= cutoff):
+                cutoff = min(VEC_MAX_DIST, hits[0]["distance"] + VEC_MAX_GAP)  # relative to the best *eligible* hit
+                for rank, r in enumerate(h for h in hits[:200] if h["distance"] <= cutoff):
                     scores[r["rowid"]] = scores.get(r["rowid"], 0) + 1 / (60 + rank)
         if not scores:
             return []

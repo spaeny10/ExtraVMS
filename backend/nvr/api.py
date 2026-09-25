@@ -531,6 +531,11 @@ async def parse_query(q: str = Query(min_length=1, max_length=300)):
 async def search(q: str, camera: str | None = None, since: float | None = None, until: float | None = None,
                  label: str | None = None, min_yolo: float = Query(0, ge=0, le=1),
                  limit: int = Query(30, le=200)):
+    win = assistant.time_window(q)
+    if win:  # "…today", "…last night": the phrase sets the window (unless given) and isn't searched for as a word
+        q = win["text"]
+        if since is None and until is None:
+            since, until = win["since"], win["until"]
     emb = await vlm.embed(f"search_query: {q}") if state.pipeline.vlm_ready else None
     return db.search(q, emb, limit, camera, since, until, label or query_label(q), min_yolo)
 

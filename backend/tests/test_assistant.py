@@ -153,6 +153,23 @@ def test_empty_period_falls_back_to_earlier():
     assert n == 0 and lines[0].startswith("EARLIER"), lines   # results shown, but they don't count as answers for the period
 
 
+def test_search_filters_before_ranking():
+    """Regression: 300 older, better-matching events must not push today's match out of the candidates."""
+    db.execute("BEGIN")
+    old = [add("cam2", at(10, days_ago=3) + i, synopsis="bathroom bathroom bathroom door entering the bathroom") for i in range(300)]
+    db.execute("COMMIT")
+    for i in old:
+        db.index_event_text(i, "bathroom bathroom bathroom door entering the bathroom", "person", None)
+    new = add("cam2", at(14, 30), synopsis="someone walks to the bathroom")
+    db.index_event_text(new, "someone walks to the bathroom", "person", None)
+    hits = db.search("bathroom", None, 50, since=at(0))
+    assert [h["id"] for h in hits] == [new], [h["id"] for h in hits][:5]
+    assert db.search("bathroom", None, 50, camera_id="cam1", since=at(0)) == []
+    for i in [*old, new]:  # leave the shared fixture as the other tests expect it
+        db.execute("DELETE FROM events_fts WHERE rowid=?", [i])
+        db.execute("DELETE FROM events WHERE id=?", [i])
+
+
 def test_average_link_counts():
     import numpy as np
     # two tight groups (0.9 inside) that are 0.6 apart, plus one loner at 0.4
