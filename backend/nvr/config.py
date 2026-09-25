@@ -1,0 +1,81 @@
+"""Runtime settings, loaded from environment / .env."""
+from __future__ import annotations
+
+from pathlib import Path
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=ROOT / ".env", env_prefix="NVR_", extra="ignore")
+
+    # Storage: recordings on the big HDD, everything else on the SSD.
+    recordings_dir: Path = Path("D:/NVR/recordings")
+    data_dir: Path = ROOT / "data"          # sqlite db, snapshots, event clips
+    runtime_dir: Path = ROOT / "runtime"    # generated configs, logs
+
+    # MediaMTX
+    mediamtx_exe: Path = ROOT / "bin" / "mediamtx" / "mediamtx.exe"
+    mediamtx_api: str = "http://127.0.0.1:9997"
+    mediamtx_playback: str = "http://127.0.0.1:9996"
+    mediamtx_rtsp: str = "rtsp://127.0.0.1:8554"
+    mediamtx_webrtc_port: int = 8889            # WHEP signalling; localhost only, the NVR proxies it (/api/whep)
+    webrtc_media_port: int = 8189               # WebRTC video (UDP, TCP fallback): forward this port for remote live view
+    webrtc_public_hosts: list[str] = []         # extra public IPs/hostnames to offer; the one in the browser's URL is added automatically
+    segment_duration: str = "10m"
+    backup_dir: Path = Path("D:/NVR/backups")   # nightly database copies (backup.py)
+
+    # Event engine
+    track_min_seconds: float = 1.0          # camera track must persist this long to become an event
+    track_end_gap: float = 2.0              # seconds without the object before the track is closed
+    track_max_seconds: float = 60.0         # long tracks are split so synopses stay timely
+    camera_clock_offset: float = 0.0        # seconds to add to camera UtcTime to match PC clock
+    clip_pre_roll: float = 3.0
+    clip_post_roll: float = 3.0
+    recording_lag: float = 3.0              # wait for MediaMTX to flush fMP4 parts before fetching
+
+    # YOLO
+    yolo_model: str = "yolo11s.pt"
+    yolo_device: str = "cuda:0"
+    yolo_imgsz: int = 1280
+    yolo_conf: float = 0.25
+    verify_frames: int = 6                  # frames sampled per event
+    verify_min_hits: int = 2                # frames where YOLO must agree with the camera
+    verify_iou: float = 0.2
+
+    # Qwen via Ollama (a dedicated `ollama serve` pinned to GPU 1)
+    ollama_exe: Path = Path.home() / "AppData/Local/Programs/Ollama/ollama.exe"
+    ollama_url: str = "http://127.0.0.1:11435"
+    ollama_gpu: str = "1"
+    vlm_model: str = "qwen2.5vl:7b"
+    vlm_num_ctx: int = 6144
+    chat_frames: int = 4                    # frames per chat question (~1,050 tokens each)
+    embed_model: str = "nomic-embed-text"
+    synopsis_images: int = 4
+    synopsis_labels: list[str] = ["person"]  # Qwen runs only for these; YOLO verifies every label
+    anomaly_synopsis_min: float = 0.75  # ...and for any other label once it is this unusual for its camera
+
+    # Optional larger remote Qwen (OpenAI-compatible, e.g. a RunPod Serverless vLLM endpoint). Put these three in
+    # .env only. Unset = everything runs on the local model. See nvr/vlmroute.py.
+    remote_vlm_url: str = ""            # e.g. https://api.runpod.ai/v2/<endpoint_id>/openai/v1
+    remote_vlm_key: str = ""
+    remote_vlm_model: str = ""          # e.g. Qwen/Qwen2.5-VL-32B-Instruct-AWQ
+    remote_tasks: list[str] = ["assistant", "briefing", "journey", "unusual_review", "footage_verify"]
+    remote_interactive_timeout_s: float = 12    # time to first token before a user-facing answer falls back to local
+    remote_background_timeout_s: float = 240    # background work waits out a cold start
+    remote_daily_budget_usd: float = 5.0
+    remote_rate_usd_per_s: float = 0.0  # your endpoint's per-second GPU price; 0 = don't enforce the budget
+    remote_idle_s: float = 300          # the endpoint's idle timeout (billed after each request)
+
+    # Retention: the policy (continuous days, what to keep, free-space floor) lives in the database and is
+    # edited in the UI (System → Retention); see nvr/keep.py for defaults.
+    retention_dry_run: bool = False     # NVR_RETENTION_DRY_RUN=1: log decisions, delete nothing
+
+    # API
+    host: str = "0.0.0.0"
+    port: int = 8080
+
+
+settings = Settings()

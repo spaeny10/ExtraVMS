@@ -1,0 +1,14 @@
+# PyTorch with CUDA: install first from the CUDA index
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+ultralytics
+fastapi
+uvicorn[standard]
+pydantic-settings
+python-dotenv
+httpx
+sqlite-vec
+av
+numpy
+opencv-python-headless
+python-multipart
+pyyaml

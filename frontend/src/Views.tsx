@@ -1,0 +1,549 @@
+import { useEffect, useState } from "react";
+import { api, fmtTime, type BaselineCamera, type FootageStatus, type RemoteStatus, type Camera, type FeedbackStats, type NvrEvent, type RetentionPolicy, type SystemInfo, type Zone } from "./api";
+import { ConfidenceSlider, loadNumber, saveNumber } from "./ConfidenceSlider";
+import { EventCard } from "./Events";
+import { EventDetail } from "./EventDetail";
+import { WhepPlayer } from "./WhepPlayer";
+import { ZoneEditor } from "./ZoneEditor";
+import { PolicyForm, RetentionPanel } from "./RetentionPanel";
+import { QwenFeedbackInfo } from "./QwenFeedbackInfo";
+import { NeighborsEditor } from "./Neighbors";
+import { FootageResults } from "./FootageSearch";
+
+/* ------------------------------------------------------------------ Live */
+
+type Quality = "sd" | "hd";
+
+function loadQuality(): Record<string, Quality> {
+  try {
+    return JSON.parse(localStorage.getItem("liveQuality") ?? "{}");
+  } catch {
+    return {};
+  }
+}
+
+export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: number; recent: NvrEvent[] }) {
+  const [focus, setFocus] = useState<string | null>(null);
+  const [open, setOpen] = useState<number | null>(null);
+  // SD = H.264 sub stream (light, plays everywhere); HD = the recorded H.265 main stream.
+  const [quality, setQualityState] = useState<Record<string, Quality>>(loadQuality);
+  const [hdUnsupported, setHdUnsupported] = useState(false);
+  const setQuality = (next: Record<string, Quality>) => {
+    setQualityState(next);
+    try {
+      localStorage.setItem("liveQuality", JSON.stringify(next));
+    } catch {
+      /* private mode */
+    }
+  };
+  const q = (id: string): Quality => (hdUnsupported ? "sd" : quality[id] ?? "sd");
+  const setAll = (v: Quality) => setQuality(Object.fromEntries(cameras.map((c) => [c.id, v])));
+  const allHd = cameras.length > 0 && cameras.every((c) => q(c.id) === "hd");
+  const allSd = cameras.every((c) => q(c.id) === "sd");
+  const name = (id: string) => cameras.find((c) => c.id === id)?.name ?? id;
+  const shown = focus ? cameras.filter((c) => c.id === focus) : cameras;
+  const cols = focus ? 1 : Math.min(4, Math.ceil(Math.sqrt(Math.max(1, cameras.length))));
+  return (
+    <div className="live-layout">
+      <div className="live-main">
+        <div className="toolbar live-toolbar">
+          <span className="muted small">Stream</span>
+          <div className="segmented">
+            <button className={allSd ? "active" : ""} onClick={() => setAll("sd")} title="H.264 sub stream: low bandwidth, plays in any browser">All SD</button>
+            <button className={allHd ? "active" : ""} disabled={hdUnsupported} onClick={() => setAll("hd")} title="Full-resolution H.265 main stream">All HD</button>
+          </div>
+          {hdUnsupported && <span className="muted small">This browser can't play the H.265 main stream, so live view is using SD. Chrome or Edge on Windows with a GPU can play it.</span>}
+        </div>
+        <div className="live-grid" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
+          {shown.map((c) => {
+            const active = recent.find((e) => e.camera_id === c.id && (e.status === "open" || e.status === "pending"));
+            const hd = q(c.id) === "hd";
+            return (
+              <div key={c.id} className={`tile ${active ? "alerting" : ""}`} onDoubleClick={() => setFocus(focus ? null : c.id)}>
+                <WhepPlayer
+                  key={hd ? "hd" : "sd"}
+                  path={hd ? c.id : `${c.id}_sub`}
+                  port={port}
+                  showSize
+                  className={hd ? "hd" : ""}
+                  onUnsupported={hd ? () => setHdUnsupported(true) : undefined}
+                />
+                <div className="tile-bar">
+                  <span className={`dot ${c.status?.stream_ready ? "ok" : "bad"}`} title={c.status?.stream_ready ? "Recording" : "Offline"} />
+                  <span>{c.name}</span>
+                  {active && <span className={`label-chip ${active.camera_class}`}>{active.camera_class}</span>}
+                  <span className="spacer" />
+                  <div className="segmented small-seg" title="Stream quality for this camera">
+                    <button className={!hd ? "active" : ""} onClick={() => setQuality({ ...quality, [c.id]: "sd" })}>SD</button>
+                    <button className={hd ? "active" : ""} disabled={hdUnsupported} onClick={() => setQuality({ ...quality, [c.id]: "hd" })}>HD</button>
+                  </div>
+                  <button className="ghost small" onClick={() => setFocus(focus ? null : c.id)}>{focus ? "Grid" : "Expand"}</button>
+                </div>
+              </div>
+            );
+          })}
+          {cameras.length === 0 && <div className="empty">No cameras yet. Add one under Cameras.</div>}
+        </div>
+      </div>
+      <aside className="live-feed">
+        <h3>Latest activity</h3>
+        {recent.length === 0 && <p className="muted">Nothing yet.</p>}
+        {recent.slice(0, 12).map((e) => (
+          <EventCard key={e.id} e={e} cameraName={name(e.camera_id)} onOpen={() => setOpen(e.id)} />
+        ))}
+      </aside>
+      {open !== null && <EventDetail id={open} cameraName={name} onClose={() => setOpen(null)} />}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ Search */
+
+export function SearchView({ cameras }: { cameras: Camera[] }) {
+  const [q, setQ] = useState("");
+  const [results, setResults] = useState<NvrEvent[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [open, setOpen] = useState<number | null>(null);
+  const [minYolo, setMinYolo] = useState(() => loadNumber("minYolo.search"));
+  // "events" searches what the cameras flagged; "footage" searches every recorded frame (image-text index)
+  const [mode, setMode] = useState<"events" | "footage">(() => (loadNumber("searchFootage", 0) === 1 ? "footage" : "events"));
+  const [fCam, setFCam] = useState("");
+  const [fSince, setFSince] = useState(0); // hours back; 0 = all indexed footage
+  const [nonce, setNonce] = useState(0);
+  const name = (id: string) => cameras.find((c) => c.id === id)?.name ?? id;
+  const run = async (ev?: React.FormEvent, conf = minYolo) => {
+    ev?.preventDefault();
+    if (!q.trim()) return;
+    if (mode === "footage") { setNonce(Date.now()); return; }
+    setBusy(true);
+    try {
+      setResults(await api.search(q, undefined, conf));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="view">
+      <form className="search-bar" onSubmit={run}>
+        <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="e.g. person in dark hoodie near the gate at night, white pickup truck" />
+        <button type="submit" disabled={busy}>{busy ? "Searching…" : "Search"}</button>
+      </form>
+      <div className="toolbar search-filters">
+        <div className="segmented">
+          {([["events", "Events"], ["footage", "All footage"]] as const).map(([v, l]) => (
+            <button key={v} type="button" className={mode === v ? "active" : ""} onClick={() => {
+              setMode(v); saveNumber("searchFootage", v === "footage" ? 1 : 0);
+              if (q.trim() && v === "footage") setNonce(Date.now());
+            }}>{l}</button>
+          ))}
+        </div>
+        {mode === "events" ? (
+          <ConfidenceSlider value={minYolo} onChange={(v) => {
+            setMinYolo(v);
+            saveNumber("minYolo.search", v);
+            if (results) run(undefined, v);
+          }} />
+        ) : (
+          <>
+            <select value={fCam} onChange={(e) => { setFCam(e.target.value); if (nonce) setNonce(Date.now()); }}>
+              <option value="">All cameras</option>
+              {cameras.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+            <select value={fSince} onChange={(e) => { setFSince(Number(e.target.value)); if (nonce) setNonce(Date.now()); }}>
+              <option value={0}>Any time</option>
+              <option value={1}>Last hour</option>
+              <option value={24}>Last 24 hours</option>
+              <option value={168}>Last 7 days</option>
+            </select>
+          </>
+        )}
+      </div>
+      {mode === "events" ? (
+        <>
+          <p className="muted small">Searches synopses, corrections, saved notes and YOLO labels by meaning and keywords. Mentioning only people or only vehicles limits results to that type.</p>
+          {results && results.length === 0 && <div className="empty">No matching events.</div>}
+          <div className="event-grid">
+            {results?.map((e) => <EventCard key={e.id} e={e} cameraName={name(e.camera_id)} onOpen={() => setOpen(e.id)} />)}
+          </div>
+        </>
+      ) : (
+        <>
+          <p className="muted small">Searches every recorded frame by what it looks like, even where no event was raised (e.g. "white pickup truck", "open gate", "person on a ladder"). Qwen double-checks the top 8 results. The outline shows the part of the view that matched.</p>
+          <FootageResults q={q} nonce={nonce} cameras={cameras} camera={fCam} sinceHours={fSince} />
+        </>
+      )}
+      {open !== null && <EventDetail id={open} cameraName={name} onClose={() => setOpen(null)} />}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ Cameras */
+
+const blank: Camera & { password?: string } = {
+  id: "", name: "", host: "", onvif_port: 80, rtsp_port: 554, username: "admin", main_path: "/main",
+  sub_path: "/sub", enabled: true, zones: [], retention_days: null, scene_notes: "",
+};
+
+export function CamerasView({ cameras, port, reload }: { cameras: Camera[]; port: number; reload: () => void }) {
+  const [edit, setEdit] = useState<(Camera & { password?: string }) | null>(null);
+  const [err, setErr] = useState("");
+  const [zoneCam, setZoneCam] = useState<Camera | null>(null);
+  const [sitePolicy, setSitePolicy] = useState<RetentionPolicy | null>(null);
+  useEffect(() => {
+    if (edit && !sitePolicy) api.retentionPolicy().then((r) => setSitePolicy(r.policy)).catch(() => {});
+  }, [edit, sitePolicy]);
+  const save = async () => {
+    if (!edit) return;
+    setErr("");
+    try {
+      await api.saveCamera({ ...edit, password: edit.password || undefined });
+      setEdit(null);
+      reload();
+    } catch (e) {
+      setErr(String(e));
+    }
+  };
+  return (
+    <div className="view">
+      <div className="toolbar">
+        <button onClick={() => setEdit({ ...blank, id: `cam${cameras.length + 1}` })}>Add camera</button>
+      </div>
+      <table className="table">
+        <thead>
+          <tr><th>Camera</th><th>Address</th><th>Stream</th><th>Metadata</th><th>ONVIF events</th><th>Zones</th><th>Retention</th><th /></tr>
+        </thead>
+        <tbody>
+          {cameras.map((c) => (
+            <tr key={c.id} className={c.enabled ? "" : "muted"}>
+              <td><strong>{c.name}</strong> <span className="muted small">{c.id}</span></td>
+              <td>{c.host}</td>
+              <td><Health ok={c.status?.stream_ready} /> {c.status?.tracks?.join(", ")}</td>
+              <td><Health ok={c.status?.metadata} /></td>
+              <td><Health ok={c.status?.onvif_events} /></td>
+              <td>{zoneSummary(c.zones)}</td>
+              <td>{c.retention_days ?? "default"}</td>
+              <td className="row">
+                <button className="ghost small" onClick={() => setZoneCam(c)}>Zones</button>
+                <button className="ghost small" onClick={() => setEdit({ ...c })}>Edit</button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {edit && (
+        <div className="modal-backdrop" onClick={() => setEdit(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <header className="modal-head">
+              <h2>{cameras.some((c) => c.id === edit.id) ? `Edit ${edit.name}` : "Add camera"}</h2>
+              <button className="ghost" onClick={() => setEdit(null)} aria-label="Close">✕</button>
+            </header>
+            <div className="modal-grid">
+              <div className="form">
+                <Field label="ID"><input value={edit.id} disabled={cameras.some((c) => c.id === edit.id)} onChange={(e) => setEdit({ ...edit, id: e.target.value })} /></Field>
+                <Field label="Name"><input value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} /></Field>
+                <Field label="Host / IP"><input value={edit.host} onChange={(e) => setEdit({ ...edit, host: e.target.value })} /></Field>
+                <div className="row">
+                  <Field label="ONVIF port"><input type="number" value={edit.onvif_port} onChange={(e) => setEdit({ ...edit, onvif_port: +e.target.value })} /></Field>
+                  <Field label="RTSP port"><input type="number" value={edit.rtsp_port} onChange={(e) => setEdit({ ...edit, rtsp_port: +e.target.value })} /></Field>
+                </div>
+                <div className="row">
+                  <Field label="Username"><input value={edit.username} onChange={(e) => setEdit({ ...edit, username: e.target.value })} /></Field>
+                  <Field label="Password"><input type="password" placeholder="unchanged" autoComplete="new-password" value={edit.password ?? ""} onChange={(e) => setEdit({ ...edit, password: e.target.value })} /></Field>
+                </div>
+                <div className="row">
+                  <Field label="Main stream path"><input value={edit.main_path} onChange={(e) => setEdit({ ...edit, main_path: e.target.value })} /></Field>
+                  <Field label="Sub stream path"><input value={edit.sub_path} onChange={(e) => setEdit({ ...edit, sub_path: e.target.value })} /></Field>
+                </div>
+                <div className="row">
+                  <Field label="Enabled"><input type="checkbox" checked={Boolean(edit.enabled)} onChange={(e) => setEdit({ ...edit, enabled: e.target.checked })} /></Field>
+                </div>
+                <div className="field">
+                  <span>Qwen describes</span>
+                  <div className="row">
+                    {(["person", "vehicle"] as const).map((l) => {
+                      const cur = edit.synopsis_labels ?? ["person"];
+                      return (
+                        <label key={l} className="row small">
+                          <input type="checkbox" checked={cur.includes(l)}
+                            onChange={(e) => setEdit({ ...edit, synopsis_labels: e.target.checked ? [...cur.filter((x) => x !== l), l] : cur.filter((x) => x !== l) })} />
+                          {l === "person" ? "People" : "Vehicles"}
+                        </label>
+                      );
+                    })}
+                  </div>
+                  <span className="small">YOLO-verified detections only, and only inside this camera's zones. Unusual events are described either way.</span>
+                </div>
+                <label className="field">
+                  <span>Scene notes for Qwen</span>
+                  <textarea rows={5} value={edit.scene_notes ?? ""} onChange={(e) => setEdit({ ...edit, scene_notes: e.target.value })}
+                    placeholder={"What's normal in this view, e.g.\nThe white trailers in the foreground are our solar light towers.\nThe road and Ford dealership in the background are public; traffic there is routine.\nStaff wear hi-vis vests."} />
+                  <span className="small">Added to every synopsis and chat prompt for this camera.</span>
+                </label>
+                {err && <p className="error">{err}</p>}
+                <div className="row"><button onClick={save}>Save</button></div>
+              </div>
+              <div>
+                <h3>Detection zones</h3>
+                <p>{zoneSummary(edit.zones)}</p>
+                <p className="muted small">Mask out busy areas such as a road, or limit detection to the areas you care about. Drawn on a full-resolution still with recent detections shown.</p>
+                {cameras.some((c) => c.id === edit.id) ? (
+                  <button className="ghost" onClick={() => { const c = cameras.find((x) => x.id === edit.id)!; setEdit(null); setZoneCam(c); }}>Edit zones…</button>
+                ) : (
+                  <p className="muted small">Save the camera first.</p>
+                )}
+                <h3 className="spaced">Neighbouring cameras</h3>
+                {cameras.some((c) => c.id === edit.id) ? <NeighborsEditor cameraId={edit.id} cameras={cameras} /> : <p className="muted small">Save the camera first.</p>}
+                <h3 className="spaced">Retention</h3>
+                <label className="row small">
+                  <input type="checkbox" checked={!edit.retention_policy} onChange={(e) => setEdit({
+                    ...edit, retention_days: null,
+                    retention_policy: e.target.checked ? null : { ...(sitePolicy ?? {}), ...(edit.retention_days ? { continuous_days: edit.retention_days } : {}) },
+                  })} />
+                  Use the site retention policy{sitePolicy ? ` (${sitePolicy.continuous_days} days continuous)` : ""}
+                </label>
+                {edit.retention_policy && sitePolicy && (
+                  <PolicyForm value={{ ...sitePolicy, ...edit.retention_policy, keep: { ...sitePolicy.keep, ...(edit.retention_policy.keep ?? {}) } } as RetentionPolicy}
+                    showFloor={false} onChange={(v) => { const { min_free_gb: _floor, ...rest } = v; setEdit({ ...edit, retention_policy: rest }); }} />
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {zoneCam && <ZoneEditor camera={zoneCam} onClose={() => setZoneCam(null)} onSaved={reload} />}
+    </div>
+  );
+}
+
+function zoneSummary(zones: Zone[]): string {
+  const valid = zones.filter((z) => z.points.length >= 3);
+  if (!valid.length) return "Full frame";
+  const masks = valid.filter((z) => z.type === "exclude").length;
+  const areas = valid.length - masks;
+  return [masks && `${masks} mask${masks > 1 ? "s" : ""}`, areas && `${areas} detect-only area${areas > 1 ? "s" : ""}`].filter(Boolean).join(", ");
+}
+
+function Health({ ok }: { ok?: boolean }) {
+  return <span className={`dot ${ok ? "ok" : "bad"}`} />;
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <label className="field">
+      <span>{label}</span>
+      {children}
+    </label>
+  );
+}
+
+/* ------------------------------------------------------------------ System */
+
+export function SystemView() {
+  const [s, setS] = useState<SystemInfo | null>(null);
+  const [fb, setFb] = useState<FeedbackStats | null>(null);
+  useEffect(() => {
+    const load = () => {
+      api.system().then(setS).catch(() => {});
+      api.feedbackStats().then(setFb).catch(() => {});
+    };
+    load();
+    const t = setInterval(load, 5000);
+    return () => clearInterval(t);
+  }, []);
+  if (!s) return <div className="view muted">Loading…</div>;
+  const used = 1 - s.recordings_disk.free_gb / s.recordings_disk.total_gb;
+  return (
+    <div className="view">
+    <div className="stats">
+      <Stat title="Recording disk" value={`${s.recordings_disk.free_gb.toLocaleString()} GB free`} sub={`of ${s.recordings_disk.total_gb.toLocaleString()} GB · ${s.retention_days} days continuous, then AI-selected`}>
+        <div className="meter"><div style={{ width: `${used * 100}%` }} /></div>
+      </Stat>
+      <Stat title="YOLO verifier" value={s.yolo_ready ? "Ready" : "Loading"} sub={`${s.yolo_model} · queue ${s.queues.verify}`} />
+      <Stat title="Qwen synopsis" value={s.vlm_ready ? "Ready" : "Starting / downloading"} sub={`${s.vlm_model} · queue ${s.queues.synopsis}`}
+        action={<QwenFeedbackInfo />} />
+      <Stat title="Events" value={String(Object.values(s.events).reduce((a, b) => a + b, 0))} sub={Object.entries(s.events).map(([k, v]) => `${k} ${v}`).join(" · ")} />
+      {fb && (
+        <Stat title="Synopsis feedback" value={`👍 ${fb.up} · 👎 ${fb.down}`}
+          sub={`${fb.corrected} of ${fb.synopses} synopses corrected${Object.keys(fb.reasons).length ? " · " + Object.entries(fb.reasons).map(([k, v]) => `${k} ${v}`).join(", ") : ""}`} />
+      )}
+      {fb && (
+        <div className="stat">
+          <div className="muted small">Detection verdicts (camera class : pipeline result)</div>
+          {Object.keys(fb.verdicts).length === 0 ? <div className="muted">No verdicts yet</div> : (
+            <table className="kv">
+              <tbody>
+                {Object.entries(fb.verdicts).map(([k, v]) => (
+                  <tr key={k}><td>{k}</td><td>{Object.entries(v).map(([vk, n]) => `${vk.replace("_", " ")} ${n}`).join(" · ")}</td></tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          <a className="small" href="/api/feedback/export">Export feedback dataset (JSONL)</a>
+        </div>
+      )}
+      <BackupStat s={s} />
+      <BaselineStat />
+      <FootageStat />
+      <RemoteStat />
+    </div>
+    <RetentionPanel />
+    </div>
+  );
+}
+
+/** Nightly database copy (backup.py): the part of the NVR that can't be re-recorded. */
+function BackupStat({ s }: { s: SystemInfo }) {
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+  const last = s.backup?.last;
+  const run = async () => {
+    setBusy(true); setMsg("");
+    try { const r = await api.backupNow(); setMsg(`Backed up ${(r.bytes / 1e6).toFixed(1)} MB to ${r.path}`); }
+    catch (e) { setMsg(String(e)); }
+    setBusy(false);
+  };
+  return (
+    <div className="stat">
+      <div className="stat-head">
+        <span className="muted small" title="A consistent copy of the database (synopses, feedback, journeys, names, settings) every night at 03:30; the last 14 are kept. Recordings aren't included: they're replaceable, this isn't.">Database backup ⓘ</span>
+        <button className="ghost small" disabled={busy} onClick={run}>{busy ? "Backing up…" : "Back up now"}</button>
+      </div>
+      <div className="stat-value">{last ? fmtTime(last.at) : "Never"}</div>
+      <div className="muted small">{last ? `${(last.bytes / 1e6).toFixed(1)} MB · ${last.count} copies in ${s.backup?.dir}` : `Nightly at 03:30 into ${s.backup?.dir ?? "the backup folder"}`}</div>
+      {msg && <div className="small">{msg}</div>}
+    </div>
+  );
+}
+
+const TASK_LABELS: Record<string, string> = {
+  assistant: "Ask the NVR", briefing: "Briefings", journey: "Journeys (same person? + narratives)",
+  unusual_review: "Unusual-event synopses", footage_verify: "Footage search checks",
+};
+
+/** Optional larger remote Qwen (e.g. RunPod Serverless): status, which tasks use it, spend, and a test. */
+function RemoteStat() {
+  const [r, setR] = useState<RemoteStatus | null>(null);
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    const load = () => api.remote().then(setR).catch(() => {});
+    load();
+    const t = setInterval(load, 10000);
+    return () => clearInterval(t);
+  }, []);
+  if (!r) return null;
+  const toggle = async (task: string, on: boolean) =>
+    setR(await api.remoteTasks(on ? [...r.tasks, task] : r.tasks.filter((t) => t !== task)));
+  const test = async () => {
+    setBusy(true); setMsg("");
+    try {
+      const t = await api.remoteTest();
+      setR(t.status);
+      setMsg(t.ok ? `OK in ${t.seconds}s (was ${t.was})` : `Failed: ${t.error}`);
+    } catch (e) { setMsg(String(e)); }
+    setBusy(false);
+  };
+  const stateLabel = { off: "Not configured", cold: "Cold (scaled to zero)", warm: "Warm", down: "Down (using local)" }[r.state];
+  return (
+    <div className="stat">
+      <div className="stat-head">
+        <span className="muted small" title="A larger Qwen on a rented cloud GPU for reasoning-heavy tasks. Everything falls back to the local model automatically. Configure NVR_REMOTE_VLM_URL, NVR_REMOTE_VLM_KEY and NVR_REMOTE_VLM_MODEL in .env.">Remote AI ⓘ</span>
+        {r.configured && <button className="ghost small" disabled={busy} onClick={test}>{busy ? "Testing…" : "Test"}</button>}
+      </div>
+      <div className="stat-value">{stateLabel}</div>
+      {!r.configured ? (
+        <div className="muted small">Everything runs on {r.local_model}. Add a RunPod Serverless endpoint in .env to use a larger model for the tasks below.</div>
+      ) : (
+        <>
+          <div className="muted small">{r.model}{r.last_latency_s != null ? ` · last ${r.last_latency_s}s` : ""}{r.last_error && r.state === "down" ? ` · ${r.last_error}` : ""}</div>
+          <div className="remote-tasks">
+            {r.all_tasks.map((t) => (
+              <label key={t} className="row small"><input type="checkbox" checked={r.tasks.includes(t)} onChange={(e) => toggle(t, e.target.checked)} /> {TASK_LABELS[t] ?? t}</label>
+            ))}
+          </div>
+          <div className="muted small">
+            Today: {r.today.requests} requests · ~{Math.round(r.today.billed_s / 60)} GPU-min
+            {r.rate_usd_per_s > 0 ? ` · ~$${r.today.usd.toFixed(2)} of $${r.budget_usd.toFixed(2)} budget` : " · set NVR_REMOTE_RATE_USD_PER_S to enforce a daily budget"}
+          </div>
+        </>
+      )}
+      {msg && <div className="small">{msg}</div>}
+    </div>
+  );
+}
+
+/** Progress of the image-text index behind "Search all footage". */
+function FootageStat() {
+  const [f, setF] = useState<FootageStatus | null>(null);
+  useEffect(() => {
+    const load = () => api.footageStatus().then(setF).catch(() => {});
+    load();
+    const t = setInterval(load, 10000);
+    return () => clearInterval(t);
+  }, []);
+  const ago = (s: number) => (s < 120 ? "live" : s < 7200 ? `${Math.round(s / 60)} min behind` : `${(s / 3600).toFixed(1)} h behind`);
+  return (
+    <div className="stat">
+      <div className="stat-head"><span className="muted small" title="Every few seconds of recording is indexed by what it looks like (OpenCLIP on the YOLO GPU), so Search → All footage can find things no camera event covered. Frames where nothing changed are skipped.">Footage search index ⓘ</span></div>
+      {!f ? <div className="muted">Loading…</div> : (
+        <table className="kv">
+          <tbody>
+            {Object.entries(f.cameras).map(([cam, c]) => (
+              <tr key={cam}><td>{cam}</td><td>{c.frames.toLocaleString()} frames · {c.cursor ? ago(c.backlog_s) : "starting"}{c.oldest ? ` · since ${fmtTime(c.oldest)}` : ""}</td></tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <div className="muted small">{f ? `${f.db_mb.toLocaleString()} MB on the recordings drive${f.model_loaded ? "" : " · model loading"}` : ""}</div>
+    </div>
+  );
+}
+
+/** What the NVR has learned is normal per camera (baseline.py); drives the Unusual badge and Priority. */
+function BaselineStat() {
+  const [b, setB] = useState<BaselineCamera[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  useEffect(() => { api.baseline().then(setB).catch(() => {}); }, []);
+  const rebuild = async () => {
+    setBusy(true); setMsg("");
+    try { const r = await api.rebuildBaseline(); setB(r.cameras); setMsg(`Re-scored ${r.scored} events`); }
+    catch (e) { setMsg(String(e)); }
+    setBusy(false);
+  };
+  return (
+    <div className="stat">
+      <div className="stat-head">
+        <span className="muted small" title="Per camera: what time of day, where in the view, and how long people and vehicles usually stay. Events that break the pattern get an Unusual badge and a higher priority. Rebuilt nightly at 03:00 from the last 4 weeks; false alarms are left out.">What's normal (learned) ⓘ</span>
+        <button className="ghost small" disabled={busy} onClick={rebuild}>{busy ? "Rebuilding…" : "Rebuild"}</button>
+      </div>
+      {!b ? <div className="muted">Loading…</div> : (
+        <table className="kv">
+          <tbody>
+            {b.map((c) => (
+              <tr key={c.camera_id}>
+                <td>{c.camera_id}</td>
+                <td>
+                  {c.days.toFixed(1)} days · {Object.entries(c.events).map(([k, n]) => `${n} ${k}`).join(", ") || "no events"}
+                  {" · "}{c.learning ? <span className="muted">learning</span> : c.time_active ? "active" : <span title="Place and dwell are active; time-of-day needs 7 days">partly active</span>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <div className="muted small">{msg || "Time-of-day needs 7 days; place and dwell need 20 events per label."}</div>
+    </div>
+  );
+}
+
+function Stat({ title, value, sub, children, action }: { title: string; value: string; sub: string; children?: React.ReactNode; action?: React.ReactNode }) {
+  return (
+    <div className="stat">
+      <div className="stat-head"><span className="muted small">{title}</span>{action}</div>
+      <div className="stat-value">{value}</div>
+      {children}
+      <div className="muted small">{sub}</div>
+    </div>
+  );
+}

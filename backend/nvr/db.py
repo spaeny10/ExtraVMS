@@ -1,0 +1,423 @@
+"""SQLite storage (events, cameras, ONVIF rule events, FTS + vector search)."""
+from __future__ import annotations
+
+import json
+import sqlite3
+import struct
+import threading
+import time
+from typing import Any, Iterable
+
+import sqlite_vec
+
+from .config import settings
+
+EMBED_DIM = 768  # nomic-embed-text
+REID_DIM = 512   # OSNet person re-ID
+CLIP_DIM = 512   # OpenCLIP ViT-B-16 (vehicle fingerprints, footage index)
+
+# Vector search relevance: nomic embeddings are unit length, so L2 distance ~0.7 is a strong match and
+# ~1.0 is unrelated (measured: "Person working" -> person synopses 0.71-0.85, label-only vehicle docs 1.01).
+VEC_MAX_DIST = 0.95
+VEC_MAX_GAP = 0.2
+STOPWORDS = {"a", "an", "the", "of", "in", "on", "at", "to", "and", "or", "is", "are", "was", "with", "near",
+             "by", "for", "from", "any", "some", "show", "me", "find", "all", "who", "that", "this"}
+
+SCHEMA = f"""
+CREATE TABLE IF NOT EXISTS cameras (
+    id           TEXT PRIMARY KEY,
+    name         TEXT NOT NULL,
+    host         TEXT NOT NULL,
+    onvif_port   INTEGER NOT NULL DEFAULT 80,
+    rtsp_port    INTEGER NOT NULL DEFAULT 554,
+    username     TEXT NOT NULL DEFAULT 'admin',
+    password     TEXT NOT NULL DEFAULT '',
+    main_path    TEXT NOT NULL DEFAULT '/main',
+    sub_path     TEXT NOT NULL DEFAULT '/sub',
+    enabled      INTEGER NOT NULL DEFAULT 1,
+    zones        TEXT NOT NULL DEFAULT '[]',   -- [{{name, points:[[x,y],...]}}] normalized 0..1
+    retention_days INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS events (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    camera_id     TEXT NOT NULL REFERENCES cameras(id),
+    track_id      TEXT NOT NULL,
+    camera_class  TEXT NOT NULL,
+    camera_conf   REAL,
+    start_ts      REAL NOT NULL,
+    end_ts        REAL,
+    path          TEXT NOT NULL DEFAULT '[]', -- [[ts, l, t, r, b, conf], ...] normalized boxes
+    rules         TEXT NOT NULL DEFAULT '[]', -- ONVIF rule events that fired during the track
+    status        TEXT NOT NULL DEFAULT 'open', -- open|pending|verified|rejected|error
+    yolo_class    TEXT,
+    yolo_conf     REAL,
+    yolo_hits     INTEGER,
+    detections    TEXT,                       -- per sampled frame YOLO boxes
+    snapshot      TEXT,
+    clip          TEXT,
+    synopsis      TEXT,
+    synopsis_json TEXT,
+    threat        TEXT,
+    error         TEXT,
+    created_at    REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS events_cam_ts ON events(camera_id, start_ts);
+CREATE INDEX IF NOT EXISTS events_status ON events(status);
+
+CREATE TABLE IF NOT EXISTS rule_events (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    camera_id TEXT NOT NULL,
+    ts        REAL NOT NULL,
+    topic     TEXT NOT NULL,
+    rule      TEXT,
+    state     TEXT,
+    data      TEXT
+);
+CREATE INDEX IF NOT EXISTS rule_events_cam_ts ON rule_events(camera_id, ts);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id  INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    role      TEXT NOT NULL,              -- user | assistant
+    content   TEXT NOT NULL,
+    frames    TEXT NOT NULL DEFAULT '[]', -- [{{file, t}}] frames the answer was based on
+    at        REAL,                       -- clip time the question was about (seconds)
+    saved     INTEGER NOT NULL DEFAULT 0, -- saved as an event note
+    ts        REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS chat_event ON chat_messages(event_id, id);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL             -- JSON
+);
+
+CREATE TABLE IF NOT EXISTS locks (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    camera_id  TEXT NOT NULL,
+    start_ts   REAL NOT NULL,
+    end_ts     REAL NOT NULL,
+    event_id   INTEGER,             -- set when the lock came from an event
+    note       TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS locks_cam_ts ON locks(camera_id, start_ts);
+
+-- Footage past the continuous window that retention decided to keep (trimmed or whole segments).
+CREATE TABLE IF NOT EXISTS kept_footage (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    camera_id  TEXT NOT NULL,
+    start_ts   REAL NOT NULL,
+    end_ts     REAL NOT NULL,
+    file       TEXT NOT NULL UNIQUE,
+    reasons    TEXT NOT NULL DEFAULT '[]',
+    score      REAL NOT NULL DEFAULT 0,
+    bytes      INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS kept_cam_ts ON kept_footage(camera_id, start_ts);
+
+-- Named Timeline layouts: which cameras are shown / soloed, shared across browsers.
+CREATE TABLE IF NOT EXISTS layouts (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL UNIQUE,
+    config     TEXT NOT NULL,       -- JSON {{visible: [camera ids], solo: camera id | null, order: [camera ids]}}
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
+-- Cross-camera journeys: which cameras neighbour each other, and how long the walk takes.
+CREATE TABLE IF NOT EXISTS camera_links (
+    cam_a   TEXT NOT NULL,
+    cam_b   TEXT NOT NULL,
+    min_s   REAL NOT NULL,          -- may be negative: overlapping fields of view
+    max_s   REAL NOT NULL,
+    one_way INTEGER NOT NULL DEFAULT 0,   -- 1: only a -> b
+    PRIMARY KEY (cam_a, cam_b)
+);
+
+-- Candidate / confirmed "same person" links between two events on different cameras.
+CREATE TABLE IF NOT EXISTS event_links (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    a          INTEGER NOT NULL,    -- earlier event
+    b          INTEGER NOT NULL,    -- later event
+    gap_s      REAL NOT NULL,
+    sim        REAL NOT NULL,       -- re-ID cosine similarity
+    status     TEXT NOT NULL,       -- confirmed | rejected | user_rejected
+    confidence TEXT,
+    reason     TEXT,
+    created_at REAL NOT NULL,
+    UNIQUE (a, b)
+);
+CREATE INDEX IF NOT EXISTS event_links_b ON event_links(b);
+
+CREATE TABLE IF NOT EXISTS journeys (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    first_ts   REAL NOT NULL,
+    last_ts    REAL NOT NULL,
+    cameras    TEXT NOT NULL,       -- JSON [camera ids in order of appearance]
+    synopsis   TEXT,
+    dirty      INTEGER NOT NULL DEFAULT 1,
+    updated_at REAL NOT NULL
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS reid_vec USING vec0(embedding float[{REID_DIM}]);
+CREATE VIRTUAL TABLE IF NOT EXISTS vehicle_vec USING vec0(embedding float[{CLIP_DIM}]);  -- CLIP fingerprint of a verified vehicle
+
+-- Named people and vehicles (identities.py): a centroid fingerprint the operator has put a name to.
+CREATE TABLE IF NOT EXISTS identities (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL,
+    kind       TEXT NOT NULL,              -- person | vehicle
+    embedding  BLOB NOT NULL,
+    notes      TEXT NOT NULL DEFAULT '',
+    sightings  INTEGER NOT NULL DEFAULT 0, -- how many sightings the centroid averages
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
+-- Ask the NVR: site-wide conversations (assistant.py)
+CREATE TABLE IF NOT EXISTS assistant_threads (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    title       TEXT NOT NULL,
+    created_at  REAL NOT NULL,
+    updated_at  REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS assistant_messages (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    thread_id   INTEGER NOT NULL REFERENCES assistant_threads(id) ON DELETE CASCADE,
+    role        TEXT NOT NULL,              -- user | assistant
+    content     TEXT NOT NULL,
+    calls       TEXT,                       -- JSON: what was looked up, plus citation refs
+    model       TEXT,
+    ts          REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS assistant_messages_thread ON assistant_messages(thread_id, id);
+-- Morning briefings (assistant.py)
+CREATE TABLE IF NOT EXISTS briefings (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    period_start REAL NOT NULL,
+    period_end   REAL NOT NULL,
+    headline     TEXT NOT NULL,
+    text         TEXT NOT NULL,             -- bullet lines, with [#id] citations
+    stats        TEXT,                      -- JSON facts the briefing was written from, plus citation refs
+    model        TEXT,
+    created_at   REAL NOT NULL
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(synopsis, labels, content='', contentless_delete=1);
+CREATE VIRTUAL TABLE IF NOT EXISTS events_vec USING vec0(embedding float[{EMBED_DIM}]);
+"""
+
+# Columns added after the first release: (table, column, definition)
+MIGRATIONS = [
+    ("cameras", "scene_notes", "TEXT NOT NULL DEFAULT ''"),
+    ("cameras", "retention_policy", "TEXT"),       # JSON partial override of the site policy; NULL = inherit
+    ("cameras", "synopsis_labels", "TEXT"),        # JSON ["person","vehicle"]: what Qwen describes here; NULL = site default
+    ("events", "clip_start", "REAL"),
+    ("events", "synopsis_original", "TEXT"),   # Qwen's JSON before the user corrected it
+    ("events", "corrected_at", "REAL"),
+    ("events", "feedback", "TEXT"),            # {rating, reasons, verdict, correct_class, note, at}
+    ("events", "status_before_mask", "TEXT"),  # set while status='masked' (zone mask), restored on unmask
+    ("events", "journey_id", "INTEGER"),        # cross-camera journey this event belongs to
+    ("events", "anomaly", "REAL"),              # 0..1 how unusual for this camera (baseline.py)
+    ("events", "anomaly_json", "TEXT"),         # {score, parts, reasons, learning}
+    ("events", "priority", "TEXT"),
+    ("journeys", "model", "TEXT"),              # which Qwen wrote the narrative (local 7B or remote)             # none|low|medium|high: max(threat, unusualness), operator wins
+]
+JSON_FIELDS = ("path", "rules", "detections", "synopsis_json", "synopsis_original", "feedback", "anomaly_json")
+
+
+class Database:
+    def __init__(self, path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.enable_load_extension(True)
+        sqlite_vec.load(self.conn)
+        self.conn.enable_load_extension(False)
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA foreign_keys=ON")
+        self.conn.executescript(SCHEMA)
+        for table, col, definition in MIGRATIONS:
+            cols = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+            if col not in cols:
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {definition}")
+        self.lock = threading.RLock()
+
+    def execute(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
+        with self.lock:
+            return self.conn.execute(sql, tuple(params))
+
+    def execute_insert(self, sql: str, params: Iterable[Any] = ()) -> int:
+        """INSERT and return the new row id (atomically, under the connection lock)."""
+        with self.lock:
+            return self.conn.execute(sql, tuple(params)).lastrowid
+
+    def all(self, sql: str, params: Iterable[Any] = ()) -> list[dict]:
+        return [dict(r) for r in self.execute(sql, params).fetchall()]
+
+    def one(self, sql: str, params: Iterable[Any] = ()) -> dict | None:
+        row = self.execute(sql, params).fetchone()
+        return dict(row) if row else None
+
+    # ---- cameras
+    def cameras(self, enabled_only: bool = False) -> list[dict]:
+        sql = "SELECT * FROM cameras" + (" WHERE enabled=1" if enabled_only else "") + " ORDER BY id"
+        cams = self.all(sql)
+        for c in cams:
+            c["zones"] = json.loads(c["zones"])
+            c["retention_policy"] = json.loads(c["retention_policy"]) if c.get("retention_policy") else None
+            c["synopsis_labels"] = json.loads(c["synopsis_labels"]) if c.get("synopsis_labels") else None
+        return cams
+
+    def upsert_camera(self, cam: dict) -> None:
+        cols = ["id", "name", "host", "onvif_port", "rtsp_port", "username", "password",
+                "main_path", "sub_path", "enabled", "zones", "retention_days", "scene_notes", "retention_policy",
+                "synopsis_labels"]
+        data = {**cam, "zones": json.dumps(cam.get("zones", []))}
+        if "retention_policy" in data:
+            data["retention_policy"] = json.dumps(data["retention_policy"]) if data["retention_policy"] else None
+        if "synopsis_labels" in data:
+            data["synopsis_labels"] = json.dumps(data["synopsis_labels"]) if data["synopsis_labels"] is not None else None
+        present = [c for c in cols if c in data]
+        self.execute(
+            f"INSERT INTO cameras ({','.join(present)}) VALUES ({','.join('?' * len(present))}) "
+            f"ON CONFLICT(id) DO UPDATE SET {','.join(f'{c}=excluded.{c}' for c in present if c != 'id')}",
+            [data[c] for c in present],
+        )
+
+    # ---- events
+    def create_event(self, **fields) -> int:
+        fields.setdefault("created_at", time.time())
+        for k in JSON_FIELDS:
+            if k in fields and fields[k] is not None and not isinstance(fields[k], str):
+                fields[k] = json.dumps(fields[k])
+        cols = list(fields)
+        cur = self.execute(f"INSERT INTO events ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
+                           [fields[c] for c in cols])
+        return cur.lastrowid
+
+    def update_event(self, event_id: int, **fields) -> None:
+        for k in JSON_FIELDS:
+            if k in fields and fields[k] is not None and not isinstance(fields[k], str):
+                fields[k] = json.dumps(fields[k])
+        self.execute(f"UPDATE events SET {','.join(f'{k}=?' for k in fields)} WHERE id=?",
+                     [*fields.values(), event_id])
+
+    def event(self, event_id: int) -> dict | None:
+        e = self.one("SELECT *, EXISTS(SELECT 1 FROM locks WHERE locks.event_id = events.id) AS locked "
+                     "FROM events WHERE id=?", [event_id])
+        return decode_event(e) if e else None
+
+    def index_event_text(self, event_id: int, synopsis: str, labels: str, embedding: list[float] | None) -> None:
+        """(Re)index an event for search; replaces any previous entry."""
+        with self.lock:
+            self.conn.execute("DELETE FROM events_fts WHERE rowid=?", (event_id,))
+            self.conn.execute("DELETE FROM events_vec WHERE rowid=?", (event_id,))
+            self.conn.execute("INSERT INTO events_fts(rowid, synopsis, labels) VALUES (?,?,?)",
+                              (event_id, synopsis, labels))
+            if embedding:
+                self.conn.execute("INSERT INTO events_vec(rowid, embedding) VALUES (?,?)",
+                                  (event_id, serialize(embedding)))
+
+    def unindex_event(self, event_id: int) -> None:
+        with self.lock:
+            self.conn.execute("DELETE FROM events_fts WHERE rowid=?", (event_id,))
+            self.conn.execute("DELETE FROM events_vec WHERE rowid=?", (event_id,))
+
+    # ---- person re-ID embeddings
+    def set_vec(self, table: str, row_id: int, vec) -> None:
+        assert table in ("reid_vec", "vehicle_vec")
+        with self.lock:
+            self.conn.execute(f"DELETE FROM {table} WHERE rowid=?", (row_id,))
+            self.conn.execute(f"INSERT INTO {table}(rowid, embedding) VALUES (?,?)", (row_id, serialize(list(map(float, vec)))))
+
+    def get_vec(self, table: str, row_id: int):
+        import numpy as np
+        assert table in ("reid_vec", "vehicle_vec")
+        row = self.one(f"SELECT embedding FROM {table} WHERE rowid=?", [row_id])
+        return np.frombuffer(row["embedding"], dtype=np.float32) if row else None
+
+    def set_reid(self, event_id: int, vec) -> None:
+        with self.lock:
+            self.conn.execute("DELETE FROM reid_vec WHERE rowid=?", (event_id,))
+            self.conn.execute("INSERT INTO reid_vec(rowid, embedding) VALUES (?,?)", (event_id, serialize(list(map(float, vec)))))
+
+    def get_reid(self, event_id: int):
+        import numpy as np
+        row = self.one("SELECT embedding FROM reid_vec WHERE rowid=?", [event_id])
+        return np.frombuffer(row["embedding"], dtype=np.float32) if row else None
+
+    # ---- settings
+    def get_setting(self, key: str, default=None):
+        row = self.one("SELECT value FROM settings WHERE key=?", [key])
+        return json.loads(row["value"]) if row else default
+
+    def set_setting(self, key: str, value) -> None:
+        self.execute("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                     [key, json.dumps(value)])
+
+    # ---- chat
+    def chat(self, event_id: int) -> list[dict]:
+        rows = self.all("SELECT * FROM chat_messages WHERE event_id=? ORDER BY id", [event_id])
+        for r in rows:
+            r["frames"] = json.loads(r["frames"])
+        return rows
+
+    def add_chat(self, event_id: int, role: str, content: str, frames: list | None = None, at: float | None = None) -> int:
+        return self.execute("INSERT INTO chat_messages (event_id, role, content, frames, at, ts) VALUES (?,?,?,?,?,?)",
+                            [event_id, role, content, json.dumps(frames or []), at, time.time()]).lastrowid
+
+    def search(self, query: str, embedding: list[float] | None, limit: int = 50,
+               camera_id: str | None = None, since: float | None = None, until: float | None = None,
+               label: str | None = None, min_yolo: float = 0) -> list[dict]:
+        """Hybrid search: reciprocal-rank fusion of FTS5 keyword and vector results.
+
+        Vector kNN always returns its k nearest neighbours, however unrelated, so vector hits are kept only
+        when they are close in absolute terms (unit vectors: L2 < VEC_MAX_DIST) and relative to the best hit.
+        """
+        scores: dict[int, float] = {}
+        words = [t for t in query.replace('"', " ").lower().split() if t and t not in STOPWORDS]
+        if words:
+            terms = " OR ".join(f'"{t}"' for t in words)
+            for rank, r in enumerate(self.all(
+                    "SELECT rowid FROM events_fts WHERE events_fts MATCH ? ORDER BY rank LIMIT 200", [terms])):
+                scores[r["rowid"]] = scores.get(r["rowid"], 0) + 1 / (60 + rank)
+        if embedding:
+            hits = self.all("SELECT rowid, distance FROM events_vec WHERE embedding MATCH ? AND k = 200 ORDER BY distance",
+                            [serialize(embedding)])
+            if hits:
+                cutoff = min(VEC_MAX_DIST, hits[0]["distance"] + VEC_MAX_GAP)
+                for rank, r in enumerate(h for h in hits if h["distance"] <= cutoff):
+                    scores[r["rowid"]] = scores.get(r["rowid"], 0) + 1 / (60 + rank)
+        if not scores:
+            return []
+        ids = list(scores)
+        where, params = [f"id IN ({','.join('?' * len(ids))})", "status != 'masked'"], list(ids)
+        for col, val in (("camera_id", camera_id), ("camera_class", label)):
+            if val:
+                where.append(f"{col}=?"); params.append(val)
+        if since:
+            where.append("start_ts>=?"); params.append(since)
+        if until:
+            where.append("start_ts<=?"); params.append(until)
+        if min_yolo > 0:
+            where.append("yolo_conf>=?"); params.append(min_yolo)
+        rows = [decode_event(r) for r in self.all(f"SELECT * FROM events WHERE {' AND '.join(where)}", params)]
+        rows.sort(key=lambda r: (-scores[r["id"]], -r["start_ts"]))  # equal relevance: newest first
+        return [{**r, "score": scores[r["id"]]} for r in rows[:limit]]
+
+
+def decode_event(e: dict) -> dict:
+    for k in JSON_FIELDS:
+        if e.get(k):
+            e[k] = json.loads(e[k])
+    return e
+
+
+def serialize(vec: list[float]) -> bytes:
+    return struct.pack(f"{len(vec)}f", *vec)
+
+
+db = Database(settings.data_dir / "nvr.db")
