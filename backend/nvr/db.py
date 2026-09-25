@@ -179,6 +179,17 @@ CREATE TABLE IF NOT EXISTS identities (
     updated_at REAL NOT NULL
 );
 
+-- One row per look (outfit) of a named identity; identities.embedding stays the look with most sightings.
+CREATE TABLE IF NOT EXISTS identity_looks (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    identity_id INTEGER NOT NULL REFERENCES identities(id) ON DELETE CASCADE,
+    embedding   BLOB NOT NULL,
+    sightings   INTEGER NOT NULL DEFAULT 0,
+    created_at  REAL NOT NULL,
+    updated_at  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS identity_looks_ident ON identity_looks(identity_id);
+
 -- Ask the NVR: site-wide conversations (assistant.py)
 CREATE TABLE IF NOT EXISTS assistant_threads (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -252,6 +263,10 @@ class Database:
             self.conn.execute("DROP TABLE vehicle_vec")
             self.conn.execute("DELETE FROM identities WHERE kind='vehicle' AND length(embedding) != ?", [VEHICLE_DIM * 4])
         self.conn.executescript(SCHEMA)
+        # identities named before looks existed: their centroid becomes the first look
+        self.conn.execute("INSERT INTO identity_looks (identity_id, embedding, sightings, created_at, updated_at) "
+                          "SELECT id, embedding, sightings, created_at, updated_at FROM identities "
+                          "WHERE id NOT IN (SELECT identity_id FROM identity_looks)")
         for table, col, definition in MIGRATIONS:
             cols = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
             if col not in cols:

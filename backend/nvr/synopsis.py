@@ -102,7 +102,8 @@ def event_facts(event: dict, camera: dict) -> str:
         t0 = event["start_ts"]
         lines.append("Places (named by the operator) the " + event["camera_class"] + " walked into, in order: "
                      + ", ".join(f"'{a['name']}' at +{max(0, a['from'] - t0):.0f} s" for a in event["areas"])
-                     + ". Use these names in the synopsis.")
+                     + ". In the summary say which of these places they went into, by name (e.g. 'walked into "
+                     + f"{event['areas'][0]['name']}'), never just 'a bathroom' or 'a door'.")
     where = _zone_fact(event, camera)
     if where:  # otherwise Qwen tends to call anything with the road behind it "background highway traffic"
         lines.append(where)

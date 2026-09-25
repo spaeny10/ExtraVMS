@@ -104,7 +104,8 @@ export function IdentitiesView({ cameras }: { cameras: Camera[] }) {
                 </div>
                 {naming?.key === c.key && (
                   <form className="row small identity-name" onSubmit={(e) => { e.preventDefault(); saveName(c); }}>
-                    <input autoFocus placeholder={kind === "person" ? "e.g. Shawn" : "e.g. UPS truck"} value={naming.name} onChange={(e) => setNaming({ ...naming, name: e.target.value })} />
+                    <input autoFocus list="known-names" placeholder={kind === "person" ? "e.g. Shawn (pick an existing name to add this look to them)" : "e.g. UPS truck"} value={naming.name} onChange={(e) => setNaming({ ...naming, name: e.target.value })} />
+                    <datalist id="known-names">{r?.named.map((n) => <option key={n.id} value={n.name} />)}</datalist>
                     <input placeholder="notes, e.g. owner / weekly delivery (used in Qwen's prompts)" value={naming.notes} onChange={(e) => setNaming({ ...naming, notes: e.target.value })} />
                     <button type="submit" className="small">Save</button>
                   </form>
@@ -127,7 +128,7 @@ export function IdentitiesView({ cameras }: { cameras: Camera[] }) {
         <details className="muted small identity-known">
           <summary>Known {kind === "person" ? "people" : "vehicles"} ({r.named.length})</summary>
           <ul className="plain">
-            {r.named.map((n) => <li key={n.id}><strong>{n.name}</strong>{n.watch ? " 👁" : ""}{n.notes ? ` — ${n.notes}` : ""} · learned from {n.sightings} sightings · {fmtTime(n.updated_at)}
+            {r.named.map((n) => <li key={n.id}><strong>{n.name}</strong>{n.watch ? " 👁" : ""}{n.notes ? ` — ${n.notes}` : ""} · learned from {n.sightings} sightings{(n.looks ?? 1) > 1 ? ` in ${n.looks} looks` : ""} · {fmtTime(n.updated_at)}
               <button className="linkish small" onClick={async () => { await api.deleteIdentity(n.id); load(); }}>forget</button></li>)}
           </ul>
         </details>

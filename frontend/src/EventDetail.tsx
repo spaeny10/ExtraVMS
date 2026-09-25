@@ -173,6 +173,7 @@ function WatchControl({ e, onChange }: { e: NvrEvent; onChange: () => void }) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [note, setNote] = useState("");
+  const [known, setKnown] = useState<NamedIdentity[]>([]);  // so an existing name can be picked (adds this look)
   const isPerson = e.camera_class === "person";
   useEffect(() => { api.eventIdentity(e.id).then(setIdent).catch(() => setIdent(null)); }, [e.id, e.watched]);
   if (ident === undefined) return null;
@@ -203,14 +204,16 @@ function WatchControl({ e, onChange }: { e: NvrEvent; onChange: () => void }) {
   }
   return (
     <span className="watch-control">
-      <button className="ghost" onClick={() => setOpen(!open)} title="Flag future sightings of this person's appearance (clothing, build) as medium priority">
+      <button className="ghost" onClick={() => { setOpen(!open); if (!open) api.identities(e.camera_class as "person" | "vehicle", 0).then((x) => setKnown(x.named)).catch(() => {}); }}
+        title="Flag future sightings of this person's appearance (clothing, build) as medium priority. Re-ID sees the outfit, not the face: name them again in each outfit.">
         👁 Watch this {isPerson ? "person" : "vehicle"}
       </button>
       {open && (
         <form className="watch-form" onSubmit={start}>
           {ident
             ? <span>Recognised as <strong>{ident.name}</strong>.</span>
-            : <input autoFocus placeholder={isPerson ? "Name, e.g. blue shirt pink hat" : "Name, e.g. white van"} value={name} onChange={(ev) => setName(ev.target.value)} />}
+            : <><input autoFocus list="known-names-watch" placeholder={isPerson ? "Name (pick a known name to add this look to them)" : "Name, e.g. white van"} value={name} onChange={(ev) => setName(ev.target.value)} />
+                <datalist id="known-names-watch">{known.map((n) => <option key={n.id} value={n.name} />)}</datalist></>}
           <input placeholder="Why (optional, shown with each sighting)" value={note} onChange={(ev) => setNote(ev.target.value)} />
           <button type="submit" className="small" disabled={!ident && !name.trim()}>Watch</button>
           <button type="button" className="ghost small" onClick={() => setOpen(false)}>Cancel</button>

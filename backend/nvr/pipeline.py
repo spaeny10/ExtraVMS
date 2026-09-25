@@ -222,6 +222,11 @@ class Pipeline:
         result = await vlm.synopsis(e, camera, images, self.correction_examples(e["camera_id"], label=e["camera_class"]))
         result["model"] = result.pop("_model", None)  # shown as a small tag in the event viewer
         summary = result.get("summary", "").strip()
+        names = [a["name"] for a in (e.get("areas") or [])]
+        if names and not any(n.lower() in summary.lower() for n in names):
+            # the 7B model sometimes ignores the operator's place names: state them anyway
+            summary = (summary.rstrip(".") + ". " if summary else "") + "Went into " + ", then ".join(dict.fromkeys(names)) + "."
+            result["summary"] = summary
         db.update_event(event_id, synopsis=summary, synopsis_json=result, threat=result.get("threat_level"), error=None)
         policy.check(event_id, camera)          # site rules (who may tow what) now that Qwen has looked
         baseline.apply(event_id, rescore=False)  # threat changed: update priority

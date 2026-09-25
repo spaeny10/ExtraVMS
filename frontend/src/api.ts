@@ -231,7 +231,7 @@ export type IdentityCluster = {
   sightings: number; first_ts: number; last_ts: number; on_site_s: number; cameras: string[]; cover: number; description: string | null;
   priority: Threat; unusual: boolean; events: IdentitySighting[];
 };
-export type NamedIdentity = { id: number; name: string; kind: string; notes: string; sightings: number; updated_at: number; watch: number | boolean; watch_note: string };
+export type NamedIdentity = { id: number; name: string; kind: string; notes: string; sightings: number; updated_at: number; watch: number | boolean; watch_note: string; looks?: number };
 export type IdentitiesResult = { kind: string; since: number; until: number; clusters: IdentityCluster[]; sightings: number; named: NamedIdentity[] };
 
 export type SystemInfo = {

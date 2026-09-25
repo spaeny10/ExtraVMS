@@ -131,6 +131,21 @@ def test_color_hist_separates_white_from_black():
     assert identities.color_hist(np.full((60, 120, 3), 225, np.uint8)) @ hw > 0.9  # same colour, slightly darker
 
 
+def test_second_outfit_becomes_a_new_look():
+    ident = identities.name_cluster("person", "Sam", [add("cam1", NOW - 600, vec=person_vec(A))])
+    assert ident["looks"] == 1
+    other = add("cam1", NOW - 500, vec=person_vec(C))       # same person, different clothes (unrelated vector)
+    assert identities.identity_facts("person", other) is None
+    ident = identities.name_cluster("person", "Sam", [other])
+    assert ident["looks"] == 2 and ident["sightings"] == 2
+    assert "Sam" in (identities.identity_facts("person", add("cam2", NOW - 20, vec=person_vec(C))) or "")
+    assert "Sam" in (identities.identity_facts("person", add("cam2", NOW - 10, vec=person_vec(A))) or "")
+    ident = identities.name_cluster("person", "Sam", [add("cam1", NOW - 400, vec=person_vec(A))])
+    assert ident["looks"] == 2 and ident["sightings"] == 3  # resembles look A: refined, not a third look
+    identities.delete_identity(ident["id"])
+    assert not db.all("SELECT 1 FROM identity_looks WHERE identity_id=?", [ident["id"]])
+
+
 if __name__ == "__main__":
     setup_module()
     for name, fn in list(globals().items()):

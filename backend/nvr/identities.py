@@ -6,8 +6,11 @@ vehicles by shape and setting ("pickup in this yard"): a white and a black picku
 pulls them apart while the same truck in different light still matches. Sightings in a time window are joined by
 average-link clustering; confirmed cross-camera journeys always count as the same person.
 
-Named identities ("Shawn", "UPS truck") are a stored centroid; any cluster whose centroid is close enough
-gets the name. Naming a cluster adds its sightings to that centroid, so recognition improves over time.
+Named identities ("Shawn", "UPS truck") hold one or more *looks*: a centroid per outfit / appearance
+(identity_looks). A sighting matches the identity if it is close to any look. Naming a cluster averages it into
+the nearest look when it resembles one, otherwise it becomes a new look: the same person in a different shirt
+on another day is recognised once you have named them in that shirt. Person re-ID sees clothing and build,
+not faces, so each outfit has to be taught once.
 """
 from __future__ import annotations
 
@@ -187,10 +190,24 @@ def _vectors(kind: str, events: list[dict]) -> tuple[list[dict], np.ndarray]:
 
 
 def named(kind: str) -> list[dict]:
+    """Named identities with their looks: r["vecs"] (unit vectors) and r["vec"] (the main look) for prompts/UI."""
     rows = db.all("SELECT id, name, kind, notes, embedding, sightings, updated_at, watch, watch_note FROM identities WHERE kind=? ORDER BY name", [kind])
+    looks = db.all("SELECT identity_id, embedding FROM identity_looks ORDER BY sightings DESC, id")
+    by_id: dict[int, list] = {}
+    for lk in looks:
+        v = np.frombuffer(lk["embedding"], dtype=np.float32).astype(np.float64)
+        by_id.setdefault(lk["identity_id"], []).append(v / (np.linalg.norm(v) + 1e-9))
     for r in rows:
-        r["vec"] = np.frombuffer(r.pop("embedding"), dtype=np.float32).astype(np.float64)
+        main = np.frombuffer(r.pop("embedding"), dtype=np.float32).astype(np.float64)
+        r["vecs"] = by_id.get(r["id"]) or [main / (np.linalg.norm(main) + 1e-9)]
+        r["vec"] = r["vecs"][0]
+        r["looks"] = len(r["vecs"])
     return rows
+
+
+def best_look(ident: dict, v: np.ndarray) -> float:
+    """Cosine similarity of a unit vector to the identity's closest look."""
+    return max(float(lk @ v) for lk in ident["vecs"])
 
 
 def clusters(kind: str, since: float, until: float | None = None, camera_id: str | None = None) -> dict:
@@ -229,7 +246,7 @@ def clusters(kind: str, since: float, until: float | None = None, camera_id: str
         centroid /= np.linalg.norm(centroid) + 1e-9
         best, best_sim = None, 0.0
         for nm in names:
-            sim = float(nm["vec"] @ centroid / (np.linalg.norm(nm["vec"]) + 1e-9))
+            sim = best_look(nm, centroid)
             if sim >= NAME_SIM[kind] and sim > best_sim:
                 best, best_sim = nm, sim
         out.append(_summary(kind, members, cams, best, best_sim))
@@ -239,7 +256,7 @@ def clusters(kind: str, since: float, until: float | None = None, camera_id: str
     for i, c in enumerate(out):
         c["key"] = f"{kind[0]}{i + 1}"
     return {"kind": kind, "since": since, "until": until, "clusters": out, "sightings": len(events),
-            "named": [{k: v for k, v in n.items() if k != "vec"} for n in names]}
+            "named": [{k: v for k, v in n.items() if k not in ("vec", "vecs")} for n in names]}
 
 
 def _summary(kind: str, members: list[dict], cams: dict, identity: dict | None, sim: float, fingerprinted: bool = True) -> dict:
@@ -262,31 +279,49 @@ def _summary(kind: str, members: list[dict], cams: dict, identity: dict | None, 
 # ---------------------------------------------------------------- naming
 
 def name_cluster(kind: str, name: str, event_ids: list[int], notes: str = "") -> dict:
-    """Give these sightings a name. Their fingerprints are averaged into the identity's centroid (created or
-    merged into an existing identity of that name)."""
+    """Give these sightings a name. Their fingerprint joins the identity's nearest look when it resembles one
+    (>= GROUP_SIM), otherwise it becomes a new look (a different outfit). Creates the identity if needed."""
     name = name.strip()
     have, V = _vectors(kind, [{"id": i} for i in event_ids])
     if not len(have):
         raise ValueError("none of these sightings has a fingerprint")
     vec, n = V.mean(axis=0), len(have)
-    existing = db.one("SELECT id, embedding, sightings FROM identities WHERE kind=? AND name=? COLLATE NOCASE", [kind, name])
-    if existing:
-        old = np.frombuffer(existing["embedding"], dtype=np.float32).astype(np.float64)
-        total = existing["sightings"] + n
-        vec = (old * existing["sightings"] + vec * n) / total
-        n = total
-    vec = (vec / (np.linalg.norm(vec) + 1e-9)).astype(np.float32)
-    if existing:
-        db.execute("UPDATE identities SET embedding=?, sightings=?, notes=COALESCE(NULLIF(?, ''), notes), updated_at=? WHERE id=?",
-                   [vec.tobytes(), n, notes, time.time(), existing["id"]])
-        iid = existing["id"]
-    else:
+    vec /= np.linalg.norm(vec) + 1e-9
+    now = time.time()
+    existing = db.one("SELECT id, sightings FROM identities WHERE kind=? AND name=? COLLATE NOCASE", [kind, name])
+    if not existing:
         iid = db.execute_insert("INSERT INTO identities (name, kind, embedding, notes, sightings, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
-                                [name, kind, vec.tobytes(), notes, n, time.time(), time.time()])
+                                [name, kind, vec.astype(np.float32).tobytes(), notes, n, now, now])
+        db.execute("INSERT INTO identity_looks (identity_id, embedding, sightings, created_at, updated_at) VALUES (?,?,?,?,?)",
+                   [iid, vec.astype(np.float32).tobytes(), n, now, now])
+        return get_identity(iid)
+    iid = existing["id"]
+    looks = db.all("SELECT id, embedding, sightings FROM identity_looks WHERE identity_id=?", [iid])
+    best, best_sim = None, -1.0
+    for lk in looks:
+        u = np.frombuffer(lk["embedding"], dtype=np.float32).astype(np.float64)
+        sim = float(u / (np.linalg.norm(u) + 1e-9) @ vec)
+        if sim > best_sim:
+            best, best_sim = lk, sim
+    if best and best_sim >= GROUP_SIM[kind]:  # same look: refine its centroid
+        old = np.frombuffer(best["embedding"], dtype=np.float32).astype(np.float64)
+        total = best["sightings"] + n
+        merged = (old * best["sightings"] + vec * n) / total
+        merged /= np.linalg.norm(merged) + 1e-9
+        db.execute("UPDATE identity_looks SET embedding=?, sightings=?, updated_at=? WHERE id=?",
+                   [merged.astype(np.float32).tobytes(), total, now, best["id"]])
+    else:  # a new outfit / appearance of the same identity
+        db.execute("INSERT INTO identity_looks (identity_id, embedding, sightings, created_at, updated_at) VALUES (?,?,?,?,?)",
+                   [iid, vec.astype(np.float32).tobytes(), n, now, now])
+    main = db.one("SELECT embedding, SUM(sightings) OVER () AS total FROM identity_looks WHERE identity_id=? "
+                  "ORDER BY sightings DESC, id LIMIT 1", [iid])
+    db.execute("UPDATE identities SET embedding=?, sightings=?, notes=COALESCE(NULLIF(?, ''), notes), updated_at=? WHERE id=?",
+               [main["embedding"], main["total"], notes, now, iid])
     return get_identity(iid)
 
 
-IDENT_COLS = "id, name, kind, notes, sightings, updated_at, watch, watch_note"
+IDENT_COLS = ("id, name, kind, notes, sightings, updated_at, watch, watch_note, "
+              "(SELECT COUNT(*) FROM identity_looks WHERE identity_id = identities.id) AS looks")
 
 
 def get_identity(iid: int) -> dict | None:
@@ -312,7 +347,7 @@ def match_identity(kind: str, event_id: int) -> tuple[dict, float] | None:
     v /= np.linalg.norm(v) + 1e-9
     best, best_sim = None, 0.0
     for n in named(kind):
-        sim = float(n["vec"] @ v / (np.linalg.norm(n["vec"]) + 1e-9))
+        sim = best_look(n, v)
         if sim >= NAME_SIM[kind] and sim > best_sim:
             best, best_sim = n, sim
     return (best, best_sim) if best else None
@@ -349,6 +384,7 @@ def set_watch(iid: int, watch: bool, note: str | None = None, recheck_hours: flo
 
 
 def delete_identity(iid: int) -> None:
+    db.execute("DELETE FROM identity_looks WHERE identity_id=?", [iid])
     db.execute("DELETE FROM identities WHERE id=?", [iid])
 
 
