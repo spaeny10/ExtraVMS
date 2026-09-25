@@ -181,8 +181,17 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
   const isPhone = useIsPhone();
   const autoSolo = useRef(false);
   useEffect(() => {  // a phone can't show a grid of full-resolution streams: one camera at a time
-    if (isPhone && !config.solo && allIds.length) { autoSolo.current = true; setConfig((c) => ({ ...c, solo: allIds[0] })); }
-    else if (!isPhone && autoSolo.current) { autoSolo.current = false; setConfig((c) => ({ ...c, solo: null })); }  // back to the grid on a desktop
+    const flag = "timelineAutoSolo"; // survives a reload, so a phone visit never leaves a desktop stuck on one camera
+    const wasAuto = autoSolo.current || localStorage.getItem(flag) === "1";
+    if (isPhone && !config.solo && allIds.length) {
+      autoSolo.current = true;
+      try { localStorage.setItem(flag, "1"); } catch { /* private mode */ }
+      setConfig((c) => ({ ...c, solo: allIds[0] }));
+    } else if (!isPhone && wasAuto) {  // back to the grid on a desktop
+      autoSolo.current = false;
+      try { localStorage.removeItem(flag); } catch { /* private mode */ }
+      setConfig((c) => ({ ...c, solo: null }));
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isPhone, allIds.join(",")]);
   const visibleIds = allIds.filter((id) => config.visible == null || config.visible.includes(id));
