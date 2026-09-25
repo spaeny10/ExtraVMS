@@ -201,6 +201,9 @@ export type FootageStatus = {
   cameras: Record<string, { frames: number; oldest: number | null; newest: number | null; cursor: number | null; backlog_s: number }>;
 };
 
+/** How Find reads a query (backend assistant.parse_query). */
+export type ParsedQuery = { since: number | null; until: number | null; time_label: string | null; text: string; footage_text: string | null; question: boolean };
+
 /* ---- Home */
 export type HomeCamera = { id: string; name: string; stream_ready: boolean; metadata: boolean; metadata_last: number | null; onvif_events: boolean; today: Record<string, number>; health: StreamHealth };
 export type HomeData = {
@@ -257,10 +260,11 @@ export const api = {
     req<NvrEvent[]>(`/api/events?${qs(p)}`),
   event: (id: number) => req<NvrEvent>(`/api/events/${id}`),
   reprocess: (id: number) => req(`/api/events/${id}/reprocess`, { method: "POST" }),
-  search: (q: string, camera?: string, minYolo?: number, since?: number) =>
-    req<NvrEvent[]>(`/api/search?${qs({ q, camera, min_yolo: minYolo || undefined, since })}`),
-  footageSearch: (q: string, camera?: string, since?: number) =>
-    req<FootageMoment[]>(`/api/footage/search?${qs({ q, camera, since })}`),
+  search: (q: string, camera?: string, minYolo?: number, since?: number, until?: number) =>
+    req<NvrEvent[]>(`/api/search?${qs({ q, camera, min_yolo: minYolo || undefined, since, until })}`),
+  footageSearch: (q: string, camera?: string, since?: number, until?: number) =>
+    req<FootageMoment[]>(`/api/footage/search?${qs({ q, camera, since, until })}`),
+  parseQuery: (q: string) => req<ParsedQuery>(`/api/query/parse?${qs({ q })}`),
   footageVerify: (b: { camera_id: string; ts: number; tile: number; q: string }) =>
     req<FootageMatch>("/api/footage/verify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(b) }),
   footageStatus: () => req<FootageStatus>("/api/footage/status"),

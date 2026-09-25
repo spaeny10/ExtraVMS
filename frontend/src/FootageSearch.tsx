@@ -9,7 +9,11 @@ const VERIFY_TOP = 8;
 type Checked = FootageMoment & { check?: FootageMatch | "pending" | "error" };
 
 /** Results from the image-text index of all recorded footage (not just events). */
-export function FootageResults({ q, nonce, cameras, camera, sinceHours }: { q: string; nonce: number; cameras: Camera[]; camera: string; sinceHours: number }) {
+export function FootageResults({ q, nonce, cameras, camera, sinceHours, window: win }: {
+  q: string; nonce: number; cameras: Camera[]; camera: string; sinceHours: number;
+  /** a window read from the query ("today"); overrides sinceHours */
+  window?: { since: number | null; until: number | null } | null;
+}) {
   const [results, setResults] = useState<Checked[] | null>(null);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
@@ -21,8 +25,8 @@ export function FootageResults({ q, nonce, cameras, camera, sinceHours }: { q: s
     if (!q.trim() || !nonce) return;
     const my = ++run.current;
     setBusy(true); setErr(""); setResults(null);
-    const since = sinceHours ? Date.now() / 1000 - sinceHours * 3600 : undefined;
-    api.footageSearch(q, camera || undefined, since).then(async (ms) => {
+    const since = win?.since ?? (sinceHours ? Date.now() / 1000 - sinceHours * 3600 : undefined);
+    api.footageSearch(q, camera || undefined, since, win?.until ?? undefined).then(async (ms) => {
       if (run.current !== my) return;
       setResults(ms);
       setBusy(false);

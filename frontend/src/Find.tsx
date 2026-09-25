@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, ask, fmtTime, type AskMeta, type AssistantMessage, type AssistantThread, type Camera, type NvrEvent } from "./api";
+import { api, ask, fmtTime, type AskMeta, type AssistantMessage, type AssistantThread, type Camera, type NvrEvent, type ParsedQuery } from "./api";
 import { Answer } from "./Ask";
 import { ConfidenceSlider, loadNumber, saveNumber } from "./ConfidenceSlider";
 import { EventCard } from "./Events";
@@ -24,6 +24,7 @@ type Pending = { question: string; answer: string; meta?: AskMeta; model?: strin
 export function FindView({ cameras }: { cameras: Camera[] }) {
   const [q, setQ] = useState("");
   const [submitted, setSubmitted] = useState("");   // the text the results below are for
+  const [parsed, setParsed] = useState<ParsedQuery | null>(null);  // time window / footage phrase read from it
   const [camera, setCamera] = useState("");
   const [hours, setHours] = useState(24);
   const [minYolo, setMinYolo] = useState(() => loadNumber("minYolo.search"));
@@ -54,10 +55,16 @@ export function FindView({ cameras }: { cameras: Camera[] }) {
   const search = async (text = q, conf = minYolo) => {
     const t = text.trim();
     if (!t) return;
+    setBusy(true);
+    setEvents(null);
+    // "today", "last night", "past 3 hours"... in the text set the window (over the time chips)
+    const p = await api.parseQuery(t).catch(() => null);
+    setParsed(p);
     setSubmitted(t);
     setNonce(Date.now());
-    setBusy(true);
-    try { setEvents(await api.search(t, camera || undefined, conf, since())); }
+    const s = p?.time_label ? p.since ?? undefined : since();
+    const u = p?.time_label ? p.until ?? undefined : undefined;
+    try { setEvents(await api.search(p?.text || t, camera || undefined, conf, s, u)); }
     catch { setEvents([]); }
     setBusy(false);
   };
@@ -165,17 +172,23 @@ export function FindView({ cameras }: { cameras: Camera[] }) {
       {submitted && (
         <>
           <section>
-            <h3>Events <span className="muted small">matching "{submitted}"{events ? ` · ${events.length}` : ""}</span></h3>
+            <h3>Events <span className="muted small">matching "{parsed?.text || submitted}"{parsed?.time_label ? ` · ${parsed.time_label}` : ""}{events ? ` · ${events.length}` : ""}</span></h3>
             {busy && !events && <SkeletonGrid n={3} />}
-            {events && events.length === 0 && <div className="empty">No matching events{hours ? " in this period" : ""}.</div>}
+            {events && events.length === 0 && <div className="empty">No matching events {parsed?.time_label ? parsed.time_label : hours ? "in this period" : ""}.</div>}
             <div className="event-grid">
               {events?.map((e) => <EventCard key={e.id} e={e} cameraName={name(e.camera_id)} onOpen={() => setOpen(e.id)} />)}
             </div>
           </section>
-          <section>
-            <h3>Footage <span className="muted small">frames that look like "{submitted}" · Qwen checks the best 8 · the outline is the part that matched</span></h3>
-            <FootageResults q={submitted} nonce={nonce} cameras={cameras} camera={camera} sinceHours={hours} />
-          </section>
+          {parsed?.footage_text !== null && (
+            <section>
+              <h3>Footage <span className="muted small">frames that look like "{parsed?.footage_text ?? submitted}"{parsed?.time_label ? ` · ${parsed.time_label}` : ""} · Qwen checks the best 8 · the outline is the part that matched</span></h3>
+              <FootageResults q={parsed?.footage_text ?? submitted} nonce={nonce} cameras={cameras} camera={camera} sinceHours={hours}
+                window={parsed?.time_label ? { since: parsed.since, until: parsed.until } : null} />
+            </section>
+          )}
+          {parsed && parsed.footage_text === null && (
+            <p className="muted small">Footage search is for things you can picture ("white van", "open gate"); questions about people are answered from events above.</p>
+          )}
         </>
       )}
       {open !== null && <EventDetail id={open} cameraName={name} onClose={() => setOpen(null)} />}

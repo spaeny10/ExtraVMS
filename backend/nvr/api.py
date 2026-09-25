@@ -521,6 +521,12 @@ INSTRUCTION_RE = re.compile(r"\b(keep an eye|watch (out )?for|look out for|alert
 query_label = assistant.query_label
 
 
+@app.get("/api/query/parse")
+async def parse_query(q: str = Query(min_length=1, max_length=300)):
+    """How Find reads a query: time window from phrases like "today", the text to search, the footage phrase."""
+    return assistant.parse_query(q)
+
+
 @app.get("/api/search")
 async def search(q: str, camera: str | None = None, since: float | None = None, until: float | None = None,
                  label: str | None = None, min_yolo: float = Query(0, ge=0, le=1),

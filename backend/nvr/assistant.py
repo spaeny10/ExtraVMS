@@ -246,13 +246,64 @@ def check_plan(raw: dict, question: str, now: float) -> list[dict]:
     if not out:
         out = [{"tool": "search_events", "args": {"text": question[:200], "camera": None, "since": None, "until": None,
                                                   "label": None, "min_priority": None, "group_by": None}}]
-    m = LAST_N.search(question.lower())
-    if m:  # an explicit "last N hours/days" beats whatever window the planner picked
-        n = float(m.group(1) or 1) if (m.group(1) or "").replace(".", "").isdigit() else WORD_NUM.get(m.group(1) or "", 1)
-        since = now - n * {"minute": 60, "hour": 3600, "day": 86400, "week": 7 * 86400}[m.group(2)]
+    win = time_window(question, now)
+    if win:  # a time phrase in the question ("today", "last night", "past 3 hours") beats the planner's guess
         for c in out:
-            c["args"]["since"], c["args"]["until"] = since, None
+            c["args"]["since"], c["args"]["until"] = win["since"], win["until"]
     return augment(out, question)
+
+
+_TIME_PHRASES = re.compile(r"\b(today|this morning|this afternoon|this evening|tonight|last night|overnight|yesterday|"
+                           r"this week|(?:in the )?(?:last|past|previous)\s+(?:\d+(?:\.\d+)?|one|two|three|four|five|six|seven|twelve|a|an)?\s*"
+                           r"(?:minute|hour|day|week)s?)\b")
+
+
+def time_window(text: str, now: float | None = None) -> dict | None:
+    """The time window a phrase in the text refers to: {since, until, label, text (phrase removed)} or None."""
+    now = now or time.time()
+    q = text.lower()
+    m = _TIME_PHRASES.search(q)
+    if not m:
+        return None
+    phrase = m.group(1)
+    n = dt.datetime.fromtimestamp(now)
+    day = n.replace(hour=0, minute=0, second=0, microsecond=0)
+    at = lambda d, h: d.replace(hour=h).timestamp()
+    yday = day - dt.timedelta(days=1)
+    windows = {
+        "today": (day.timestamp(), None), "this morning": (at(day, 5), at(day, 12)),
+        "this afternoon": (at(day, 12), at(day, 18)), "this evening": (at(day, 18), None), "tonight": (at(day, 18), None),
+        "last night": (at(yday, 18), at(day, 7)), "overnight": (at(yday, 18), at(day, 7)),
+        "yesterday": (yday.timestamp(), day.timestamp()),
+        "this week": ((day - dt.timedelta(days=day.weekday())).timestamp(), None),
+    }
+    if phrase in windows:
+        since, until = windows[phrase]
+    else:
+        lm = LAST_N.search(phrase)
+        if not lm:
+            return None
+        k = float(lm.group(1) or 1) if (lm.group(1) or "").replace(".", "").isdigit() else WORD_NUM.get(lm.group(1) or "", 1)
+        since, until = now - k * {"minute": 60, "hour": 3600, "day": 86400, "week": 7 * 86400}[lm.group(2)], None
+        phrase = lm.group(0)
+    if until is not None and until > now:
+        until = None
+    cleaned = re.sub(r"\s+", " ", (text[:m.start()] + text[m.end():])).strip(" ?.,!") or text
+    return {"since": since, "until": until, "label": phrase, "text": cleaned}
+
+
+def parse_query(text: str, now: float | None = None) -> dict:
+    """For Find: the time window, the text to search events with, and what (if anything) to look for in footage."""
+    win = time_window(text, now) or {}
+    cleaned = win.get("text", text)
+    q = text.lower().strip()
+    is_question = q.endswith("?") or bool(re.match(r"(did|was|were|is|are|has|have|how|when|what|who|where|which|why|any)\b", q))
+    obj = footage_text(cleaned) if is_question else cleaned
+    # questions about people in general ("did anyone use the bathroom") are answered by events, not by what frames look like
+    if is_question and (GENERIC_SUBJECT.search(q) or len(obj) < 3):
+        obj = None
+    return {"since": win.get("since"), "until": win.get("until"), "time_label": win.get("label"), "text": cleaned,
+            "footage_text": obj, "question": is_question}
 
 
 LAST_N = re.compile(r"\b(?:last|past|previous)\s+(\d+(?:\.\d+)?|one|two|three|four|five|six|seven|twelve|a|an)?\s*(minute|hour|day|week)s?\b")
@@ -352,9 +403,13 @@ async def t_search_events(a: dict, refs: Refs) -> tuple[list[str], int]:
         rows = await asyncio.to_thread(db.all, f"SELECT {EVENT_COLS} FROM events WHERE {where} ORDER BY start_ts DESC LIMIT 25", p)
     if a.get("min_priority"):
         rows = [r for r in rows if PRIORITY_RANK.get(r.get("priority") or "none", 0) >= PRIORITY_RANK[a["min_priority"]]]
-    rows = rows[:12]
+    rows = rows[:3 if a.get("earlier") else 12]
     for r in rows:
         refs.event(r)
+    if a.get("earlier"):  # the most recent matches before the period asked about
+        rows.sort(key=lambda r: -r["start_ts"])
+        return (["EARLIER (before the period asked about; nothing matched in that period):"] + [_event_line(r) for r in rows]
+                if rows else ["No earlier matches either."]), 0
     return [_event_line(r) for r in rows] or ["No matching events."], len(rows)
 
 
@@ -559,17 +614,21 @@ TOOL_FUNCS = {"search_events": t_search_events, "count_events": t_count_events, 
 
 
 def fallback_call(calls: list[dict], question: str) -> dict | None:
-    """When every lookup came back empty, one plain search of all cameras with the question text (keeping
-    only the time window) usually finds what an over-filtered plan missed."""
+    """When every lookup came back empty: first one plain search of all cameras with the question text (keeping
+    the time window), which usually finds what an over-filtered plan missed; then, if the question was about a
+    period, the most recent matches before it, so the answer can say "not today; last time was yesterday 16:53"."""
     if any(c["count"] for c in calls):
         return None
+    text = (time_window(question) or {}).get("text", question)[:200]
     since = min((c["args"].get("since") for c in calls if c["args"].get("since") is not None), default=None)
-    args = {"text": question[:200], "camera": None, "since": since, "until": None, "label": query_label(question),
+    args = {"text": text, "camera": None, "since": since, "until": None, "label": query_label(question),
             "min_priority": None, "group_by": None}
-    key = json.dumps(args, sort_keys=True)
-    if any(c["tool"] == "search_events" and json.dumps(c["args"], sort_keys=True) == key for c in calls):
-        return None
-    return {"tool": "search_events", "args": args}
+    tried = {json.dumps(c["args"], sort_keys=True) for c in calls if c["tool"] == "search_events"}
+    if json.dumps(args, sort_keys=True) not in tried:
+        return {"tool": "search_events", "args": args}
+    if since is not None and not any(c["args"].get("earlier") for c in calls):
+        return {"tool": "search_events", "args": {**args, "since": None, "until": since, "earlier": True}}
+    return None
 
 
 async def run_calls(calls: list[dict], refs: Refs, question: str | None = None) -> tuple[str, list[dict]]:
@@ -600,7 +659,8 @@ ANSWER_SYSTEM = (
     "that sighting, copy its handle exactly (only handles from the list you are given). Use the local times shown. "
     "Be brief and concrete: a direct answer first, then the supporting sightings. If the results don't answer the "
     "question, say so plainly and say what was checked. Never invent events, times or counts. Footage matches only "
-    "count if they say CHECKED: yes. Counts are sightings, not different people. Cite only the few sightings that "
+    "count if they say CHECKED: yes. If the only matches are marked EARLIER, say nothing matched in the period asked "
+    "about and mention the most recent earlier one with its date. Counts are sightings, not different people. Cite only the few sightings that "
     "support your answer (at most 5). Don't guess identities. Write plain sentences; don't repeat these instructions."
 )
 

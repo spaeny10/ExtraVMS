@@ -123,7 +123,34 @@ def test_fallback_search_when_everything_is_empty():
     fb = assistant.fallback_call(empty, "Did any trucks come by?")
     assert fb and fb["tool"] == "search_events" and fb["args"]["camera"] is None and fb["args"]["label"] == "vehicle" and fb["args"]["since"] == at(0)
     assert assistant.fallback_call([{**empty[0], "count": 3}], "q") is None                # something was found
-    assert assistant.fallback_call([{"tool": "search_events", "args": fb["args"], "count": 0}], "Did any trucks come by?") is None  # already tried
+    after_plain = assistant.fallback_call([{"tool": "search_events", "args": fb["args"], "count": 0}], "Did any trucks come by?")
+    assert after_plain["args"]["earlier"]                                                  # then: look before the period
+    assert assistant.fallback_call([{"tool": "search_events", "args": fb["args"], "count": 0},
+                                    {"tool": "search_events", "args": after_plain["args"], "count": 0}], "Did any trucks come by?") is None
+
+
+def test_time_words_and_footage_phrase():
+    day = dt.datetime.fromtimestamp(NOW).replace(hour=0, minute=0, second=0, microsecond=0)
+    p = assistant.parse_query("Did anyone use the bathroom today?", NOW)
+    assert p["time_label"] == "today" and p["since"] == day.timestamp() and p["until"] is None
+    assert p["text"] == "Did anyone use the bathroom" and p["footage_text"] is None and p["question"]  # people: events, not pixels
+    p = assistant.parse_query("white pickup truck yesterday", NOW)
+    assert p["until"] == day.timestamp() and p["since"] == (day - dt.timedelta(days=1)).timestamp() and p["footage_text"] == "white pickup truck"
+    p = assistant.parse_query("Was a boat on any camera last night?", NOW)
+    assert p["footage_text"] == "a boat" and dt.datetime.fromtimestamp(p["since"]).hour == 18
+    assert assistant.parse_query("person in a pink hat", NOW)["time_label"] is None
+    plan = assistant.check_plan({"calls": [{"tool": "search_events", "since": "2020-01-01 00:00"}]}, "Did anyone use the bathroom today?", NOW)
+    assert plan[0]["args"]["since"] == day.timestamp()
+
+
+def test_empty_period_falls_back_to_earlier():
+    tried = [{"tool": "search_events", "args": {"text": "Did anyone use the bathroom", "camera": None, "since": at(0), "until": None,
+                                                 "label": "person", "min_priority": None, "group_by": None}, "count": 0}]
+    fb = assistant.fallback_call(tried, "Did anyone use the bathroom today?")
+    assert fb["args"].get("earlier") and fb["args"]["until"] == at(0) and fb["args"]["since"] is None, fb
+    lines, n, _ = run("search_events", **{**{k: v for k, v in fb["args"].items() if k not in ("earlier", "text", "until")},
+                                          "earlier": True, "text": "", "until": NOW + 60})
+    assert n == 0 and lines[0].startswith("EARLIER"), lines   # results shown, but they don't count as answers for the period
 
 
 def test_average_link_counts():
