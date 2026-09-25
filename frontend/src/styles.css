@@ -578,3 +578,32 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   nav button { flex-direction: column; gap: 1px; }
   .toasts { bottom: calc(72px + env(safe-area-inset-bottom)); }
 }
+
+/* ---------- phone layouts (pass B) ---------- */
+.live-phone { display: flex; flex-direction: column; gap: 10px; }
+.live-phone .tile { touch-action: pan-y; }
+.live-strip { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; scroll-snap-type: x mandatory; }
+.live-strip-item { flex: none; width: 128px; padding: 0; background: var(--panel); border: 2px solid var(--border); border-radius: 8px; overflow: hidden; color: var(--text); scroll-snap-align: start; }
+.live-strip-item.active { border-color: var(--accent); }
+.live-strip-item img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; display: block; background: #000; }
+.live-strip-item span { display: block; font-size: 11px; padding: 3px 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; }
+.tl-cam-picker { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; }
+.tl-cam-picker .chip { flex: none; padding: 8px 14px; font-size: 14px; }
+.detail-tabs { margin: 10px 16px 0; display: flex; }
+.detail-tabs button { flex: 1; padding: 10px 6px; }
+.modal-grid.phone { grid-template-columns: 1fr; padding: 12px; }
+@media (max-width: 700px) {
+  .tl-controls.phone button { min-height: 44px; padding: 8px 12px; font-size: 15px; }
+  .tl-controls.phone select, .tl-controls.phone input { min-height: 44px; }
+  .tl-controls.phone .segmented button { min-height: 40px; }
+  .tl-lane { height: 44px; }
+  .tl-name, .tl-name-row { height: 44px; }
+  .tl-handle { left: -16px; width: 32px; height: 36px; border-radius: 0 0 12px 12px; }
+  .tl-playhead::after { left: -18px; width: 36px; }
+  .lane-btn { min-width: 32px; min-height: 32px; }
+  .modal-head { flex-wrap: wrap; padding: 12px; }
+  .modal-head .row { flex-wrap: wrap; gap: 6px; }
+  .modal-head h2 { font-size: 1.05rem; margin: 0; }
+  .event-card { grid-template-columns: 120px 1fr; }
+  input[type=date] { min-height: 40px; }
+}

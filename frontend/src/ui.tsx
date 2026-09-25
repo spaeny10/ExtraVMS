@@ -165,6 +165,33 @@ export function SkeletonGrid({ n = 6 }: { n?: number }) {
   return <div className="event-grid">{Array.from({ length: n }, (_, i) => <Skeleton key={i} card lines={3} />)}</div>;
 }
 
+// ---------------------------------------------------------------- viewport
+
+const PHONE = "(max-width: 700px)";
+/** True on phone-width screens (matches the CSS breakpoint), live-updating on rotate/resize. */
+export function useIsPhone(): boolean {
+  const [phone, setPhone] = useState(() => typeof matchMedia !== "undefined" && matchMedia(PHONE).matches);
+  useEffect(() => {
+    const mq = matchMedia(PHONE);
+    const on = () => setPhone(mq.matches);
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, []);
+  return phone;
+}
+
+/** Horizontal swipe detection for touch: calls onSwipe(-1 | 1) for left / right. */
+export function swipeHandlers(onSwipe: (dir: -1 | 1) => void) {
+  let x0 = 0, y0 = 0, t0 = 0;
+  return {
+    onTouchStart: (e: React.TouchEvent) => { x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; t0 = Date.now(); },
+    onTouchEnd: (e: React.TouchEvent) => {
+      const dx = e.changedTouches[0].clientX - x0, dy = e.changedTouches[0].clientY - y0;
+      if (Date.now() - t0 < 600 && Math.abs(dx) > 50 && Math.abs(dx) > 2 * Math.abs(dy)) onSwipe(dx < 0 ? 1 : -1);
+    },
+  };
+}
+
 // ---------------------------------------------------------------- connection status
 
 export type Connection = { online: boolean; ws: boolean; lastData: number };

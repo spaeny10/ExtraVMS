@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, fmtTime, type BaselineCamera, type FootageStatus, type RemoteStatus, type Camera, type FeedbackStats, type NvrEvent, type RetentionPolicy, type SystemInfo, type Zone } from "./api";
+import { api, fmtTime, frameUrl, type BaselineCamera, type FootageStatus, type RemoteStatus, type Camera, type FeedbackStats, type NvrEvent, type RetentionPolicy, type SystemInfo, type Zone } from "./api";
 import { EventCard } from "./Events";
 import { EventDetail } from "./EventDetail";
 import { WhepPlayer } from "./WhepPlayer";
@@ -7,7 +7,7 @@ import { ZoneEditor } from "./ZoneEditor";
 import { PolicyForm, RetentionPanel } from "./RetentionPanel";
 import { QwenFeedbackInfo } from "./QwenFeedbackInfo";
 import { NeighborsEditor } from "./Neighbors";
-import { Skeleton, errorText, toast } from "./ui";
+import { Skeleton, errorText, swipeHandlers, toast, useIsPhone } from "./ui";
 
 /* ------------------------------------------------------------------ Live */
 
@@ -42,6 +42,56 @@ export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: n
   const name = (id: string) => cameras.find((c) => c.id === id)?.name ?? id;
   const shown = focus ? cameras.filter((c) => c.id === focus) : cameras;
   const cols = focus ? 1 : Math.min(4, Math.ceil(Math.sqrt(Math.max(1, cameras.length))));
+  const isPhone = useIsPhone();
+  const [phoneCam, setPhoneCam] = useState(0);
+  const [stripTick, setStripTick] = useState(0);
+  useEffect(() => {
+    if (!isPhone) return;
+    const t = setInterval(() => setStripTick((x) => x + 1), 10000); // refresh the strip stills
+    return () => clearInterval(t);
+  }, [isPhone]);
+  if (isPhone && cameras.length > 0) {
+    const idx = Math.min(phoneCam, cameras.length - 1);
+    const c = cameras[idx];
+    const hd = q(c.id) === "hd";
+    const active = recent.find((e) => e.camera_id === c.id && (e.status === "open" || e.status === "pending"));
+    const go = (dir: -1 | 1) => setPhoneCam((i) => (i + dir + cameras.length) % cameras.length);
+    return (
+      <div className="live-phone">
+        <div className={`tile ${active ? "alerting" : ""}`} {...swipeHandlers(go)}>
+          <WhepPlayer key={`${c.id}-${hd ? "hd" : "sd"}`} path={hd ? c.id : `${c.id}_sub`} port={port} showSize className={hd ? "hd" : ""}
+            onUnsupported={hd ? () => setHdUnsupported(true) : undefined} />
+          <div className="tile-bar">
+            <span className={`dot ${c.status?.stream_ready ? "ok" : "bad"}`} />
+            <span>{c.name}</span>
+            {active && <span className={`label-chip ${active.camera_class}`}>{active.camera_class}</span>}
+            <span className="spacer" />
+            <div className="segmented small-seg">
+              <button className={!hd ? "active" : ""} onClick={() => setQuality({ ...quality, [c.id]: "sd" })}>SD</button>
+              <button className={hd ? "active" : ""} disabled={hdUnsupported} onClick={() => setQuality({ ...quality, [c.id]: "hd" })}>HD</button>
+            </div>
+          </div>
+        </div>
+        {cameras.length > 1 && (
+          <div className="live-strip" role="tablist">
+            {cameras.map((x, i) => (
+              <button key={x.id} role="tab" aria-selected={i === idx} className={`live-strip-item ${i === idx ? "active" : ""}`} onClick={() => setPhoneCam(i)}>
+                <img src={`${frameUrl(x.id, Date.now() / 1000 - 15, 320)}&r=${stripTick}`} alt="" />
+                <span><span className={`dot ${x.status?.stream_ready ? "ok" : "bad"}`} /> {x.name}</span>
+              </button>
+            ))}
+          </div>
+        )}
+        <p className="muted small center">Swipe the picture or tap a thumbnail to switch cameras.</p>
+        <aside className="live-feed">
+          <h3>Latest activity</h3>
+          {recent.length === 0 && <p className="muted">Nothing yet.</p>}
+          {recent.slice(0, 12).map((e) => <EventCard key={e.id} e={e} cameraName={name(e.camera_id)} onOpen={() => setOpen(e.id)} />)}
+        </aside>
+        {open !== null && <EventDetail id={open} cameraName={name} onClose={() => setOpen(null)} />}
+      </div>
+    );
+  }
   return (
     <div className="live-layout">
       <div className="live-main">
@@ -118,8 +168,10 @@ export function CamerasView({ cameras, port, reload }: { cameras: Camera[]; port
       await api.saveCamera({ ...edit, password: edit.password || undefined });
       setEdit(null);
       reload();
+      toast.success(`Camera "${edit.name}" saved`);
     } catch (e) {
-      setErr(String(e));
+      setErr(errorText(e));
+      toast.error(e);
     }
   };
   return (

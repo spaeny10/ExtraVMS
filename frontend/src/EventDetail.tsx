@@ -5,7 +5,7 @@ import {
 } from "./api";
 import { StatusBadge, placeholder } from "./Events";
 import { useNav } from "./nav";
-import { Icon, confirmDialog, toast } from "./ui";
+import { Icon, confirmDialog, toast, useIsPhone } from "./ui";
 
 const REASONS = ["Wrong object", "Missed detail", "Made something up", "Threat too high", "Threat too low", "Too vague"];
 const VERDICTS: [Verdict, string][] = [["correct", "Correct detection"], ["false_alarm", "False alarm"], ["wrong_class", "Wrong class"]];
@@ -15,7 +15,9 @@ export function EventDetail({ id: initialId, cameraName, onClose }: { id: number
   const [id, setId] = useState(initialId); // the viewer can step to another camera's sighting of the same person
   useEffect(() => setId(initialId), [initialId]);
   const [e, setE] = useState<NvrEvent | null>(null);
-  const [tab, setTab] = useState<"details" | "chat">("details");
+  const [tab, setTab] = useState<"clip" | "details" | "chat">("details");
+  const isPhone = useIsPhone();
+  useEffect(() => { if (isPhone) setTab("clip"); }, [isPhone]);
   const [chat, setChat] = useState<ChatMessage[]>([]);
   const video = useRef<HTMLVideoElement>(null);
   const { openInTimeline } = useNav();
@@ -62,8 +64,15 @@ export function EventDetail({ id: initialId, cameraName, onClose }: { id: number
             <button className="ghost" onClick={onClose} aria-label="Close">✕</button>
           </div>
         </header>
-        <div className="modal-grid">
-          <div>
+        {isPhone && (
+          <div className="segmented detail-tabs">
+            <button className={tab === "clip" ? "active" : ""} onClick={() => setTab("clip")}>Clip</button>
+            <button className={tab === "details" ? "active" : ""} onClick={() => setTab("details")}>Details</button>
+            <button className={tab === "chat" ? "active" : ""} onClick={() => setTab("chat")}>Ask{chat.length ? ` (${chat.filter((m) => m.role === "user").length})` : ""}</button>
+          </div>
+        )}
+        <div className={`modal-grid ${isPhone ? "phone" : ""}`}>
+          {(!isPhone || tab === "clip") && <div>
             {e.clip ? (
               <video ref={video} className="clip" src={media(e, "clip.mp4")} poster={e.snapshot ? media(e, "snapshot.jpg") : undefined} controls autoPlay muted />
             ) : e.snapshot ? (
@@ -81,15 +90,16 @@ export function EventDetail({ id: initialId, cameraName, onClose }: { id: number
                 {crops.map((k) => <img key={k.file} src={media(e, k.file)} alt="" />)}
               </div>
             )}
-          </div>
-          <aside className="detail-side">
-            <div className="segmented">
+            {isPhone && <p className="synopsis">{e.synopsis ?? <span className="muted">{placeholder(e)}</span>}</p>}
+          </div>}
+          {(!isPhone || tab !== "clip") && <aside className="detail-side">
+            {!isPhone && <div className="segmented">
               <button className={tab === "details" ? "active" : ""} onClick={() => setTab("details")}>Details</button>
               <button className={tab === "chat" ? "active" : ""} onClick={() => setTab("chat")}>
                 Ask about this clip{chat.length ? ` (${chat.filter((m) => m.role === "user").length})` : ""}
               </button>
-            </div>
-            {tab === "details" ? (
+            </div>}
+            {tab !== "chat" ? (
               <>
                 <JourneySection e={e} cameraName={cameraName} onShow={(eid) => setId(eid)}
                   onOpenTimeline={(members) => { openInTimeline({ ...e, members }); onClose(); }} />
@@ -98,7 +108,7 @@ export function EventDetail({ id: initialId, cameraName, onClose }: { id: number
             ) : (
               <ChatPanel e={e} chat={chat} setChat={setChat} video={video} seek={seek} />
             )}
-          </aside>
+          </aside>}
         </div>
       </div>
     </div>

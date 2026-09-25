@@ -1,4 +1,4 @@
-import { confirmDialog, promptDialog, toast } from "./ui";
+import { confirmDialog, promptDialog, toast, useIsPhone } from "./ui";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, fmtTime, type Camera, type KeptSpan, type Layout, type LayoutConfig, type Lock, type TimelineEvent, UNUSUAL_MIN } from "./api";
 import { ConfidenceSlider, loadNumber, saveNumber } from "./ConfidenceSlider";
@@ -178,6 +178,11 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
   }, []);
 
   const allIds = cameras.map((c) => c.id);
+  const isPhone = useIsPhone();
+  useEffect(() => {  // a phone can't show a grid of full-resolution streams: one camera at a time
+    if (isPhone && !config.solo && allIds.length) setConfig((c) => ({ ...c, solo: allIds[0] }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPhone, allIds.join(",")]);
   const visibleIds = allIds.filter((id) => config.visible == null || config.visible.includes(id));
   const solo = config.solo && allIds.includes(config.solo) ? config.solo : null;
   const tileIds = solo ? [solo] : visibleIds;
@@ -737,7 +742,15 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
         )}
       </div>
 
-      <div className="tl-controls">
+      {isPhone && cameras.length > 1 && (
+        <div className="tl-cam-picker" role="tablist">
+          {cameras.map((c) => (
+            <button key={c.id} role="tab" aria-selected={solo === c.id} className={`chip ${solo === c.id ? "on-person" : ""}`}
+              onClick={() => setConfig((cfg) => ({ ...cfg, solo: c.id }))}>{c.name}</button>
+          ))}
+        </div>
+      )}
+      <div className={`tl-controls ${isPhone ? "phone" : ""}`}>
         <button onClick={() => seekTo((playhead ?? nowS()) - 10)} title="Back 10 s (←)">⏪ 10s</button>
         <button onClick={togglePlay} className="tl-play">{playing ? "⏸ Pause" : "▶ Play"}</button>
         <button onClick={() => seekTo((playhead ?? nowS()) + 10)} title="Forward 10 s (→)">10s ⏩</button>

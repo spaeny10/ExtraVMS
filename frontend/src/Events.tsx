@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, fmtDuration, fmtTime, media, UNUSUAL_MIN, type Camera, type NvrEvent } from "./api";
 import { ConfidenceSlider, loadNumber, saveNumber } from "./ConfidenceSlider";
 import { EventDetail } from "./EventDetail";
@@ -57,7 +57,10 @@ export function EventCard({ e, cameraName, onOpen }: { e: NvrEvent; cameraName: 
 
 export function EventsView({ cameras, live }: { cameras: Camera[]; live: NvrEvent | null }) {
   const [events, setEvents] = useState<NvrEvent[]>([]);
-  const [filter, setFilter] = useState({ status: "verified", camera: "", label: "", min_yolo: loadNumber("minYolo.events") });
+  const [filter, setFilter] = useState({ status: "verified", camera: "", label: "", min_yolo: loadNumber("minYolo.events"), until: undefined as number | undefined });
+  const [jump, setJump] = useState("");
+  const sentinel = useRef<HTMLDivElement>(null);
+  const loadingMore = useRef(false);
   const [open, setOpen] = useState<number | null>(null);
   const [more, setMore] = useState(true);
   // "grouped": repeated sightings of the same person/vehicle become one row (Identities.tsx)
@@ -83,11 +86,24 @@ export function EventsView({ cameras, live }: { cameras: Camera[]; live: NvrEven
     });
   }, [live, filter]);
 
-  const loadMore = () =>
-    api.events({ ...filter, limit: 60, before_id: events[events.length - 1]?.id }).then((r) => {
+  const loadMore = async () => {
+    if (loadingMore.current || !more || !events.length) return;
+    loadingMore.current = true;
+    try {
+      const r = await api.events({ ...filter, limit: 60, before_id: events[events.length - 1]?.id });
       setEvents((p) => [...p, ...r]);
       setMore(r.length === 60);
-    });
+    } finally { loadingMore.current = false; }
+  };
+  // older events load as you scroll to the bottom
+  useEffect(() => {
+    const el = sentinel.current;
+    if (!el || mode !== "sightings") return;
+    const io = new IntersectionObserver((entries) => { if (entries[0].isIntersecting) loadMore(); }, { rootMargin: "600px" });
+    io.observe(el);
+    return () => io.disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [events, more, mode]);
 
   return (
     <div className="view">
@@ -123,6 +139,14 @@ export function EventsView({ cameras, live }: { cameras: Camera[]; live: NvrEven
           saveNumber("minYolo.events", v);
           setFilter({ ...filter, min_yolo: v });
         }} />}
+        {mode === "sightings" && <label className="row small" title="Show events from the end of this day backwards">
+          <input type="date" value={jump} max={new Date().toISOString().slice(0, 10)} onChange={(e) => {
+            setJump(e.target.value);
+            const d = e.target.value ? new Date(e.target.value + "T23:59:59") : null;
+            setFilter({ ...filter, until: d && Number.isFinite(d.getTime()) ? d.getTime() / 1000 : undefined });
+          }} />
+          {jump && <button className="linkish small" onClick={() => { setJump(""); setFilter({ ...filter, until: undefined }); }}>now</button>}
+        </label>}
       </div>
       {mode === "grouped" ? <IdentitiesView cameras={cameras} /> : events.length === 0 ? (
         <div className="empty">No events match these filters yet.</div>
@@ -133,11 +157,7 @@ export function EventsView({ cameras, live }: { cameras: Camera[]; live: NvrEven
           ))}
         </div>
       )}
-      {mode === "sightings" && more && events.length > 0 && (
-        <div className="center">
-          <button className="ghost" onClick={loadMore}>Load older events</button>
-        </div>
-      )}
+      {mode === "sightings" && <div ref={sentinel} className="center muted small">{more && events.length > 0 ? "Loading older events…" : events.length > 0 ? "That's everything." : ""}</div>}
       {open !== null && <EventDetail id={open} cameraName={name} onClose={() => setOpen(null)} />}
     </div>
   );

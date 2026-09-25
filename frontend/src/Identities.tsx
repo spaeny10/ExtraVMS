@@ -21,6 +21,7 @@ export function IdentitiesView({ cameras }: { cameras: Camera[] }) {
   const [open, setOpen] = useState<number | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [naming, setNaming] = useState<{ key: string; name: string; notes: string } | null>(null);
+  const [limit, setLimit] = useState(25);
   const name = (id: string) => cameras.find((c) => c.id === id)?.name ?? id;
 
   const load = () => {
@@ -69,7 +70,7 @@ export function IdentitiesView({ cameras }: { cameras: Camera[] }) {
       {err && <div className="error">{err}</div>}
       {r && r.clusters.length === 0 && <div className="empty">No verified {kind === "person" ? "people" : "vehicles"} in this period.</div>}
       <div className="identity-list">
-        {r?.clusters.map((c) => {
+        {r?.clusters.slice(0, limit).map((c) => {
           const cover = c.events.find((e) => e.id === c.cover) ?? c.events[0];
           const isOpen = expanded === c.key;
           return (
@@ -115,6 +116,7 @@ export function IdentitiesView({ cameras }: { cameras: Camera[] }) {
           );
         })}
       </div>
+      {r && r.clusters.length > limit && <div className="center"><button className="ghost" onClick={() => setLimit(limit + 25)}>Show {Math.min(25, r.clusters.length - limit)} more</button></div>}
       {r && r.named.length > 0 && (
         <details className="muted small identity-known">
           <summary>Known {kind === "person" ? "people" : "vehicles"} ({r.named.length})</summary>
