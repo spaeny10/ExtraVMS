@@ -239,7 +239,8 @@ class Pipeline:
         if names and not any(n.lower() in summary.lower() for n in names):
             # the 7B model sometimes ignores the operator's place names: state them anyway
             summary = (summary.rstrip(".") + ". " if summary else "") + "Went into " + ", then ".join(dict.fromkeys(names)) + "."
-            result["summary"] = summary
+        summary = zones.apply_door_facts(summary, e)  # entries/exits through named doors come from the track, not the model
+        result["summary"] = summary
         db.update_event(event_id, synopsis=summary, synopsis_json=result, threat=result.get("threat_level"), error=None)
         policy.check(event_id, camera)          # site rules (who may tow what) now that Qwen has looked
         baseline.apply(event_id, rescore=False)  # threat changed: update priority

@@ -83,6 +83,22 @@ def test_entry_rule():
     assert policy.recheck("cam3") == 1
 
 
+def test_door_facts_fix_the_summary():
+    NOWT = 1000.0
+    e = {"path": [[NOWT, *box(0.55, 0.42)], [NOWT + 3, *box(0.3, 0.99)]],
+         "areas": [{"name": "South Exterior Door", "from": NOWT, "to": NOWT + 0.6}]}
+    assert zones.door_facts(e) == ("South Exterior Door", None)
+    fixed = zones.apply_door_facts("A person walks toward the camera. They then walk out of the building through the South Exterior Door.", e)
+    assert fixed.startswith("Came in through the South Exterior Door.") and "out of the building" not in fixed
+    ok = "A bearded man came in through the South Exterior Door carrying a bag."
+    assert zones.apply_door_facts(ok, e) == ok
+    leaving = {"path": [[NOWT, *box(0.3, 0.99)], [NOWT + 4, *box(0.55, 0.42)]],
+               "areas": [{"name": "South Exterior Door", "from": NOWT + 3.6, "to": NOWT + 4}]}
+    assert zones.door_facts(leaving) == (None, "South Exterior Door")
+    assert zones.apply_door_facts("A person walks to the door.", leaving).endswith("Left through the South Exterior Door.")
+    assert zones.apply_door_facts("Someone at the sink.", {"path": e["path"], "areas": [{"name": "Espresso Machine", "from": NOWT, "to": NOWT + 1}]}) == "Someone at the sink."
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

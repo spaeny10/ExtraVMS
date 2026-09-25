@@ -9,6 +9,8 @@ an object's point is the bottom-centre of its box (where it touches the ground).
 """
 from __future__ import annotations
 
+import re
+
 import cv2
 import numpy as np
 
@@ -137,3 +139,49 @@ def draw_outlines(img: np.ndarray, zones: list[dict]) -> np.ndarray:
         color = (60, 60, 230) if z["type"] == "exclude" else (230, 150, 50)
         cv2.polylines(img, [pts], True, color, 2, cv2.LINE_AA)
     return img
+
+
+# ---------------------------------------------------------------- doors: entries and exits the NVR knows for certain
+
+DOOR_RE = re.compile(r"\b(door|entrance|entry|exit|gate)\b", re.I)
+DOOR_WINDOW_S = 2.5   # at the door within this long of the track's start (came in) or end (went out)
+
+
+def door_facts(event: dict) -> tuple[str | None, str | None]:
+    """(entered_through, left_through): named door places the track started at / ended at, else None."""
+    path = event.get("path") or []
+    areas = event.get("areas") or []
+    if not path or not areas:
+        return None, None
+    t0, t1 = path[0][0], path[-1][0]
+    entered = next((a["name"] for a in areas if DOOR_RE.search(a["name"]) and a["from"] - t0 <= DOOR_WINDOW_S), None)
+    left = next((a["name"] for a in reversed(areas) if DOOR_RE.search(a["name"]) and t1 - a["to"] <= DOOR_WINDOW_S), None)
+    if entered and left == entered and len(areas) == 1 and t1 - t0 < 2 * DOOR_WINDOW_S:
+        left = None  # a short track at the door: an entry, not in-and-straight-out
+    return entered, left
+
+
+_CONTRA_OUT = re.compile(r"\b(out of|walks? out|walked out|leav\w*|left|exit\w*|goes out|went out)\b", re.I)
+_CONTRA_IN = re.compile(r"\b(came in|comes in|enter\w*|walks? in|walked in|into the building)\b", re.I)
+
+
+def apply_door_facts(summary: str, event: dict) -> str:
+    """Make the synopsis agree with the track: state a known entry/exit through a door and drop a sentence
+    that says the opposite about that door (small models invert this)."""
+    entered, left = door_facts(event)
+    if not entered and not left:
+        return summary
+    sentences = [x.strip() for x in re.split(r"(?<=[.!?])\s+", summary.strip()) if x.strip()]
+    keep = []
+    for x in sentences:
+        if entered and entered.lower() in x.lower() and _CONTRA_OUT.search(x) and not left:
+            continue
+        if left and left.lower() in x.lower() and _CONTRA_IN.search(x) and not entered:
+            continue
+        keep.append(x)
+    out = " ".join(keep)
+    if entered and not re.search(r"(came in|entered|comes in|enters)[^.]*" + re.escape(entered), out, re.I):
+        out = f"Came in through the {entered}. " + out
+    if left and not re.search(r"(left|leaves|went out|goes out|exited|exits)[^.]*" + re.escape(left), out, re.I):
+        out = (out.rstrip(".") + ". " if out else "") + f"Left through the {left}."
+    return out.strip()
