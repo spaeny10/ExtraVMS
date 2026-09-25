@@ -24,7 +24,7 @@ log = logging.getLogger("nvr.identities")
 # same-identity thresholds (cosine). Person: measured on this site, same person 0.8-0.9, different median ~0.65.
 # Vehicle: CLIP image-image; same vehicle ~0.9+, different vehicles of the same type ~0.8.
 GROUP_SIM = {"person": 0.76, "vehicle": 0.88}
-NAME_SIM = {"person": 0.74, "vehicle": 0.88}
+NAME_SIM = {"person": 0.85, "vehicle": 0.88}   # conservative: a wrong name is worse than a missing one (indoor re-ID: different people reach ~0.82)
 VEC_TABLE = {"person": "reid_vec", "vehicle": "vehicle_vec"}
 EVENT_COLS = "id, camera_id, camera_class, start_ts, end_ts, synopsis, snapshot, yolo_class, yolo_conf, priority, anomaly, journey_id"
 
