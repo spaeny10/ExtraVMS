@@ -328,8 +328,11 @@ class PtzCamera:
         while time.time() < deadline:
             await self.refresh_status(log_moves=False)
             if not self.status["moving"]:
-                return
+                break
             await asyncio.sleep(0.3)
+        # Milesight reports a transient position right after a preset move: read again once settled
+        await asyncio.sleep(1.0)
+        await self.refresh_status(log_moves=False)
 
     async def goto_preset(self, token: str, wait: bool = False) -> dict:
         await self._call("ptz", f"<tptz:GotoPreset>{self._pt()}<tptz:PresetToken>{escape(token)}</tptz:PresetToken></tptz:GotoPreset>")
