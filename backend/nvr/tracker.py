@@ -38,6 +38,7 @@ class Track:
     rules: list = field(default_factory=list)
     in_zone: bool = False
     event_id: int | None = None
+    away: str | None = None     # PTZ camera turned away from home when the track opened (preset name / "away")
 
 
 class Tracker:
@@ -45,6 +46,9 @@ class Tracker:
         self.tracks: dict[tuple[str, str], Track] = {}
         self.zones: dict[str, list[dict]] = {}
         self.on_closed = on_closed  # async callback(event_id)
+        # PTZ cameras (ptz.py): where the camera points now / during a window. Fixed cameras answer None.
+        self.away_preset = lambda camera_id: None
+        self.away_between = lambda camera_id, t0, t1: None
 
     def set_zones(self, camera_id: str, zone_list: list[dict]) -> None:
         self.zones[camera_id] = zones.normalize(zone_list)
@@ -65,16 +69,22 @@ class Tracker:
             t.last_ts, t.last_wall = f.ts, now
             t.max_conf = max(t.max_conf, o.conf)
             t.path.append([round(f.ts, 3), *(round(v, 4) for v in o.box), o.conf])
-            t.in_zone = t.in_zone or self._zone_hit(f.camera_id, o.box)
+            away = self.away_preset(f.camera_id)
+            if away and not t.away:
+                t.away = away
+            # zones are drawn for the home view: while the camera is turned away, record everything it sees
+            t.in_zone = t.in_zone or away is not None or self._zone_hit(f.camera_id, o.box)
             if t.event_id is None and t.in_zone and t.last_ts - t.first_ts >= settings.track_min_seconds:
                 t.event_id = db.create_event(
                     camera_id=t.camera_id, track_id=t.object_id, camera_class=t.label,
                     camera_conf=t.max_conf, start_ts=t.first_ts, path=t.path, status="open",
-                    cells=cells.for_event(t.path),
+                    cells=cells.for_event(t.path), ptz_preset=t.away,
                 )
                 log.info("[%s] event %s opened: %s track %s", t.camera_id, t.event_id, t.label, t.object_id)
 
     def on_rule_event(self, e: RuleEvent) -> None:
+        if e.initial:
+            return  # a state dump at subscription time, not something that happened
         db.execute("INSERT INTO rule_events (camera_id, ts, topic, rule, state, data) VALUES (?,?,?,?,?,?)",
                    [e.camera_id, e.ts, e.topic, e.rule, None if e.state is None else int(e.state), str(e.data)])
         if not e.state:
@@ -94,8 +104,11 @@ class Tracker:
             del self.tracks[key]
             if t.event_id is None:
                 continue  # too short / never entered a zone: noise
+            # a camera that moved during the track can't be trusted against zones drawn for home
+            away = self.away_between(t.camera_id, t.first_ts, t.last_ts) or t.away
             db.update_event(t.event_id, end_ts=t.last_ts, path=t.path, rules=t.rules,
-                            camera_conf=t.max_conf, status="pending", cells=cells.for_event(t.path))
+                            camera_conf=t.max_conf, status="pending", cells=cells.for_event(t.path),
+                            **({"ptz_preset": away} if away else {}))
             log.info("[%s] event %s closed after %.1fs (%d samples)", t.camera_id, t.event_id,
                      t.last_ts - t.first_ts, len(t.path))
             await self.on_closed(t.event_id)

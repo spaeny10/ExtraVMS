@@ -292,6 +292,9 @@ function Details({ e, setE, notes, onUnsave, seek }: {
             {e.areas?.length ? (
               <div className="d-line" title="Named places the person walked into, in order">📍 {e.areas.map((a) => `${a.name} (+${Math.max(0, Math.round(a.from - e.start_ts))} s)`).join(" → ")}</div>
             ) : null}
+            {e.ptz_preset ? (
+              <div className="d-line" title="Zones, named places, painted regions and the learned baseline describe the home view and were not applied">↗ Camera was turned away from its home view{e.ptz_preset !== "away" ? ` (at preset '${e.ptz_preset}')` : ""}</div>
+            ) : null}
             {e.policy ? (
               <div className="d-line rule-broken" title="A site rule from Settings → Cameras → Site rules">🚫 <strong>Site rule:</strong> {e.policy.text}</div>
             ) : null}

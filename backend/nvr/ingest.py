@@ -50,6 +50,7 @@ class RuleEvent:
     rule: str | None
     state: bool | None
     data: dict
+    initial: bool = False   # the subscription's state dump, not a transition (kept for relay / digital input)
 
 
 def parse_utc(value: str | None) -> float | None:
@@ -245,24 +246,20 @@ class EventPuller(threading.Thread):
 
     @staticmethod
     def _sync_clock(onvif: Onvif) -> None:
-        body = onvif.call(onvif.device_url, "<tds:GetSystemDateAndTime/>", auth=False)
-        utc = find(body, "UTCDateTime")
-        if utc is None:
-            return
-        d, t = find(utc, "Date"), find(utc, "Time")
-        cam_time = dt.datetime(int(text(d, "Year")), int(text(d, "Month")), int(text(d, "Day")),
-                               int(text(t, "Hour")), int(text(t, "Minute")), int(text(t, "Second")),
-                               tzinfo=dt.timezone.utc)
-        onvif.clock_offset = cam_time - dt.datetime.now(dt.timezone.utc)
-        if abs(onvif.clock_offset.total_seconds()) > 5:
-            log.warning("camera clock is %.0fs off this PC; check NTP", onvif.clock_offset.total_seconds())
+        from .onvif_soap import sync_clock
+        offset = sync_clock(onvif)
+        if abs(offset.total_seconds()) > 5:
+            log.warning("camera clock is %.0fs off this PC; check NTP", offset.total_seconds())
 
     def _parse(self, n: ET.Element) -> RuleEvent | None:
         topic = (text(n, "Topic") or "").split(":", 1)[-1]
         msg = find(n, "Message")
         inner = find(msg, "Message") if msg is not None else None
-        if inner is None or inner.get("PropertyOperation") == "Initialized":
-            return None  # initial state dump, not a transition
+        if inner is None:
+            return None
+        initial = inner.get("PropertyOperation") == "Initialized"
+        if initial and not ("DigitalInput" in topic or "Relay" in topic):
+            return None  # initial state dump, not a transition (IO state is worth knowing at startup)
         source = simple_items(find(inner, "Source"))
         data = simple_items(find(inner, "Data"))
         state = next((v.lower() in ("true", "1", "active") for k, v in data.items()
@@ -270,7 +267,7 @@ class EventPuller(threading.Thread):
         return RuleEvent(
             camera_id=self.cam["id"],
             ts=parse_utc(inner.get("UtcTime")) or time.time(),
-            topic=topic, rule=source.get("Rule"), state=state, data={**source, **data},
+            topic=topic, rule=source.get("Rule"), state=state, data={**source, **data}, initial=initial,
         )
 
 

@@ -78,8 +78,8 @@ def check(event_id: int, camera: dict | None = None) -> dict | None:
     """Evaluate the camera's rules for a described vehicle event; store and return the broken rule (or None)."""
     from . import identities
     e = db.event(event_id)
-    if not e or e["status"] != "verified" or e["camera_class"] not in ("vehicle", "person"):
-        return None
+    if not e or e["status"] != "verified" or e["camera_class"] not in ("vehicle", "person") or e.get("ptz_preset"):
+        return None  # (a PTZ camera turned away from home: its rules describe the home view)
     camera = camera or db.one("SELECT * FROM cameras WHERE id=?", [e["camera_id"]])
     broken = None
     for r in rules(camera):
@@ -120,7 +120,7 @@ def recheck(camera_id: str, days: float = 7) -> int:
     camera = db.one("SELECT * FROM cameras WHERE id=?", [camera_id])
     n = 0
     for r in db.all("SELECT id FROM events WHERE camera_id=? AND camera_class IN ('vehicle','person') AND status='verified' "
-                    "AND start_ts >= ?", [camera_id, time.time() - days * 86400]):
+                    "AND ptz_preset IS NULL AND start_ts >= ?", [camera_id, time.time() - days * 86400]):
         if check(r["id"], camera):
             n += 1
     return n

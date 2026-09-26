@@ -41,6 +41,7 @@ export type Camera = {
   synopsis_labels?: ("person" | "vehicle")[] | null;
   policies?: SiteRule[];
   retention_policy?: Partial<RetentionPolicy> | null;
+  ptz_config?: PtzConfig | null;
   status?: {
     stream_ready: boolean;
     recording: boolean;
@@ -49,7 +50,22 @@ export type Camera = {
     metadata_last?: number;
     onvif_events?: boolean;
     health?: StreamHealth;
+    ptz?: PtzStatus | null;
   };
+};
+
+/** PTZ camera state and settings (backend/nvr/ptz.py). */
+export type PtzConfig = { home_token: string | null; home_name: string | null; return_home_min: number; relay_label: string; input_label: string };
+export type PtzStatus = {
+  available: boolean; at_home: boolean; moving: boolean; preset: string | null; preset_name: string | null;
+  position: { x: number; y: number; zoom: number } | null; home_token: string | null; home_name: string | null; last_error: string | null;
+  relay: { label: string; state: boolean | null; mode: "bistable" | "monostable"; changed_at: number | null } | null;
+  input: { label: string; state: boolean | null; changed_at: number | null } | null;
+};
+export type PtzPreset = { token: string; name: string; system: boolean; is_home: boolean; known: boolean };
+export type PtzInfo = {
+  caps: { available: boolean; home_supported?: boolean; max_presets?: number; aux_commands?: string[]; tours?: boolean; relays?: number; inputs?: number } | null;
+  status: PtzStatus; presets: PtzPreset[]; config: PtzConfig;
 };
 
 /** From MediaMTX metrics, sampled every 10 s (backend/nvr/health.py). */
@@ -100,6 +116,7 @@ export type NvrEvent = {
   /** named areas (zones of type "area") the object walked into */
   areas?: { name: string; from: number; to: number }[] | null;
   cells?: string | null; // 32x18 grid cells the object crossed (region.ts filter)
+  ptz_preset?: string | null; // PTZ camera turned away from home: preset name or "away"
   error: string | null;
   corrected_at?: number | null;
   feedback?: Feedback | null;
@@ -277,6 +294,20 @@ export const api = {
   footageSearch: (q: string, camera?: string, since?: number, until?: number) =>
     req<FootageMoment[]>(`/api/footage/search?${qs({ q, camera, since, until })}`),
   parseQuery: (q: string) => req<ParsedQuery>(`/api/query/parse?${qs({ q })}`),
+  // PTZ / relay (ptz.py). Move and stop use keepalive so a Stop still goes out when the tab closes mid-drag.
+  ptz: (cam: string) => req<PtzInfo>(`/api/cameras/${cam}/ptz`),
+  ptzProbe: (cam: string) => req<PtzInfo>(`/api/cameras/${cam}/ptz/probe`, { method: "POST" }),
+  ptzMove: (cam: string, v: { pan: number; tilt: number; zoom: number }) => req(`/api/cameras/${cam}/ptz/move`, { ...json("POST", v), keepalive: true }),
+  ptzStop: (cam: string) => req(`/api/cameras/${cam}/ptz/stop`, { method: "POST", keepalive: true }),
+  ptzRelative: (cam: string, t: { dx?: number; dy?: number; zoom?: number }) => req(`/api/cameras/${cam}/ptz/relative`, json("POST", { dx: 0, dy: 0, zoom: 0, ...t })),
+  ptzHome: (cam: string) => req<PtzInfo>(`/api/cameras/${cam}/ptz/home`, { method: "POST" }),
+  ptzGoto: (cam: string, token: string, wait = false) => req<PtzInfo>(`/api/cameras/${cam}/ptz/presets/${encodeURIComponent(token)}/goto${wait ? "?wait=true" : ""}`, { method: "POST" }),
+  ptzSavePreset: (cam: string, name: string) => req<PtzInfo & { token: string }>(`/api/cameras/${cam}/ptz/presets`, json("POST", { name })),
+  ptzRenamePreset: (cam: string, token: string, name: string) => req<PtzInfo>(`/api/cameras/${cam}/ptz/presets/${encodeURIComponent(token)}`, json("PUT", { name })),
+  ptzDeletePreset: (cam: string, token: string) => req<PtzInfo>(`/api/cameras/${cam}/ptz/presets/${encodeURIComponent(token)}`, { method: "DELETE" }),
+  ptzSetHome: (cam: string, token: string | null) => req<PtzInfo>(`/api/cameras/${cam}/ptz/home-preset`, json("POST", { token })),
+  ptzConfig: (cam: string, cfg: Partial<Pick<PtzConfig, "return_home_min" | "relay_label" | "input_label">>) => req<PtzInfo>(`/api/cameras/${cam}/ptz/config`, json("PUT", cfg)),
+  relay: (cam: string, on: boolean) => req<{ state: boolean; mode: string }>(`/api/cameras/${cam}/relay`, json("POST", { on })),
   footageVerify: (b: { camera_id: string; ts: number; tile: number; q: string }) =>
     req<FootageMatch>("/api/footage/verify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(b) }),
   footageStatus: () => req<FootageStatus>("/api/footage/status"),

@@ -111,6 +111,10 @@ def event_facts(event: dict, camera: dict) -> str:
     lines = [f"Camera: {camera.get('name', event['camera_id'])}"]
     if notes:
         lines.append(f"Scene notes from the operator (treat as ground truth about this view):\n{notes}")
+    if event.get("ptz_preset"):  # PTZ camera turned away from its home view
+        where = "not at any saved preset" if event["ptz_preset"] == "away" else f"pointed at preset '{event['ptz_preset']}'"
+        lines.append(f"The camera was turned away from its usual view for this event ({where}). The scene notes and "
+                     "place names describe the usual view and may not apply here.")
     lines += [
         f"Local time: {start:%A %Y-%m-%d %H:%M:%S} ({'night' if start.hour < 6 or start.hour >= 20 else 'day'})",
         f"Duration on scene: {dur:.0f} s; movement across the frame: {describe_motion(event['path'])}",

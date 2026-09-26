@@ -10,7 +10,7 @@ const COARSE = typeof matchMedia !== "undefined" && matchMedia("(pointer: coarse
 type Rect = { left: number; top: number; width: number; height: number };
 
 /** Where the video's picture sits inside its box (object-fit: contain). */
-function contentRect(box: { width: number; height: number }, aspect: number): Rect {
+export function contentRect(box: { width: number; height: number }, aspect: number): Rect {
   const boxAspect = box.width / Math.max(1, box.height);
   if (boxAspect > aspect) { const w = box.height * aspect; return { left: (box.width - w) / 2, top: 0, width: w, height: box.height }; }
   const h = box.width / aspect;

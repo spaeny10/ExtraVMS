@@ -20,7 +20,10 @@ ENVELOPE = """<?xml version="1.0" encoding="UTF-8"?>
  xmlns:tan="http://www.onvif.org/ver20/analytics/wsdl"
  xmlns:tt="http://www.onvif.org/ver10/schema"
  xmlns:wsa="http://www.w3.org/2005/08/addressing"
- xmlns:wsnt="http://docs.oasis-open.org/wsn/b-2">
+ xmlns:wsnt="http://docs.oasis-open.org/wsn/b-2"
+ xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl"
+ xmlns:timg="http://www.onvif.org/ver20/imaging/wsdl"
+ xmlns:tmd="http://www.onvif.org/ver10/deviceIO/wsdl">
 <s:Header>{header}</s:Header><s:Body>{body}</s:Body></s:Envelope>"""
 
 WSSE = (
@@ -127,3 +130,51 @@ class Onvif:
 
     def service(self, key: str) -> str | None:
         return self.services.get(key)
+
+
+# --------------------------------------------------------------------------- shared helpers
+
+SERVICE_KEYS = {
+    "http://www.onvif.org/ver10/device/wsdl": "device",
+    "http://www.onvif.org/ver10/media/wsdl": "media",
+    "http://www.onvif.org/ver20/media/wsdl": "media2",
+    "http://www.onvif.org/ver10/events/wsdl": "events",
+    "http://www.onvif.org/ver20/ptz/wsdl": "ptz",
+    "http://www.onvif.org/ver20/imaging/wsdl": "imaging",
+    "http://www.onvif.org/ver10/deviceIO/wsdl": "deviceio",
+    "http://www.onvif.org/ver20/analytics/wsdl": "analytics",
+}
+
+
+def sync_clock(cam: Onvif) -> dt.timedelta:
+    """Learn the camera's clock offset (unauthenticated) so WS-Security digests aren't rejected."""
+    body = cam.call(cam.device_url, "<tds:GetSystemDateAndTime/>", auth=False)
+    utc = find(body, "UTCDateTime")
+    if utc is None:
+        return cam.clock_offset
+    d, t = find(utc, "Date"), find(utc, "Time")
+    cam_time = dt.datetime(int(text(d, "Year")), int(text(d, "Month")), int(text(d, "Day")),
+                           int(text(t, "Hour")), int(text(t, "Minute")), int(text(t, "Second")), tzinfo=dt.timezone.utc)
+    cam.clock_offset = cam_time - dt.datetime.now(dt.timezone.utc)
+    return cam.clock_offset
+
+
+def discover_services(cam: Onvif) -> dict[str, str]:
+    """GetServices -> cam.services keyed by SERVICE_KEYS (unknown namespaces keep their namespace as key)."""
+    body = cam.call(cam.device_url, "<tds:GetServices><tds:IncludeCapability>false</tds:IncludeCapability></tds:GetServices>")
+    for s in find_all(body, "Service"):
+        ns, addr = text(s, "Namespace"), text(s, "XAddr")
+        if ns and addr:
+            cam.services[SERVICE_KEYS.get(ns, ns)] = addr
+    return cam.services
+
+
+def parse_duration(s: str | None) -> float:
+    """xsd:duration like PT1S / PT00H00M10S / PT2.5S -> seconds (0 if missing)."""
+    if not s or not s.startswith("PT"):
+        return 0.0
+    import re
+    total = 0.0
+    for num, unit in re.findall(r"([0-9.]+)([HMS])", s[2:]):
+        total += float(num) * {"H": 3600, "M": 60, "S": 1}[unit]
+    return total

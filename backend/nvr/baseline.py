@@ -63,7 +63,7 @@ def _counted(e: dict) -> bool:
     fb = e.get("feedback") or {}
     if isinstance(fb, str):
         fb = json.loads(fb)
-    return e.get("status") == "verified" and fb.get("verdict") != "false_alarm"
+    return e.get("status") == "verified" and fb.get("verdict") != "false_alarm" and not e.get("ptz_preset")
 
 
 def rebuild(now: float | None = None) -> dict:
@@ -71,7 +71,7 @@ def rebuild(now: float | None = None) -> dict:
     now = now or time.time()
     since = now - HISTORY_DAYS * 86400
     firsts = {r["camera_id"]: r["t"] for r in db.all("SELECT camera_id, MIN(start_ts) AS t FROM events GROUP BY camera_id")}
-    rows = db.all("SELECT camera_id, camera_class, status, start_ts, end_ts, path, feedback FROM events "
+    rows = db.all("SELECT camera_id, camera_class, status, start_ts, end_ts, path, feedback, ptz_preset FROM events "
                   "WHERE status='verified' AND start_ts >= ? AND start_ts < ?", [since, now])
     groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
     for r in rows:
@@ -202,8 +202,8 @@ def priority(e: dict, anomaly: float | None) -> str | None:
 def apply(event_id: int, rescore: bool = True) -> dict | None:
     """Score the event (unless rescore=False and it already has a score) and store score + priority."""
     e = db.event(event_id)
-    if not e or e["status"] != "verified":
-        return None
+    if not e or e["status"] != "verified" or e.get("ptz_preset"):
+        return None  # a PTZ camera turned away: the profile describes the home view
     a = e.get("anomaly_json")
     if rescore or not a:
         a = score(e)
@@ -213,7 +213,7 @@ def apply(event_id: int, rescore: bool = True) -> dict | None:
 
 def backfill(only_missing: bool = True) -> int:
     """Score verified events with no score yet, plus ones scored while their camera was still learning."""
-    rows = db.all("SELECT id, anomaly_json FROM events WHERE status='verified' AND start_ts >= ?",
+    rows = db.all("SELECT id, anomaly_json FROM events WHERE status='verified' AND ptz_preset IS NULL AND start_ts >= ?",
                   [time.time() - HISTORY_DAYS * 86400])
     n = 0
     for r in rows:

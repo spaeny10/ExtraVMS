@@ -190,6 +190,16 @@ CREATE TABLE IF NOT EXISTS identity_looks (
 );
 CREATE INDEX IF NOT EXISTS identity_looks_ident ON identity_looks(identity_id);
 
+-- Where a PTZ camera pointed over time: one row per change (ptz.py), for "was the camera away?" answers.
+CREATE TABLE IF NOT EXISTS ptz_moves (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    camera_id TEXT NOT NULL,
+    ts        REAL NOT NULL,
+    at_home   INTEGER NOT NULL,
+    preset    TEXT
+);
+CREATE INDEX IF NOT EXISTS ptz_moves_cam_ts ON ptz_moves(camera_id, ts);
+
 -- Ask the NVR: site-wide conversations (assistant.py)
 CREATE TABLE IF NOT EXISTS assistant_threads (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -230,6 +240,8 @@ MIGRATIONS = [
     ("cameras", "policies", "TEXT"),               # JSON list of site rules (policy.py)
     ("events", "policy", "TEXT"),                  # JSON {kind, text, priority}: the site rule this event breaks
     ("events", "cells", "TEXT"),                   # base64url 32x18 bitmap of grid cells the object's feet crossed (cells.py)
+    ("cameras", "ptz_config", "TEXT"),             # JSON: home preset, return-home minutes, relay/input labels, preset positions (ptz.py)
+    ("events", "ptz_preset", "TEXT"),              # PTZ camera turned away from home: preset name or "away"; NULL = at home / fixed camera
     ("events", "clip_start", "REAL"),
     ("events", "synopsis_original", "TEXT"),   # Qwen's JSON before the user corrected it
     ("events", "corrected_at", "REAL"),
@@ -299,7 +311,12 @@ class Database:
             c["retention_policy"] = json.loads(c["retention_policy"]) if c.get("retention_policy") else None
             c["synopsis_labels"] = json.loads(c["synopsis_labels"]) if c.get("synopsis_labels") else None
             c["policies"] = json.loads(c["policies"]) if c.get("policies") else []
+            c["ptz_config"] = json.loads(c["ptz_config"]) if c.get("ptz_config") else None
         return cams
+
+    def set_ptz_config(self, camera_id: str, cfg: dict) -> None:
+        """Only ptz.py writes this; the camera form never touches it."""
+        self.execute("UPDATE cameras SET ptz_config=? WHERE id=?", [json.dumps(cfg), camera_id])
 
     def upsert_camera(self, cam: dict) -> None:
         cols = ["id", "name", "host", "onvif_port", "rtsp_port", "username", "password",

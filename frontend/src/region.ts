@@ -41,8 +41,9 @@ export function regionMatches(eventCells: string | null | undefined, region: Uin
 }
 
 /** Open events have only a partial path yet: keep them visible until they close. */
-export function regionPass(e: { status: string; cells?: string | null }, region: Uint8Array | undefined): boolean {
-  return !region || e.status === "open" || regionMatches(e.cells, region);
+export function regionPass(e: { status: string; cells?: string | null; ptz_preset?: string | null }, region: Uint8Array | undefined): boolean {
+  // a region is painted on the home view: an event while a PTZ camera was turned away can't match it
+  return !region || e.status === "open" || (!e.ptz_preset && regionMatches(e.cells, region));
 }
 
 // ---------------------------------------------------------------- store (localStorage-backed, shared by views)

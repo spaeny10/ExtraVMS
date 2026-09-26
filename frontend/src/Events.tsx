@@ -49,6 +49,7 @@ export function EventCard({ e, cameraName, onOpen }: { e: NvrEvent; cameraName: 
           {e.locked ? <span className="badge lock-badge" title="Footage locked: kept regardless of retention">🔒</span> : null}
           {e.watched ? <span className="badge threat-medium" title="On the watch list">👁 {e.watched}</span> : null}
           {e.policy ? <span className={`badge threat-${e.policy.priority === "medium" ? "medium" : "high"}`} title={e.policy.text}>🚫 Site rule</span> : null}
+          {e.ptz_preset ? <span className="badge ptz-badge" title="The camera was turned away from its home view: zones, places and the learned baseline did not apply">↗ {e.ptz_preset === "away" ? "camera away" : e.ptz_preset}</span> : null}
           {e.areas?.length ? <span className="badge area-badge" title={`Went to: ${e.areas.map((a) => a.name).join(" → ")}`}>📍 {e.areas.map((a) => a.name).join(" → ")}</span> : null}
           {(e.anomaly ?? 0) >= UNUSUAL_MIN ? <span className="badge unusual-badge" title={`Unusual for this camera:\n${(e.anomaly_json?.reasons ?? []).join("\n")}`}>⚠ Unusual</span> : null}
           {e.journey_cameras && e.journey_cameras > 1 ? <span className="badge journey-badge" title="Same person seen on other cameras">🔗 {e.journey_cameras} cams</span> : null}

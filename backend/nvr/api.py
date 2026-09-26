@@ -19,12 +19,13 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import assistant, backup, baseline, footage, frames, health, identities, journeys, keep, mediamtx, policy, retention, zones
+from . import assistant, backup, baseline, footage, frames, health, identities, journeys, keep, mediamtx, policy, ptz, retention, zones
 from . import synopsis as vlm
 from . import vlmroute
 from .config import ROOT, settings
 from .db import db
 from .ingest import CameraIngest
+from .onvif_soap import OnvifError
 from .pipeline import Pipeline
 from .seed import seed_cameras_from_env
 
@@ -39,6 +40,7 @@ class State:
     tasks: list[asyncio.Task] = []
     footage: footage.Indexer
     health: health.StreamHealth
+    ptz: ptz.PtzManager
 
 
 state = State()
@@ -60,6 +62,7 @@ def sync_cameras() -> None:
             ing = CameraIngest(cam, loop, state.pipeline.frames, state.pipeline.rule_events)
             ing.start()
             state.ingests[cid] = ing
+    state.ptz.sync(cams)
 
 
 @contextlib.asynccontextmanager
@@ -74,6 +77,10 @@ async def lifespan(app: FastAPI):
     p = state.pipeline
     state.footage = footage.Indexer(p)
     state.health = health.StreamHealth()
+    state.ptz = ptz.PtzManager()
+    p.ptz = state.ptz
+    p.tracker.away_preset = state.ptz.away_preset
+    p.tracker.away_between = state.ptz.away_between
     assistant.ctx.pipeline, assistant.ctx.footage = p, state.footage
     state.tasks = [asyncio.create_task(coro, name=name) for name, coro in [
         ("mediamtx", state.mtx.run()),
@@ -90,6 +97,7 @@ async def lifespan(app: FastAPI):
         ("briefings", assistant.briefing_loop(p)),
         ("backup", backup.backup_loop()),
         ("stream-health", state.health.run()),
+        ("ptz", state.ptz.run()),
     ]]
     await asyncio.sleep(1.5)  # let MediaMTX bind before readers connect
     sync_cameras()
@@ -108,7 +116,7 @@ app = FastAPI(title="NewVMS", lifespan=lifespan)
 
 PUBLIC_CAMERA_FIELDS = ("id", "name", "host", "onvif_port", "rtsp_port", "username", "main_path",
                         "sub_path", "enabled", "zones", "retention_days", "scene_notes", "retention_policy",
-                        "synopsis_labels", "policies")
+                        "synopsis_labels", "policies", "ptz_config")
 
 
 def public_camera(c: dict) -> dict:
@@ -159,6 +167,7 @@ async def list_cameras():
             "tracks": [t if isinstance(t, str) else t.get("codec") for t in p.get("tracks", [])],
             **(ing.status() if ing else {}),
             "health": state.health.camera(c["id"]),
+            "ptz": state.ptz.status(c["id"]),
         }})
     return out
 
@@ -176,6 +185,7 @@ async def put_camera(camera_id: str, cam: CameraIn):
     if camera_id in state.ingests:  # restart readers with new settings
         state.ingests.pop(camera_id).stop()
     sync_cameras()
+    state.ptz.reset(camera_id)  # re-probe with the new host/credentials (ptz_config is kept)
     state.pipeline.queue_missing_synopses(camera_id)  # e.g. vehicles just switched on for Qwen
     if policy.recheck(camera_id):  # rules changed: re-judge this week's described vehicles
         pass
@@ -189,6 +199,171 @@ async def delete_camera(camera_id: str):
     return {"ok": True}
 
 
+# ---------------------------------------------------------------- PTZ / relay / digital input
+
+def _ptz(camera_id: str) -> ptz.PtzCamera:
+    p = state.ptz.get(camera_id)
+    if not p:
+        raise HTTPException(404, "unknown camera")
+    if p.caps is None:
+        raise HTTPException(503, "camera not probed yet; try again in a few seconds")
+    if not p.available:
+        raise HTTPException(409, p.caps.get("error") or "camera has no PTZ")
+    return p
+
+
+async def _ptz_do(camera_id: str, coro):
+    try:
+        await coro
+    except OnvifError as e:
+        raise HTTPException(503, str(e))
+    return _ptz(camera_id).info()
+
+
+class MoveIn(BaseModel):
+    pan: float = Field(0, ge=-1, le=1)
+    tilt: float = Field(0, ge=-1, le=1)
+    zoom: float = Field(0, ge=-1, le=1)
+
+
+class RelativeIn(BaseModel):
+    dx: float = Field(0, ge=-0.5, le=0.5)   # click offset from the picture centre, fractions of the picture
+    dy: float = Field(0, ge=-0.5, le=0.5)
+    zoom: float = Field(0, ge=-1, le=1)
+
+
+class PresetIn(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+
+
+class HomePresetIn(BaseModel):
+    token: str | None = Field(None, max_length=64)
+
+
+class PtzConfigIn(BaseModel):
+    return_home_min: int | None = Field(None, ge=0, le=1440)
+    relay_label: str | None = Field(None, max_length=40)
+    input_label: str | None = Field(None, max_length=40)
+
+
+class RelayIn(BaseModel):
+    on: bool
+
+
+@app.get("/api/cameras/{camera_id}/ptz")
+async def ptz_info(camera_id: str):
+    return _ptz(camera_id).info()
+
+
+@app.post("/api/cameras/{camera_id}/ptz/probe")
+async def ptz_probe(camera_id: str):
+    p = state.ptz.get(camera_id)
+    if not p:
+        raise HTTPException(404, "unknown camera")
+    await p.probe()
+    return p.info() if p.available else {"caps": p.caps, "status": None, "presets": [], "config": p.cfg}
+
+
+@app.post("/api/cameras/{camera_id}/ptz/move")
+async def ptz_move(camera_id: str, body: MoveIn):
+    p = _ptz(camera_id)
+    try:
+        return await p.move(body.pan, body.tilt, body.zoom)
+    except OnvifError as e:
+        raise HTTPException(503, str(e))
+
+
+@app.post("/api/cameras/{camera_id}/ptz/stop")
+async def ptz_stop(camera_id: str):
+    p = _ptz(camera_id)
+    try:
+        return await p.stop()
+    except OnvifError as e:
+        raise HTTPException(503, str(e))
+
+
+@app.post("/api/cameras/{camera_id}/ptz/relative")
+async def ptz_relative(camera_id: str, body: RelativeIn):
+    p = _ptz(camera_id)
+    try:
+        return await p.relative(body.dx, body.dy, body.zoom)
+    except OnvifError as e:
+        raise HTTPException(503, str(e))
+
+
+@app.post("/api/cameras/{camera_id}/ptz/home")
+async def ptz_home(camera_id: str):
+    return await _ptz_do(camera_id, _ptz(camera_id).home())
+
+
+@app.get("/api/cameras/{camera_id}/ptz/presets")
+async def ptz_presets(camera_id: str):
+    p = _ptz(camera_id)
+    try:
+        await p.refresh_presets()
+    except OnvifError as e:
+        raise HTTPException(503, str(e))
+    return p.info()["presets"]
+
+
+@app.post("/api/cameras/{camera_id}/ptz/presets")
+async def ptz_save_preset(camera_id: str, body: PresetIn):
+    p = _ptz(camera_id)
+    try:
+        token = await p.set_preset(body.name)
+    except OnvifError as e:
+        raise HTTPException(503, str(e))
+    return {"token": token, **p.info()}
+
+
+@app.put("/api/cameras/{camera_id}/ptz/presets/{token}")
+async def ptz_rename_preset(camera_id: str, token: str, body: PresetIn):
+    p = _ptz(camera_id)
+    if any(x["token"] == token and x["system"] for x in p.presets):
+        raise HTTPException(400, "system presets can't be renamed")
+    return await _ptz_do(camera_id, p.rename_preset(token, body.name))
+
+
+@app.delete("/api/cameras/{camera_id}/ptz/presets/{token}")
+async def ptz_delete_preset(camera_id: str, token: str):
+    p = _ptz(camera_id)
+    if any(x["token"] == token and x["system"] for x in p.presets):
+        raise HTTPException(400, "system presets can't be deleted")
+    return await _ptz_do(camera_id, p.remove_preset(token))
+
+
+@app.post("/api/cameras/{camera_id}/ptz/presets/{token}/goto")
+async def ptz_goto_preset(camera_id: str, token: str, wait: bool = False):
+    return await _ptz_do(camera_id, _ptz(camera_id).goto_preset(token, wait=wait))
+
+
+@app.post("/api/cameras/{camera_id}/ptz/home-preset")
+async def ptz_home_preset(camera_id: str, body: HomePresetIn):
+    return await _ptz_do(camera_id, _ptz(camera_id).set_home(body.token))
+
+
+@app.put("/api/cameras/{camera_id}/ptz/config")
+async def ptz_config(camera_id: str, body: PtzConfigIn):
+    p = _ptz(camera_id)
+    p.set_config(**body.model_dump())
+    return p.info()
+
+
+@app.get("/api/cameras/{camera_id}/ptz/moves")
+async def ptz_moves(camera_id: str, since: float | None = None, until: float | None = None):
+    return db.all("SELECT ts, at_home, preset FROM ptz_moves WHERE camera_id=? AND ts >= ? AND ts <= ? ORDER BY ts",
+                  [camera_id, since or 0, until or time.time()])
+
+
+@app.post("/api/cameras/{camera_id}/relay")
+async def relay_set(camera_id: str, body: RelayIn):
+    p = _ptz(camera_id)
+    try:
+        return await p.set_relay(body.on)
+    except OnvifError as e:
+        raise HTTPException(503, str(e))
+
+
 # ---------------------------------------------------------------- zones / masks
 
 class ZonesIn(BaseModel):
@@ -199,8 +374,10 @@ def _mask_changes(camera_id: str, zone_list: list[dict]) -> tuple[list[int], lis
     """Past events to hide (whole path in masked areas) and previously hidden ones to restore."""
     zl = zones.normalize(zone_list)
     to_mask, to_restore = [], []
-    for r in db.all("SELECT id, status, status_before_mask, path FROM events WHERE camera_id=? "
+    for r in db.all("SELECT id, status, status_before_mask, path, ptz_preset FROM events WHERE camera_id=? "
                     "AND status IN ('verified','rejected','error','masked')", [camera_id]):
+        if r["ptz_preset"]:
+            continue  # captured while the PTZ camera was turned away: the zones don't describe that view
         ok = zones.path_allowed(json.loads(r["path"] or "[]"), zl)
         if r["status"] == "masked" and ok:
             to_restore.append((r["id"], r["status_before_mask"] or "verified"))
@@ -297,7 +474,7 @@ async def list_events(camera: str | None = None, status: str | None = None, labe
     if before_id:
         where.append("id<?"); params.append(before_id)
     sql = ("SELECT id, camera_id, track_id, camera_class, camera_conf, start_ts, end_ts, status, yolo_class, "
-           "yolo_conf, yolo_hits, snapshot, clip, synopsis, threat, priority, anomaly, anomaly_json, watched, areas, policy, cells, error, corrected_at, feedback, "
+           "yolo_conf, yolo_hits, snapshot, clip, synopsis, threat, priority, anomaly, anomaly_json, watched, areas, policy, cells, ptz_preset, error, corrected_at, feedback, "
            "EXISTS(SELECT 1 FROM locks WHERE locks.event_id = events.id) AS locked, journey_id, "
            "(SELECT COUNT(DISTINCT je.value) FROM journeys, json_each(journeys.cameras) je WHERE journeys.id = events.journey_id) AS journey_cameras FROM events"
            + (f" WHERE {' AND '.join(where)}" if where else "") + " ORDER BY id DESC LIMIT ?")
@@ -779,7 +956,7 @@ async def unlock_event(event_id: int):
 @app.get("/api/recordings/{camera_id}")
 async def recordings(camera_id: str, start: float | None = None, end: float | None = None):
     spans = await mediamtx.recording_spans(camera_id, start, end)
-    events = db.all("SELECT id, camera_class, yolo_class, yolo_conf, start_ts, end_ts, status, threat, priority, anomaly, journey_id, cells, "
+    events = db.all("SELECT id, camera_class, yolo_class, yolo_conf, start_ts, end_ts, status, threat, priority, anomaly, journey_id, cells, ptz_preset, "
                     "json_extract(feedback, '$.verdict') AS verdict, synopsis IS NOT NULL AS has_synopsis FROM events "
                     "WHERE camera_id=? AND start_ts>=? AND start_ts<=? ORDER BY start_ts",
                     [camera_id, start or 0, end or time.time()])

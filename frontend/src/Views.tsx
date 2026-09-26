@@ -9,6 +9,7 @@ import { QwenFeedbackInfo } from "./QwenFeedbackInfo";
 import { NeighborsEditor } from "./Neighbors";
 import { Skeleton, errorText, swipeHandlers, toast, useIsPhone } from "./ui";
 import { RegionBadge, RegionOverlay } from "./RegionPaint";
+import { PtzBadge, PtzOverlay, PtzSettings } from "./PtzControl";
 import { regionPass, regions, useRegions } from "./region";
 import { useRef } from "react";
 
@@ -30,16 +31,26 @@ function LiveTile({ c, hd, port, active, onUnsupported, bar, phone, onSwipe }: {
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [painting, setPainting] = useState(false);
+  const [ptzOn, setPtzOn] = useState(false);
+  const ptz = c.status?.ptz;
+  const aspect = hd ? 2592 / 1520 : 4 / 3;
   return (
-    <div className={`tile ${active ? "alerting" : ""} ${painting ? "painting" : ""}`} {...(phone && onSwipe && !painting ? swipeHandlers(onSwipe) : {})}>
+    <div className={`tile ${active ? "alerting" : ""} ${painting ? "painting" : ""} ${ptzOn ? "ptz" : ""}`}
+      {...(phone && onSwipe && !painting && !ptzOn ? swipeHandlers(onSwipe) : {})}>
       <WhepPlayer key={`${c.id}-${hd ? "hd" : "sd"}`} path={hd ? c.id : `${c.id}_sub`} port={port} showSize className={hd ? "hd" : ""}
         onUnsupported={onUnsupported} videoRef={videoRef}>
-        <RegionOverlay cam={c.id} videoRef={videoRef} editing={painting} onDone={() => setPainting(false)} camera={c} fallbackAspect={hd ? 2592 / 1520 : 4 / 3} />
+        {!ptzOn && <RegionOverlay cam={c.id} videoRef={videoRef} editing={painting} onDone={() => setPainting(false)} camera={c} fallbackAspect={aspect} />}
+        {ptz?.available && <PtzOverlay cam={c.id} videoRef={videoRef} active={ptzOn} onDone={() => setPtzOn(false)} fallbackAspect={aspect} />}
       </WhepPlayer>
       <div className="tile-bar">
         {bar}
+        <PtzBadge cam={c.id} ptz={ptz} />
         {!painting && <RegionBadge cam={c.id} onEdit={() => setPainting(true)} />}
-        <button className={`ghost small ${painting ? "on" : ""}`} title="Paint a region: the activity feed shows only events that passed through it"
+        {ptz?.available && (
+          <button className={`ghost small ${ptzOn ? "on" : ""}`} title="Pan / tilt / zoom, presets, relay" disabled={painting}
+            onClick={() => setPtzOn((p) => !p)}>🕹</button>
+        )}
+        <button className={`ghost small ${painting ? "on" : ""}`} title="Paint a region: the activity feed shows only events that passed through it" disabled={ptzOn}
           onClick={() => setPainting((p) => !p)}>✎</button>
       </div>
     </div>
@@ -226,7 +237,7 @@ export function CamerasView({ cameras, port, reload }: { cameras: Camera[]; port
       </div>
       <table className="table">
         <thead>
-          <tr><th>Camera</th><th>Address</th><th>Stream</th><th>Bitrate</th><th>Metadata</th><th>ONVIF events</th><th>Zones</th><th>Retention</th><th /></tr>
+          <tr><th>Camera</th><th>Address</th><th>Stream</th><th>Bitrate</th><th>Metadata</th><th>ONVIF events</th><th>PTZ</th><th>Zones</th><th>Retention</th><th /></tr>
         </thead>
         <tbody>
           {cameras.map((c) => (
@@ -241,6 +252,12 @@ export function CamerasView({ cameras, port, reload }: { cameras: Camera[]; port
               </td>
               <td><Health ok={c.status?.metadata} /></td>
               <td><Health ok={c.status?.onvif_events} /></td>
+              <td>{!c.status?.ptz?.available ? <span className="muted">—</span>
+                : c.status.ptz.last_error ? <span className="error small">unreachable</span>
+                : c.status.ptz.at_home ? "home"
+                : c.status.ptz.home_name ? <span className="ptz-badge">↗ {c.status.ptz.preset_name ?? "away"}</span>
+                : <span className="muted small">no home set</span>}
+                {c.status?.ptz?.relay?.state ? <span className="ptz-badge"> ⚡</span> : null}</td>
               <td>{zoneSummary(c.zones)}</td>
               <td>{c.retention_days ?? "default"}</td>
               <td className="row">
@@ -348,6 +365,8 @@ export function CamerasView({ cameras, port, reload }: { cameras: Camera[]; port
                 )}
                 <h3 className="spaced">Neighbouring cameras</h3>
                 {cameras.some((c) => c.id === edit.id) ? <NeighborsEditor cameraId={edit.id} cameras={cameras} /> : <p className="muted small">Save the camera first.</p>}
+                <h3 className="spaced">PTZ</h3>
+                {cameras.some((c) => c.id === edit.id) ? <PtzSettings camera={cameras.find((c) => c.id === edit.id)!} onChanged={reload} /> : <p className="muted small">Save the camera first.</p>}
                 <h3 className="spaced">Retention</h3>
                 <label className="row small">
                   <input type="checkbox" checked={!edit.retention_policy} onChange={(e) => setEdit({

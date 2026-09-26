@@ -38,6 +38,7 @@ class Pipeline:
         vlmroute.router.gate = self.gate  # local Qwen calls take turns here; remote ones don't need to
         self.decode = ThreadPoolExecutor(max_workers=2, thread_name_prefix="decode")
         self.clip = None  # OpenCLIP, shared by the footage index and vehicle fingerprints (loaded on the GPU thread)
+        self.ptz = None   # ptz.PtzManager, set by the API at startup (PTZ cameras: home/away, relay, digital input)
 
     async def get_clip(self):
         if self.clip is None:
@@ -89,7 +90,10 @@ class Pipeline:
             except asyncio.TimeoutError:
                 pass
             while not self.rule_events.empty():
-                self.tracker.on_rule_event(self.rule_events.get_nowait())
+                ev = self.rule_events.get_nowait()
+                if self.ptz and ("DigitalInput" in ev.topic or "Relay" in ev.topic):
+                    self.ptz.io_event(ev.camera_id, ev.topic, ev.state, ev.ts)
+                self.tracker.on_rule_event(ev)
             if time.time() - last_sweep >= 1:
                 last_sweep = time.time()
                 await self.tracker.sweep()
@@ -123,8 +127,9 @@ class Pipeline:
         clip_start = e["start_ts"] - settings.clip_pre_roll
         clip = event_dir(event_id) / "clip.mp4"
         await fetch_clip(e["camera_id"], clip_start, clip_end - clip_start, clip)
+        away = bool(e.get("ptz_preset"))  # PTZ camera turned away from home: zones/masks don't apply
         result = await asyncio.get_running_loop().run_in_executor(
-            self.gpu, self.verifier.verify, e, clip, clip_start, self.cameras.get(e["camera_id"], {}).get("zones"))
+            self.gpu, self.verifier.verify, e, clip, clip_start, None if away else self.cameras.get(e["camera_id"], {}).get("zones"))
         reid = result.pop("reid", None)
         if "path" in result:  # extended into the pre/post-roll: the region cells follow
             result["cells"] = cells.for_event(result["path"])
@@ -140,9 +145,13 @@ class Pipeline:
                  result.get("yolo_class"), result.get("yolo_hits"))
         if result["status"] != "verified":
             return
-        self.record_areas(event_id)
-        policy.check(event_id, self.cameras.get(e["camera_id"]))  # e.g. an unrecognised person entering by an exterior door
-        a = baseline.apply(event_id) or {}
+        a: dict = {}
+        if away:  # named places, site rules and "what's normal" all describe the home view
+            db.update_event(event_id, anomaly=None, anomaly_json=None, priority=None)
+        else:
+            self.record_areas(event_id)
+            policy.check(event_id, self.cameras.get(e["camera_id"]))  # e.g. an unrecognised person entering by an exterior door
+            a = baseline.apply(event_id) or {}
         if a.get("reasons"):
             log.info("event %s unusual %.2f: %s", event_id, a["score"], "; ".join(a["reasons"]))
         if self.wants_synopsis(db.event(event_id)) or a.get("score", 0) >= settings.anomaly_synopsis_min:
@@ -241,8 +250,9 @@ class Pipeline:
             summary = (summary.rstrip(".") + ". " if summary else "") + "Went into " + ", then ".join(dict.fromkeys(names)) + "."
         result["summary"] = summary
         db.update_event(event_id, synopsis=summary, synopsis_json=result, threat=result.get("threat_level"), error=None)
-        policy.check(event_id, camera)          # site rules (who may tow what) now that Qwen has looked
-        baseline.apply(event_id, rescore=False)  # threat changed: update priority
+        if not e.get("ptz_preset"):
+            policy.check(event_id, camera)          # site rules (who may tow what) now that Qwen has looked
+            baseline.apply(event_id, rescore=False)  # threat changed: update priority
         await self.reindex(event_id)
         log.info("event %s synopsis in %.1fs: %s", event_id, time.time() - t0, summary[:120])
 
@@ -277,6 +287,8 @@ class Pipeline:
             notes.append("Unusual for this camera: " + "; ".join(an["reasons"]))
         if e.get("policy"):  # a broken site rule, so "unknown truck towing" finds it
             notes.append("Site rule broken: " + e["policy"]["text"])
+        if e.get("ptz_preset"):  # so "when the camera was on the parking lot" finds it
+            notes.append("Camera turned away from its usual view" + (f" (at preset '{e['ptz_preset']}')" if e["ptz_preset"] != "away" else ""))
         if e.get("journey_id"):  # cross-camera narrative, so e.g. "went outside" finds every leg
             j = db.one("SELECT synopsis FROM journeys WHERE id=?", [e["journey_id"]])
             if j and j["synopsis"]:
@@ -351,6 +363,8 @@ class Pipeline:
         zones, YOLO confirmed it inside one (never for something only seen outside the zones)."""
         if not e or e["status"] != "verified" or e["camera_class"] not in self.synopsis_labels(e["camera_id"]):
             return False
+        if e.get("ptz_preset"):
+            return True  # the zones describe the home view; away from it everything verified is worth describing
         zl = zones.normalize((self.cameras.get(e["camera_id"]) or {}).get("zones"))
         if not any(z["type"] == "include" for z in zl):
             return True
