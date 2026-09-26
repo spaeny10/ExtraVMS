@@ -739,19 +739,35 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
   );
   const inView = allFiltered.filter((e) => e.start_ts >= view.start && e.start_ts <= view.end).length;
 
-  const jumpToEvent = (dir: 1 | -1) => {
-    const ref = playhead ?? (view.start + view.end) / 2;
-    const target = dir > 0
-      ? allFiltered.find((e) => e.start_ts - 2 > ref + 0.5)
-      : [...allFiltered].reverse().find((e) => e.start_ts - 2 < ref - 0.5);
-    if (!target) {
-      setMessage(dir > 0 ? "No later events match the filter in the loaded range" : "No earlier events match the filter in the loaded range");
-      return;
-    }
+  const SEARCH_BACK_S = 14 * 86400; // how far Prev/Next look beyond the loaded window
+  const goTo = (target: Marker & { camId: string }) => {
     const r = view.end - view.start;
     if (target.start_ts < view.start || target.start_ts > view.end) setView(clampView(target.start_ts - r / 2, target.start_ts + r / 2));
     setCam(target.camId);
     seekTo(target.start_ts - 2, target.camId, true, { noSkip: true, until: target.end_ts ?? target.start_ts });
+  };
+  const jumpToEvent = async (dir: 1 | -1) => {
+    const ref = playhead ?? (view.start + view.end) / 2;
+    const target = dir > 0
+      ? allFiltered.find((e) => e.start_ts - 2 > ref + 0.5)
+      : [...allFiltered].reverse().find((e) => e.start_ts - 2 < ref - 0.5);
+    if (target) { goTo(target); return; }
+    // Nothing in the loaded window: ask the server for the shown cameras' events beyond it and apply the
+    // same filters (including a painted region), so Prev/Next find the nearest match however far away.
+    setMessage(dir > 0 ? "Looking for a later match…" : "Looking for an earlier match…");
+    const lo = dir > 0 ? ref + 0.5 : Math.max(0, ref - SEARCH_BACK_S);
+    const hi = dir > 0 ? Math.min(nowS(), ref + SEARCH_BACK_S) : ref - 0.5;
+    const found = (await Promise.all(tileIds.map(async (id) => {
+      try { return (await api.recordings(id, lo, hi)).events.filter((e) => matches(e, filter) && regionPass(e, regionMap[id])).map((e) => ({ ...e, camId: id })); }
+      catch { return []; }
+    }))).flat().sort((a, b) => a.start_ts - b.start_ts);
+    const far = dir > 0 ? found.find((e) => e.start_ts - 2 > ref + 0.5) : [...found].reverse().find((e) => e.start_ts - 2 < ref - 0.5);
+    if (!far) {
+      setMessage(dir > 0 ? "No later events match the filter in the last 14 days" : "No earlier events match the filter in the last 14 days");
+      return;
+    }
+    setMessage("");
+    goTo(far);
   };
 
   // ---- controls
