@@ -1,0 +1,47 @@
+# Production hub: Caddy (80/443, Let's Encrypt) -> hub -> Postgres. Only 80 and 443 are open; sites open nothing.
+#   cp hub/.env.example hub/.env   (set HUB_SECRET, HUB_PUBLIC_URL, POSTGRES_PASSWORD)
+#   docker compose -f hub/docker-compose.yml up -d --build
+#   docker compose -f hub/docker-compose.yml exec hub python -m hub createsuper you@example.com
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      HUB_DOMAIN: ${HUB_DOMAIN:-cloudvms.bigview.ai}
+    depends_on: [hub]
+
+  hub:
+    build: { context: .., dockerfile: hub/Dockerfile }
+    restart: unless-stopped
+    environment:
+      HUB_DATABASE_URL: postgresql+psycopg://hub:${POSTGRES_PASSWORD:-change-me}@postgres:5432/hub
+      HUB_SECRET: ${HUB_SECRET:?set HUB_SECRET in hub/.env}
+      HUB_PUBLIC_URL: ${HUB_PUBLIC_URL:-https://cloudvms.bigview.ai}
+      HUB_COOKIE_SECURE: "1"
+    depends_on:
+      postgres: { condition: service_healthy }
+    expose: ["8000"]
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: hub
+      POSTGRES_USER: hub
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+    volumes: [pg_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hub -d hub"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  caddy_data:
+  caddy_config:
+  pg_data:

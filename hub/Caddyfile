@@ -1,0 +1,10 @@
+{$HUB_DOMAIN} {
+	encode zstd gzip
+	# long-lived site tunnels and browser sockets: don't time them out
+	reverse_proxy hub:8000 {
+		transport http {
+			read_timeout 0
+			write_timeout 0
+		}
+	}
+}
