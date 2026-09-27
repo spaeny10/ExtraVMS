@@ -441,7 +441,7 @@ function HubPanel() {
   return (
     <Row label="Cloud hub" hint="One webpage for all your sites. The site dials out to the hub; no port forwarding. Enter the claim code at the hub under Add site."
       value={<><Status ok={h.connected} /> {state}</>}
-      sub={h.last_error && !h.connected ? h.last_error : h.last_heartbeat ? `last heartbeat ${fmtTime(h.last_heartbeat)}${h.vlm_managed ? " · Qwen managed by the hub" : ""}` : undefined}
+      sub={h.last_error && !h.connected ? `Can't reach the hub yet · ${h.last_error}` : h.last_heartbeat ? `last heartbeat ${fmtTime(h.last_heartbeat)}${h.vlm_managed ? " · Qwen managed by the hub" : ""}` : undefined}
       action={h.enrolled ? <button className="ghost small" onClick={async () => { if (await confirmDialog("Unenrol this site from the hub?", { confirmLabel: "Unenrol", danger: true })) { await api.setHub({ unenrol: true }); load(); } }}>Unenrol</button> : undefined}>
       {!h.enrolled && h.claim_code && (
         <div className="hub-claim">
