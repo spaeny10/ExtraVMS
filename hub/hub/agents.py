@@ -69,6 +69,28 @@ class AgentConn:
             await self.send({"t": "end", "id": s.id})
         return s
 
+    async def call(self, method: str, path: str, query: str = "", headers: dict | None = None, body: bytes | None = None,
+                   timeout: float = 15.0) -> tuple[int, bytes]:
+        """A whole request/response through the tunnel, for hub-side features (fleet search, digests, backups)."""
+        s = await self.request(method, path, query, headers or {}, body)
+        try:
+            await asyncio.wait_for(s.head.wait(), timeout)
+            if s.aborted or s.status is None:
+                raise RuntimeError(s.aborted or "no response")
+            out = bytearray()
+            while True:
+                c = await asyncio.wait_for(s.read(), timeout)
+                if c is None:
+                    break
+                out += c
+                await self.send({"t": "credit", "id": s.id, "bytes": len(c)})
+            return s.status, bytes(out)
+        except asyncio.TimeoutError:
+            await self.abort(s, "timeout")
+            raise RuntimeError("site did not answer in time")
+        finally:
+            self.finish(s)
+
     async def abort(self, s: Stream, reason: str) -> None:
         if self.streams.pop(s.id, None) is not None and not s.done.is_set():
             await s.abort(reason)

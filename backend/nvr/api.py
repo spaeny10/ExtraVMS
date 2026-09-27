@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 
 from . import assistant, backup, baseline, footage, frames, health, identities, journeys, keep, mediamtx, policy, ptz, retention, zones
 from . import synopsis as vlm
-from . import hub_agent
+from . import hub_agent, siteconfig
 from . import vlmroute
 from .config import ROOT, settings
 from .db import db
@@ -141,6 +141,29 @@ class HubIn(BaseModel):
 @app.get("/api/hub")
 async def hub_status():
     return state.hub.status()
+
+
+@app.get("/api/config/export")
+async def config_export():
+    """Cameras, zones, places, rules, PTZ settings, topology, named identities, layouts, retention/briefing settings."""
+    return siteconfig.export_config()
+
+
+class ConfigImportIn(BaseModel):
+    data: dict
+    replace_identities: bool = False
+
+
+@app.post("/api/config/import")
+async def config_import(body: ConfigImportIn):
+    try:
+        counts = siteconfig.import_config(body.data, body.replace_identities)
+    except (ValueError, KeyError) as e:
+        raise HTTPException(400, f"bad backup: {e}")
+    for cid in list(state.ingests):  # cameras may have changed: restart readers with the new settings
+        state.ingests.pop(cid).stop()
+    sync_cameras()
+    return counts
 
 
 @app.get("/api/turn")

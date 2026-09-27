@@ -5,9 +5,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { Dialogs, Icon, OfflineBanner, Toaster, confirmDialog, promptDialog, toast } from "@site/ui";
 import { ThemeToggle } from "@site/ThemeToggle";
-import { type Alert, type AuditRow, type ClaimPreview, type Fleet, type Me, type Member, type Org, type Site, type Usage, ago, api, fmtTime } from "./api";
+import { type Alert, type AuditRow, type Backup, type ClaimPreview, type Digest, type Fleet, type FleetSearch, type Me, type Member, type Org, type PushInfo, type Site, type Usage, ago, api, fleetAsk, fmtTime } from "./api";
 
-const PAGES = [["/", "Fleet"], ["/alerts", "Alerts"], ["/org", "Organisation"], ["/audit", "Audit"], ["/account", "Account"]] as const;
+const PAGES = [["/", "Fleet"], ["/find", "Find"], ["/alerts", "Alerts"], ["/org", "Organisation"], ["/audit", "Audit"], ["/account", "Account"]] as const;
 const ROLES = ["viewer", "operator", "admin", "owner"];
 
 function navigate(path: string) {
@@ -32,7 +32,7 @@ export default function App() {
   if (!me) return <><Login onDone={reload} /><Toaster /><Dialogs /></>;
   const orgs = me.orgs;
   const current = orgs.find((o) => o.id === org) ?? orgs[0];
-  const page = path.startsWith("/alerts") ? "alerts" : path.startsWith("/org") ? "org" : path.startsWith("/audit") ? "audit" : path.startsWith("/account") ? "account" : "fleet";
+  const page = path.startsWith("/alerts") ? "alerts" : path.startsWith("/find") ? "find" : path.startsWith("/org") ? "org" : path.startsWith("/audit") ? "audit" : path.startsWith("/account") ? "account" : "fleet";
   return (
     <>
       <OfflineBanner />
@@ -48,6 +48,7 @@ export default function App() {
       <main className="hub-page">
         {page === "fleet" && <FleetPage org={current} me={me} />}
         {page === "alerts" && current && <AlertsPage org={current} />}
+        {page === "find" && current && <FindPage org={current} />}
         {page === "org" && current && <OrgPage org={current} me={me} onChanged={reload} />}
         {page === "audit" && current && <AuditPage org={current} />}
         {page === "account" && <AccountPage me={me} onChanged={reload} />}
@@ -104,6 +105,7 @@ function FleetPage({ org, me }: { org: Org | undefined; me: Me }) {
           <h2>{g.org.name} <span className="muted small">{g.sites.filter((s) => s.online).length} of {g.sites.length} online{g.open_alerts ? ` · ${g.open_alerts} open alerts` : ""}</span></h2>
           {g.sites.length === 0 && <p className="muted">No sites yet. Enrol one under Organisation → Add site.</p>}
           <div className="site-grid">{g.sites.map((s) => <SiteCard key={s.id} s={s} now={fleet.now} />)}</div>
+          <DigestCard org={g.org} />
         </section>
       ))}
     </>
@@ -139,6 +141,98 @@ function SiteCard({ s, now }: { s: Site; now: number }) {
       )}
       {s.open_alerts > 0 && <div className="alerts">⚠ {s.open_alerts} open alert{s.open_alerts > 1 ? "s" : ""}</div>}
     </a>
+  );
+}
+
+function DigestCard({ org }: { org: Org }) {
+  const [rows, setRows] = useState<Digest[]>([]);
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(() => api.digests(org.id).then(setRows).catch(() => setRows([])), [org.id]);
+  useEffect(() => { load(); }, [load]);
+  const d = rows[0];
+  return (
+    <div className="card" style={{ marginTop: 12 }}>
+      <div className="row"><h3 style={{ margin: 0 }}>Digest</h3><span className="muted small">{d ? `${d.day}${d.model ? ` · ${d.model}` : ""}` : "none yet"}</span><span className="spacer" />
+        <button className="ghost small" disabled={busy} onClick={async () => { setBusy(true); try { await api.digestNow(org.id); await load(); } catch (e) { toast.error(e); } finally { setBusy(false); } }}>Generate now</button></div>
+      {d && <pre style={{ whiteSpace: "pre-wrap", margin: "8px 0 0", font: "inherit" }}>{d.text}</pre>}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------- find / ask across sites
+
+function FindPage({ org }: { org: Org }) {
+  const [q, setQ] = useState("");
+  const [res, setRes] = useState<FleetSearch | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [answers, setAnswers] = useState<Record<string, { name: string; text: string; error?: string; done?: boolean }>>({});
+  const [asking, setAsking] = useState(false);
+  const search = async () => {
+    if (!q.trim()) return;
+    setBusy(true); setAnswers({});
+    try { setRes(await api.fleetSearch(org.id, q.trim())); } catch (e) { toast.error(e); } finally { setBusy(false); }
+  };
+  const ask = async () => {
+    if (!q.trim()) return;
+    setAsking(true); setRes(null); setAnswers({});
+    try {
+      await fleetAsk(org.id, q.trim(), (c) => {
+        const site = c.site as string | undefined;
+        if (c.type === "sites") { const init: typeof answers = {}; for (const s of c.sites as { site: string; site_name: string }[]) init[s.site] = { name: s.site_name, text: "" }; setAnswers(init); return; }
+        if (!site) return;
+        setAnswers((a) => {
+          const cur = a[site] ?? { name: String(c.site_name ?? site), text: "" };
+          if (c.type === "delta") return { ...a, [site]: { ...cur, text: cur.text + String(c.text ?? "") } };
+          if (c.type === "error") return { ...a, [site]: { ...cur, error: String(c.error), done: true } };
+          if (c.type === "site_done" || c.type === "done") return { ...a, [site]: { ...cur, done: true } };
+          return a;
+        });
+      });
+    } catch (e) { toast.error(e); } finally { setAsking(false); }
+  };
+  return (
+    <>
+      <h2>Find across {org.name}</h2>
+      <form className="row" onSubmit={(e) => { e.preventDefault(); search(); }}>
+        <input style={{ flex: 1, minWidth: 260 }} value={q} onChange={(e) => setQ(e.target.value)} placeholder='Search every site: "white pickup truck", "person at the back door last night"…' />
+        <button type="submit" disabled={busy || !q.trim()}>Search</button>
+        <button type="button" className="ghost" disabled={asking || !q.trim()} onClick={ask} title="Every site's assistant answers from its own footage">✦ Ask all sites</button>
+      </form>
+      {res && (
+        <>
+          <p className="muted small">{res.sites.map((s) => `${s.site_name}: ${s.events} events, ${s.footage} moments${s.error ? ` (${s.error})` : ""}`).join(" · ")}{res.offline.length ? ` · offline: ${res.offline.join(", ")}` : ""}</p>
+          {res.events.length === 0 && res.footage.length === 0 && <p className="muted">Nothing matched.</p>}
+          <div className="site-grid">
+            {res.events.map((e) => (
+              <a key={`${e.site_id}-${e.id}`} className="site-card" href={`/s/${e.site_id}/#timeline?cam=${e.camera_id}&event=${e.id}`}>
+                <div className="head"><strong>{e.site_name}</strong><span className="spacer" /><span className="muted small">{fmtTime(e.start_ts)}</span></div>
+                <div className="row" style={{ alignItems: "flex-start" }}>
+                  {e.snapshot ? <img src={`/s/${e.site_id}/api/events/${e.id}/media/snapshot.jpg`} alt="" style={{ width: 140, borderRadius: 6 }} /> : null}
+                  <div className="small">{e.synopsis || `${e.camera_class} · ${e.camera_id}`}</div>
+                </div>
+              </a>
+            ))}
+          </div>
+          {res.footage.length > 0 && (
+            <>
+              <h3>Footage moments</h3>
+              <div className="row">{res.footage.map((m, i) => <a key={i} className="chip" href={`/s/${m.site_id}/#timeline?cam=${m.camera_id}&t=${Math.round(m.ts)}`}>{m.site_name} · {m.camera_id} · {fmtTime(m.ts)}</a>)}</div>
+            </>
+          )}
+        </>
+      )}
+      {Object.keys(answers).length > 0 && (
+        <div className="site-grid" style={{ marginTop: 12 }}>
+          {Object.entries(answers).map(([id, a]) => (
+            <div key={id} className="site-card">
+              <div className="head"><strong>{a.name}</strong><span className="spacer" /><span className="muted small">{a.done ? "" : "thinking…"}</span></div>
+              {a.error ? <p className="small" style={{ color: "var(--bad)" }}>{a.error}</p> : <pre style={{ whiteSpace: "pre-wrap", font: "inherit", margin: "6px 0 0" }}>{a.text || (a.done ? "No answer." : "")}</pre>}
+              <a className="small" href={`/s/${id}/#find`}>Open this site's Find →</a>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
   );
 }
 
@@ -217,6 +311,7 @@ function OrgPage({ org, me, onChanged }: { org: Org; me: Me; onChanged: () => vo
                   {admin && <button className="ghost small" onClick={async () => { const name = await promptDialog("Rename site", { initial: s.name, label: "Name" }); if (name?.trim()) { await api.updateSite(s.id, { name: name.trim() }); load(); } }}>Rename</button>}
                   {admin && <button className="ghost small" onClick={async () => { const loc = await promptDialog("Location", { initial: s.location, label: "Location" }); if (loc != null) { await api.updateSite(s.id, { location: loc.trim() }); load(); } }}>Location</button>}
                   {admin && <button className="ghost small" title="Issue a new device token (the old one stops working after 10 minutes)" onClick={async () => { if (await confirmDialog(`Rotate ${s.name}'s token?`)) { await api.rotateSite(s.id); toast.success("New token sent to the site"); } }}>Rotate token</button>}
+                  {admin && <BackupsButton site={s} />}
                   {admin && <button className="ghost small" onClick={async () => { if (await confirmDialog(`Remove ${s.name}?`, { message: "The site is told to unenrol; recordings stay at the site.", confirmLabel: "Remove", danger: true })) { await api.removeSite(s.id); load(); } }}>Remove</button>}
                 </td>
               </tr>))}
@@ -227,6 +322,40 @@ function OrgPage({ org, me, onChanged }: { org: Org; me: Me; onChanged: () => vo
       {admin && <MembersBox org={org} members={members} sites={sites} onChanged={() => { load(); onChanged(); }} />}
       <SharedAiBox org={org} canEdit={org.role === "owner" || me.user.is_super} />
       {me.user.is_super && <CreateOrgBox onDone={onChanged} />}
+    </>
+  );
+}
+
+function BackupsButton({ site }: { site: Site }) {
+  const [open, setOpen] = useState(false);
+  const [rows, setRows] = useState<Backup[]>([]);
+  const load = () => api.backups(site.id).then(setRows).catch((e) => toast.error(e));
+  return (
+    <>
+      <button className="ghost small" onClick={() => { setOpen(true); load(); }}>Backups</button>
+      {open && (
+        <div className="modal-backdrop" onClick={() => setOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 640 }}>
+            <header className="modal-head"><h2>{site.name} · configuration backups</h2><button className="ghost" onClick={() => setOpen(false)} aria-label="Close">✕</button></header>
+            <p className="muted small">Cameras, zones, places, rules, PTZ, neighbours, named people/vehicles, layouts, retention and briefing settings — taken nightly, 30 kept. Camera passwords are not included. Recordings and events stay at the site.</p>
+            <div className="row"><button className="ghost small" onClick={async () => { try { await api.backupNow(site.id); toast.success("Backup taken"); load(); } catch (e) { toast.error(e); } }}>Back up now</button></div>
+            <table className="hub-table">
+              <thead><tr><th>When</th><th>Size</th><th>Cameras</th><th>Identities</th><th>Version</th><th /></tr></thead>
+              <tbody>{rows.map((b) => (
+                <tr key={b.id}><td>{fmtTime(b.created_at)}</td><td>{(b.bytes / 1024).toFixed(0)} KB</td><td>{b.cameras}</td><td>{b.identities}</td><td>{b.site_version}</td>
+                  <td className="row">
+                    <a className="small" href={`/api/sites/${site.id}/backups/${b.id}`}>Download</a>
+                    <button className="ghost small" onClick={async () => {
+                      if (!await confirmDialog(`Restore ${site.name} from ${fmtTime(b.created_at)}?`, { message: "Cameras, zones, rules, topology and layouts on the site are replaced; named people/vehicles are merged by name. Camera passwords must already be set on the site.", confirmLabel: "Restore", danger: true })) return;
+                      try { const r = await api.restore(site.id, b.id); toast.success(`Restored: ${Object.entries(r).map(([k, v]) => `${v} ${k}`).join(", ")}`); } catch (e) { toast.error(e); }
+                    }}>Restore</button>
+                  </td></tr>))}
+              </tbody>
+            </table>
+            {rows.length === 0 && <p className="muted">No backups yet.</p>}
+          </div>
+        </div>
+      )}
     </>
   );
 }
@@ -346,6 +475,47 @@ function CreateOrgBox({ onDone }: { onDone: () => void }) {
   );
 }
 
+function PushCard() {
+  const [info, setInfo] = useState<PushInfo | null>(null);
+  const [kinds, setKinds] = useState<string[]>(["offline", "event_policy", "event_watched", "event_high"]);
+  const load = () => api.pushInfo().then(setInfo).catch(() => setInfo(null));
+  useEffect(() => { load(); }, []);
+  const supported = "serviceWorker" in navigator && "PushManager" in window && window.isSecureContext;
+  const enable = async () => {
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      const perm = await Notification.requestPermission();
+      if (perm !== "granted") { toast.error("Notifications were not allowed by the browser"); return; }
+      const key = Uint8Array.from(atob(info!.public_key.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(info!.public_key.length / 4) * 4, "=")), (c) => c.charCodeAt(0));
+      const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+      await api.pushSubscribe(sub.toJSON(), kinds);
+      toast.success("This browser will be notified"); load();
+    } catch (e) { toast.error(e); }
+  };
+  const disable = async () => {
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.getSubscription();
+    if (sub) { await api.pushUnsubscribe(sub.endpoint); await sub.unsubscribe(); }
+    toast.success("Notifications off on this browser"); load();
+  };
+  const LABEL: Record<string, string> = { offline: "Site offline", camera_down: "Camera down", disk: "Disk low", clock: "Clock skew", event_high: "High-priority event", event_policy: "Site rule broken", event_watched: "Watched person/vehicle" };
+  return (
+    <div className="card">
+      <h3>Notifications</h3>
+      {!supported ? <p className="muted small">This browser can't receive push notifications here (needs HTTPS and a modern browser).</p> : (
+        <>
+          <div className="row">{(info?.kinds ?? Object.keys(LABEL)).map((k) => <label key={k} className="small row"><input type="checkbox" checked={kinds.includes(k)} onChange={(e) => setKinds((ks) => e.target.checked ? [...ks, k] : ks.filter((x) => x !== k))} /> {LABEL[k] ?? k}</label>)}</div>
+          <div className="row" style={{ marginTop: 8 }}>
+            <button className="small" onClick={enable} disabled={!info}>Notify this browser</button>
+            <button className="ghost small" onClick={disable}>Turn off here</button>
+            <span className="muted small">{info?.subscriptions.length ?? 0} browser(s) subscribed</span>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------- audit
 
 function AuditPage({ org }: { org: Org }) {
@@ -386,6 +556,7 @@ function AccountPage({ me, onChanged }: { me: Me; onChanged: () => void }) {
           <div className="row"><span>Authenticator app: off</span><button className="ghost small" onClick={() => api.totpSetup().then(setSetup).catch((e) => toast.error(e))}>Set up</button></div>
         )}
       </div>
+      <PushCard />
       <div className="card">
         <h3>Password</h3>
         <button className="ghost small" onClick={async () => {

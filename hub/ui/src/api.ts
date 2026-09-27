@@ -14,6 +14,14 @@ export type Alert = { id: number; org_id: string; site_id: string; site_name: st
 export type Member = { id: string; email: string; role: string; totp_enabled: boolean; last_login_at: number | null; sites: string[] };
 export type AuditRow = { id: number; ts: number; user_email: string | null; site_id: string | null; action: string; method: string | null; path: string | null; status: number | null; ip: string | null };
 export type Usage = { ai_shared: boolean; configured: boolean; model: string; turn: boolean; days: number; sites: { site_id: string; site_name: string; requests: number; prompt_tokens: number; completion_tokens: number; latency_ms: number; errors: number }[] };
+export type FleetSearch = {
+  q: string; sites: { site_id: string; site_name: string; error: string | null; events: number; footage: number }[]; offline: string[];
+  events: (Record<string, unknown> & { id: number; camera_id: string; start_ts: number; synopsis?: string | null; camera_class: string; site_id: string; site_name: string; snapshot?: string | null })[];
+  footage: { camera_id: string; ts: number; score: number; site_id: string; site_name: string }[];
+};
+export type Digest = { id: number; org_id: string; day: string; created_at: number; text: string; model: string | null };
+export type Backup = { id: number; created_at: number; bytes: number; cameras: number; identities: number; site_version: string | null };
+export type PushInfo = { public_key: string; subscriptions: { endpoint: string; kinds: string[]; ua: string }[]; kinds: string[] };
 export type ClaimPreview = { code: string; hint: { hostname?: string; cameras?: { id: string; name: string }[]; version?: string }; agent_ip: string | null; waiting: boolean };
 
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
@@ -50,8 +58,31 @@ export const api = {
   ack: (id: number) => req(`/api/alerts/${id}/ack`, { method: "POST" }),
   audit: (org: string, site?: string) => req<AuditRow[]>(`/api/audit?${qs({ org, site })}`),
   usage: (org: string, days = 30) => req<Usage>(`/api/orgs/${org}/usage?${qs({ days })}`),
+  fleetSearch: (org: string, q: string, since?: number) => req<FleetSearch>(`/api/fleet/search?${qs({ org, q, since })}`),
+  digests: (org: string) => req<Digest[]>(`/api/orgs/${org}/digests`),
+  digestNow: (org: string) => req<Digest>(`/api/orgs/${org}/digests/generate`, { method: "POST" }),
+  backups: (site: string) => req<Backup[]>(`/api/sites/${site}/backups`),
+  backupNow: (site: string) => req<Backup>(`/api/sites/${site}/backups`, { method: "POST" }),
+  restore: (site: string, id: number, replace_identities = false) => req<Record<string, number>>(`/api/sites/${site}/backups/${id}/restore`, json("POST", { replace_identities })),
+  pushInfo: () => req<PushInfo>("/api/push/vapid"),
+  pushSubscribe: (subscription: unknown, kinds: string[]) => req("/api/push/subscribe", json("POST", { subscription, kinds })),
+  pushUnsubscribe: (endpoint: string) => req("/api/push/unsubscribe", json("POST", { endpoint })),
   patchOrg: (org: string, b: { name?: string; ai_shared?: boolean }) => req<Org>(`/api/orgs/${org}`, json("PATCH", b)),
 };
+
+/** Fleet Ask: every site's assistant answers; onChunk gets {site, site_name, ...chunk} lines. */
+export async function fleetAsk(org: string, message: string, onChunk: (c: Record<string, unknown>) => void) {
+  const r = await fetch("/api/fleet/ask", json("POST", { org, message }));
+  if (!r.ok || !r.body) throw new Error(`${r.status} ${await r.text()}`);
+  const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let nl: number;
+    while ((nl = buf.indexOf("\n")) >= 0) { const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1); if (line) onChunk(JSON.parse(line)); }
+  }
+}
 
 export const fmtTime = (ts: number) =>
   new Date(ts * 1000).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });

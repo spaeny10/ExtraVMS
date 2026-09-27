@@ -8,6 +8,7 @@ import sqlalchemy as sa
 from . import db
 
 KINDS = ("offline", "camera_down", "disk", "clock", "event_high", "event_policy", "event_watched")
+on_open = None   # set by api: called with (org_id, site, kind, detail) when a new alert opens (push notifications)
 EVENT_TTL_S = 24 * 3600
 _camera_strikes: dict[tuple[str, str], int] = {}
 
@@ -19,6 +20,11 @@ def open(site: dict, kind: str, key: str = "", detail: dict | None = None) -> bo
         return False
     db.insert(db.alerts, {"org_id": site["org_id"], "site_id": site["id"], "kind": kind, "key": key,
                           "opened_at": time.time(), "closed_at": None, "acked_by": None, "acked_at": None, "detail": detail or {}})
+    if on_open is not None:
+        try:
+            on_open(site["org_id"], site, kind, detail or {})
+        except Exception:  # notifications must never break alerting
+            pass
     return True
 
 

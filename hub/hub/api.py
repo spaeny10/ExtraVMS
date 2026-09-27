@@ -16,7 +16,9 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, W
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, EmailStr, Field
 
-from . import __version__, alerts, auth, db, proxy, turn, vlm_proxy
+from . import __version__, alerts, auth, backups, db, digest, proxy, push, turn, vlm_proxy
+from . import fleet as fleet_mod
+from fastapi.responses import StreamingResponse
 from .agents import registry
 from .config import settings
 from .roles import ROLES
@@ -27,10 +29,21 @@ log = logging.getLogger("hub")
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     db.engine()
-    task = asyncio.create_task(_sweeper(), name="sweeper")
+    alerts.on_open = _notify
+    tasks = [asyncio.create_task(_sweeper(), name="sweeper"), asyncio.create_task(digest.daily_loop(), name="digests"),
+             asyncio.create_task(backups.nightly_loop(), name="backups")]
+    task = tasks[0]
     log.info("hub %s up on http://%s:%s (%s)", __version__, settings.host, settings.port, settings.public_url)
     yield
-    task.cancel()
+    for t in tasks:
+        t.cancel()
+
+
+def _notify(org_id: str, site: dict, kind: str, detail: dict) -> None:
+    try:
+        asyncio.get_running_loop().create_task(push.notify_alert(org_id, site, kind, detail))
+    except RuntimeError:
+        pass  # no loop (tests calling alerts directly)
 
 
 async def _sweeper() -> None:
@@ -407,6 +420,117 @@ async def audit(org: str, site: str | None = None, since: float | None = None, l
 def _audit(u: dict, org_id: str | None, site_id: str | None, action: str) -> None:
     db.insert(db.audit_log, {"ts": time.time(), "user_id": u["id"], "user_email": u["email"], "org_id": org_id, "site_id": site_id,
                              "action": action, "method": None, "path": None, "status": None, "ip": None, "detail": {}})
+
+
+# ---------------------------------------------------------------- fleet find / ask, digests, backups, push
+
+@app.get("/api/fleet/search")
+async def fleet_search(org: str, q: str = Query(min_length=1, max_length=200), since: float | None = None, until: float | None = None,
+                       u: dict = Depends(user)):
+    auth.require_role(u, org, "viewer")
+    return await fleet_mod.search(u, org, q, since, until)
+
+
+class FleetAskIn(BaseModel):
+    org: str
+    message: str = Field(min_length=1, max_length=2000)
+
+
+@app.post("/api/fleet/ask")
+async def fleet_ask(body: FleetAskIn, u: dict = Depends(user)):
+    auth.require_role(u, body.org, "viewer")
+    return StreamingResponse(fleet_mod.ask(u, body.org, body.message), media_type="application/x-ndjson")
+
+
+@app.get("/api/orgs/{org_id}/digests")
+async def org_digests(org_id: str, limit: int = Query(7, le=60), u: dict = Depends(user)):
+    auth.require_role(u, org_id, "viewer")
+    return digest.latest(org_id, limit)
+
+
+@app.post("/api/orgs/{org_id}/digests/generate")
+async def org_digest_now(org_id: str, u: dict = Depends(user)):
+    auth.require_role(u, org_id, "viewer")
+    return await digest.generate(org_id)
+
+
+@app.get("/api/sites/{site_id}/backups")
+async def site_backups(site_id: str, u: dict = Depends(user)):
+    site, _ = auth.site_access(u, site_id)
+    auth.require_role(u, site["org_id"], "admin")
+    return backups.list_for(site_id)
+
+
+@app.post("/api/sites/{site_id}/backups")
+async def site_backup_now(site_id: str, u: dict = Depends(user)):
+    site, _ = auth.site_access(u, site_id)
+    auth.require_role(u, site["org_id"], "admin")
+    try:
+        row = await backups.backup_site(site, u["email"])
+    except Exception as e:
+        raise HTTPException(503, f"backup failed: {e}")
+    if not row:
+        raise HTTPException(503, "site offline")
+    _audit(u, site["org_id"], site_id, "config backup taken")
+    return {k: v for k, v in row.items() if k != "data"}
+
+
+@app.get("/api/sites/{site_id}/backups/{backup_id}")
+async def site_backup_download(site_id: str, backup_id: int, u: dict = Depends(user)):
+    site, _ = auth.site_access(u, site_id)
+    auth.require_role(u, site["org_id"], "admin")
+    b = db.one(sa.select(db.config_backups).where(db.config_backups.c.id == backup_id, db.config_backups.c.site_id == site_id))
+    if not b:
+        raise HTTPException(404)
+    return JSONResponse(b["data"], headers={"Content-Disposition": f'attachment; filename="{site["name"]}-{time.strftime("%Y%m%d", time.localtime(b["created_at"]))}.json"'})
+
+
+class RestoreIn(BaseModel):
+    replace_identities: bool = False
+
+
+@app.post("/api/sites/{site_id}/backups/{backup_id}/restore")
+async def site_backup_restore(site_id: str, backup_id: int, body: RestoreIn, u: dict = Depends(user)):
+    site, _ = auth.site_access(u, site_id)
+    auth.require_role(u, site["org_id"], "admin")
+    try:
+        result = await backups.restore(site, backup_id, u["email"], body.replace_identities)
+    except LookupError:
+        raise HTTPException(404, "no such backup")
+    except Exception as e:
+        raise HTTPException(503, f"restore failed: {e}")
+    _audit(u, site["org_id"], site_id, f"config restored from backup {backup_id}")
+    return result
+
+
+@app.get("/api/push/vapid")
+async def push_vapid(u: dict = Depends(user)):
+    return {"public_key": push.vapid()["public"], "subscriptions": [{"endpoint": s["endpoint"], "kinds": s["kinds"], "ua": s["ua"]} for s in push.subscriptions_for(u["id"])],
+            "kinds": list(alerts.KINDS)}
+
+
+class PushIn(BaseModel):
+    subscription: dict
+    kinds: list[str] | None = None
+
+
+@app.post("/api/push/subscribe")
+async def push_subscribe(body: PushIn, request: Request, u: dict = Depends(user)):
+    try:
+        push.subscribe(u["id"], body.subscription, body.kinds, request.headers.get("user-agent") or "")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True}
+
+
+class UnpushIn(BaseModel):
+    endpoint: str
+
+
+@app.post("/api/push/unsubscribe")
+async def push_unsubscribe(body: UnpushIn, u: dict = Depends(user)):
+    push.unsubscribe(u["id"], body.endpoint)
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------- tunnel + proxy

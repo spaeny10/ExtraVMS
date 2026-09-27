@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     vllm_per_site: int = 2
     vllm_per_org: int = 8
 
+    digest_hour: int = 7                      # org digest at HH:30 hub-local
+    backup_hour: int = 3                      # nightly site config backups
+    push_contact: str = ""                    # mailto for VAPID claims (defaults to admin@<public host>)
+
 
 settings = Settings()
 if not settings.secret:

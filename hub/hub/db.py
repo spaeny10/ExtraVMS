@@ -68,6 +68,20 @@ vlm_usage = Table("vlm_usage", metadata,
                   Column("prompt_tokens", Integer, nullable=False, default=0), Column("completion_tokens", Integer, nullable=False, default=0),
                   Column("latency_ms", Integer, nullable=True), Column("status", Integer, nullable=True),
                   Column("images", Integer, nullable=False, default=0), Column("streamed", Boolean, nullable=False, default=False))
+digests = Table("digests", metadata,
+                Column("id", Integer, primary_key=True, autoincrement=True), Column("org_id", String(24), nullable=False, index=True),
+                Column("day", String(10), nullable=False), Column("created_at", Float, nullable=False), Column("text", Text, nullable=False),
+                Column("data", sa.JSON, nullable=True), Column("model", String(120), nullable=True))
+config_backups = Table("config_backups", metadata,
+                       Column("id", Integer, primary_key=True, autoincrement=True), Column("site_id", String(24), nullable=False, index=True),
+                       Column("org_id", String(24), nullable=False), Column("created_at", Float, nullable=False), Column("bytes", Integer, nullable=False),
+                       Column("data", sa.JSON, nullable=False), Column("cameras", Integer, nullable=False, default=0),
+                       Column("identities", Integer, nullable=False, default=0), Column("site_version", String(32), nullable=True))
+push_subscriptions = Table("push_subscriptions", metadata,
+                           Column("id", Integer, primary_key=True, autoincrement=True), Column("user_id", String(24), nullable=False, index=True),
+                           Column("endpoint", Text, nullable=False), Column("sub", sa.JSON, nullable=False), Column("kinds", sa.JSON, nullable=False),
+                           Column("created_at", Float, nullable=False), Column("ua", String(200), nullable=True))
+kv = Table("kv", metadata, Column("key", String(64), primary_key=True), Column("value", sa.JSON, nullable=False))
 audit_log = Table("audit_log", metadata,
                   Column("id", Integer, primary_key=True, autoincrement=True), Column("ts", Float, nullable=False, index=True),
                   Column("user_id", String(24), nullable=True), Column("user_email", String(200), nullable=True),
