@@ -143,6 +143,13 @@ async def hub_status():
     return state.hub.status()
 
 
+@app.get("/api/turn")
+async def turn_servers():
+    """ICE servers for a browser on the site's own address (through the hub, the hub answers /s/<site>/api/turn)."""
+    t = db.get_setting("hub_turn") or {}
+    return {"iceServers": [{"urls": t["urls"], "username": t["username"], "credential": t["credential"]}] if t.get("urls") else []}
+
+
 @app.put("/api/hub")
 async def hub_configure(body: HubIn):
     await state.hub.configure(hub_url=body.hub_url, unenrol=body.unenrol)
@@ -1340,7 +1347,7 @@ async def whep(path: str, request: Request):
         r = await c.post(f"http://127.0.0.1:{settings.mediamtx_webrtc_port}/{path}/whep", content=await request.body(),
                          headers={"Content-Type": "application/sdp"})
     body = r.content
-    if r.status_code in (200, 201):
+    if r.status_code in (200, 201) and not request.headers.get("x-hub-site"):  # through the hub the relay does this
         hosts = [*settings.webrtc_public_hosts, request.headers.get("host", "")]
         ips = await asyncio.to_thread(public_ips, hosts)
         if ips:

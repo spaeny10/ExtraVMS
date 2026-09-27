@@ -61,6 +61,13 @@ alerts = Table("alerts", metadata,
                Column("key", String(120), nullable=False, default=""), Column("opened_at", Float, nullable=False),
                Column("closed_at", Float, nullable=True), Column("acked_by", String(24), nullable=True),
                Column("acked_at", Float, nullable=True), Column("detail", sa.JSON, nullable=True))
+vlm_usage = Table("vlm_usage", metadata,
+                  Column("id", Integer, primary_key=True, autoincrement=True), Column("ts", Float, nullable=False, index=True),
+                  Column("site_id", String(24), nullable=False), Column("org_id", String(24), nullable=False, index=True),
+                  Column("model", String(120), nullable=True), Column("task", String(40), nullable=True),
+                  Column("prompt_tokens", Integer, nullable=False, default=0), Column("completion_tokens", Integer, nullable=False, default=0),
+                  Column("latency_ms", Integer, nullable=True), Column("status", Integer, nullable=True),
+                  Column("images", Integer, nullable=False, default=0), Column("streamed", Boolean, nullable=False, default=False))
 audit_log = Table("audit_log", metadata,
                   Column("id", Integer, primary_key=True, autoincrement=True), Column("ts", Float, nullable=False, index=True),
                   Column("user_id", String(24), nullable=True), Column("user_email", String(200), nullable=True),

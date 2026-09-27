@@ -183,7 +183,7 @@ class HubAgent:
                 db.set_setting("hub_vlm", m["vlm"])
                 self._apply_vlm(m["vlm"])
             if "turn" in m:
-                db.set_setting("hub_turn", m["turn"])
+                self._apply_turn(m["turn"])
             log.info("hub: connected as %s (%s)", self.site_id, self.org or "no org")
         elif t == "enrolled":
             db.set_setting("hub_token", m["token"])
@@ -203,7 +203,7 @@ class HubAgent:
             db.set_setting("hub_vlm", m.get("vlm"))
             self._apply_vlm(m.get("vlm"))
         elif t == "turn":
-            db.set_setting("hub_turn", m.get("turn"))
+            self._apply_turn(m.get("turn"))
         elif t == "req":
             s = Stream(m["id"])
             s.headers = {k.lower(): v for k, v in (m.get("headers") or {}).items()}
@@ -309,6 +309,18 @@ class HubAgent:
         while True:
             await asyncio.sleep(PING_S)
             await self._send({"t": "ping", "ts": time.time()})
+
+    def _apply_turn(self, turn: dict | None) -> None:
+        """Remember the hub's TURN credentials and hand them to MediaMTX (it re-reads its config)."""
+        if db.get_setting("hub_turn") == turn:
+            return
+        db.set_setting("hub_turn", turn)
+        mtx = getattr(self.state, "mtx", None)
+        if mtx is not None:
+            try:
+                mtx.write_config(db.cameras(enabled_only=True))
+            except Exception as e:
+                log.warning("hub: could not apply TURN to MediaMTX: %s", e)
 
     # ---- shared AI pushed by the hub
     @staticmethod

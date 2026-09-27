@@ -16,16 +16,17 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from tunnelproto import CHUNK, WINDOW, Stream, chunk, decode, encode, split
 
-from . import alerts, db
+from . import alerts, db, turn
 from .config import settings
 
 log = logging.getLogger("hub.agents")
 
 
 class AgentConn:
-    def __init__(self, ws: WebSocket, site: dict | None, claim_code: str | None = None) -> None:
+    def __init__(self, ws: WebSocket, site: dict | None, claim_code: str | None = None, token: str | None = None) -> None:
         self.ws = ws
-        self.site = site                      # None while unenrolled (claim)
+        self.site = site
+        self.token = token                    # the device token this connection authenticated with                      # None while unenrolled (claim)
         self.site_id = site["id"] if site else None
         self.claim_code = claim_code
         self.hello: dict = {}
@@ -123,7 +124,7 @@ class AgentRegistry:
             await ws.close(code=4401, reason="authorization required")
             return
         await ws.accept()
-        conn = AgentConn(ws, site, claim_code)
+        conn = AgentConn(ws, site, claim_code, cred if scheme == "Bearer" else None)
         try:
             await self._loop(conn)
         except WebSocketDisconnect:
@@ -208,7 +209,9 @@ class AgentRegistry:
             version=frame.get("site_version")))
         org = db.one(sa.select(db.orgs).where(db.orgs.c.id == conn.site["org_id"]))
         welcome = {"t": "welcome", "site_id": conn.site_id, "org": org["name"] if org else None,
-                   "heartbeat_s": settings.heartbeat_s, "now": time.time(), "max_streams": settings.max_streams_per_site}
+                   "heartbeat_s": settings.heartbeat_s, "now": time.time(), "max_streams": settings.max_streams_per_site,
+                   "turn": turn.mint(f"site:{conn.site_id}", settings.turn_site_ttl_s),
+                   "vlm": self.vlm_config(org, conn.token)}
         await conn.send(welcome)
         alerts.close(conn.site, "offline")
         log.info("site %s (%s) connected from %s", conn.site_id, conn.site["name"], conn.ip)
@@ -226,6 +229,19 @@ class AgentRegistry:
             del self.by_site[conn.site_id]
             db.run(sa.update(db.sites).where(db.sites.c.id == conn.site_id).values(online=False, last_seen_at=time.time()))
             log.info("site %s disconnected", conn.site_id)
+
+    @staticmethod
+    def vlm_config(org: dict | None, token: str | None) -> dict | None:
+        """What a site should put in its remote-VLM settings: the hub's /v1 with its own device token as key."""
+        if not (org and org.get("ai_shared") and settings.vllm_url and settings.vllm_model and token):
+            return None
+        return {"url": settings.public_url.rstrip("/") + "/v1", "model": settings.vllm_model, "key": token}
+
+    async def push_vlm(self, org: dict) -> None:
+        """The org's sharing flag changed: tell its connected sites."""
+        for conn in list(self.by_site.values()):
+            if conn.site and conn.site["org_id"] == org["id"]:
+                await conn.send({"t": "vlm", "vlm": self.vlm_config(org, conn.token)})
 
     # ---- enrolment from the UI
     async def enrol(self, code: str, site: dict, token: str) -> bool:

@@ -23,6 +23,11 @@ services:
       HUB_SECRET: ${HUB_SECRET:?set HUB_SECRET in hub/.env}
       HUB_PUBLIC_URL: ${HUB_PUBLIC_URL:-https://cloudvms.bigview.ai}
       HUB_COOKIE_SECURE: "1"
+      HUB_TURN_HOST: ${HUB_DOMAIN:-cloudvms.bigview.ai}
+      HUB_TURN_SECRET: ${HUB_TURN_SECRET:-}
+      HUB_VLLM_URL: ${HUB_VLLM_URL:-http://vllm:8000/v1}
+      HUB_VLLM_KEY: ${HUB_VLLM_KEY:-internal}
+      HUB_VLLM_MODEL: ${HUB_VLLM_MODEL:-Qwen/Qwen2.5-VL-32B-Instruct-AWQ}
     depends_on:
       postgres: { condition: service_healthy }
     expose: ["8000"]
@@ -41,7 +46,30 @@ services:
       timeout: 3s
       retries: 20
 
+  # TURN relay so live video reaches browsers outside the sites' LANs. Open 3478/udp+tcp, 5349/tcp, 49152-49252/udp.
+  coturn:
+    image: coturn/coturn:4
+    restart: unless-stopped
+    network_mode: host
+    volumes: ["./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro"]
+    command: ["-c", "/etc/coturn/turnserver.conf", "--static-auth-secret=${HUB_TURN_SECRET:?set HUB_TURN_SECRET in hub/.env}", "--realm=${HUB_DOMAIN:-cloudvms.bigview.ai}"]
+
+  # Shared AI (optional: docker compose --profile ai up): Qwen2.5-VL-32B on the hub's GPU, only reachable through the hub proxy.
+  vllm:
+    image: vllm/vllm-openai:latest
+    profiles: ["ai"]
+    restart: unless-stopped
+    command: ["--model", "${HUB_VLLM_MODEL:-Qwen/Qwen2.5-VL-32B-Instruct-AWQ}", "--quantization", "awq", "--max-model-len", "8192",
+              "--api-key", "${HUB_VLLM_KEY:-internal}", "--limit-mm-per-prompt", "image=6", "--gpu-memory-utilization", "0.92"]
+    volumes: ["hf_cache:/root/.cache/huggingface"]
+    expose: ["8000"]
+    deploy:
+      resources:
+        reservations:
+          devices: [{ driver: nvidia, count: 1, capabilities: [gpu] }]
+
 volumes:
+  hf_cache:
   caddy_data:
   caddy_config:
   pg_data:

@@ -28,6 +28,21 @@ class Settings(BaseSettings):
     port: int = 8000
     log_level: str = "info"
 
+    # TURN relay for live video through the hub (coturn with use-auth-secret; see hub/coturn/turnserver.conf)
+    turn_host: str = ""                       # e.g. cloudvms.bigview.ai; empty = no relay (LAN viewing only)
+    turn_secret: str = ""
+    turn_port: int = 3478
+    turn_tls_port: int = 5349
+    turn_user_ttl_s: int = 3600
+    turn_site_ttl_s: int = 30 * 86400
+
+    # Shared AI: an OpenAI-compatible vLLM the hub fronts for every site whose organisation has ai_shared
+    vllm_url: str = ""                        # e.g. http://vllm:8000/v1
+    vllm_key: str = ""
+    vllm_model: str = ""                      # e.g. Qwen/Qwen2.5-VL-32B-Instruct-AWQ
+    vllm_per_site: int = 2
+    vllm_per_org: int = 8
+
 
 settings = Settings()
 if not settings.secret:

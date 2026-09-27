@@ -61,7 +61,13 @@ async def site_app(scope, receive, send):
 
 
 site_app.cancelled = False
-state = SimpleNamespace(pipeline=SimpleNamespace(subscribers=set()), ingests={}, health=None)
+class FakeMtx:
+    writes = 0
+    def write_config(self, cams):
+        FakeMtx.writes += 1
+
+
+state = SimpleNamespace(pipeline=SimpleNamespace(subscribers=set()), ingests={}, health=None, mtx=FakeMtx())
 
 
 class FakeHub:
@@ -93,7 +99,8 @@ class FakeHub:
                             await ws.send(encode({"t": "enrolled", "site_id": "s_test", "token": "device-token-1"}))
                         else:
                             await ws.send(encode({"t": "welcome", "site_id": "s_test", "org": "Jetstream", "heartbeat_s": 0.3,
-                                                  "vlm": {"url": "https://hub/v1", "model": "qwen32", "key": "k"}}))
+                                                  "vlm": {"url": "https://hub/v1", "model": "qwen32", "key": "k"},
+                                                  "turn": {"urls": ["turn:hub:3478?transport=udp"], "username": "9:site:s_test", "credential": "c", "expires": 9}}))
                     elif m["t"] == "res":
                         self.heads[m["id"]] = m
                     elif m["t"] == "end":
@@ -133,6 +140,7 @@ async def _run():
             assert db.get_setting("hub_token") == "device-token-1"
             from nvr.config import settings
             assert settings.remote_vlm_url == "https://hub/v1" and settings.remote_vlm_model == "qwen32"
+            assert db.get_setting("hub_turn")["username"] == "9:site:s_test" and FakeMtx.writes >= 1  # TURN handed to MediaMTX
 
             # 2. a JSON request with hub identity headers, served in-process
             await hub.request(1, "GET", "/json", {"X-Hub-User": "shawn", "X-Hub-Role": "owner"})

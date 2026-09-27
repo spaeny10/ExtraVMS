@@ -16,7 +16,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, W
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, EmailStr, Field
 
-from . import __version__, alerts, auth, db, proxy
+from . import __version__, alerts, auth, db, proxy, turn, vlm_proxy
 from .agents import registry
 from .config import settings
 from .roles import ROLES
@@ -168,6 +168,36 @@ async def create_org(body: OrgIn, u: dict = Depends(user)):
     db.insert(db.orgs, o)
     db.insert(db.memberships, {"user_id": u["id"], "org_id": o["id"], "role": "owner"})
     return o
+
+
+class OrgPatch(BaseModel):
+    name: str | None = Field(None, min_length=1, max_length=120)
+    ai_shared: bool | None = None
+
+
+@app.patch("/api/orgs/{org_id}")
+async def patch_org(org_id: str, body: OrgPatch, u: dict = Depends(user)):
+    auth.require_role(u, org_id, "owner")
+    vals = {k: v for k, v in body.model_dump().items() if v is not None}
+    if vals:
+        db.run(sa.update(db.orgs).where(db.orgs.c.id == org_id).values(**vals))
+    org = db.one(sa.select(db.orgs).where(db.orgs.c.id == org_id))
+    if "ai_shared" in vals:
+        await registry.push_vlm(org)
+        _audit(u, org_id, None, f"shared AI {'enabled' if vals['ai_shared'] else 'disabled'}")
+    return org
+
+
+@app.get("/api/orgs/{org_id}/usage")
+async def org_usage(org_id: str, days: int = Query(30, ge=1, le=365), u: dict = Depends(user)):
+    auth.require_role(u, org_id, "viewer")
+    org = db.one(sa.select(db.orgs).where(db.orgs.c.id == org_id))
+    names = {s["id"]: s["name"] for s in db.rows(sa.select(db.sites.c.id, db.sites.c.name).where(db.sites.c.org_id == org_id))}
+    rows = vlm_proxy.usage_report(org_id, days)
+    for r in rows:
+        r["site_name"] = names.get(r["site_id"], r["site_id"])
+    return {"ai_shared": bool(org and org.get("ai_shared")), "configured": vlm_proxy.configured(), "model": settings.vllm_model,
+            "turn": turn.configured(), "days": days, "sites": rows}
 
 
 class MemberIn(BaseModel):
@@ -386,6 +416,15 @@ async def agent(ws: WebSocket):
     await registry.serve(ws)
 
 
+@app.get("/s/{site_id}/api/turn")
+async def site_turn(site_id: str, request: Request):
+    """ICE servers for a browser watching this site through the hub (answered here, not by the site)."""
+    u = auth.require_user(request)
+    auth.site_access(u, site_id)
+    return {"iceServers": turn.ice_servers(f"user:{u['id']}", settings.turn_user_ttl_s)}
+
+
+app.include_router(vlm_proxy.router)
 app.include_router(proxy.router)
 
 
@@ -393,7 +432,7 @@ app.include_router(proxy.router)
 
 @app.get("/healthz")
 async def healthz():
-    return {"ok": True, "version": __version__, "sites_online": len(registry.by_site)}
+    return {"ok": True, "version": __version__, "sites_online": len(registry.by_site), "turn": turn.configured(), "shared_ai": vlm_proxy.configured()}
 
 
 @app.get("/{full_path:path}")

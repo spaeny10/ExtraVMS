@@ -6,8 +6,12 @@ import { BASE } from "./api";
  * onUnsupported fires when the browser can't decode the stream's codec (e.g. H.265 main streams),
  * so the caller can fall back to the H.264 sub stream.
  */
-export function WhepPlayer({ path, port, className, onUnsupported, showSize = false, videoRef, children }: {
+export function WhepPlayer({ path, port, className, onUnsupported, showSize = false, videoRef, children, iceServers, onFallback }: {
   path: string; port: number; className?: string; onUnsupported?: () => void; showSize?: boolean;
+  /** STUN/TURN servers (a hub relay when viewed remotely); none = direct/LAN candidates only */
+  iceServers?: RTCIceServer[];
+  /** called after repeated connection failures so the caller can switch to a non-WebRTC picture */
+  onFallback?: () => void;
   /** receives the <video> element (e.g. for an overlay that needs its real aspect ratio) */
   videoRef?: React.MutableRefObject<HTMLVideoElement | null>;
   /** overlays rendered inside the player box */
@@ -19,6 +23,9 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
   const [size, setSize] = useState<string>("");
   const unsupported = useRef(onUnsupported);
   unsupported.current = onUnsupported;
+  const fallback = useRef(onFallback);
+  fallback.current = onFallback;
+  const failures = useRef(0);
 
   useEffect(() => {
     let pc: RTCPeerConnection | null = null;
@@ -29,7 +36,7 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
 
     const start = async () => {
       setState("connecting");
-      pc = new RTCPeerConnection();
+      pc = new RTCPeerConnection(iceServers?.length ? { iceServers } : undefined);
       pc.addTransceiver("video", { direction: "recvonly" });
       pc.ontrack = (ev) => {
         if (video.current) video.current.srcObject = ev.streams[0];
@@ -53,7 +60,7 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
         await pc.setLocalDescription(offer);
         await new Promise<void>((resolve) => {
           if (pc!.iceGatheringState === "complete") return resolve();
-          const t = setTimeout(resolve, 1500);
+          const t = setTimeout(resolve, iceServers?.length ? 3000 : 1500);  // relay candidates take longer
           pc!.onicegatheringstatechange = () => {
             if (pc!.iceGatheringState === "complete") {
               clearTimeout(t);
@@ -87,6 +94,7 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
     const retry = () => {
       if (cancelled) return;
       setState("error");
+      if (++failures.current >= 2 && fallback.current) { cancelled = true; pc?.close(); fallback.current(); return; }
       pc?.close();
       pc = null;
       clearTimeout(retryTimer);
@@ -100,7 +108,8 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
       clearTimeout(noFramesTimer);
       pc?.close();
     };
-  }, [path, port]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [path, port, JSON.stringify(iceServers ?? [])]);
 
   return (
     <div className={`player ${className ?? ""}`}>

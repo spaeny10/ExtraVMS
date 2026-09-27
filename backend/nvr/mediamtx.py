@@ -10,6 +10,7 @@ import httpx
 import yaml
 
 from .config import settings
+from .db import db
 
 log = logging.getLogger("nvr.mediamtx")
 
@@ -63,6 +64,9 @@ def build_config(cameras: list[dict]) -> dict:
         "webrtcLocalUDPAddress": f":{settings.webrtc_media_port}",
         "webrtcLocalTCPAddress": f":{settings.webrtc_media_port}",
         "webrtcIPsFromInterfaces": True,
+        # Through the fleet hub the browser is somewhere on the internet: relay via the hub's TURN as well
+        **({"webrtcICEServers2": [{"url": u, "username": turn["username"], "password": turn["credential"]} for u in turn["urls"]]}
+           if (turn := db.get_setting("hub_turn")) and turn.get("urls") else {}),
         "pathDefaults": {
             "recordPath": f"{rec_root}/%path/%Y-%m-%d_%H-%M-%S-%f",
             "recordFormat": "fmp4",

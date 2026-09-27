@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { BASE, api, fmtTime, frameUrl, type BaselineCamera, type FootageStatus, type RemoteStatus, type Camera, type FeedbackStats, type HubStatus, type NvrEvent, type RetentionPolicy, type SystemInfo, type Zone } from "./api";
 import { EventCard } from "./Events";
 import { EventDetail } from "./EventDetail";
-import { WhepPlayer } from "./WhepPlayer";
+import { LivePlayer } from "./LivePlayer";
 import { ZoneEditor } from "./ZoneEditor";
 import { PolicyForm, RetentionPanel } from "./RetentionPanel";
 import { QwenFeedbackInfo } from "./QwenFeedbackInfo";
@@ -26,8 +26,9 @@ function loadQuality(): Record<string, Quality> {
 }
 
 /** One live camera: the WHEP player with the paint-a-region overlay and the tile bar. */
-function LiveTile({ c, hd, port, active, onUnsupported, bar, phone, onSwipe }: {
+function LiveTile({ c, hd, port, active, onUnsupported, bar, phone, onSwipe, iceServers }: {
   c: Camera; hd: boolean; port: number; active?: NvrEvent; onUnsupported?: () => void; bar: React.ReactNode; phone?: boolean; onSwipe?: (dir: -1 | 1) => void;
+  iceServers?: RTCIceServer[];
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [painting, setPainting] = useState(false);
@@ -37,11 +38,11 @@ function LiveTile({ c, hd, port, active, onUnsupported, bar, phone, onSwipe }: {
   return (
     <div className={`tile ${active ? "alerting" : ""} ${painting ? "painting" : ""} ${ptzOn ? "ptz" : ""}`}
       {...(phone && onSwipe && !painting && !ptzOn ? swipeHandlers(onSwipe) : {})}>
-      <WhepPlayer key={`${c.id}-${hd ? "hd" : "sd"}`} path={hd ? c.id : `${c.id}_sub`} port={port} showSize className={hd ? "hd" : ""}
-        onUnsupported={onUnsupported} videoRef={videoRef}>
+      <LivePlayer key={`${c.id}-${hd ? "hd" : "sd"}`} path={hd ? c.id : `${c.id}_sub`} port={port} showSize className={hd ? "hd" : ""}
+        onUnsupported={onUnsupported} videoRef={videoRef} iceServers={iceServers}>
         {!ptzOn && <RegionOverlay cam={c.id} videoRef={videoRef} editing={painting} onDone={() => setPainting(false)} camera={c} fallbackAspect={aspect} />}
         {ptz?.available && <PtzOverlay cam={c.id} videoRef={videoRef} active={ptzOn} onDone={() => setPtzOn(false)} fallbackAspect={aspect} />}
-      </WhepPlayer>
+      </LivePlayer>
       <div className="tile-bar">
         {bar}
         <PtzBadge cam={c.id} ptz={ptz} />
@@ -72,6 +73,9 @@ function RegionNote({ cameras }: { cameras: Camera[] }) {
 
 export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: number; recent: NvrEvent[] }) {
   const [focus, setFocus] = useState<string | null>(null);
+  // ICE servers: a TURN relay when this UI is served through the fleet hub (or the site knows the hub's relay)
+  const [iceServers, setIceServers] = useState<RTCIceServer[] | undefined>(undefined);
+  useEffect(() => { api.turn().then((t) => setIceServers(t.iceServers)).catch(() => setIceServers([])); }, []);
   const regionMap = useRegions();
   // a painted region scopes the feed to that camera (or cameras): only their events, only through the region.
   // `recent` is just the last few events site-wide, so fetch a deeper history for the scoped cameras.
@@ -124,7 +128,7 @@ export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: n
     const go = (dir: -1 | 1) => setPhoneCam((i) => (i + dir + cameras.length) % cameras.length);
     return (
       <div className="live-phone">
-        <LiveTile c={c} hd={hd} port={port} active={active} phone onSwipe={go} onUnsupported={hd ? () => setHdUnsupported(true) : undefined} bar={<>
+        <LiveTile c={c} hd={hd} port={port} active={active} phone onSwipe={go} iceServers={iceServers} onUnsupported={hd ? () => setHdUnsupported(true) : undefined} bar={<>
           <span className={`dot ${c.status?.stream_ready ? "ok" : "bad"}`} />
           <span>{c.name}</span>
           {active && <span className={`label-chip ${active.camera_class}`}>{active.camera_class}</span>}
@@ -172,7 +176,7 @@ export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: n
             const active = recent.find((e) => e.camera_id === c.id && (e.status === "open" || e.status === "pending"));
             const hd = q(c.id) === "hd";
             return (
-              <LiveTile key={c.id} c={c} hd={hd} port={port} active={active} onUnsupported={hd ? () => setHdUnsupported(true) : undefined} bar={<>
+              <LiveTile key={c.id} c={c} hd={hd} port={port} active={active} iceServers={iceServers} onUnsupported={hd ? () => setHdUnsupported(true) : undefined} bar={<>
                 <span className={`dot ${c.status?.stream_ready ? "ok" : "bad"}`} title={c.status?.stream_ready ? "Recording" : "Offline"} />
                 <span>{c.name}</span>
                 {active && <span className={`label-chip ${active.camera_class}`}>{active.camera_class}</span>}

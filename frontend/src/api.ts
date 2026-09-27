@@ -304,6 +304,7 @@ export const api = {
     req<FootageMoment[]>(`/api/footage/search?${qs({ q, camera, since, until })}`),
   parseQuery: (q: string) => req<ParsedQuery>(`/api/query/parse?${qs({ q })}`),
   hub: () => req<HubStatus>("/api/hub"),
+  turn: () => req<{ iceServers: RTCIceServer[] }>("/api/turn"),
   setHub: (b: { hub_url?: string; unenrol?: boolean }) => req<HubStatus>("/api/hub", json("PUT", b)),
   // PTZ / relay (ptz.py). Move and stop use keepalive so a Stop still goes out when the tab closes mid-drag.
   ptz: (cam: string) => req<PtzInfo>(`/api/cameras/${cam}/ptz`),
