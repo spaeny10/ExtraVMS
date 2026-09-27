@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { BASE } from "./api";
 
 /**
  * WebRTC (WHEP) player for a MediaMTX path.
@@ -61,7 +62,7 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
           };
         });
         // same-origin signalling via the NVR (works over HTTPS); media flows directly from MediaMTX
-        const r = await fetch(`/api/whep/${path}`, {
+        const r = await fetch(`${BASE}/api/whep/${path}`, {
           method: "POST",
           headers: { "Content-Type": "application/sdp" },
           body: pc.localDescription!.sdp,

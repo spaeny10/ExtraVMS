@@ -6,6 +6,8 @@ uvicorn[standard]
 pydantic-settings
 python-dotenv
 httpx
+websockets>=13
+-e ../tunnelproto
 sqlite-vec
 av
 numpy

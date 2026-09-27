@@ -10,6 +10,10 @@ Get-ChildItem "$root\backend\tests\test_*.py" | ForEach-Object {
     if ($LASTEXITCODE -ne 0) { $failed += $_.Name }
     Pop-Location
 }
+Write-Host "== frontend URL prefix check"
+$stray = Get-ChildItem "$root\frontend\src" -Recurse -Include *.ts,*.tsx | Where-Object { $_.Name -ne "api.ts" } |
+    Select-String -Pattern '["`]/api/' | ForEach-Object { "$($_.Filename):$($_.LineNumber)" }
+if ($stray) { Write-Host "backend URLs must go through BASE (api.ts): $($stray -join ', ')"; $failed += "frontend URL prefix" } else { Write-Host "ok" }
 Write-Host "== frontend build"
 Push-Location "$root\frontend"
 npm run build 2>&1 | Select-String -Pattern "error|built" | ForEach-Object { $_.Line }

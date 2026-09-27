@@ -1,4 +1,5 @@
 /* Small UI toolkit: SVG icons, toasts, in-app confirm/prompt dialogs, skeletons, connection status. */
+import { BASE } from "./api";
 import { useEffect, useState, useSyncExternalStore } from "react";
 
 // ---------------------------------------------------------------- icons (24px stroke paths, Lucide-style)
@@ -217,7 +218,7 @@ export function OfflineBanner() {
     const probe = async () => {
       if (c.online && !c.ws && Date.now() - c.lastData > 8000) {
         try {
-          const r = await fetch("/api/system", { cache: "no-store" });
+          const r = await fetch(`${BASE}/api/system`, { cache: "no-store" });
           if (!stop) { setApiDown(!r.ok); if (r.ok) connection.data(); }
         } catch { if (!stop) setApiDown(true); }
       } else if (!stop) setApiDown(false);

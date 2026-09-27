@@ -77,5 +77,10 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8080
 
+    # Fleet hub (hub_agent.py): this site dials out to the hub; nothing is opened inbound.
+    hub_enabled: bool = True
+    hub_url: str = "wss://cloudvms.bigview.ai/agent"   # the settings table can override (Settings -> System)
+    hub_insecure: bool = False                         # NVR_HUB_INSECURE=1: accept a self-signed hub cert (dev only)
+
 
 settings = Settings()

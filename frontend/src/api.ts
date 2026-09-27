@@ -252,6 +252,12 @@ export type IdentityCluster = {
 export type NamedIdentity = { id: number; name: string; kind: string; notes: string; sightings: number; updated_at: number; watch: number | boolean; watch_note: string; looks?: number };
 export type IdentitiesResult = { kind: string; since: number; until: number; clusters: IdentityCluster[]; sightings: number; named: NamedIdentity[] };
 
+/** This site's link to the fleet hub (backend hub_agent.py). */
+export type HubStatus = {
+  enabled: boolean; hub_url: string; connected: boolean; enrolled: boolean; site_id: string | null; org: string | null;
+  claim_code: string | null; claim_expires: number | null; last_error: string | null; last_heartbeat: number | null; vlm_managed: boolean;
+};
+
 export type SystemInfo = {
   recordings_disk: { total_gb: number; free_gb: number };
   retention_days: number;
@@ -265,8 +271,11 @@ export type SystemInfo = {
   backup?: { dir: string; last: { at: number; path: string; bytes: number; count: number } | null };
 };
 
+/** URL prefix when this UI is served through the fleet hub ("/s/<site>"); empty on the site itself. */
+export const BASE = /^\/s\/[A-Za-z0-9_-]+/.exec(location.pathname)?.[0] ?? "";
+
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
-  const r = await fetch(url, init);
+  const r = await fetch(BASE + url, init);
   connection.data();
   if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
   return r.json();
@@ -294,6 +303,8 @@ export const api = {
   footageSearch: (q: string, camera?: string, since?: number, until?: number) =>
     req<FootageMoment[]>(`/api/footage/search?${qs({ q, camera, since, until })}`),
   parseQuery: (q: string) => req<ParsedQuery>(`/api/query/parse?${qs({ q })}`),
+  hub: () => req<HubStatus>("/api/hub"),
+  setHub: (b: { hub_url?: string; unenrol?: boolean }) => req<HubStatus>("/api/hub", json("PUT", b)),
   // PTZ / relay (ptz.py). Move and stop use keepalive so a Stop still goes out when the tab closes mid-drag.
   ptz: (cam: string) => req<PtzInfo>(`/api/cameras/${cam}/ptz`),
   ptzProbe: (cam: string) => req<PtzInfo>(`/api/cameras/${cam}/ptz/probe`, { method: "POST" }),
@@ -402,7 +413,7 @@ export type RemoteStatus = {
 };
 
 export async function ask(threadId: number | null, message: string, onChunk: (c: AskChunk) => void) {
-  const r = await fetch("/api/assistant/ask", json("POST", { message, thread_id: threadId }));
+  const r = await fetch(`${BASE}/api/assistant/ask`, json("POST", { message, thread_id: threadId }));
   if (!r.ok || !r.body) throw new Error(`${r.status} ${await r.text()}`);
   const reader = r.body.getReader();
   const dec = new TextDecoder();
@@ -429,7 +440,7 @@ export type ChatChunk =
 
 /** Ask Qwen about an event clip; calls onChunk for each streamed NDJSON message. */
 export async function askClip(id: number, message: string, at: number | null, onChunk: (c: ChatChunk) => void) {
-  const r = await fetch(`/api/events/${id}/chat`, json("POST", { message, at }));
+  const r = await fetch(`${BASE}/api/events/${id}/chat`, json("POST", { message, at }));
   if (!r.ok || !r.body) throw new Error(`${r.status} ${await r.text()}`);
   const reader = r.body.getReader();
   const dec = new TextDecoder();
@@ -447,11 +458,11 @@ export async function askClip(id: number, message: string, at: number | null, on
   }
 }
 
-export const media = (e: { id: number }, name: string) => `/api/events/${e.id}/media/${name}`;
+export const media = (e: { id: number }, name: string) => `${BASE}/api/events/${e.id}/media/${name}`;
 export const frameUrl = (camera: string, t: number, w = 960, exact = false) =>
-  `/api/frame/${camera}?${qs({ t: t.toFixed(2), w, exact: exact ? "true" : undefined })}`;
-export const playbackUrl =(camera: string, start: number, duration = 300) =>
-  `/api/playback/${camera}?${qs({ start, duration })}`;
+  `${BASE}/api/frame/${camera}?${qs({ t: t.toFixed(2), w, exact: exact ? "true" : undefined })}`;
+export const playbackUrl = (camera: string, start: number, duration = 300) =>
+  `${BASE}/api/playback/${camera}?${qs({ start, duration })}`;
 
 /** Live updates. onMessage gets the other message types (e.g. {type: "briefing"}). */
 export function subscribe(onEvent: (e: NvrEvent) => void, onMessage?: (msg: { type: string; [k: string]: unknown }) => void): () => void {
@@ -460,7 +471,7 @@ export function subscribe(onEvent: (e: NvrEvent) => void, onMessage?: (msg: { ty
   let retry = 1000;
   const connect = () => {
     const proto = location.protocol === "https:" ? "wss" : "ws";
-    ws = new WebSocket(`${proto}://${location.host}/api/ws`);
+    ws = new WebSocket(`${proto}://${location.host}${BASE}/api/ws`);
     ws.onmessage = (m) => {
       const msg = JSON.parse(m.data);
       connection.data();

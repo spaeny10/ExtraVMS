@@ -1,3 +1,4 @@
+import { BASE } from "./api";
 import { useEffect, useRef, useState } from "react";
 import { api, type Camera, type FeedbackStats } from "./api";
 
@@ -83,7 +84,7 @@ export function QwenFeedbackInfo() {
                 (a LoRA adapter) or YOLO offline. That's a separate, manual step, not automatic.
                 <div className="info-status">
                   {stats ? `👍 ${stats.up} · 👎 ${stats.down}` : "…"}
-                  <a href="/api/feedback/export">Export dataset (JSONL)</a>
+                  <a href={`${BASE}/api/feedback/export`}>Export dataset (JSONL)</a>
                 </div>
               </div>
             </div>

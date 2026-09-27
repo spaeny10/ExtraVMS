@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 
 from . import assistant, backup, baseline, footage, frames, health, identities, journeys, keep, mediamtx, policy, ptz, retention, zones
 from . import synopsis as vlm
+from . import hub_agent
 from . import vlmroute
 from .config import ROOT, settings
 from .db import db
@@ -41,6 +42,7 @@ class State:
     footage: footage.Indexer
     health: health.StreamHealth
     ptz: ptz.PtzManager
+    hub: hub_agent.HubAgent
 
 
 state = State()
@@ -81,6 +83,7 @@ async def lifespan(app: FastAPI):
     p.ptz = state.ptz
     p.tracker.away_preset = state.ptz.away_preset
     p.tracker.away_between = state.ptz.away_between
+    state.hub = hub_agent.HubAgent(app, state)
     assistant.ctx.pipeline, assistant.ctx.footage = p, state.footage
     state.tasks = [asyncio.create_task(coro, name=name) for name, coro in [
         ("mediamtx", state.mtx.run()),
@@ -98,6 +101,7 @@ async def lifespan(app: FastAPI):
         ("backup", backup.backup_loop()),
         ("stream-health", state.health.run()),
         ("ptz", state.ptz.run()),
+        ("hub-agent", state.hub.run()),
     ]]
     await asyncio.sleep(1.5)  # let MediaMTX bind before readers connect
     sync_cameras()
@@ -113,6 +117,36 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="NewVMS", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def hub_headers(request: Request, call_next):
+    """X-Hub-* headers identify the hub user behind a tunnelled request. Only the in-process tunnel may set
+    them: strip them from anything that arrived over the network so they can't be forged on the LAN."""
+    if request.scope.get("client") != hub_agent.IN_PROCESS_CLIENT:
+        request.scope["headers"] = [(k, v) for k, v in request.scope["headers"] if not k.startswith(b"x-hub-")]
+    elif request.method != "GET":
+        log.info("hub write: %s %s by %s (%s)", request.method, request.url.path,
+                 request.headers.get("x-hub-user", "?"), request.headers.get("x-hub-role", "?"))
+    return await call_next(request)
+
+
+# ---------------------------------------------------------------- fleet hub
+
+class HubIn(BaseModel):
+    hub_url: str | None = Field(None, max_length=200)
+    unenrol: bool = False
+
+
+@app.get("/api/hub")
+async def hub_status():
+    return state.hub.status()
+
+
+@app.put("/api/hub")
+async def hub_configure(body: HubIn):
+    await state.hub.configure(hub_url=body.hub_url, unenrol=body.unenrol)
+    return state.hub.status()
 
 PUBLIC_CAMERA_FIELDS = ("id", "name", "host", "onvif_port", "rtsp_port", "username", "main_path",
                         "sub_path", "enabled", "zones", "retention_days", "scene_notes", "retention_policy",

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, fmtTime, frameUrl, type BaselineCamera, type FootageStatus, type RemoteStatus, type Camera, type FeedbackStats, type NvrEvent, type RetentionPolicy, type SystemInfo, type Zone } from "./api";
+import { BASE, api, fmtTime, frameUrl, type BaselineCamera, type FootageStatus, type RemoteStatus, type Camera, type FeedbackStats, type HubStatus, type NvrEvent, type RetentionPolicy, type SystemInfo, type Zone } from "./api";
 import { EventCard } from "./Events";
 import { EventDetail } from "./EventDetail";
 import { WhepPlayer } from "./WhepPlayer";
@@ -7,7 +7,7 @@ import { ZoneEditor } from "./ZoneEditor";
 import { PolicyForm, RetentionPanel } from "./RetentionPanel";
 import { QwenFeedbackInfo } from "./QwenFeedbackInfo";
 import { NeighborsEditor } from "./Neighbors";
-import { Skeleton, errorText, swipeHandlers, toast, useIsPhone } from "./ui";
+import { Skeleton, confirmDialog, errorText, swipeHandlers, toast, useIsPhone } from "./ui";
 import { RegionBadge, RegionOverlay } from "./RegionPaint";
 import { PtzBadge, PtzOverlay, PtzSettings } from "./PtzControl";
 import { regionPass, regions, useRegions } from "./region";
@@ -429,6 +429,34 @@ function Row({ label, hint, value, sub, action, children }: {
   );
 }
 
+/** Settings -> System: this site's link to the fleet hub (claim code while unenrolled). */
+function HubPanel() {
+  const [h, setH] = useState<HubStatus | null>(null);
+  const [url, setUrl] = useState<string | null>(null);
+  const load = () => api.hub().then(setH).catch(() => {});
+  useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, []);
+  if (!h) return null;
+  const state = !h.enabled ? "Off" : h.connected ? `Connected as ${h.site_id}${h.org ? ` · ${h.org}` : ""}`
+    : h.enrolled ? "Enrolled · reconnecting…" : "Not enrolled";
+  return (
+    <Row label="Cloud hub" hint="One webpage for all your sites. The site dials out to the hub; no port forwarding. Enter the claim code at the hub under Add site."
+      value={<><Status ok={h.connected} /> {state}</>}
+      sub={h.last_error && !h.connected ? h.last_error : h.last_heartbeat ? `last heartbeat ${fmtTime(h.last_heartbeat)}${h.vlm_managed ? " · Qwen managed by the hub" : ""}` : undefined}
+      action={h.enrolled ? <button className="ghost small" onClick={async () => { if (await confirmDialog("Unenrol this site from the hub?", { confirmLabel: "Unenrol", danger: true })) { await api.setHub({ unenrol: true }); load(); } }}>Unenrol</button> : undefined}>
+      {!h.enrolled && h.claim_code && (
+        <div className="hub-claim">
+          <div className="hub-code" title="Type this at the hub: Add site">{h.claim_code}</div>
+          <div className="muted small">Claim code · renews every 15 minutes</div>
+        </div>
+      )}
+      <div className="row small">
+        <input value={url ?? h.hub_url} onChange={(e) => setUrl(e.target.value)} style={{ minWidth: 320 }} title="Hub address (wss://…/agent)" />
+        <button className="ghost small" disabled={url == null || url === h.hub_url} onClick={async () => { await api.setHub({ hub_url: url! }); setUrl(null); load(); }}>Save hub URL</button>
+      </div>
+    </Row>
+  );
+}
+
 export function SystemView() {
   const [s, setS] = useState<SystemInfo | null>(null);
   const [fb, setFb] = useState<FeedbackStats | null>(null);
@@ -458,6 +486,7 @@ export function SystemView() {
         <RemoteRow />
         <FootageRow />
         <BackupRow s={s} />
+        <HubPanel />
       </section>
 
       <section className="sys-group">
@@ -466,7 +495,7 @@ export function SystemView() {
         {fb && (
           <Row label="Synopsis feedback" value={<>👍 {fb.up} · 👎 {fb.down} · {fb.corrected} of {fb.synopses} corrected</>}
             sub={Object.keys(fb.reasons).length ? Object.entries(fb.reasons).map(([k, v]) => `${k} ${v}`).join(", ") : "no reasons given yet"}
-            action={<a className="small" href="/api/feedback/export">Export</a>} />
+            action={<a className="small" href={`${BASE}/api/feedback/export`}>Export</a>} />
         )}
         {fb && Object.keys(fb.verdicts).length > 0 && (
           <Row label="Detection verdicts" hint="Camera class : what the operator said it really was"
