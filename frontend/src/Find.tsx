@@ -201,8 +201,8 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
       <div className="toolbar search-filters">
         {browsing && (
           <div className="segmented">
-            <button className={mode === "sightings" ? "active" : ""} onClick={() => { setMode("sightings"); saveNumber("eventsGrouped", 0); }}>Sightings</button>
-            <button className={mode === "grouped" ? "active" : ""} onClick={() => { setMode("grouped"); saveNumber("eventsGrouped", 1); }} title="Group repeated sightings of the same person or vehicle">People &amp; vehicles</button>
+            <button className={mode === "sightings" ? "active" : ""} onClick={() => { setMode("sightings"); saveNumber("eventsGrouped", 0); }} title="Every event as its own card">Events</button>
+            <button className={mode === "grouped" ? "active" : ""} onClick={() => { setMode("grouped"); saveNumber("eventsGrouped", 1); }} title="One row per person or vehicle, with all of their sightings">Grouped by who</button>
           </div>
         )}
         {!grouped && (
@@ -212,7 +212,7 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
               {cameras.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
             <select value={label} onChange={(e) => setLabel(e.target.value)}>
-              <option value="">People &amp; vehicles</option>
+              <option value="">Any type</option>
               <option value="person">People</option>
               <option value="vehicle">Vehicles</option>
             </select>
