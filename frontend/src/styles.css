@@ -717,12 +717,12 @@ body:has(.drag-ghost) { cursor: grabbing; user-select: none; }
   color: #fff; font-size: 16px; display: grid; place-items: center; user-select: none; touch-action: none; padding: 0; cursor: pointer; }
 .ptz-arrow:hover, .ptz-arrow:active, .ptz-zoom button:hover, .ptz-zoom button:active { background: rgb(0 0 0 / .5); }
 .ptz-arrow { position: absolute; }
-.ptz-arrow.up { left: 50%; top: 6%; transform: translateX(-50%); }
-.ptz-arrow.down { left: 50%; bottom: 6%; transform: translateX(-50%); }
-.ptz-arrow.left { left: 3%; top: 50%; transform: translateY(-50%); }
-.ptz-arrow.right { right: 3%; top: 50%; transform: translateY(-50%); }
+.ptz-arrow.up { left: 50%; top: 12%; transform: translateX(-50%); }
+.ptz-arrow.down { left: 50%; bottom: max(12%, 64px); transform: translateX(-50%); }
+.ptz-arrow.left { left: 22%; top: 50%; transform: translateY(-50%); }
+.ptz-arrow.right { right: 22%; top: 50%; transform: translateY(-50%); }
 .ptz-arrow.home { left: 50%; top: 50%; transform: translate(-50%, -50%); width: 36px; height: 36px; font-size: 14px; opacity: .8; }
-.ptz-zoom { position: absolute; left: 3%; bottom: 6%; display: flex; flex-direction: column; gap: 6px; }
+.ptz-zoom { position: absolute; left: 3%; bottom: max(8%, 58px); display: flex; flex-direction: column; gap: 6px; }
 .ptz-zoom button { width: 36px; height: 36px; }
 .tile.ptz, .live-phone .tile.ptz { touch-action: none; }
 .ptz-badge { display: inline-flex; gap: 4px; align-items: center; color: var(--vehicle, #e0a020); font-size: 12px; }
