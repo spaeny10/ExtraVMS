@@ -159,6 +159,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
   const viewRef = useRef(view);
   const loadedFor = useRef<View | null>(null);   // time window the current lane data covers
   const pendingFocus = useRef<TimelineFocus | null>(null);
+  const pendingSeek = useRef<number | null>(null);   // a "go to date and time" waiting for that window's recordings
   viewRef.current = view;
 
   const range = view.end - view.start;
@@ -510,6 +511,11 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focus?.nonce]);
   useEffect(() => {
+    const ps = pendingSeek.current, lfs = loadedFor.current;
+    if (ps != null && lfs && ps >= lfs.start && ps <= lfs.end) {
+      pendingSeek.current = null;
+      seekTo(ps);
+    }
     const f = pendingFocus.current;
     const lf = loadedFor.current;
     if (!f || !lf || f.start < lf.start || f.end > lf.end || !lanes[f.cam]) return;
@@ -925,7 +931,10 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
             if (!Number.isFinite(t)) return;
             const r = Math.min(range, 3600);
             setView(clampView(t - r / 2, t + r / 2));
-            seekTo(t);
+            // the recordings for that window load next; seek once they are in (below), not against the old window
+            pendingSeek.current = t;
+            setPlaying(false);
+            setClock(t);
           }}
         />
         <button className={isLive ? "live-btn on" : "ghost live-btn"} onClick={goLive}
