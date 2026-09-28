@@ -29,6 +29,9 @@ from .db import db
 log = logging.getLogger("nvr.journeys")
 
 REID_MIN_SIM = 0.70       # measured on this site: same person ~0.8-0.9, different events median ~0.65
+REID_AUTO_SIM = 0.80      # at or above this re-ID alone confirms the link: Qwen is only asked about the grey zone
+NARRATIVE_MIN_S = 900     # a journey's narrative is rewritten at most this often while it keeps growing
+_last_narrative: dict[int, float] = {}
 SUGGEST_MIN_SIM = 0.78
 SUGGEST_WINDOW_S = (-30.0, 180.0)
 QUIET_S = 90
@@ -139,11 +142,14 @@ async def link_event(gate, event_id: int) -> int:
         facts = (f"First camera: '{_cam_name(ea['camera_id'])}', person seen {_hhmmss(ea['start_ts'])}-{_hhmmss(ea['end_ts'] or ea['start_ts'])}.\n"
                  f"Second camera: '{_cam_name(eb['camera_id'])}', person seen {c['gap']:.0f} s after leaving the first camera.\n"
                  f"First camera description: {ea.get('synopsis') or 'n/a'}\nSecond camera description: {eb.get('synopsis') or 'n/a'}")
-        try:
-            verdict = await vlm.same_person(ia, ib, facts)  # routed; waits its turn on the local gate if local
-        except Exception as ex:
-            log.warning("same-person check %s->%s failed: %s", c["a"], c["b"], ex)
-            continue
+        if c["sim"] >= REID_AUTO_SIM:
+            verdict = {"same_person": True, "confidence": "high", "reason": f"re-ID {c['sim']:.2f} alone (no VLM check)"}
+        else:
+            try:
+                verdict = await vlm.same_person(ia, ib, facts)  # routed; waits its turn on the local gate if local
+            except Exception as ex:
+                log.warning("same-person check %s->%s failed: %s", c["a"], c["b"], ex)
+                continue
         ok = bool(verdict.get("same_person")) and verdict.get("confidence") in ("medium", "high")
         db.execute("INSERT OR IGNORE INTO event_links (a, b, gap_s, sim, status, confidence, reason, created_at) VALUES (?,?,?,?,?,?,?,?)",
                    [c["a"], c["b"], c["gap"], c["sim"], "confirmed" if ok else "rejected",
@@ -280,8 +286,11 @@ async def narrative_loop(pipeline) -> None:
         await asyncio.sleep(15)
         if not pipeline.vlm_ready:
             continue
-        for j in db.all("SELECT id FROM journeys WHERE dirty=1 AND updated_at < ?", [time.time() - QUIET_S]):
+        for j in db.all("SELECT id, synopsis AS summary FROM journeys WHERE dirty=1 AND updated_at < ?", [time.time() - QUIET_S]):
+            if j["summary"] and time.time() - _last_narrative.get(j["id"], 0) < NARRATIVE_MIN_S:
+                continue  # it has a narrative; the rewrite for its newest sightings can wait
             try:
+                _last_narrative[j["id"]] = time.time()
                 await write_narrative(pipeline.gate, j["id"])
                 for m in db.all("SELECT id FROM events WHERE journey_id=?", [j["id"]]):
                     await pipeline.reindex(m["id"])

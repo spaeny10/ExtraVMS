@@ -25,7 +25,9 @@ class Pipeline:
         self.frames: asyncio.Queue = asyncio.Queue(maxsize=10000)
         self.rule_events: asyncio.Queue = asyncio.Queue(maxsize=1000)
         self.verify_q: asyncio.Queue[int] = asyncio.Queue()
-        self.synopsis_q: asyncio.Queue[int] = asyncio.Queue()
+        # (priority, seq, event_id): people before vehicles, oldest first within a class
+        self.synopsis_q: asyncio.PriorityQueue[tuple[int, int, int]] = asyncio.PriorityQueue()
+        self._synopsis_seq = 0
         self.synopsis_pending: set[int] = set()  # queued or being written now; the UI shows "Qwen is writing…"
         self.journey_q: asyncio.Queue[int] = asyncio.Queue()
         self.tracker = Tracker(self.verify_q.put)
@@ -58,7 +60,9 @@ class Pipeline:
         if event_id in self.synopsis_pending:
             return False
         self.synopsis_pending.add(event_id)
-        self.synopsis_q.put_nowait(event_id)
+        row = db.one("SELECT camera_class FROM events WHERE id=?", [event_id])
+        self._synopsis_seq += 1
+        self.synopsis_q.put_nowait((0 if row and row["camera_class"] == "person" else 1, self._synopsis_seq, event_id))
         return True
 
     def publish(self, event_id: int) -> None:
@@ -161,10 +165,11 @@ class Pipeline:
 
     async def synopsis_loop(self) -> None:
         while True:
-            event_id = await self.synopsis_q.get()
+            item = await self.synopsis_q.get()
+            event_id = item[2]
             if not self.vlm_ready:
                 await asyncio.sleep(5)
-                await self.synopsis_q.put(event_id)
+                await self.synopsis_q.put(item)
                 continue
             try:
                 await self._synopsis(event_id)
@@ -364,7 +369,9 @@ class Pipeline:
         if not e or e["status"] != "verified" or e["camera_class"] not in self.synopsis_labels(e["camera_id"]):
             return False
         if e.get("ptz_preset"):
-            return True  # the zones describe the home view; away from it everything verified is worth describing
+            # The zones describe the home view. Away from it, people are still worth describing; vehicles are
+            # almost always public-road traffic the camera happens to be pointed at (and no site rule can apply).
+            return e["camera_class"] == "person"
         zl = zones.normalize((self.cameras.get(e["camera_id"]) or {}).get("zones"))
         if not any(z["type"] == "include" for z in zl):
             return True
