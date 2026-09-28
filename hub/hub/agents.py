@@ -117,6 +117,7 @@ class AgentRegistry:
         self.by_site: dict[str, AgentConn] = {}
         self.pending: dict[str, AgentConn] = {}      # claim code -> parked connection
         self.started_at = time.time()
+        self.org_subscribers: dict[str, set[asyncio.Queue]] = {}   # org -> browsers on /api/fleet/ws
 
     def get(self, site_id: str) -> AgentConn | None:
         return self.by_site.get(site_id)
@@ -185,6 +186,7 @@ class AgentRegistry:
                 conn.broadcast(msg)
                 if conn.site:
                     alerts.on_event(conn.site, msg)
+                    self.broadcast_org(conn.site["org_id"], {**msg, "site_id": conn.site_id, "site_name": conn.site["name"]})
             elif t == "res":
                 s = conn.streams.get(frame["id"])
                 if s is not None:
@@ -237,6 +239,13 @@ class AgentRegistry:
         await conn.send(welcome)
         alerts.close(conn.site, "offline")
         log.info("site %s (%s) connected from %s", conn.site_id, conn.site["name"], conn.ip)
+        self.broadcast_org(conn.site["org_id"], {"type": "site_online", "site_id": conn.site_id, "site_name": conn.site["name"]})
+
+    def broadcast_org(self, org_id: str, msg: dict) -> None:
+        """Dashboards and other org-wide pages listen on /api/fleet/ws; slow readers are skipped, not blocked."""
+        for q in list(self.org_subscribers.get(org_id, ())):
+            if q.qsize() < 100:
+                q.put_nowait(msg)
 
     async def _detach(self, conn: AgentConn) -> None:
         conn.closed.set()
@@ -251,6 +260,8 @@ class AgentRegistry:
             del self.by_site[conn.site_id]
             db.run(sa.update(db.sites).where(db.sites.c.id == conn.site_id).values(online=False, last_seen_at=time.time()))
             log.info("site %s disconnected", conn.site_id)
+            if conn.site:
+                self.broadcast_org(conn.site["org_id"], {"type": "site_offline", "site_id": conn.site_id, "site_name": conn.site["name"]})
 
     @staticmethod
     def vlm_config(org: dict | None, token: str | None) -> dict | None:

@@ -1,4 +1,8 @@
 /** Hub API client. Same shape as the site's api.ts: relative URLs, cookie session, errors as `${status} ${text}`. */
+import type { NvrEvent } from "@site/api";
+import type { CameraGroup, Dashboard, DashboardConfig, DashboardList, FleetEvent, FleetEvents } from "@site/dashboard/types";
+export type { CameraGroup, Dashboard, DashboardConfig, DashboardList, FleetEvent, FleetEvents, Widget, WidgetProps, DashboardWidgetType } from "@site/dashboard/types";
+export type FleetMessage = { type: "event"; event: NvrEvent; site_id: string; site_name: string } | { type: "site_online" | "site_offline"; site_id: string; site_name: string };
 
 export type Me = { user: { id: string; email: string; totp_enabled: boolean; is_super: boolean }; orgs: Org[]; active_org: string | null };
 export type Org = { id: string; name: string; slug: string; role: string };
@@ -59,6 +63,19 @@ export const api = {
   audit: (org: string, site?: string) => req<AuditRow[]>(`/api/audit?${qs({ org, site })}`),
   usage: (org: string, days = 30) => req<Usage>(`/api/orgs/${org}/usage?${qs({ days })}`),
   fleetSearch: (org: string, q: string, since?: number) => req<FleetSearch>(`/api/fleet/search?${qs({ org, q, since })}`),
+  // home dashboards, camera groups, fleet events
+  dashboards: (org: string) => req<DashboardList>(`/api/orgs/${org}/dashboards`),
+  dashboard: (org: string, id: string) => req<Dashboard & { can_edit: boolean }>(`/api/orgs/${org}/dashboards/${id}`),
+  createDashboard: (org: string, b: { name: string; config: DashboardConfig; shared?: boolean }) => req<Dashboard & { can_edit: boolean }>(`/api/orgs/${org}/dashboards`, json("POST", b)),
+  updateDashboard: (org: string, id: string, b: { name?: string; config?: DashboardConfig; shared?: boolean }) => req<Dashboard & { can_edit: boolean }>(`/api/orgs/${org}/dashboards/${id}`, json("PUT", b)),
+  deleteDashboard: (org: string, id: string) => req(`/api/orgs/${org}/dashboards/${id}`, { method: "DELETE" }),
+  setDefaultDashboard: (org: string, id: string | null) => req<{ default_id: string | null }>(`/api/orgs/${org}/dashboards/default`, json("PUT", { id })),
+  groups: (org: string) => req<CameraGroup[]>(`/api/orgs/${org}/groups`),
+  createGroup: (org: string, b: { name: string; members: { site: string; camera: string }[] }) => req<CameraGroup>(`/api/orgs/${org}/groups`, json("POST", b)),
+  updateGroup: (org: string, id: string, b: { name?: string; members?: { site: string; camera: string }[] }) => req<CameraGroup>(`/api/orgs/${org}/groups/${id}`, json("PUT", b)),
+  deleteGroup: (org: string, id: string) => req(`/api/orgs/${org}/groups/${id}`, { method: "DELETE" }),
+  fleetEvents: (org: string, p: { sites?: string[]; cameras?: { site: string; camera: string }[]; group?: string; classes?: string[]; limit?: number; since?: number }) =>
+    req<FleetEvents>(`/api/fleet/events?${qs({ org, sites: p.sites?.join(","), cameras: p.cameras?.map((c) => `${c.site}:${c.camera}`).join(","), group: p.group, classes: p.classes?.join(","), limit: p.limit, since: p.since })}`),
   digests: (org: string) => req<Digest[]>(`/api/orgs/${org}/digests`),
   digestNow: (org: string) => req<Digest>(`/api/orgs/${org}/digests/generate`, { method: "POST" }),
   backups: (site: string) => req<Backup[]>(`/api/sites/${site}/backups`),
@@ -69,6 +86,21 @@ export const api = {
   pushUnsubscribe: (endpoint: string) => req("/api/push/unsubscribe", json("POST", { endpoint })),
   patchOrg: (org: string, b: { name?: string; ai_shared?: boolean }) => req<Org>(`/api/orgs/${org}`, json("PATCH", b)),
 };
+
+/** Live events from every site of the org (and site online/offline); reconnects with backoff. */
+export function subscribeFleet(org: string, onMessage: (m: FleetMessage) => void, onStatus?: (up: boolean) => void): () => void {
+  let ws: WebSocket | null = null;
+  let closed = false;
+  let retry = 1000;
+  const connect = () => {
+    ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/fleet/ws?org=${encodeURIComponent(org)}`);
+    ws.onmessage = (m) => onMessage(JSON.parse(m.data));
+    ws.onopen = () => { retry = 1000; onStatus?.(true); };
+    ws.onclose = () => { onStatus?.(false); if (!closed) setTimeout(connect, (retry = Math.min(retry * 2, 15000))); };
+  };
+  connect();
+  return () => { closed = true; ws?.close(); };
+}
 
 /** Fleet Ask: every site's assistant answers; onChunk gets {site, site_name, ...chunk} lines. */
 export async function fleetAsk(org: string, message: string, onChunk: (c: Record<string, unknown>) => void) {

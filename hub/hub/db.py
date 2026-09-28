@@ -82,6 +82,17 @@ push_subscriptions = Table("push_subscriptions", metadata,
                            Column("endpoint", Text, nullable=False), Column("sub", sa.JSON, nullable=False), Column("kinds", sa.JSON, nullable=False),
                            Column("created_at", Float, nullable=False), Column("ua", String(200), nullable=True))
 kv = Table("kv", metadata, Column("key", String(64), primary_key=True), Column("value", sa.JSON, nullable=False))
+dashboards = Table("dashboards", metadata,
+                   Column("id", String(24), primary_key=True), Column("org_id", String(24), nullable=False, index=True),
+                   Column("owner_user_id", String(24), nullable=True, index=True),   # NULL = shared by the org
+                   Column("name", String(120), nullable=False), Column("config", sa.JSON, nullable=False),
+                   Column("shared", Boolean, nullable=False, default=False),
+                   Column("created_at", Float, nullable=False), Column("updated_at", Float, nullable=False),
+                   Column("updated_by", String(24), nullable=True))
+camera_groups = Table("camera_groups", metadata,
+                      Column("id", String(24), primary_key=True), Column("org_id", String(24), nullable=False, index=True),
+                      Column("name", String(120), nullable=False), Column("members", sa.JSON, nullable=False),   # [{site_id, camera_id}]
+                      Column("created_at", Float, nullable=False), Column("updated_at", Float, nullable=False))
 audit_log = Table("audit_log", metadata,
                   Column("id", Integer, primary_key=True, autoincrement=True), Column("ts", Float, nullable=False, index=True),
                   Column("user_id", String(24), nullable=True), Column("user_email", String(200), nullable=True),

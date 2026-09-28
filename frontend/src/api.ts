@@ -272,21 +272,90 @@ export type SystemInfo = {
 };
 
 /** URL prefix when this UI is served through the fleet hub ("/s/<site>"); empty on the site itself. */
-export const BASE = /^\/s\/[A-Za-z0-9_-]+/.exec(location.pathname)?.[0] ?? "";
+export const BASE = /^\/s\/[A-Za-z0-9_-]+/.exec(typeof location === "undefined" ? "" : location.pathname)?.[0] ?? "";
 
-async function req<T>(url: string, init?: RequestInit): Promise<T> {
-  const r = await fetch(BASE + url, init);
-  connection.data();
-  if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
-  return r.json();
-}
+const json = (method: string, body: unknown): RequestInit => ({
+  method,
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(body),
+});
 
 const qs = (params: Record<string, string | number | undefined | null>) =>
   new URLSearchParams(
     Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== "") as [string, string][],
   ).toString();
 
-export const api = {
+/**
+ * All backend calls for one site. `api` is the site this page is served from (prefix BASE); the fleet hub's
+ * dashboard builds one per site with makeApi("/s/<site>") so tiles and feeds can mix sites on one page.
+ */
+export function makeApi(base: string) {
+  const req = async <T,>(url: string, init?: RequestInit): Promise<T> => {
+    const r = await fetch(base + url, init);
+    connection.data();
+    if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+    return r.json();
+  };
+  /** NDJSON stream: one parsed object per line to onChunk. */
+  const stream = async <C,>(url: string, init: RequestInit, onChunk: (c: C) => void) => {
+    const r = await fetch(base + url, init);
+    if (!r.ok || !r.body) throw new Error(`${r.status} ${await r.text()}`);
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let nl: number;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (line) onChunk(JSON.parse(line));
+      }
+    }
+  };
+  return {
+  base,
+  // ---- URLs (media, frames, playback, WebRTC signalling, live socket)
+  media: (e: { id: number }, name: string) => `${base}/api/events/${e.id}/media/${name}`,
+  frameUrl: (camera: string, t: number, w = 960, exact = false) =>
+    `${base}/api/frame/${camera}?${qs({ t: t.toFixed(2), w, exact: exact ? "true" : undefined })}`,
+  playbackUrl: (camera: string, start: number, duration = 300) => `${base}/api/playback/${camera}?${qs({ start, duration })}`,
+  whepUrl: (path: string) => `${base}/api/whep/${path}`,
+  wsUrl: () => `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${base}/api/ws`,
+  /** Live updates. onMessage gets the other message types (e.g. {type: "briefing"}). */
+  subscribe(onEvent: (e: NvrEvent) => void, onMessage?: (msg: { type: string; [k: string]: unknown }) => void): () => void {
+    let ws: WebSocket | null = null;
+    let closed = false;
+    let retry = 1000;
+    const connect = () => {
+      ws = new WebSocket(this.wsUrl());
+      ws.onmessage = (m) => {
+        const msg = JSON.parse(m.data);
+        connection.data();
+        if (msg.type === "event") onEvent(msg.event);
+        else onMessage?.(msg);
+      };
+      ws.onopen = () => { retry = 1000; connection.ws(true); };
+      ws.onclose = () => {
+        connection.ws(false);
+        if (!closed) setTimeout(connect, (retry = Math.min(retry * 2, 15000)));
+      };
+    };
+    connect();
+    return () => {
+      closed = true;
+      ws?.close();
+    };
+  },
+  /** Ask the NVR assistant; streams AskChunk messages. */
+  ask: (threadId: number | null, message: string, onChunk: (c: AskChunk) => void) =>
+    stream<AskChunk>("/api/assistant/ask", json("POST", { message, thread_id: threadId }), onChunk),
+  /** Ask Qwen about an event clip; calls onChunk for each streamed NDJSON message. */
+  askClip: (id: number, message: string, at: number | null, onChunk: (c: ChatChunk) => void) =>
+    stream<ChatChunk>(`/api/events/${id}/chat`, json("POST", { message, at }), onChunk),
+  // ---- REST
   cameras: () => req<Camera[]>("/api/cameras"),
   saveCamera: (c: Partial<Camera> & { id: string; password?: string }) =>
     req<Camera>(`/api/cameras/${c.id}`, {
@@ -378,13 +447,11 @@ export const api = {
   clearChat: (id: number) => req<ChatMessage[]>(`/api/events/${id}/chat`, { method: "DELETE" }),
   saveNote: (id: number, msgId: number, saved: boolean) =>
     req<ChatMessage[]>(`/api/events/${id}/chat/${msgId}/saved?saved=${saved}`, { method: "PUT" }),
-};
-
-const json = (method: string, body: unknown): RequestInit => ({
-  method,
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify(body),
-});
+  };
+}
+export type SiteApi = ReturnType<typeof makeApi>;
+/** The site this page is served from. */
+export const api = makeApi(BASE);
 
 /* ---- Ask the NVR */
 export type CiteRefs = {
@@ -413,24 +480,7 @@ export type RemoteStatus = {
   rate_usd_per_s: number; last_latency_s: number | null;
 };
 
-export async function ask(threadId: number | null, message: string, onChunk: (c: AskChunk) => void) {
-  const r = await fetch(`${BASE}/api/assistant/ask`, json("POST", { message, thread_id: threadId }));
-  if (!r.ok || !r.body) throw new Error(`${r.status} ${await r.text()}`);
-  const reader = r.body.getReader();
-  const dec = new TextDecoder();
-  let buf = "";
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    let nl: number;
-    while ((nl = buf.indexOf("\n")) >= 0) {
-      const line = buf.slice(0, nl).trim();
-      buf = buf.slice(nl + 1);
-      if (line) onChunk(JSON.parse(line));
-    }
-  }
-}
+export const ask: SiteApi["ask"] = (...args) => api.ask(...args);
 
 export type ChatChunk =
   | { type: "user"; id: number }
@@ -439,58 +489,11 @@ export type ChatChunk =
   | { type: "done"; id: number }
   | { type: "error"; error: string };
 
-/** Ask Qwen about an event clip; calls onChunk for each streamed NDJSON message. */
-export async function askClip(id: number, message: string, at: number | null, onChunk: (c: ChatChunk) => void) {
-  const r = await fetch(`${BASE}/api/events/${id}/chat`, json("POST", { message, at }));
-  if (!r.ok || !r.body) throw new Error(`${r.status} ${await r.text()}`);
-  const reader = r.body.getReader();
-  const dec = new TextDecoder();
-  let buf = "";
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    let nl: number;
-    while ((nl = buf.indexOf("\n")) >= 0) {
-      const line = buf.slice(0, nl).trim();
-      buf = buf.slice(nl + 1);
-      if (line) onChunk(JSON.parse(line));
-    }
-  }
-}
-
-export const media = (e: { id: number }, name: string) => `${BASE}/api/events/${e.id}/media/${name}`;
-export const frameUrl = (camera: string, t: number, w = 960, exact = false) =>
-  `${BASE}/api/frame/${camera}?${qs({ t: t.toFixed(2), w, exact: exact ? "true" : undefined })}`;
-export const playbackUrl = (camera: string, start: number, duration = 300) =>
-  `${BASE}/api/playback/${camera}?${qs({ start, duration })}`;
-
-/** Live updates. onMessage gets the other message types (e.g. {type: "briefing"}). */
-export function subscribe(onEvent: (e: NvrEvent) => void, onMessage?: (msg: { type: string; [k: string]: unknown }) => void): () => void {
-  let ws: WebSocket | null = null;
-  let closed = false;
-  let retry = 1000;
-  const connect = () => {
-    const proto = location.protocol === "https:" ? "wss" : "ws";
-    ws = new WebSocket(`${proto}://${location.host}${BASE}/api/ws`);
-    ws.onmessage = (m) => {
-      const msg = JSON.parse(m.data);
-      connection.data();
-      if (msg.type === "event") onEvent(msg.event);
-      else onMessage?.(msg);
-    };
-    ws.onopen = () => { retry = 1000; connection.ws(true); };
-    ws.onclose = () => {
-      connection.ws(false);
-      if (!closed) setTimeout(connect, (retry = Math.min(retry * 2, 15000)));
-    };
-  };
-  connect();
-  return () => {
-    closed = true;
-    ws?.close();
-  };
-}
+export const askClip: SiteApi["askClip"] = (...args) => api.askClip(...args);
+export const media: SiteApi["media"] = (...args) => api.media(...args);
+export const frameUrl: SiteApi["frameUrl"] = (...args) => api.frameUrl(...args);
+export const playbackUrl: SiteApi["playbackUrl"] = (...args) => api.playbackUrl(...args);
+export const subscribe: SiteApi["subscribe"] = (...args) => api.subscribe(...args);
 
 export const fmtTime = (ts: number) =>
   new Date(ts * 1000).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });

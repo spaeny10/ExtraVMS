@@ -1,4 +1,4 @@
-import { fmtDuration, fmtTime, media, UNUSUAL_MIN, type NvrEvent } from "./api";
+import { api, fmtDuration, fmtTime, UNUSUAL_MIN, type NvrEvent, type SiteApi } from "./api";
 
 const STATUS_LABEL: Record<string, string> = {
   open: "Tracking",
@@ -25,16 +25,20 @@ export function placeholder(e: NvrEvent): string {
   return e.error ?? "Waiting for verification…";
 }
 
-export function EventCard({ e, cameraName, onOpen }: { e: NvrEvent; cameraName: string; onOpen: () => void }) {
+export function EventCard({ e, cameraName, onOpen, site = api, siteName }: {
+  e: NvrEvent; cameraName: string; onOpen: () => void;
+  /** the site the event belongs to (hub dashboard: another site than the page's); default: this site */
+  site?: SiteApi; siteName?: string;
+}) {
   return (
     <button className={`event-card ${e.status}`} onClick={onOpen}>
       <div className="thumb">
-        {e.snapshot ? <img src={media(e, "snapshot.jpg")} loading="lazy" alt="" /> : <div className="thumb-empty">{e.camera_class}</div>}
+        {e.snapshot ? <img src={site.media(e, "snapshot.jpg")} loading="lazy" alt="" /> : <div className="thumb-empty">{e.camera_class}</div>}
         <span className={`label-chip ${e.camera_class}`}>{e.yolo_class ?? e.camera_class}</span>
       </div>
       <div className="event-body">
         <div className="event-meta">
-          <span className="cam">{cameraName}</span>
+          <span className="cam">{siteName ? `${siteName} · ` : ""}{cameraName}</span>
           <span className="muted">{fmtTime(e.start_ts)} · {fmtDuration(e)}</span>
         </div>
         <p className={e.synopsis ? "synopsis" : "synopsis muted"}>{e.synopsis ?? placeholder(e)}</p>

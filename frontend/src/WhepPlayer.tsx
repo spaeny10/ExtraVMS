@@ -1,13 +1,15 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import { BASE } from "./api";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { api, makeApi } from "./api";
 
 /**
  * WebRTC (WHEP) player for a MediaMTX path.
  * onUnsupported fires when the browser can't decode the stream's codec (e.g. H.265 main streams),
  * so the caller can fall back to the H.264 sub stream.
  */
-export function WhepPlayer({ path, port, className, onUnsupported, showSize = false, videoRef, children, iceServers, onFallback }: {
+export function WhepPlayer({ path, port, className, onUnsupported, showSize = false, videoRef, children, iceServers, onFallback, base }: {
   path: string; port: number; className?: string; onUnsupported?: () => void; showSize?: boolean;
+  /** URL prefix of the site that owns the camera ("/s/<site>" on the hub dashboard); default: this page's site */
+  base?: string;
   /** STUN/TURN servers (a hub relay when viewed remotely); none = direct/LAN candidates only */
   iceServers?: RTCIceServer[];
   /** called after repeated connection failures so the caller can switch to a non-WebRTC picture */
@@ -26,6 +28,7 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
   const fallback = useRef(onFallback);
   fallback.current = onFallback;
   const failures = useRef(0);
+  const site = useMemo(() => (base === undefined ? api : makeApi(base)), [base]);
 
   useEffect(() => {
     let pc: RTCPeerConnection | null = null;
@@ -69,7 +72,7 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
           };
         });
         // same-origin signalling via the NVR (works over HTTPS); media flows directly from MediaMTX
-        const r = await fetch(`${BASE}/api/whep/${path}`, {
+        const r = await fetch(site.whepUrl(path), {
           method: "POST",
           headers: { "Content-Type": "application/sdp" },
           body: pc.localDescription!.sdp,
@@ -109,7 +112,7 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
       pc?.close();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, port, JSON.stringify(iceServers ?? [])]);
+  }, [path, port, site, JSON.stringify(iceServers ?? [])]);
 
   return (
     <div className={`player ${className ?? ""}`}>

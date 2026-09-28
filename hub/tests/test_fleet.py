@@ -10,6 +10,7 @@ import httpx
 import pytest
 import sqlalchemy as sa
 import uvicorn
+from websockets.sync.client import connect as ws_connect
 
 from hub import agents, db, push
 from hub.api import app
@@ -25,7 +26,17 @@ def make_site(name: str):
         async def reply(status, obj, ctype=b"application/json"):
             await send({"type": "http.response.start", "status": status, "headers": [(b"content-type", ctype)]})
             await send({"type": "http.response.body", "body": json.dumps(obj).encode() if not isinstance(obj, bytes) else obj})
-        if path == "/api/search":
+        if path == "/api/events":
+            from urllib.parse import parse_qs
+            qd = parse_qs(q)
+            evs = [{"id": 11, "camera_id": "cam1", "camera_class": "person", "start_ts": 200.0, "status": "verified", "synopsis": f"{name} person"},
+                   {"id": 12, "camera_id": "cam2", "camera_class": "vehicle", "start_ts": 210.0, "status": "verified", "synopsis": f"{name} car"}]
+            if qd.get("camera"):
+                evs = [e for e in evs if e["camera_id"] == qd["camera"][0]]
+            if qd.get("label"):
+                evs = [e for e in evs if e["camera_class"] == qd["label"][0]]
+            await reply(200, evs)
+        elif path == "/api/search":
             await reply(200, [{"id": 1, "camera_id": "cam1", "start_ts": 100.0, "camera_class": "person", "synopsis": f"{name}: a person", "score": 0.9}])
         elif path == "/api/footage/search":
             await reply(200, [{"camera_id": "cam1", "ts": 90.0, "score": 3.2}])
@@ -143,6 +154,31 @@ def test_fleet_features(hub_server, superuser):
         push.set_sender(None)
         assert owner.post("/api/push/unsubscribe", json={"endpoint": "https://push.example/abc"}).status_code == 200
         assert owner.get("/api/push/vapid").json()["subscriptions"] == []
+
+        # fleet events: fan-out with camera / class / group filters, tagged with the site
+        fe = owner.get(f"/api/fleet/events?org={org['id']}&limit=10").json()
+        assert [e["id"] for e in fe["events"]] == [12, 11] and fe["events"][0]["site_name"] == "Alpha" and fe["offline"] == []
+        fe = owner.get(f"/api/fleet/events?org={org['id']}&cameras={site_a['id']}:cam1").json()
+        assert [e["id"] for e in fe["events"]] == [11]
+        fe = owner.get(f"/api/fleet/events?org={org['id']}&classes=vehicle").json()
+        assert [e["id"] for e in fe["events"]] == [12]
+        g = owner.post(f"/api/orgs/{org['id']}/groups", json={"name": "Doors", "members": [{"site": site_a["id"], "camera": "cam2"}]}).json()
+        fe = owner.get(f"/api/fleet/events?org={org['id']}&group={g['id']}").json()
+        assert [e["id"] for e in fe["events"]] == [12]
+        assert owner.get(f"/api/fleet/events?org={org['id']}&group=g_nope").json()["errors"][0]["error"] == "group not found"
+
+        # live: an event the site publishes reaches the org websocket with its site tag
+        sid = owner.cookies.get("hub_session")
+        with ws_connect(base.replace("http://", "ws://") + f"/api/fleet/ws?org={org['id']}", additional_headers={"Cookie": f"hub_session={sid}"}) as sock:
+            subs = agent_a.state.pipeline.subscribers
+            for _ in range(50):
+                if subs: break
+                time.sleep(0.05)
+            evt = {"type": "event", "event": {"id": 99, "camera_id": "cam1", "camera_class": "person", "start_ts": 300.0, "status": "open"}}
+            for qq in list(subs):
+                loop.call_soon_threadsafe(qq.put_nowait, evt)
+            got = json.loads(sock.recv(timeout=5))
+            assert got["type"] == "event" and got["event"]["id"] == 99 and got["site_id"] == site_a["id"] and got["site_name"] == "Alpha"
     finally:
         fut_a.cancel()
         time.sleep(0.3)   # let the agent's cancellation unwind before the loop stops

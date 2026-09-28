@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, fmtTime, frameUrl, media, subscribe, type AskMeta, type Briefing, type BriefingSettings, type CiteRefs } from "./api";
+import { api, fmtTime, type AskMeta, type Briefing, type BriefingSettings, type CiteRefs, type SiteApi } from "./api";
 import { useNav } from "./nav";
 import { Skeleton, toast } from "./ui";
 
@@ -30,7 +30,7 @@ export function Answer({ text, meta, model, fallback, onEvent, streaming }: {
 }
 
 /** Renders [#123] and [F1] citations as links; ids the lookups didn't return stay plain text. */
-export function Cited({ text, refs, onEvent }: { text: string; refs?: CiteRefs; onEvent: (id: number) => void }) {
+export function Cited({ text, refs, onEvent, site = api }: { text: string; refs?: CiteRefs; onEvent: (id: number) => void; site?: SiteApi }) {
   const { openInTimeline } = useNav();
   const parts = text.split(/(\[#\d+\]|\[F\d+\])/g);
   return (
@@ -43,7 +43,7 @@ export function Cited({ text, refs, onEvent }: { text: string; refs?: CiteRefs; 
           return (
             <button key={i} className="cite" onClick={() => onEvent(id)} title={`Event #${id} · ${r.camera} · ${fmtTime(r.start_ts)}`}>
               {r.label === "vehicle" ? "🚗" : "🧍"} {r.camera} {clock(r.start_ts)}
-              {r.snapshot && <img className="cite-preview" src={media({ id }, "snapshot.jpg")} alt="" loading="lazy" />}
+              {r.snapshot && <img className="cite-preview" src={site.media({ id }, "snapshot.jpg")} alt="" loading="lazy" />}
             </button>
           );
         }
@@ -54,7 +54,7 @@ export function Cited({ text, refs, onEvent }: { text: string; refs?: CiteRefs; 
             <button key={i} className="cite footage" title={`Footage · ${r.camera} · ${fmtTime(r.ts)} (open on the Timeline)`}
               onClick={() => openInTimeline({ id: 0, camera_id: r.camera_id, start_ts: r.ts, end_ts: r.ts + 5, camera_class: "moment" })}>
               ▶ {r.camera} {clock(r.ts)}
-              <img className="cite-preview" src={frameUrl(r.camera_id, r.ts, 320)} alt="" loading="lazy" />
+              <img className="cite-preview" src={site.frameUrl(r.camera_id, r.ts, 320)} alt="" loading="lazy" />
             </button>
           );
         }
@@ -71,21 +71,27 @@ const clock = (ts: number) => {
   return d.toDateString() === today.toDateString() ? time : `${d.toLocaleDateString(undefined, { month: "short", day: "numeric" })} ${time}`;
 };
 
-export function BriefingCard({ onEvent, compact }: { onEvent: (id: number) => void; compact?: boolean }) {
+export function BriefingCard({ onEvent, compact, site = api, readOnly }: {
+  onEvent: (id: number) => void; compact?: boolean;
+  /** the site whose briefings to show (hub dashboard); default: this site */
+  site?: SiteApi;
+  /** hide settings and "Generate now" (e.g. a hub viewer without operator rights) */
+  readOnly?: boolean;
+}) {
   const [list, setList] = useState<Briefing[] | null>(null);
   const [cfg, setCfg] = useState<BriefingSettings | null>(null);
   const [shown, setShown] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [editing, setEditing] = useState(false);
-  const load = () => api.briefings(14).then((r) => { setList(r.briefings); setCfg(r.settings); }).catch(() => setList([]));
+  const load = () => site.briefings(14).then((r) => { setList(r.briefings); setCfg(r.settings); }).catch(() => setList([]));
   useEffect(() => {
     load();
-    return subscribe(() => {}, (m) => { if (m.type === "briefing") load(); });
+    return site.subscribe(() => {}, (m) => { if (m.type === "briefing") load(); });
   }, []);
   const generate = async () => {
     setBusy(true); setErr("");
-    try { await api.generateBriefing(); await load(); setShown(null); toast.success("Briefing written"); }
+    try { await site.generateBriefing(); await load(); setShown(null); toast.success("Briefing written"); }
     catch (e) { setErr(String(e)); toast.error(e); }
     setBusy(false);
   };
@@ -100,11 +106,11 @@ export function BriefingCard({ onEvent, compact }: { onEvent: (id: number) => vo
             {list.map((x) => <option key={x.id} value={x.id}>{fmtTime(x.created_at)}</option>)}
           </select>
         )}
-        <button className="ghost small" onClick={() => setEditing(!editing)} title="When the daily briefing is written">⚙</button>
-        <button className="ghost small" disabled={busy} onClick={generate}>{busy ? "Writing…" : "Generate now"}</button>
+        {!readOnly && <button className="ghost small" onClick={() => setEditing(!editing)} title="When the daily briefing is written">⚙</button>}
+        {!readOnly && <button className="ghost small" disabled={busy} onClick={generate}>{busy ? "Writing…" : "Generate now"}</button>}
       </div>
       {editing && cfg && (
-        <form className="row small briefing-settings" onSubmit={async (e) => { e.preventDefault(); setCfg(await api.saveBriefingSettings(cfg)); setEditing(false); }}>
+        <form className="row small briefing-settings" onSubmit={async (e) => { e.preventDefault(); setCfg(await site.saveBriefingSettings(cfg)); setEditing(false); }}>
           <label className="row"><input type="checkbox" checked={cfg.enabled} onChange={(e) => setCfg({ ...cfg, enabled: e.target.checked })} /> Write a briefing every day at</label>
           <input type="time" value={cfg.time} onChange={(e) => setCfg({ ...cfg, time: e.target.value })} />
           <span className="muted">covering the time since the previous one (up to 24 h)</span>
@@ -119,7 +125,7 @@ export function BriefingCard({ onEvent, compact }: { onEvent: (id: number) => vo
           <h3 className="briefing-headline">{b.headline}</h3>
           <ul className="briefing-bullets">
             {b.text.split("\n").filter(Boolean).map((line, i) => (
-              <li key={i}><Cited text={line.replace(/^-\s*/, "")} refs={b.stats.refs} onEvent={onEvent} /></li>
+              <li key={i}><Cited text={line.replace(/^-\s*/, "")} refs={b.stats.refs} onEvent={onEvent} site={site} /></li>
             ))}
           </ul>
           {b.model && <div className="muted small"><span className="model-tag">{b.model}</span></div>}

@@ -12,11 +12,11 @@ from typing import Literal
 
 import pyotp
 import sqlalchemy as sa
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, WebSocket
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, EmailStr, Field
 
-from . import __version__, alerts, auth, backups, db, digest, proxy, push, turn, vlm_proxy
+from . import __version__, alerts, auth, backups, dashboards, db, digest, proxy, push, turn, vlm_proxy
 from . import fleet as fleet_mod
 from fastapi.responses import StreamingResponse
 from .agents import registry
@@ -531,6 +531,191 @@ class UnpushIn(BaseModel):
 async def push_unsubscribe(body: UnpushIn, u: dict = Depends(user)):
     push.unsubscribe(u["id"], body.endpoint)
     return {"ok": True}
+
+
+# ---------------------------------------------------------------- home dashboards, camera groups, fleet events
+
+class DashboardIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    config: dict
+    shared: bool = False
+
+
+class DashboardPatch(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    config: dict | None = None
+    shared: bool | None = None
+
+
+class DefaultIn(BaseModel):
+    id: str | None = None
+
+
+class GroupIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    members: list[dict] = Field(default_factory=list)
+
+
+class GroupPatch(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    members: list[dict] | None = None
+
+
+@app.get("/api/orgs/{org_id}/dashboards")
+async def list_dashboards(org_id: str, u: dict = Depends(user)):
+    auth.require_role(u, org_id, "viewer")
+    return {"dashboards": dashboards.list_for(u, org_id), "default_id": dashboards.default_id(u, org_id),
+            "generated": dashboards.default_config(u, org_id)}
+
+
+@app.put("/api/orgs/{org_id}/dashboards/default")
+async def set_default_dashboard(org_id: str, body: DefaultIn, u: dict = Depends(user)):
+    auth.require_role(u, org_id, "viewer")
+    if body.id and not dashboards.get(u, org_id, body.id):
+        raise HTTPException(404, "no such dashboard")
+    dashboards.set_default(u, org_id, body.id)
+    return {"default_id": body.id}
+
+
+@app.get("/api/orgs/{org_id}/dashboards/{dash_id}")
+async def get_dashboard(org_id: str, dash_id: str, u: dict = Depends(user)):
+    auth.require_role(u, org_id, "viewer")
+    row = dashboards.get(u, org_id, dash_id)
+    if not row:
+        raise HTTPException(404, "no such dashboard")
+    return dashboards._public(row) | {"can_edit": dashboards.can_edit(u, org_id, row)}
+
+
+@app.post("/api/orgs/{org_id}/dashboards")
+async def create_dashboard(org_id: str, body: DashboardIn, u: dict = Depends(user)):
+    auth.require_role(u, org_id, "admin" if body.shared else "viewer")
+    try:
+        row = dashboards.create(u, org_id, body.name, body.config, body.shared)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    if body.shared:
+        _audit(u, org_id, None, f"dashboard.publish {row['name']}")
+    return row | {"can_edit": True}
+
+
+@app.put("/api/orgs/{org_id}/dashboards/{dash_id}")
+async def update_dashboard(org_id: str, dash_id: str, body: DashboardPatch, u: dict = Depends(user)):
+    auth.require_role(u, org_id, "viewer")
+    row = dashboards.get(u, org_id, dash_id)
+    if not row:
+        raise HTTPException(404, "no such dashboard")
+    if not dashboards.can_edit(u, org_id, row):
+        raise HTTPException(403, "shared dashboards are edited by admins; save your own copy instead")
+    if body.shared is not None and body.shared != row["shared"]:
+        auth.require_role(u, org_id, "admin")
+    try:
+        out = dashboards.update(u, org_id, row, body.name, body.config, body.shared)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    if out["shared"] or row["shared"]:
+        _audit(u, org_id, None, f"dashboard.{'publish' if body.shared and not row['shared'] else 'unpublish' if body.shared is False and row['shared'] else 'update'} {out['name']}")
+    return out | {"can_edit": dashboards.can_edit(u, org_id, {**row, **out})}
+
+
+@app.delete("/api/orgs/{org_id}/dashboards/{dash_id}")
+async def delete_dashboard(org_id: str, dash_id: str, u: dict = Depends(user)):
+    auth.require_role(u, org_id, "viewer")
+    row = dashboards.get(u, org_id, dash_id)
+    if not row:
+        raise HTTPException(404, "no such dashboard")
+    if not dashboards.can_edit(u, org_id, row):
+        raise HTTPException(403, "only admins delete shared dashboards")
+    dashboards.delete(row)
+    if row["shared"]:
+        _audit(u, org_id, None, f"dashboard.delete {row['name']}")
+    return {"ok": True}
+
+
+@app.get("/api/orgs/{org_id}/groups")
+async def list_groups(org_id: str, u: dict = Depends(user)):
+    auth.require_role(u, org_id, "viewer")
+    return dashboards.groups_for(org_id)
+
+
+@app.post("/api/orgs/{org_id}/groups")
+async def create_group(org_id: str, body: GroupIn, u: dict = Depends(user)):
+    auth.require_role(u, org_id, "admin")
+    try:
+        row = dashboards.create_group(u, org_id, body.name, body.members)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    _audit(u, org_id, None, f"group.create {row['name']}")
+    return row
+
+
+@app.put("/api/orgs/{org_id}/groups/{group_id}")
+async def update_group(org_id: str, group_id: str, body: GroupPatch, u: dict = Depends(user)):
+    auth.require_role(u, org_id, "admin")
+    try:
+        row = dashboards.update_group(org_id, group_id, body.name, body.members)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    if not row:
+        raise HTTPException(404, "no such group")
+    _audit(u, org_id, None, f"group.update {row['name']}")
+    return row
+
+
+@app.delete("/api/orgs/{org_id}/groups/{group_id}")
+async def delete_group(org_id: str, group_id: str, u: dict = Depends(user)):
+    auth.require_role(u, org_id, "admin")
+    if not dashboards.delete_group(org_id, group_id):
+        raise HTTPException(404, "no such group")
+    _audit(u, org_id, None, f"group.delete {group_id}")
+    return {"ok": True}
+
+
+def _cam_refs(cameras: str | None) -> list[tuple[str, str]] | None:
+    """?cameras=site:cam,site:cam"""
+    if not cameras:
+        return None
+    out = []
+    for part in cameras.split(","):
+        if ":" in part:
+            site, cam = part.split(":", 1)
+            out.append((site.strip(), cam.strip()))
+    return out or None
+
+
+@app.get("/api/fleet/events")
+async def fleet_events(org: str, sites: str | None = None, cameras: str | None = None, group: str | None = None,
+                       classes: str | None = None, limit: int = Query(20, ge=1, le=100), since: float | None = None,
+                       u: dict = Depends(user)):
+    auth.require_role(u, org, "viewer")
+    return await dashboards.fleet_events(u, org, [s for s in (sites or "").split(",") if s] or None, _cam_refs(cameras), group,
+                                         [c for c in (classes or "").split(",") if c] or None, limit, since)
+
+
+@app.websocket("/api/fleet/ws")
+async def fleet_ws(ws: WebSocket, org: str):
+    """Every event from every site of the org the viewer may see: {type:"event", event, site_id, site_name},
+    plus site_online / site_offline."""
+    u = auth.current_user(ws)  # type: ignore[arg-type]
+    if not u or not auth.role_in(u, org):
+        await ws.close(code=4401 if not u else 4403)
+        return
+    await ws.accept()
+    q: asyncio.Queue = asyncio.Queue()
+    registry.org_subscribers.setdefault(org, set()).add(q)
+    allowed = {s["id"] for s in auth.visible_sites(u, org)}
+    refreshed = time.time()
+    try:
+        while True:
+            msg = await q.get()
+            if time.time() - refreshed > 60:   # grants can change while a tab stays open
+                allowed = {s["id"] for s in auth.visible_sites(u, org)}
+                refreshed = time.time()
+            if msg.get("site_id") in allowed:
+                await ws.send_json(msg)
+    except (WebSocketDisconnect, RuntimeError):
+        pass
+    finally:
+        registry.org_subscribers.get(org, set()).discard(q)
 
 
 # ---------------------------------------------------------------- tunnel + proxy
