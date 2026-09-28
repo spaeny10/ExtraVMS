@@ -6,8 +6,12 @@ import { api, makeApi } from "./api";
  * onUnsupported fires when the browser can't decode the stream's codec (e.g. H.265 main streams),
  * so the caller can fall back to the H.264 sub stream.
  */
-export function WhepPlayer({ path, port, className, onUnsupported, showSize = false, videoRef, children, iceServers, onFallback, base }: {
+export function WhepPlayer({ path, port, className, onUnsupported, showSize = false, videoRef, children, iceServers, onFallback, base, muted = true, onAudio }: {
   path: string; port: number; className?: string; onUnsupported?: () => void; showSize?: boolean;
+  /** sound off (default); unmuting must follow a click, browsers block autoplaying audio */
+  muted?: boolean;
+  /** told whether the stream carries an audio track the browser can play */
+  onAudio?: (has: boolean) => void;
   /** URL prefix of the site that owns the camera ("/s/<site>" on the hub dashboard); default: this page's site */
   base?: string;
   /** STUN/TURN servers (a hub relay when viewed remotely); none = direct/LAN candidates only */
@@ -29,6 +33,9 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
   fallback.current = onFallback;
   const failures = useRef(0);
   const site = useMemo(() => (base === undefined ? api : makeApi(base)), [base]);
+  const audioCb = useRef(onAudio);
+  audioCb.current = onAudio;
+  useEffect(() => { if (video.current) video.current.muted = muted; }, [muted]);  // React doesn't sync the muted attribute
 
   useEffect(() => {
     let pc: RTCPeerConnection | null = null;
@@ -41,8 +48,17 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
       setState("connecting");
       pc = new RTCPeerConnection(iceServers?.length ? { iceServers } : undefined);
       pc.addTransceiver("video", { direction: "recvonly" });
+      pc.addTransceiver("audio", { direction: "recvonly" });   // answered only if the camera sends a WebRTC-playable codec
+      audioCb.current?.(false);
       pc.ontrack = (ev) => {
-        if (video.current) video.current.srcObject = ev.streams[0];
+        if (video.current) { video.current.srcObject = ev.streams[0]; video.current.muted = muted; }
+        if (ev.track.kind === "audio") {
+          // the answer always carries an audio m-line; the track stays "muted" unless the camera really sends sound
+          const t = ev.track;
+          const report = () => audioCb.current?.(!t.muted);
+          t.onunmute = report; t.onmute = report;
+          report();
+        }
       };
       pc.onconnectionstatechange = () => {
         if (!pc) return;

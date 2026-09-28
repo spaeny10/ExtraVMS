@@ -43,6 +43,8 @@ export function CameraWidget({ widget: w, source, editing, big, onProps }: {
   const [quality, setQuality] = useState<"sd" | "hd">(w.props.quality ?? "sd");
   useEffect(() => { setQuality(w.props.quality ?? "sd"); }, [w.props.quality]);
   const [stillTs, setStillTs] = useState(() => nowS() - 3);
+  const [hasAudio, setHasAudio] = useState(false);
+  const [sound, setSound] = useState(false);
 
   // visibility feeds the budget; offscreen tiles give their slot back
   const { visible } = budget;   // stable callback: the effect must not re-run when the budget's order changes
@@ -70,7 +72,7 @@ export function CameraWidget({ widget: w, source, editing, big, onProps }: {
     <div ref={box} className={`dash-cam ${big ? "big" : ""}`}>
       {playing && cam.online ? (
         <LivePlayer key={`${site}-${path}`} path={path} port={source.port} base={api!.base} iceServers={ice} className={hd ? "hd" : ""}
-          onUnsupported={() => setHdOk(false)} />
+          onUnsupported={() => setHdOk(false)} muted={!sound} onAudio={setHasAudio} />
       ) : (
         <div className="player dash-still">
           {cam.online ? <img src={api!.frameUrl(camera, stillTs, 640)} alt="" /> : <div className="player-state">{cam.siteName} is offline</div>}
@@ -83,6 +85,7 @@ export function CameraWidget({ widget: w, source, editing, big, onProps }: {
         <span className={`dot ${cam.streamReady && cam.online ? "ok" : "bad"}`} />
         {!playing && cam.online && <span className="muted small">{editing ? "paused while editing" : "paused · still frame"}</span>}
         <span className="spacer" />
+        {playing && hasAudio && <button className={`ghost small ${sound ? "on" : ""}`} title={sound ? "Mute" : "Listen"} onClick={() => setSound((s) => !s)}>{sound ? "🔊" : "🔇"}</button>}
         <div className="segmented small-seg" title={hdOk ? "Stream quality" : "This browser can't decode the HD stream"}>
           <button className={!hd ? "active" : ""} onClick={() => setQ("sd")}>SD</button>
           <button className={hd ? "active" : ""} disabled={!hdOk} onClick={() => setQ("hd")}>HD</button>

@@ -33,13 +33,15 @@ function LiveTile({ c, hd, port, active, onUnsupported, bar, phone, onSwipe, ice
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [painting, setPainting] = useState(false);
   const [ptzOn, setPtzOn] = useState(false);
+  const [hasAudio, setHasAudio] = useState(false);
+  const [sound, setSound] = useState(false);
   const ptz = c.status?.ptz;
   const aspect = hd ? 2592 / 1520 : 4 / 3;
   return (
     <div className={`tile ${active ? "alerting" : ""} ${painting ? "painting" : ""} ${ptzOn ? "ptz" : ""}`}
       {...(phone && onSwipe && !painting && !ptzOn ? swipeHandlers(onSwipe) : {})}>
       <LivePlayer key={`${c.id}-${hd ? "hd" : "sd"}`} path={hd ? c.id : `${c.id}_sub`} port={port} showSize className={hd ? "hd" : ""}
-        onUnsupported={onUnsupported} videoRef={videoRef} iceServers={iceServers}>
+        onUnsupported={onUnsupported} videoRef={videoRef} iceServers={iceServers} muted={!sound} onAudio={setHasAudio}>
         {!ptzOn && <RegionOverlay cam={c.id} videoRef={videoRef} editing={painting} onDone={() => setPainting(false)} camera={c} fallbackAspect={aspect} />}
         {ptz?.available && <PtzOverlay cam={c.id} videoRef={videoRef} active={ptzOn} onDone={() => setPtzOn(false)} fallbackAspect={aspect} />}
       </LivePlayer>
@@ -47,6 +49,7 @@ function LiveTile({ c, hd, port, active, onUnsupported, bar, phone, onSwipe, ice
         {bar}
         <PtzBadge cam={c.id} ptz={ptz} />
         {!painting && <RegionBadge cam={c.id} onEdit={() => setPainting(true)} />}
+        {hasAudio && <button className={`ghost small ${sound ? "on" : ""}`} title={sound ? "Mute" : "Listen"} onClick={() => setSound((s) => !s)}>{sound ? "🔊" : "🔇"}</button>}
         {ptz?.available && (
           <button className={`ghost small ${ptzOn ? "on" : ""}`} title={ptz.pan_tilt === false ? "Zoom, relay, digital input" : "Pan / tilt / zoom, presets, relay"} disabled={painting}
             onClick={() => setPtzOn((p) => !p)}>🕹</button>

@@ -10,17 +10,18 @@ import { WhepPlayer } from "./WhepPlayer";
 
 const FALLBACK_LAG = LIVE_LAG + 6;   // a chunk must exist on disk before it can be fetched
 
-export function LivePlayer({ path, port, className, onUnsupported, showSize, iceServers, videoRef, children, base }: {
+export function LivePlayer({ path, port, className, onUnsupported, showSize, iceServers, videoRef, children, base, muted, onAudio }: {
   path: string; port: number; className?: string; onUnsupported?: () => void; showSize?: boolean;
   iceServers?: RTCIceServer[]; videoRef?: React.MutableRefObject<HTMLVideoElement | null>; children?: ReactNode;
   /** URL prefix of the camera's site ("/s/<site>" on the hub dashboard); default: this page's site */
   base?: string;
+  muted?: boolean; onAudio?: (has: boolean) => void;
 }) {
   const [fallback, setFallback] = useState(false);
   useEffect(() => { setFallback(false); }, [path]);
   if (!fallback) {
     return <WhepPlayer path={path} port={port} className={className} onUnsupported={onUnsupported} showSize={showSize} base={base}
-      iceServers={iceServers} videoRef={videoRef} onFallback={() => setFallback(true)}>{children}</WhepPlayer>;
+      iceServers={iceServers} videoRef={videoRef} muted={muted} onAudio={onAudio} onFallback={() => setFallback(true)}>{children}</WhepPlayer>;
   }
   return <RecordingFollow camera={path.replace(/_sub$/, "")} className={className} videoRef={videoRef} base={base} onGiveUp={() => setFallback(false)}>{children}</RecordingFollow>;
 }
