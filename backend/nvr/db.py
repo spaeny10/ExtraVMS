@@ -128,6 +128,14 @@ CREATE TABLE IF NOT EXISTS layouts (
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
+-- Home dashboards (frontend/src/dashboard): a widget grid, shared by everyone on this site.
+CREATE TABLE IF NOT EXISTS dashboards (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL UNIQUE,
+    config     TEXT NOT NULL,       -- JSON {{version, cols, rowH, widgets: [...]}}
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
 
 -- Cross-camera journeys: which cameras neighbour each other, and how long the walk takes.
 CREATE TABLE IF NOT EXISTS camera_links (

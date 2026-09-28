@@ -12,7 +12,8 @@ export function BriefingWidget({ widget: w, source }: { widget: Widget<"briefing
     return (
       <div className="dash-briefing">
         {site && source.sites().length > 1 && <div className="muted small">{site.name}</div>}
-        <BriefingCard site={source.siteApi(p.site)} compact readOnly onEvent={(id) => { location.href = source.eventHref({ site_id: p.site, id }); }} />
+        <BriefingCard site={source.siteApi(p.site)} compact readOnly={!source.extras?.briefingEditable}
+          onEvent={(id) => { const e = { site_id: p.site, id }; if (source.openEvent) source.openEvent(e); else location.href = source.eventHref(e); }} />
       </div>
     );
   }

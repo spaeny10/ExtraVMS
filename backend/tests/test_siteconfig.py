@@ -34,20 +34,22 @@ def test_round_trip():
     identities.name_cluster("person", "Sam", [eid], notes="owner")
     db.execute("INSERT INTO layouts (name, config, created_at, updated_at) VALUES (?,?,?,?)", ["Front", json.dumps({"visible": ["cam1"], "solo": None}), time.time(), time.time()])
     db.set_setting("retention_policy", {"continuous_days": 9})
+    db.execute("INSERT INTO dashboards (name, config, created_at, updated_at) VALUES (?,?,?,?)", ["Ops", json.dumps({"version": 1, "cols": 12, "rowH": 60, "widgets": []}), time.time(), time.time()])
 
     data = siteconfig.export_config()
     assert data["format"] == 1 and len(data["cameras"]) == 2 and "password" not in data["cameras"][0]
     assert data["cameras"][0]["ptz_config"]["home_name"] == "parking" and data["cameras"][0]["policies"][0]["area"] == "Door"
     assert data["camera_links"][0]["cam_b"] == "cam2" and data["identities"][0]["name"] == "Sam" and data["identities"][0]["looks"]
     assert data["layouts"][0]["name"] == "Front" and data["settings"]["retention_policy"] == {"continuous_days": 9}
+    assert data["dashboards"][0]["name"] == "Ops"
     text = json.dumps(data)   # JSON-clean (bytes are base64)
 
     # wipe and restore
-    db.execute("DELETE FROM camera_links"); db.execute("DELETE FROM layouts"); db.execute("DELETE FROM identity_looks"); db.execute("DELETE FROM identities")
+    db.execute("DELETE FROM camera_links"); db.execute("DELETE FROM layouts"); db.execute("DELETE FROM dashboards"); db.execute("DELETE FROM identity_looks"); db.execute("DELETE FROM identities")
     db.upsert_camera({**CAM, "name": "renamed", "zones": [], "policies": []})
     db.set_setting("retention_policy", None)
     counts = siteconfig.import_config(json.loads(text))
-    assert counts == {"cameras": 2, "camera_links": 1, "identities": 1, "layouts": 1}
+    assert counts == {"cameras": 2, "camera_links": 1, "identities": 1, "layouts": 1, "dashboards": 1}
     cams = {c["id"]: c for c in db.cameras()}
     assert cams["cam1"]["name"] == "Yard" and cams["cam1"]["password"] == "secret-pw" and cams["cam1"]["zones"][0]["name"] == "Door"
     assert cams["cam1"]["ptz_config"]["home_name"] == "parking"

@@ -43,7 +43,7 @@ export function EventsWidget({ widget: w, source }: { widget: Widget<"events">; 
       {events?.map((e) => (
         <EventCard key={`${e.site_id}-${e.id}`} e={e} cameraName={names.get(`${e.site_id}/${e.camera_id}`) ?? e.camera_id}
           site={source.siteApi(e.site_id)} siteName={multi ? e.site_name : undefined}
-          onOpen={() => { location.href = source.eventHref(e); }} />
+          onOpen={() => { if (source.openEvent) source.openEvent(e); else location.href = source.eventHref(e); }} />
       ))}
     </div>
   );

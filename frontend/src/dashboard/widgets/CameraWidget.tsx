@@ -49,6 +49,7 @@ export function CameraWidget({ widget: w, source, editing, big, onProps }: {
   useEffect(() => {
     const el = box.current;
     if (!el) return;
+    visible(w.id, true);   // assume on screen until the observer says otherwise (a hidden tab reports nothing until shown)
     const io = new IntersectionObserver(([e]) => visible(w.id, e.isIntersecting), { rootMargin: "100px" });
     io.observe(el);
     return () => { io.disconnect(); visible(w.id, false); };

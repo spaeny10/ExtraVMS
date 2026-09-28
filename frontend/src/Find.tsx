@@ -69,6 +69,11 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
   useEffect(() => {
     loadThreads();
     api.remoteWarm().catch(() => {}); // a cold remote model (if configured) starts loading while you type
+    // a question handed over from the Home dashboard's Ask box
+    let handed: string | null = null;
+    try { handed = sessionStorage.getItem("findAsk"); sessionStorage.removeItem("findAsk"); } catch { /* ignore */ }
+    if (handed) askNvr(handed);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   useEffect(() => {
     if (threadId == null) { setMessages([]); return; }

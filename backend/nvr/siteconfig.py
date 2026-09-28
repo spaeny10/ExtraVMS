@@ -25,8 +25,9 @@ def export_config() -> dict:
         idents.append({**{k: i[k] for k in ("name", "kind", "notes", "sightings", "watch", "watch_note")},
                        "looks": [{"embedding": base64.b64encode(lk["embedding"]).decode(), "sightings": lk["sightings"]} for lk in looks]})
     layouts = [{"name": r["name"], "config": json.loads(r["config"])} for r in db.all("SELECT name, config FROM layouts")]
+    dashboards = [{"name": r["name"], "config": json.loads(r["config"])} for r in db.all("SELECT name, config FROM dashboards")]
     return {"format": 1, "exported_at": time.time(), "site_version": __version__, "cameras": cams, "camera_links": links,
-            "identities": idents, "layouts": layouts, "settings": {k: db.get_setting(k) for k in SETTINGS_KEYS}}
+            "identities": idents, "layouts": layouts, "dashboards": dashboards, "settings": {k: db.get_setting(k) for k in SETTINGS_KEYS}}
 
 
 def import_config(data: dict, replace_identities: bool = False) -> dict:
@@ -34,7 +35,7 @@ def import_config(data: dict, replace_identities: bool = False) -> dict:
     identities merged by name (or replaced), settings overwritten. Returns counts."""
     if data.get("format") != 1:
         raise ValueError("unknown backup format")
-    counts = {"cameras": 0, "camera_links": 0, "identities": 0, "layouts": 0}
+    counts = {"cameras": 0, "camera_links": 0, "identities": 0, "layouts": 0, "dashboards": 0}
     existing_pw = {c["id"]: c["password"] for c in db.cameras()}
     for c in data.get("cameras", []):
         cam = {**c, "password": existing_pw.get(c["id"], "")}
@@ -71,6 +72,11 @@ def import_config(data: dict, replace_identities: bool = False) -> dict:
         for l in data.get("layouts", []):
             db.conn.execute("INSERT INTO layouts (name, config, created_at, updated_at) VALUES (?,?,?,?)", [l["name"], json.dumps(l["config"]), now, now])
             counts["layouts"] += 1
+        if "dashboards" in data:
+            db.conn.execute("DELETE FROM dashboards")
+            for d in data["dashboards"]:
+                db.conn.execute("INSERT INTO dashboards (name, config, created_at, updated_at) VALUES (?,?,?,?)", [d["name"], json.dumps(d["config"]), now, now])
+                counts["dashboards"] += 1
         db.conn.commit()
     for k, v in (data.get("settings") or {}).items():
         if k in SETTINGS_KEYS and v is not None:

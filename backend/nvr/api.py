@@ -933,6 +933,63 @@ async def delete_layout(layout_id: int):
     return {"ok": True}
 
 
+# ---------------------------------------------------------------- home dashboards (same shape as the hub's, one site)
+
+def _dashboard(r: dict) -> dict:
+    return {**r, "config": json.loads(r["config"])}
+
+
+def _check_dashboard(cfg: dict) -> None:
+    ws = cfg.get("widgets")
+    if not isinstance(ws, list) or len(ws) > 60:
+        raise HTTPException(422, "a dashboard is {widgets: [...]} with at most 60 widgets")
+    for w in ws:
+        if not isinstance(w, dict) or w.get("type") not in ("camera", "events", "briefing", "alerts", "health", "ask"):
+            raise HTTPException(422, "unknown widget type")
+        if not all(isinstance(w.get(k), int) for k in ("x", "y", "w", "h")) or w["x"] < 0 or w["w"] < 1 or w["x"] + w["w"] > 12:
+            raise HTTPException(422, "widget out of the 12-column grid")
+
+
+@app.get("/api/dashboards")
+async def list_dashboards():
+    return [_dashboard(r) for r in db.all("SELECT * FROM dashboards ORDER BY name COLLATE NOCASE")]
+
+
+@app.post("/api/dashboards")
+async def create_dashboard(body: LayoutIn):
+    _check_dashboard(body.config)
+    now = time.time()
+    try:
+        did = db.execute("INSERT INTO dashboards (name, config, created_at, updated_at) VALUES (?,?,?,?)",
+                         [body.name.strip(), json.dumps(body.config), now, now]).lastrowid
+    except Exception as e:
+        if "UNIQUE" in str(e):
+            raise HTTPException(409, "a dashboard with that name already exists")
+        raise
+    return _dashboard(db.one("SELECT * FROM dashboards WHERE id=?", [did]))
+
+
+@app.put("/api/dashboards/{dash_id}")
+async def update_dashboard(dash_id: int, body: LayoutIn):
+    if not db.one("SELECT 1 FROM dashboards WHERE id=?", [dash_id]):
+        raise HTTPException(404)
+    _check_dashboard(body.config)
+    try:
+        db.execute("UPDATE dashboards SET name=?, config=?, updated_at=? WHERE id=?",
+                   [body.name.strip(), json.dumps(body.config), time.time(), dash_id])
+    except Exception as e:
+        if "UNIQUE" in str(e):
+            raise HTTPException(409, "a dashboard with that name already exists")
+        raise
+    return _dashboard(db.one("SELECT * FROM dashboards WHERE id=?", [dash_id]))
+
+
+@app.delete("/api/dashboards/{dash_id}")
+async def delete_dashboard(dash_id: int):
+    db.execute("DELETE FROM dashboards WHERE id=?", [dash_id])
+    return {"ok": True}
+
+
 # ---------------------------------------------------------------- retention & locks
 
 @app.get("/api/retention/policy")

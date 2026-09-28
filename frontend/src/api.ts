@@ -1,4 +1,5 @@
 import { connection } from "./ui";
+import type { DashboardConfig } from "./dashboard/types";
 /** include = detect only here; exclude = mask out; area = just a name for a place (never filters) */
 export type Zone = { name: string; type?: "include" | "exclude" | "area"; points: [number, number][] };
 /** [x, y, class, event_id, status] foot point of a recent detection */
@@ -271,6 +272,8 @@ export type SystemInfo = {
   backup?: { dir: string; last: { at: number; path: string; bytes: number; count: number } | null };
 };
 
+export type SiteDashboard = { id: number; name: string; config: DashboardConfig; created_at: number; updated_at: number };
+
 /** URL prefix when this UI is served through the fleet hub ("/s/<site>"); empty on the site itself. */
 export const BASE = /^\/s\/[A-Za-z0-9_-]+/.exec(typeof location === "undefined" ? "" : location.pathname)?.[0] ?? "";
 
@@ -419,6 +422,10 @@ export function makeApi(base: string) {
   eventJourney: (id: number) => req<Journey | null>(`/api/events/${id}/journey`),
   rejectLink: (id: number) => req(`/api/links/${id}/reject`, { method: "POST" }),
   regenerateJourney: (id: number) => req(`/api/journeys/${id}/regenerate`, { method: "POST" }),
+  dashboards: () => req<SiteDashboard[]>("/api/dashboards"),
+  createDashboard: (d: { name: string; config: DashboardConfig }) => req<SiteDashboard>("/api/dashboards", json("POST", d)),
+  updateDashboard: (id: number, d: { name: string; config: DashboardConfig }) => req<SiteDashboard>(`/api/dashboards/${id}`, json("PUT", d)),
+  deleteDashboard: (id: number) => req(`/api/dashboards/${id}`, { method: "DELETE" }),
   layouts: () => req<Layout[]>("/api/layouts"),
   createLayout: (l: { name: string; config: LayoutConfig }) => req<Layout>("/api/layouts", json("POST", l)),
   updateLayout: (id: number, l: { name: string; config: LayoutConfig }) => req<Layout>(`/api/layouts/${id}`, json("PUT", l)),

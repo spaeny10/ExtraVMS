@@ -142,7 +142,7 @@ export default function App() {
         </div>
       </header>
       <main>
-        {tab === "Home" && <HomeView cameras={cameras} onGo={choose} />}
+        {tab === "Home" && <HomeView cameras={cameras} port={port} onGo={choose} />}
         {tab === "Live" && <LiveView cameras={cameras.filter((c) => c.enabled)} port={port} recent={recent} />}
         {tab === "Find" && <FindView cameras={cameras} live={live} />}
         {tab === "Timeline" && <TimelineView cameras={cameras} focus={focus} onClearFocus={() => { setFocus(null); history.replaceState(null, "", location.pathname); }} />}

@@ -26,10 +26,10 @@ RULES: list[tuple[set[str], re.Pattern, str]] = [
     ({"PUT", "POST", "DELETE"}, re.compile(r"^/api/events/\d+/(feedback|synopsis|synopsis/generate|synopsis/revert|reprocess|identity|lock|watch)(/|$)"), "operator"),
     ({"PUT", "DELETE"}, re.compile(r"^/api/events/\d+/chat(/|$)"), "operator"),        # keep/forget clip-chat notes
     ({"POST"}, re.compile(r"^/api/links/\d+/reject$"), "operator"),                       # "not the same person"
-    ({"POST", "DELETE"}, re.compile(r"^/api/(locks|layouts)(/|$)"), "operator"),
+    ({"POST", "DELETE"}, re.compile(r"^/api/(locks|layouts|dashboards)(/|$)"), "operator"),
     ({"POST"}, re.compile(r"^/api/remote/test$"), "admin"),
     ({"POST"}, re.compile(r"^/api/config/import$"), "admin"),
-    ({"PUT"}, re.compile(r"^/api/layouts/"), "operator"),
+    ({"PUT"}, re.compile(r"^/api/(layouts|dashboards)/"), "operator"),
     ({"POST"}, re.compile(r"^/api/briefings/generate$"), "operator"),
     ({"DELETE"}, re.compile(r"^/api/assistant/threads/"), "operator"),
     ({"POST"}, re.compile(r"^/api/journeys/\d+/regenerate$"), "operator"),

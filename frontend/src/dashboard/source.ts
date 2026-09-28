@@ -24,6 +24,8 @@ export interface DashboardSource {
   events(p: EventsProps): Promise<FleetEvents>;
   subscribe(onMessage: (m: FleetMessage) => void): () => void;
   eventHref(e: { site_id: string; camera_id?: string; id: number }): string;
+  /** in-app opener (the site's own Home); when absent widgets navigate to eventHref */
+  openEvent?: (e: { site_id: string; camera_id?: string; id: number }) => void;
   liveHref(site: string): string;
   /** the WebRTC port the site UI was told about (only used as an effect key by the players) */
   port: number;
@@ -32,6 +34,11 @@ export interface DashboardSource {
     ack?: (id: number) => Promise<unknown>;
     digest?: () => Promise<SourceDigest>;
     askHref?: (q: string) => string;
+    /** in-app Ask (the site's own Home); preferred over askHref */
+    ask?: (q: string) => void;
+    /** the viewer may generate briefings / change their schedule (site operators; not hub viewers) */
+    briefingEditable?: boolean;
+    cameraName?: (id: string) => string;
     kindLabels?: Record<string, string>;
   };
 }
