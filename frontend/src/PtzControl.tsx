@@ -4,7 +4,6 @@
  * release; the camera itself stops after 2 s if the re-sends stop.
  */
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
 import { api, type Camera, type PtzInfo, type PtzStatus } from "./api";
 import { contentRect } from "./RegionPaint";
 import { confirmDialog, promptDialog, toast } from "./ui";
@@ -41,15 +40,19 @@ function useHeldMove(cam: string) {
   return { start, stop, held: () => vel.current !== null };
 }
 
+const PAD_KEY = "ptzPad";
+
 /**
- * The drag surface sits over the picture (transparent, so nothing is hidden); the toolbar is portalled into
- * `dock` (a strip under the video) when given, otherwise it floats in the corner of the picture.
+ * PTZ mode over a live picture. Control is by mouse/finger on the transparent drag surface (drag = pan/tilt,
+ * click = centre, wheel = zoom). A translucent pill in the corner holds presets, relay, input and Done; the
+ * on-picture pad (big translucent arrows + zoom) is optional, toggled from the pill and remembered.
  */
-export function PtzOverlay({ cam, videoRef, active, onDone, fallbackAspect = 2592 / 1520, dock }: {
+export function PtzOverlay({ cam, videoRef, active, onDone, fallbackAspect = 2592 / 1520 }: {
   cam: string; videoRef: React.RefObject<HTMLVideoElement | null>; active: boolean; onDone: () => void; fallbackAspect?: number;
-  dock?: HTMLElement | null;
 }) {
   const [info, setInfo] = useState<PtzInfo | null>(null);
+  const [pad, setPad] = useState(() => { try { return localStorage.getItem(PAD_KEY) === "1"; } catch { return false; } });
+  const togglePad = () => setPad((p) => { try { localStorage.setItem(PAD_KEY, p ? "0" : "1"); } catch { /* private mode */ } return !p; });
   const [rect, setRect] = useState<Rect | null>(null);
   const surface = useRef<HTMLDivElement>(null);
   const drag = useRef<{ x0: number; y0: number; moved: boolean } | null>(null);
@@ -93,42 +96,10 @@ export function PtzOverlay({ cam, videoRef, active, onDone, fallbackAspect = 259
     onPointerUp: stop, onPointerLeave: stop, onPointerCancel: stop,
   });
 
-  const tools = (
-    <div className={`ptz-tools ${dock ? "docked" : ""}`} onPointerDown={stopAll} onClick={stopAll} onDoubleClick={stopAll} onWheel={stopAll}>
-      <div className="ptz-pad">
-        <span /><button className="ghost small" title="Tilt up (hold)" {...hold({ pan: 0, tilt: 0.5, zoom: 0 })}>▲</button><span />
-        <button className="ghost small" title="Pan left (hold)" {...hold({ pan: -0.5, tilt: 0, zoom: 0 })}>◀</button>
-        <button className="ghost small" title="Go home" onClick={() => after(api.ptzHome(cam))}>⌂</button>
-        <button className="ghost small" title="Pan right (hold)" {...hold({ pan: 0.5, tilt: 0, zoom: 0 })}>▶</button>
-        <span /><button className="ghost small" title="Tilt down (hold)" {...hold({ pan: 0, tilt: -0.5, zoom: 0 })}>▼</button><span />
-      </div>
-      <div className="segmented small-seg" title="Zoom (hold)">
-        <button {...hold({ pan: 0, tilt: 0, zoom: -0.5 })}>−</button>
-        <button {...hold({ pan: 0, tilt: 0, zoom: 0.5 })}>+</button>
-      </div>
-      <select value="" title="Go to a preset" onChange={(e) => { if (e.target.value) after(api.ptzGoto(cam, e.target.value)); }}>
-        <option value="">Preset…</option>
-        {info?.presets.filter((p) => !p.system).map((p) => <option key={p.token} value={p.token}>{p.is_home ? "★ " : ""}{p.name}</option>)}
-        {info?.presets.some((p) => p.system) && (
-          <optgroup label="Camera">{info.presets.filter((p) => p.system).map((p) => <option key={p.token} value={p.token}>{p.name}</option>)}</optgroup>
-        )}
-      </select>
-      <button className="ghost small" title="Save the current view as a new preset" onClick={async () => {
-        const name = await promptDialog("Save this view as a preset", { label: "Name", confirmLabel: "Save" });
-        if (name?.trim()) after(api.ptzSavePreset(cam, name.trim()).then(() => toast.success(`Preset "${name.trim()}" saved`)));
-      }}>Save as…</button>
-      {s?.relay && (
-        <button className={`ghost small ${s.relay.state ? "on" : ""}`} title={`Relay output (${s.relay.mode})`}
-          onClick={() => after(api.relay(cam, s.relay!.mode === "monostable" ? true : !s.relay!.state))}>
-          ⚡ {s.relay.label}{s.relay.mode === "monostable" ? " · pulse" : s.relay.state == null ? "" : s.relay.state ? " · on" : " · off"}
-        </button>
-      )}
-      {s?.input && <span className={`ptz-chip ${s.input.state ? "on" : ""}`} title="Digital input">⏺ {s.input.label}: {s.input.state == null ? "?" : s.input.state ? "active" : "idle"}</span>}
-      <span className="muted-on-dark ptz-status" title="Drag the picture to pan/tilt · click to centre · wheel to zoom · arrow keys">{statusText(s)}</span>
-      <span className="spacer" />
-      <button className="small" onClick={onDone}>Done</button>
-    </div>
-  );
+  const saveAs = async () => {
+    const name = await promptDialog("Save this view as a preset", { label: "Name", confirmLabel: "Save" });
+    if (name?.trim()) after(api.ptzSavePreset(cam, name.trim()).then(() => toast.success(`Preset "${name.trim()}" saved`)));
+  };
 
   return (
     <>
@@ -176,7 +147,43 @@ export function PtzOverlay({ cam, videoRef, active, onDone, fallbackAspect = 259
         }}
         onKeyUp={(e) => { if (e.key.startsWith("Arrow")) stop(); }}
       />
-      {dock ? createPortal(tools, dock) : tools}
+      {pad && (
+        <div className="ptz-padlay" style={rect ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : undefined}
+          onPointerDown={stopAll} onClick={stopAll} onDoubleClick={stopAll} onWheel={stopAll}>
+          <button className="ptz-arrow up" title="Tilt up (hold)" {...hold({ pan: 0, tilt: 0.5, zoom: 0 })}>▲</button>
+          <button className="ptz-arrow down" title="Tilt down (hold)" {...hold({ pan: 0, tilt: -0.5, zoom: 0 })}>▼</button>
+          <button className="ptz-arrow left" title="Pan left (hold)" {...hold({ pan: -0.5, tilt: 0, zoom: 0 })}>◀</button>
+          <button className="ptz-arrow right" title="Pan right (hold)" {...hold({ pan: 0.5, tilt: 0, zoom: 0 })}>▶</button>
+          <button className="ptz-arrow home" title="Go home" onClick={() => after(api.ptzHome(cam))}>⌂</button>
+          <div className="ptz-zoom">
+            <button title="Zoom in (hold)" {...hold({ pan: 0, tilt: 0, zoom: 0.5 })}>+</button>
+            <button title="Zoom out (hold)" {...hold({ pan: 0, tilt: 0, zoom: -0.5 })}>−</button>
+          </div>
+        </div>
+      )}
+      <div className="ptz-pill" onPointerDown={stopAll} onClick={stopAll} onDoubleClick={stopAll} onWheel={stopAll}>
+        <select value="" title="Go to a preset" onChange={(e) => {
+          const v = e.target.value;
+          if (v === "__save") saveAs(); else if (v) after(api.ptzGoto(cam, v));
+        }}>
+          <option value="">{s?.preset_name ? `at ${s.preset_name}` : "Preset…"}</option>
+          {info?.presets.filter((p) => !p.system).map((p) => <option key={p.token} value={p.token}>{p.is_home ? "★ " : ""}{p.name}</option>)}
+          <option value="__save">＋ Save current view…</option>
+          {info?.presets.some((p) => p.system) && (
+            <optgroup label="Camera">{info.presets.filter((p) => p.system).map((p) => <option key={p.token} value={p.token}>{p.name}</option>)}</optgroup>
+          )}
+        </select>
+        {s?.relay && (
+          <button className={`ghost small ${s.relay.state ? "on" : ""}`} title={`Relay output (${s.relay.mode})`}
+            onClick={() => after(api.relay(cam, s.relay!.mode === "monostable" ? true : !s.relay!.state))}>
+            ⚡ {s.relay.label}{s.relay.mode === "monostable" || s.relay.state == null ? "" : s.relay.state ? " · on" : " · off"}
+          </button>
+        )}
+        {s?.input && <span className={`ptz-chip ${s.input.state ? "on" : ""}`} title={`Digital input: ${s.input.state == null ? "unknown" : s.input.state ? "active" : "idle"}`}>⏺ {s.input.label}</span>}
+        <button className={`ghost small ${pad ? "on" : ""}`} title={pad ? "Hide the on-screen pad (drag the picture to move, wheel to zoom)" : "Show an on-screen pad for pan/tilt/zoom"} onClick={togglePad}>✚</button>
+        {s?.last_error && <span className="ptz-chip on" title={s.last_error}>unreachable</span>}
+        <button className="small" title="Leave PTZ mode (Esc)" onClick={onDone}>Done</button>
+      </div>
     </>
   );
 }

@@ -33,7 +33,6 @@ function LiveTile({ c, hd, port, active, onUnsupported, bar, phone, onSwipe, ice
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [painting, setPainting] = useState(false);
   const [ptzOn, setPtzOn] = useState(false);
-  const [dock, setDock] = useState<HTMLDivElement | null>(null);   // the strip under the video that holds the PTZ toolbar
   const ptz = c.status?.ptz;
   const aspect = hd ? 2592 / 1520 : 4 / 3;
   return (
@@ -42,9 +41,8 @@ function LiveTile({ c, hd, port, active, onUnsupported, bar, phone, onSwipe, ice
       <LivePlayer key={`${c.id}-${hd ? "hd" : "sd"}`} path={hd ? c.id : `${c.id}_sub`} port={port} showSize className={hd ? "hd" : ""}
         onUnsupported={onUnsupported} videoRef={videoRef} iceServers={iceServers}>
         {!ptzOn && <RegionOverlay cam={c.id} videoRef={videoRef} editing={painting} onDone={() => setPainting(false)} camera={c} fallbackAspect={aspect} />}
-        {ptz?.available && <PtzOverlay cam={c.id} videoRef={videoRef} active={ptzOn} onDone={() => setPtzOn(false)} fallbackAspect={aspect} dock={dock} />}
+        {ptz?.available && <PtzOverlay cam={c.id} videoRef={videoRef} active={ptzOn} onDone={() => setPtzOn(false)} fallbackAspect={aspect} />}
       </LivePlayer>
-      {ptz?.available && ptzOn && <div ref={setDock} className="ptz-dock" />}
       <div className="tile-bar">
         {bar}
         <PtzBadge cam={c.id} ptz={ptz} />
