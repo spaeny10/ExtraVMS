@@ -11,6 +11,7 @@ export type SourceAlert = { id: number; site_id: string; site_name: string; kind
 export type SourceDigest = { day: string; text: string; model: string | null; created_at: number } | null;
 export type FleetMessage =
   | { type: "event"; event: NvrEvent; site_id: string; site_name: string }
+  | { type: "event_removed"; id: number; site_id: string; site_name: string }
   | { type: "site_online" | "site_offline"; site_id: string; site_name: string };
 
 export interface DashboardSource {

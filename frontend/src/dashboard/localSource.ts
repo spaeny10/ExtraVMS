@@ -35,7 +35,8 @@ export function makeLocalSource(cameras: Camera[], home: HomeData | null, port: 
       const keep = rows.filter((e) => (!want || want.some((c) => c.camera === e.camera_id)) && (!p.classes?.length || p.classes.includes(e.camera_class as "person" | "vehicle")));
       return { events: keep.map((e) => ({ ...e, site_id: LOCAL, site_name: name })), offline: [], errors: [] };
     },
-    subscribe: (onMessage) => api.subscribe((e) => onMessage({ type: "event", event: e, site_id: LOCAL, site_name: name })),
+    subscribe: (onMessage) => api.subscribe((e) => onMessage({ type: "event", event: e, site_id: LOCAL, site_name: name }),
+      (m) => { if (m.type === "event_removed") onMessage({ type: "event_removed", id: m.id as number, site_id: LOCAL, site_name: name }); }),
     eventHref: () => "#timeline",
     openEvent: (e) => opts.openEvent(e),
     liveHref: () => "#live",

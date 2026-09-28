@@ -2,7 +2,7 @@
 import type { NvrEvent } from "@site/api";
 import type { CameraGroup, Dashboard, DashboardConfig, DashboardList, FleetEvent, FleetEvents } from "@site/dashboard/types";
 export type { CameraGroup, Dashboard, DashboardConfig, DashboardList, FleetEvent, FleetEvents, Widget, WidgetProps, DashboardWidgetType } from "@site/dashboard/types";
-export type FleetMessage = { type: "event"; event: NvrEvent; site_id: string; site_name: string } | { type: "site_online" | "site_offline"; site_id: string; site_name: string };
+export type FleetMessage = { type: "event"; event: NvrEvent; site_id: string; site_name: string } | { type: "event_removed"; id: number; site_id: string; site_name: string } | { type: "site_online" | "site_offline"; site_id: string; site_name: string };
 
 export type Me = { user: { id: string; email: string; totp_enabled: boolean; is_super: boolean }; orgs: Org[]; active_org: string | null };
 export type Org = { id: string; name: string; slug: string; role: string };

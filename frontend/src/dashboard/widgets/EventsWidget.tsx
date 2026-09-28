@@ -18,6 +18,7 @@ export function EventsWidget({ widget: w, source }: { widget: Widget<"events">; 
     source.events(p).then((r) => { if (!alive) return; setEvents(r.events.slice(0, limit)); setOffline(r.offline); })
       .catch((e) => { if (alive) { setErr(String(e)); setEvents([]); } });
     const unsub = source.subscribe((m) => {
+      if (m.type === "event_removed") { setEvents((prev) => prev && prev.filter((x) => !(x.id === m.id && x.site_id === m.site_id))); return; }
       if (m.type !== "event") return;
       const e = m.event;
       if (!eventInScope(p, source.groups(), m.site_id, e.camera_id, e.camera_class)) return;

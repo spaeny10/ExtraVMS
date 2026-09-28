@@ -109,6 +109,12 @@ export default function App() {
         if (e.status === "rejected" || e.status === "masked") return prev.map((x) => (x.id === e.id ? e : x));
         return [e, ...prev.filter((x) => x.id !== e.id)].slice(0, 30);
       });
+    }, (m) => {
+      if (m.type === "event_removed") {  // a fragment merged into an earlier event: every list drops it
+        const id = m.id as number;
+        setRecent((prev) => prev.filter((x) => x.id !== id));
+        window.dispatchEvent(new CustomEvent("nvr:event_removed", { detail: id }));
+      }
     });
     return () => {
       clearInterval(t);

@@ -383,6 +383,14 @@ class Database:
             self.conn.execute("DELETE FROM events_fts WHERE rowid=?", (event_id,))
             self.conn.execute("DELETE FROM events_vec WHERE rowid=?", (event_id,))
 
+    def delete_event(self, event_id: int) -> None:
+        """Remove an event row and everything keyed on it (search index, embeddings); files are the caller's."""
+        self.unindex_event(event_id)
+        with self.lock:
+            self.conn.execute("DELETE FROM reid_vec WHERE rowid=?", (event_id,))
+            self.conn.execute("DELETE FROM vehicle_vec WHERE rowid=?", (event_id,))
+            self.conn.execute("DELETE FROM events WHERE id=?", (event_id,))
+
     # ---- person re-ID embeddings
     def set_vec(self, table: str, row_id: int, vec) -> None:
         assert table in ("reid_vec", "vehicle_vec")

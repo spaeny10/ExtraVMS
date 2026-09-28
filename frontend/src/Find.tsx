@@ -106,6 +106,12 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [live]);
 
+  useEffect(() => {
+    const on = (ev: Event) => { const id = (ev as CustomEvent<number>).detail; setEvents((prev) => prev && prev.filter((x) => x.id !== id)); };
+    window.addEventListener("nvr:event_removed", on);
+    return () => window.removeEventListener("nvr:event_removed", on);
+  }, []);
+
   const loadMore = async () => {
     if (loadingMore.current || !more || !events?.length) return;
     loadingMore.current = true;

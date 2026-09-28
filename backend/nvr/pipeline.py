@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import cv2
 
-from . import baseline, cells, identities, journeys, policy, vlmroute, zones
+from . import baseline, cells, identities, journeys, policy, vlmroute, zones, merge
 from . import synopsis as vlm
 from .config import settings
 from .db import db
@@ -29,6 +29,7 @@ class Pipeline:
         self.synopsis_q: asyncio.PriorityQueue[tuple[int, int, int]] = asyncio.PriorityQueue()
         self._synopsis_seq = 0
         self.synopsis_pending: set[int] = set()  # queued or being written now; the UI shows "Qwen is writing…"
+        self.synopsis_hold: dict[int, float] = {}  # verified events waiting for a possible follow-on fragment (merge.py)
         self.journey_q: asyncio.Queue[int] = asyncio.Queue()
         self.tracker = Tracker(self.verify_q.put)
         self.gpu = ThreadPoolExecutor(max_workers=1, thread_name_prefix="yolo")
@@ -74,6 +75,10 @@ class Pipeline:
             if q.qsize() < 100:
                 q.put_nowait({"type": "event", "event": e})
 
+    def publish_removed(self, event_id: int) -> None:
+        """A fragment was merged into an earlier event: browsers drop its card."""
+        self.publish_msg({"type": "event_removed", "id": event_id})
+
     def publish_msg(self, msg: dict) -> None:
         """Push any other live update (e.g. a new briefing) to connected browsers."""
         for q in list(self.subscribers):
@@ -108,6 +113,7 @@ class Pipeline:
         asyncio.create_task(self._reid_backfill(), name="reid-backfill")
         asyncio.create_task(self._vehicle_backfill(), name="vehicle-backfill")
         asyncio.create_task(self._cells_backfill(), name="cells-backfill")
+        asyncio.create_task(self.hold_loop(), name="synopsis-hold")
         while True:
             event_id = await self.verify_q.get()
             try:
@@ -149,6 +155,17 @@ class Pipeline:
                  result.get("yolo_class"), result.get("yolo_hits"))
         if result["status"] != "verified":
             return
+        # A continuation of the fragment just before it? Fold it in and verify the whole visit as one event.
+        found = merge.candidate(db.event(event_id))
+        if found:
+            target, reason = found
+            self.synopsis_hold.pop(event_id, None)
+            self.synopsis_hold.pop(target["id"], None)
+            merge.apply(target, db.event(event_id), reason)
+            self.publish_removed(event_id)
+            self.publish(target["id"])
+            self.verify_q.put_nowait(target["id"])
+            return
         a: dict = {}
         if away:  # named places, site rules and "what's normal" all describe the home view
             db.update_event(event_id, anomaly=None, anomaly_json=None, priority=None)
@@ -159,9 +176,23 @@ class Pipeline:
         if a.get("reasons"):
             log.info("event %s unusual %.2f: %s", event_id, a["score"], "; ".join(a["reasons"]))
         if self.wants_synopsis(db.event(event_id)) or a.get("score", 0) >= settings.anomaly_synopsis_min:
-            self.queue_synopsis(event_id)
+            # hold long enough for a follow-on fragment to close, be verified and merge in; then describe once
+            self.synopsis_hold[event_id] = e["end_ts"] + settings.track_merge_gap + settings.clip_post_roll + settings.recording_lag + 2
         else:
             await self.reindex(event_id)  # no VLM for this label: index the YOLO tags for search
+
+    async def hold_loop(self) -> None:
+        """Queue held synopses once their merge window has passed (events merged meanwhile were removed from the hold)."""
+        while True:
+            await asyncio.sleep(1)
+            now = time.time()
+            for event_id, due in list(self.synopsis_hold.items()):
+                if due > now:
+                    continue
+                self.synopsis_hold.pop(event_id, None)
+                e = db.event(event_id)
+                if e and e["status"] == "verified" and not e["synopsis"]:
+                    self.queue_synopsis(event_id)
 
     async def synopsis_loop(self) -> None:
         while True:

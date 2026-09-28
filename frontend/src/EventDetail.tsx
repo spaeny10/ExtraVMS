@@ -23,9 +23,11 @@ export function EventDetail({ id: initialId, cameraName, onClose }: { id: number
   const video = useRef<HTMLVideoElement>(null);
   const { openInTimeline } = useNav();
 
+  const gone = () => { toast.info("This sighting was merged into a longer event"); onClose(); };
   useEffect(() => {
-    api.event(id).then(setE);
+    api.event(id).then(setE).catch(gone);
     api.chat(id).then(setChat).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
   useEffect(() => {
     const onKey = (k: KeyboardEvent) => k.key === "Escape" && onClose();
@@ -35,7 +37,7 @@ export function EventDetail({ id: initialId, cameraName, onClose }: { id: number
   // Poll while the pipeline is still working on this event.
   useEffect(() => {
     if (!e || (e.status !== "open" && e.status !== "pending" && !(e.status === "verified" && !e.synopsis && e.camera_class === "person"))) return;
-    const t = setInterval(() => api.event(id).then(setE), 3000);
+    const t = setInterval(() => api.event(id).then(setE).catch(gone), 3000);
     return () => clearInterval(t);
   }, [e, id]);
 

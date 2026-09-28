@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     chat_frames: int = 4                    # frames per chat question (~1,050 tokens each)
     embed_model: str = "nomic-embed-text"
     synopsis_images: int = 4
+    # Back-to-back fragments of one visit on a camera merge into one event before Qwen describes it (merge.py)
+    track_merge_gap: float = 10.0           # a fragment starting within this of the previous one may merge
+    merge_max_seconds: float = 300.0        # never grow one event beyond this
+    merge_max_dist: float = 0.25            # normalised centre distance between the last and first boxes
+    merge_reid_min: float = 0.75            # people: appearance similarity needed when the camera gave a new track id
     synopsis_labels: list[str] = ["person"]  # Qwen runs only for these; YOLO verifies every label
     anomaly_synopsis_min: float = 0.75  # ...and for any other label once it is this unusual for its camera
 
