@@ -23,7 +23,7 @@ const ago = (ts: number) => {
 
 /** The daily entry point: what needs attention since you last looked, who's been on site today, and whether
  * everything is recording. */
-export function HomeView({ cameras, onGo }: { cameras: Camera[]; onGo: (tab: "Live" | "Events" | "Settings") => void }) {
+export function HomeView({ cameras, onGo }: { cameras: Camera[]; onGo: (tab: "Live" | "Find" | "Settings") => void }) {
   const [seenAt] = useState(loadSeen);
   const [h, setH] = useState<HomeData | null>(null);
   const [err, setErr] = useState("");
@@ -99,7 +99,7 @@ export function HomeView({ cameras, onGo }: { cameras: Camera[]; onGo: (tab: "Li
           </div>
         </section>
         <section>
-          <h3>Latest <button className="linkish small" onClick={() => onGo("Events")}>all events →</button></h3>
+          <h3>Latest <button className="linkish small" onClick={() => onGo("Find")}>all events →</button></h3>
           <div className="home-recent">
             {h.recent.map((e: NvrEvent) => <EventCard key={e.id} e={e} cameraName={name(e.camera_id)} onOpen={() => setOpen(e.id)} />)}
           </div>

@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { decodeCells, regions } from "./region";
 import { api, subscribe, type Camera, type NvrEvent } from "./api";
-import { EventsView } from "./Events";
 import { CamerasView, LiveView, SystemView } from "./Views";
 import { Dialogs, Icon, OfflineBanner, Toaster } from "./ui";
 import { FindView } from "./Find";
@@ -10,14 +9,14 @@ import { ThemeToggle } from "./ThemeToggle";
 import { TimelineView } from "./Timeline";
 import { NavContext, parseTimelineHash, timelineHash, type TimelineFocus, type TimelineTarget } from "./nav";
 
-const TABS = ["Home", "Live", "Events", "Find", "Timeline", "Settings"] as const;
+const TABS = ["Home", "Live", "Find", "Timeline", "Settings"] as const;
 type Tab = (typeof TABS)[number];
-const TAB_ICON: Record<Tab, string> = { Home: "home", Live: "live", Events: "events", Find: "find", Timeline: "timeline", Settings: "settings" };
+const TAB_ICON: Record<Tab, string> = { Home: "home", Live: "live", Find: "find", Timeline: "timeline", Settings: "settings" };
 
 /** "#ask", "#live"... (home-screen shortcuts) open that tab */
 const hashTab = (): Tab | null => {
   const h = location.hash.toLowerCase();
-  if (h === "#ask" || h === "#search") return "Find";
+  if (h === "#ask" || h === "#search" || h === "#events") return "Find";  // Events merged into Find
   if (h === "#cameras" || h === "#system") return "Settings";
   return TABS.find((t) => h === `#${t.toLowerCase()}`) ?? null;
 };
@@ -145,8 +144,7 @@ export default function App() {
       <main>
         {tab === "Home" && <HomeView cameras={cameras} onGo={choose} />}
         {tab === "Live" && <LiveView cameras={cameras.filter((c) => c.enabled)} port={port} recent={recent} />}
-        {tab === "Events" && <EventsView cameras={cameras} live={live} />}
-        {tab === "Find" && <FindView cameras={cameras} />}
+        {tab === "Find" && <FindView cameras={cameras} live={live} />}
         {tab === "Timeline" && <TimelineView cameras={cameras} focus={focus} onClearFocus={() => { setFocus(null); history.replaceState(null, "", location.pathname); }} />}
         {tab === "Settings" && <SettingsView cameras={cameras} port={port} reload={loadCameras} />}
       </main>
