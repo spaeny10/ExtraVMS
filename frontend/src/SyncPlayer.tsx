@@ -2,7 +2,7 @@ import { RegionBadge, RegionOverlay } from "./RegionPaint";
 import { useEffect, useRef, useState } from "react";
 import { playbackUrl } from "./api";
 import type { Camera } from "./api";
-import { CHUNK, isBuffered, spanAt, useLatestFrame, type Span } from "./playback";
+import { chunkLen, isBuffered, spanAt, useLatestFrame, type Span } from "./playback";
 
 export type TileStatus = "idle" | "paused" | "playing" | "buffering" | "gap";
 const DRIFT_S = 0.5;      // paused: re-seek a tile further than this from the shared clock
@@ -30,7 +30,7 @@ export function SyncTile({
   statusRef: React.RefObject<Record<string, TileStatus>>;
 }) {
   const video = useRef<HTMLVideoElement>(null);
-  const [chunk, setChunk] = useState<{ start: number; key: number } | null>(null);
+  const [chunk, setChunk] = useState<{ start: number; key: number; len: number } | null>(null);
   const loaded = useRef(false);
   const [status, setStatus] = useState<TileStatus>("idle");
   const frames = useLatestFrame(previewWidth);
@@ -45,7 +45,7 @@ export function SyncTile({
   };
   const load = (t: number) => {
     loaded.current = false;
-    setChunk({ start: t, key: Date.now() });
+    setChunk({ start: t, key: Date.now(), len: chunkLen(t) });
   };
 
   // Follow the shared clock.
@@ -61,7 +61,7 @@ export function SyncTile({
         return report("gap");
       }
       if (scrubbing) return report("paused"); // the preview frames are showing; don't fight the drag
-      if (!c || t < c.start - DRIFT_S || t > c.start + CHUNK - 1) {
+      if (!c || t < c.start - DRIFT_S || t > c.start + c.len - 1) {
         load(t);
         return report(playing ? "buffering" : "paused");
       }
@@ -131,7 +131,7 @@ export function SyncTile({
         <video
           key={chunk.key}
           ref={video}
-          src={playbackUrl(cam, chunk.start, CHUNK)}
+          src={playbackUrl(cam, chunk.start, chunk.len)}
           muted
           playsInline
           onLoadedMetadata={(e) => {
@@ -141,7 +141,8 @@ export function SyncTile({
           onSeeked={onCaughtUp}
           onPlaying={onCaughtUp}
           onEnded={(e) => {
-            const next = chunk.start + (e.currentTarget.duration || CHUNK) + 0.1;
+            const d = e.currentTarget.duration;
+            const next = chunk.start + (Number.isFinite(d) && d > 0 ? d : chunk.len) + 0.1;
             if (spanAt(props.current.spans, next)) load(next);
           }}
         />

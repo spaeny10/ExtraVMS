@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     webrtc_media_port: int = 8189               # WebRTC video (UDP, TCP fallback): forward this port for remote live view
     webrtc_public_hosts: list[str] = []         # extra public IPs/hostnames to offer; the one in the browser's URL is added automatically
     segment_duration: str = "10m"
+    playback_format: str = "fmp4"           # what /api/playback serves: fmp4 (progressive) or mp4 (indexed first)
     backup_dir: Path = Path("D:/NVR/backups")   # nightly database copies (backup.py)
 
     # Event engine

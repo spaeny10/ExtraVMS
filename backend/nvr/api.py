@@ -1237,9 +1237,10 @@ async def frame(camera_id: str, t: float, w: int = Query(960, ge=320, le=1280), 
 
 
 @app.get("/api/playback/{camera_id}")
-async def playback(camera_id: str, start: float, duration: float = Query(60, le=3600)):
-    """Proxy MediaMTX playback so the browser stays same-origin."""
-    params = {"path": camera_id, "start": mediamtx.rfc3339(start), "duration": str(duration), "format": "mp4"}
+async def playback(camera_id: str, start: float, duration: float = Query(60, le=3600), fmt: str | None = Query(None, pattern="^(mp4|fmp4)$")):
+    """Proxy MediaMTX playback so the browser stays same-origin. fMP4 streams as it is read from disk (first
+    bytes in ~0.2 s); plain MP4 has to be indexed over the whole range first (seconds, more on a spinning disk)."""
+    params = {"path": camera_id, "start": mediamtx.rfc3339(start), "duration": str(duration), "format": fmt or settings.playback_format}
     client = httpx.AsyncClient(timeout=None)
     req = client.build_request("GET", f"{settings.mediamtx_playback}/get", params=params)
     r = await client.send(req, stream=True)

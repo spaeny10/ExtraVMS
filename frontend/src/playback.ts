@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { frameUrl } from "./api";
 
-export const CHUNK = 600; // seconds of recording loaded per playback request
+export const CHUNK = 600; // seconds of recording loaded per playback request near live
+export const FAR_CHUNK = 120; // ...and when scrubbing back in time: several cameras each pulling a 10-minute file over a remote link is what buffers
+/** How long a playback chunk starting at `t` should be. */
+export const chunkLen = (t: number): number => (nowS() - t < 1800 ? CHUNK : FAR_CHUNK);
 export const LIVE_LAG = 3; // MediaMTX flushes fMP4 parts every second; stay a little behind "now"
 
 export type Span = { start: number; end: number };
