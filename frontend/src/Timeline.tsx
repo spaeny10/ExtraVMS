@@ -717,10 +717,16 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
 
   // ---- filtered events (shown cameras only) & stepping between them
   const regionMap = useRegions();  // painted regions per camera (region.ts)
+  // A painted region scopes the Timeline to that camera (or cameras), like the Live feed: other lanes stay
+  // scrubbable but dimmed, with no markers, so Prev/Next and "matching in view" mean the painted area only.
+  const regionScoped = Object.keys(regionMap).length > 0;
+  const inRegionScope = (id: string) => !regionScoped || !!regionMap[id];
   const filtered = useMemo(() => {
     const out: Record<string, Marker[]> = {};
-    for (const [id, lane] of Object.entries(lanes)) out[id] = lane.events.filter((e) => matches(e, filter) && regionPass(e, regionMap[id]));
+    for (const [id, lane] of Object.entries(lanes))
+      out[id] = inRegionScope(id) ? lane.events.filter((e) => matches(e, filter) && regionPass(e, regionMap[id])) : [];
     return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lanes, filter, regionMap]);
   // the share link carries the focused event (or playhead) and the painted region of the selected camera
   const shareLink = () => {
@@ -757,7 +763,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
     setMessage(dir > 0 ? "Looking for a later match…" : "Looking for an earlier match…");
     const lo = dir > 0 ? ref + 0.5 : Math.max(0, ref - SEARCH_BACK_S);
     const hi = dir > 0 ? Math.min(nowS(), ref + SEARCH_BACK_S) : ref - 0.5;
-    const found = (await Promise.all(tileIds.map(async (id) => {
+    const found = (await Promise.all(tileIds.filter(inRegionScope).map(async (id) => {
       try { return (await api.recordings(id, lo, hi)).events.filter((e) => matches(e, filter) && regionPass(e, regionMap[id])).map((e) => ({ ...e, camId: id })); }
       catch { return []; }
     }))).flat().sort((a, b) => a.start_ts - b.start_ts);
@@ -970,7 +976,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
           <input type="checkbox" checked={showJourneys} onChange={(e) => { setShowJourneys(e.target.checked); saveNumber("timelineShowJourneys", e.target.checked ? 1 : 0); }} /> Show journeys
         </label>
         {Object.keys(regionMap).map((id) => (
-          <span key={id} className="chip on region-chip" title="Only events that passed through the painted region on this camera are shown (✎ on the tile to edit)">
+          <span key={id} className="chip on region-chip" title="The Timeline shows only this camera's events that passed through the painted region; other lanes are dimmed (✎ on the tile to edit, ✕ to clear)">
             ▦ region on {camName(id)}
             <button className="linkish" onClick={shareLink} title="Copy a link that includes this region">link</button>
             <button className="linkish" aria-label="Clear region" onClick={() => regions.set(id, null)}>✕</button>
@@ -1026,7 +1032,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
           <div className="tl-axis-spacer" />
           {orderedCams.map((c) => {
             const shown = visibleIds.includes(c.id);
-            const dim = solo != null && solo !== c.id;
+            const dim = (solo != null && solo !== c.id) || !inRegionScope(c.id);
             return (
               <div key={c.id} className={`tl-name-row ${shown ? "" : "lane-hidden"} ${dim ? "lane-dimmed" : ""} ${c.id === cam ? "active" : ""}`}>
                 <button className={`lane-btn lane-eye ${shown ? "on" : ""}`} onClick={() => toggleVisible(c.id)}
@@ -1063,7 +1069,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
           {orderedCams.map((c) => {
             const lane = lanes[c.id];
             const shown = visibleIds.includes(c.id);
-            const dim = solo != null && solo !== c.id;
+            const dim = (solo != null && solo !== c.id) || !inRegionScope(c.id);
             if (!shown) return <div key={c.id} className="tl-lane lane-hidden" data-cam={c.id} />;
             return (
               <div key={c.id} className={`tl-lane ${c.id === cam ? "active" : ""} ${dim ? "lane-dimmed" : ""}`} data-cam={c.id}>
