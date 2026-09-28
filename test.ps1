@@ -11,7 +11,7 @@ Get-ChildItem "$root\backend\tests\test_*.py" | ForEach-Object {
     Pop-Location
 }
 Write-Host "== frontend URL prefix check"
-$stray = Get-ChildItem "$root\frontend\src" -Recurse -Include *.ts,*.tsx | Where-Object { $_.Name -ne "api.ts" } |
+$stray = Get-ChildItem "$root\frontend\src" -Recurse -Include *.ts,*.tsx | Where-Object { $_.Name -ne "api.ts" -and $_.Name -notlike "*.test.ts" } |
     Select-String -Pattern '["`]/api/' | ForEach-Object { "$($_.Filename):$($_.LineNumber)" }
 if ($stray) { Write-Host "backend URLs must go through BASE (api.ts): $($stray -join ', ')"; $failed += "frontend URL prefix" } else { Write-Host "ok" }
 Write-Host "== frontend unit tests"

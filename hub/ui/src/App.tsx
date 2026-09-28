@@ -1,25 +1,17 @@
 /**
- * Hub pages: Login, Fleet (site cards), Alerts, Audit, Organisation (members, sites, enrolment), Account.
- * Path routing without a router library: /, /alerts, /audit, /org, /account, /login.
+ * Hub pages: Home (dashboard), Fleet (site cards), Find, Alerts, Audit, Organisation (members, sites,
+ * groups, enrolment), Account. Path routing without a router library (nav.ts).
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Dialogs, Icon, OfflineBanner, Toaster, confirmDialog, promptDialog, toast } from "@site/ui";
 import { ThemeToggle } from "@site/ThemeToggle";
+import { GroupsBox } from "./Groups";
+import { HomePage } from "./HomePage";
+import { navigate, usePath } from "./nav";
 import { type Alert, type AuditRow, type Backup, type ClaimPreview, type Digest, type Fleet, type FleetSearch, type Me, type Member, type Org, type PushInfo, type Site, type Usage, ago, api, fleetAsk, fmtTime } from "./api";
 
-const PAGES = [["/", "Fleet"], ["/find", "Find"], ["/alerts", "Alerts"], ["/org", "Organisation"], ["/audit", "Audit"], ["/account", "Account"]] as const;
+const PAGES = [["/", "Home"], ["/fleet", "Fleet"], ["/find", "Find"], ["/alerts", "Alerts"], ["/org", "Organisation"], ["/audit", "Audit"], ["/account", "Account"]] as const;
 const ROLES = ["viewer", "operator", "admin", "owner"];
-
-function navigate(path: string) {
-  history.pushState(null, "", path);
-  dispatchEvent(new PopStateEvent("popstate"));
-}
-
-function usePath() {
-  const [p, setP] = useState(location.pathname);
-  useEffect(() => { const on = () => setP(location.pathname); addEventListener("popstate", on); return () => removeEventListener("popstate", on); }, []);
-  return p;
-}
 
 export default function App() {
   const path = usePath();
@@ -32,13 +24,13 @@ export default function App() {
   if (!me) return <><Login onDone={reload} /><Toaster /><Dialogs /></>;
   const orgs = me.orgs;
   const current = orgs.find((o) => o.id === org) ?? orgs[0];
-  const page = path.startsWith("/alerts") ? "alerts" : path.startsWith("/find") ? "find" : path.startsWith("/org") ? "org" : path.startsWith("/audit") ? "audit" : path.startsWith("/account") ? "account" : "fleet";
+  const page = path.startsWith("/alerts") ? "alerts" : path.startsWith("/find") ? "find" : path.startsWith("/org") ? "org" : path.startsWith("/audit") ? "audit" : path.startsWith("/account") ? "account" : path.startsWith("/fleet") ? "fleet" : "home";
   return (
     <>
       <OfflineBanner />
       <header className="hub-top">
         <span className="brand"><Icon name="home" /> NewVMS Hub</span>
-        <nav>{PAGES.map(([p, label]) => <a key={p} href={p} className={(p === "/" ? page === "fleet" : path.startsWith(p)) ? "active" : ""} onClick={(e) => { e.preventDefault(); navigate(p); }}>{label}</a>)}</nav>
+        <nav>{PAGES.map(([p, label]) => <a key={p} href={p} className={(p === "/" ? page === "home" : path.startsWith(p)) ? "active" : ""} onClick={(e) => { e.preventDefault(); navigate(p); }}>{label}</a>)}</nav>
         <span className="spacer" />
         {orgs.length > 1 && <select value={current?.id ?? ""} onChange={(e) => setOrg(e.target.value)}>{orgs.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select>}
         <span className="muted small">{me.user.email}</span>
@@ -46,6 +38,7 @@ export default function App() {
         <button className="ghost small" onClick={async () => { await api.logout(); setMe(null); }}>Sign out</button>
       </header>
       <main className="hub-page">
+        {page === "home" && current && <HomePage org={current} me={me} />}
         {page === "fleet" && <FleetPage org={current} me={me} />}
         {page === "alerts" && current && <AlertsPage org={current} />}
         {page === "find" && current && <FindPage org={current} />}
@@ -162,7 +155,8 @@ function DigestCard({ org }: { org: Org }) {
 // ---------------------------------------------------------------- find / ask across sites
 
 function FindPage({ org }: { org: Org }) {
-  const [q, setQ] = useState("");
+  const [q, setQ] = useState(() => new URLSearchParams(location.search).get("q") ?? "");
+  const fromUrl = useRef(!!new URLSearchParams(location.search).get("q"));
   const [res, setRes] = useState<FleetSearch | null>(null);
   const [busy, setBusy] = useState(false);
   const [answers, setAnswers] = useState<Record<string, { name: string; text: string; error?: string; done?: boolean }>>({});
@@ -172,6 +166,11 @@ function FindPage({ org }: { org: Org }) {
     setBusy(true); setAnswers({});
     try { setRes(await api.fleetSearch(org.id, q.trim())); } catch (e) { toast.error(e); } finally { setBusy(false); }
   };
+  // arrived from a dashboard Ask box: run the question once, then drop it from the URL
+  useEffect(() => {
+    if (fromUrl.current) { fromUrl.current = false; history.replaceState(null, "", "/find"); ask(); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const ask = async () => {
     if (!q.trim()) return;
     setAsking(true); setRes(null); setAnswers({});
@@ -285,8 +284,10 @@ function OrgPage({ org, me, onChanged }: { org: Org; me: Me; onChanged: () => vo
   const admin = ["admin", "owner"].includes(org.role) || me.user.is_super;
   const [sites, setSites] = useState<Site[]>([]);
   const [members, setMembers] = useState<Member[]>([]);
+  const [fleet, setFleet] = useState<Fleet | null>(null);
   const load = useCallback(() => {
     api.sites(org.id).then(setSites).catch((e) => toast.error(e));
+    api.fleet(org.id).then(setFleet).catch(() => {});
     if (admin) api.members(org.id).then(setMembers).catch(() => {});
   }, [org.id, admin]);
   useEffect(() => { load(); }, [load]);
@@ -320,6 +321,7 @@ function OrgPage({ org, me, onChanged }: { org: Org; me: Me; onChanged: () => vo
         )}
       </div>
       {admin && <MembersBox org={org} members={members} sites={sites} onChanged={() => { load(); onChanged(); }} />}
+      <GroupsBox org={org} fleet={fleet} canEdit={admin} />
       <SharedAiBox org={org} canEdit={org.role === "owner" || me.user.is_super} />
       {me.user.is_super && <CreateOrgBox onDone={onChanged} />}
     </>
