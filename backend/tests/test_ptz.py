@@ -131,6 +131,7 @@ def test_probe_and_commands():
     p = ptz.PtzCamera(dict(CAM))
     asyncio.run(p.probe())
     assert p.available and p.profile == "Profile_1" and len(p.presets) == 10 and p.relays[0]["mode"] == "bistable" and p.inputs == ["AlarmIn_0"]
+    assert p.pan_tilt and p.public()["pan_tilt"]
     calls.clear()
     asyncio.run(p.move(0.5, -0.2, 0))
     body = sent("ContinuousMove")[0]

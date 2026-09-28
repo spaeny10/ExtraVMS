@@ -48,7 +48,7 @@ function LiveTile({ c, hd, port, active, onUnsupported, bar, phone, onSwipe, ice
         <PtzBadge cam={c.id} ptz={ptz} />
         {!painting && <RegionBadge cam={c.id} onEdit={() => setPainting(true)} />}
         {ptz?.available && (
-          <button className={`ghost small ${ptzOn ? "on" : ""}`} title="Pan / tilt / zoom, presets, relay" disabled={painting}
+          <button className={`ghost small ${ptzOn ? "on" : ""}`} title={ptz.pan_tilt === false ? "Zoom, relay, digital input" : "Pan / tilt / zoom, presets, relay"} disabled={painting}
             onClick={() => setPtzOn((p) => !p)}>🕹</button>
         )}
         <button className={`ghost small ${painting ? "on" : ""}`} title="Paint a region: the activity feed shows only events that passed through it" disabled={ptzOn}

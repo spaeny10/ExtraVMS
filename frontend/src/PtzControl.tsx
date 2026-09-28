@@ -88,6 +88,7 @@ export function PtzOverlay({ cam, videoRef, active, onDone, fallbackAspect = 259
 
   if (!active) return null;
   const s = info?.status;
+  const panTilt = s?.pan_tilt !== false;
   const stopAll = (e: React.SyntheticEvent) => e.stopPropagation();
   const after = (p: Promise<unknown>) => p.then(refresh).catch((e) => toast.error(e));
   const clamp = (v: number) => Math.max(-1, Math.min(1, v));
@@ -103,7 +104,7 @@ export function PtzOverlay({ cam, videoRef, active, onDone, fallbackAspect = 259
 
   return (
     <>
-      <div ref={surface} className="ptz-surface" tabIndex={0} title="Drag to pan/tilt · click to centre · wheel to zoom · arrow keys"
+      {panTilt && <div ref={surface} className="ptz-surface" tabIndex={0} title="Drag to pan/tilt · click to centre · wheel to zoom · arrow keys"
         style={rect ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : undefined}
         onClick={stopAll} onDoubleClick={stopAll} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
         onPointerDown={(e) => {
@@ -146,8 +147,8 @@ export function PtzOverlay({ cam, videoRef, active, onDone, fallbackAspect = 259
           else if (e.key === "Escape") onDone();
         }}
         onKeyUp={(e) => { if (e.key.startsWith("Arrow")) stop(); }}
-      />
-      {pad && (
+      />}
+      {pad && panTilt && (
         <div className="ptz-padlay" style={rect ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : undefined}
           onPointerDown={stopAll} onClick={stopAll} onDoubleClick={stopAll} onWheel={stopAll}>
           <button className="ptz-arrow up" title="Tilt up (hold)" {...hold({ pan: 0, tilt: 0.5, zoom: 0 })}>▲</button>
@@ -162,7 +163,13 @@ export function PtzOverlay({ cam, videoRef, active, onDone, fallbackAspect = 259
         </div>
       )}
       <div className="ptz-pill" onPointerDown={stopAll} onClick={stopAll} onDoubleClick={stopAll} onWheel={stopAll}>
-        <select value="" title="Go to a preset" onChange={(e) => {
+        {!panTilt && (
+          <div className="segmented small-seg" title="Zoom (hold)">
+            <button {...hold({ pan: 0, tilt: 0, zoom: -0.5 })}>−</button>
+            <button {...hold({ pan: 0, tilt: 0, zoom: 0.5 })}>+</button>
+          </div>
+        )}
+        {panTilt && <select value="" title="Go to a preset" onChange={(e) => {
           const v = e.target.value;
           if (v === "__save") saveAs(); else if (v) after(api.ptzGoto(cam, v));
         }}>
@@ -172,7 +179,7 @@ export function PtzOverlay({ cam, videoRef, active, onDone, fallbackAspect = 259
           {info?.presets.some((p) => p.system) && (
             <optgroup label="Camera">{info.presets.filter((p) => p.system).map((p) => <option key={p.token} value={p.token}>{p.name}</option>)}</optgroup>
           )}
-        </select>
+        </select>}
         {s?.relay && (
           <button className={`ghost small ${s.relay.state ? "on" : ""}`} title={`Relay output (${s.relay.mode})`}
             onClick={() => after(api.relay(cam, s.relay!.mode === "monostable" ? true : !s.relay!.state))}>
@@ -180,7 +187,7 @@ export function PtzOverlay({ cam, videoRef, active, onDone, fallbackAspect = 259
           </button>
         )}
         {s?.input && <span className={`ptz-chip ${s.input.state ? "on" : ""}`} title={`Digital input: ${s.input.state == null ? "unknown" : s.input.state ? "active" : "idle"}`}>⏺ {s.input.label}</span>}
-        <button className={`ghost small ${pad ? "on" : ""}`} title={pad ? "Hide the on-screen pad (drag the picture to move, wheel to zoom)" : "Show an on-screen pad for pan/tilt/zoom"} onClick={togglePad}>✚</button>
+        {panTilt && <button className={`ghost small ${pad ? "on" : ""}`} title={pad ? "Hide the on-screen pad (drag the picture to move, wheel to zoom)" : "Show an on-screen pad for pan/tilt/zoom"} onClick={togglePad}>✚</button>}
         {s?.last_error && <span className="ptz-chip on" title={s.last_error}>unreachable</span>}
         <button className="small" title="Leave PTZ mode (Esc)" onClick={onDone}>Done</button>
       </div>
@@ -226,6 +233,21 @@ export function PtzSettings({ camera, onChanged }: { camera: Camera; onChanged?:
   }
   const c = info.config, s = info.status, caps: NonNullable<PtzInfo["caps"]> = info.caps ?? { available: true };
   const user = info.presets.filter((p) => !p.system);
+  if (caps.pan_tilt === false) {
+    return (
+      <div className="ptz-settings">
+        <p className="muted small">Fixed camera with a motorised lens: zoom and focus only, no pan/tilt or presets, so the home-view rules don't apply.
+          {s.relay ? ` Relay output (${s.relay.mode}).` : ""}{s.input ? " Digital input." : ""} Zoom, relay and input are on the tile's 🕹 button.</p>
+        <div className="row">
+          {s.relay && <label className="field"><span>Relay label</span>
+            <input defaultValue={c.relay_label} disabled={busy} onBlur={(e) => { if (e.target.value.trim() && e.target.value.trim() !== c.relay_label) run(api.ptzConfig(camera.id, { relay_label: e.target.value.trim() })); }} /></label>}
+          {s.input && <label className="field"><span>Digital input label</span>
+            <input defaultValue={c.input_label} disabled={busy} onBlur={(e) => { if (e.target.value.trim() && e.target.value.trim() !== c.input_label) run(api.ptzConfig(camera.id, { input_label: e.target.value.trim() })); }} /></label>}
+          <button className="ghost small" disabled={busy} onClick={() => run(api.ptzProbe(camera.id), "Camera re-probed")}>Probe camera</button>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="ptz-settings">
       <p className="muted small">

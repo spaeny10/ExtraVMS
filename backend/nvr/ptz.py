@@ -247,6 +247,9 @@ class PtzCamera:
             cfgs = self.onvif.call(self._url("ptz"), "<tptz:GetConfigurations/>")
             caps["default_timeout_s"] = soap.parse_duration(text(cfgs, "DefaultPTZTimeout"))
             presets = parse_presets(self.onvif.call(self._url("ptz"), f"<tptz:GetPresets><tptz:ProfileToken>{escape(profile)}</tptz:ProfileToken></tptz:GetPresets>"))
+            # A fixed camera with a motorised lens also answers the PTZ service (zoom + focus only). Without pan/tilt
+            # or presets there is nothing to steer: no PTZ mode, no home view, never "away".
+            caps["pan_tilt"] = bool(caps["continuous"] or caps["relative"] or caps["absolute"] or presets)
             relays, inputs = [], []
             try:
                 relays = parse_relays(self.onvif.call(self._url("device"), "<tds:GetRelayOutputs/>"))
@@ -451,9 +454,13 @@ class PtzCamera:
                            [self.cam["id"], now, int(at_home), label])
         return self.status
 
+    @property
+    def pan_tilt(self) -> bool:
+        return bool(self.caps and self.caps.get("pan_tilt", True))
+
     def away_label(self) -> str | None:
         """None while at home (or when we can't tell); else the preset name or 'away'."""
-        if not self.available or not self.cfg.get("home_token") or self.status.get("position") is None:
+        if not self.available or not self.pan_tilt or not self.cfg.get("home_token") or self.status.get("position") is None:
             return None
         if self.status["at_home"]:
             return None
@@ -463,7 +470,7 @@ class PtzCamera:
         cfg = self.cfg
         relay = self.relays[0] if self.relays else None
         return {
-            "available": self.available, "at_home": self.status["at_home"], "moving": self.status["moving"],
+            "available": self.available, "pan_tilt": self.pan_tilt, "at_home": self.status["at_home"], "moving": self.status["moving"],
             "preset": self.status["preset"], "preset_name": self.status["preset_name"], "position": self.status["position"],
             "home_token": cfg.get("home_token"), "home_name": cfg.get("home_name"), "last_error": self.status["last_error"],
             "relay": {"label": cfg["relay_label"], "state": self.relay_state, "mode": relay["mode"], "changed_at": self.relay_changed_at} if relay else None,

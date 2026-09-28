@@ -58,14 +58,14 @@ export type Camera = {
 /** PTZ camera state and settings (backend/nvr/ptz.py). */
 export type PtzConfig = { home_token: string | null; home_name: string | null; return_home_min: number; relay_label: string; input_label: string };
 export type PtzStatus = {
-  available: boolean; at_home: boolean; moving: boolean; preset: string | null; preset_name: string | null;
+  available: boolean; pan_tilt?: boolean; at_home: boolean; moving: boolean; preset: string | null; preset_name: string | null;
   position: { x: number; y: number; zoom: number } | null; home_token: string | null; home_name: string | null; last_error: string | null;
   relay: { label: string; state: boolean | null; mode: "bistable" | "monostable"; changed_at: number | null } | null;
   input: { label: string; state: boolean | null; changed_at: number | null } | null;
 };
 export type PtzPreset = { token: string; name: string; system: boolean; is_home: boolean; known: boolean };
 export type PtzInfo = {
-  caps: { available: boolean; home_supported?: boolean; max_presets?: number; aux_commands?: string[]; tours?: boolean; relays?: number; inputs?: number } | null;
+  caps: { available: boolean; pan_tilt?: boolean; home_supported?: boolean; max_presets?: number; aux_commands?: string[]; tours?: boolean; relays?: number; inputs?: number } | null;
   status: PtzStatus; presets: PtzPreset[]; config: PtzConfig;
 };
 
