@@ -4,6 +4,7 @@
  * release; the camera itself stops after 2 s if the re-sends stop.
  */
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { api, type Camera, type PtzInfo, type PtzStatus } from "./api";
 import { contentRect } from "./RegionPaint";
 import { confirmDialog, promptDialog, toast } from "./ui";
@@ -40,8 +41,13 @@ function useHeldMove(cam: string) {
   return { start, stop, held: () => vel.current !== null };
 }
 
-export function PtzOverlay({ cam, videoRef, active, onDone, fallbackAspect = 2592 / 1520 }: {
+/**
+ * The drag surface sits over the picture (transparent, so nothing is hidden); the toolbar is portalled into
+ * `dock` (a strip under the video) when given, otherwise it floats in the corner of the picture.
+ */
+export function PtzOverlay({ cam, videoRef, active, onDone, fallbackAspect = 2592 / 1520, dock }: {
   cam: string; videoRef: React.RefObject<HTMLVideoElement | null>; active: boolean; onDone: () => void; fallbackAspect?: number;
+  dock?: HTMLElement | null;
 }) {
   const [info, setInfo] = useState<PtzInfo | null>(null);
   const [rect, setRect] = useState<Rect | null>(null);
@@ -86,6 +92,43 @@ export function PtzOverlay({ cam, videoRef, active, onDone, fallbackAspect = 259
     onPointerDown: (e: React.PointerEvent) => { e.stopPropagation(); e.preventDefault(); start(v); },
     onPointerUp: stop, onPointerLeave: stop, onPointerCancel: stop,
   });
+
+  const tools = (
+    <div className={`ptz-tools ${dock ? "docked" : ""}`} onPointerDown={stopAll} onClick={stopAll} onDoubleClick={stopAll} onWheel={stopAll}>
+      <div className="ptz-pad">
+        <span /><button className="ghost small" title="Tilt up (hold)" {...hold({ pan: 0, tilt: 0.5, zoom: 0 })}>▲</button><span />
+        <button className="ghost small" title="Pan left (hold)" {...hold({ pan: -0.5, tilt: 0, zoom: 0 })}>◀</button>
+        <button className="ghost small" title="Go home" onClick={() => after(api.ptzHome(cam))}>⌂</button>
+        <button className="ghost small" title="Pan right (hold)" {...hold({ pan: 0.5, tilt: 0, zoom: 0 })}>▶</button>
+        <span /><button className="ghost small" title="Tilt down (hold)" {...hold({ pan: 0, tilt: -0.5, zoom: 0 })}>▼</button><span />
+      </div>
+      <div className="segmented small-seg" title="Zoom (hold)">
+        <button {...hold({ pan: 0, tilt: 0, zoom: -0.5 })}>−</button>
+        <button {...hold({ pan: 0, tilt: 0, zoom: 0.5 })}>+</button>
+      </div>
+      <select value="" title="Go to a preset" onChange={(e) => { if (e.target.value) after(api.ptzGoto(cam, e.target.value)); }}>
+        <option value="">Preset…</option>
+        {info?.presets.filter((p) => !p.system).map((p) => <option key={p.token} value={p.token}>{p.is_home ? "★ " : ""}{p.name}</option>)}
+        {info?.presets.some((p) => p.system) && (
+          <optgroup label="Camera">{info.presets.filter((p) => p.system).map((p) => <option key={p.token} value={p.token}>{p.name}</option>)}</optgroup>
+        )}
+      </select>
+      <button className="ghost small" title="Save the current view as a new preset" onClick={async () => {
+        const name = await promptDialog("Save this view as a preset", { label: "Name", confirmLabel: "Save" });
+        if (name?.trim()) after(api.ptzSavePreset(cam, name.trim()).then(() => toast.success(`Preset "${name.trim()}" saved`)));
+      }}>Save as…</button>
+      {s?.relay && (
+        <button className={`ghost small ${s.relay.state ? "on" : ""}`} title={`Relay output (${s.relay.mode})`}
+          onClick={() => after(api.relay(cam, s.relay!.mode === "monostable" ? true : !s.relay!.state))}>
+          ⚡ {s.relay.label}{s.relay.mode === "monostable" ? " · pulse" : s.relay.state == null ? "" : s.relay.state ? " · on" : " · off"}
+        </button>
+      )}
+      {s?.input && <span className={`ptz-chip ${s.input.state ? "on" : ""}`} title="Digital input">⏺ {s.input.label}: {s.input.state == null ? "?" : s.input.state ? "active" : "idle"}</span>}
+      <span className="muted-on-dark ptz-status" title="Drag the picture to pan/tilt · click to centre · wheel to zoom · arrow keys">{statusText(s)}</span>
+      <span className="spacer" />
+      <button className="small" onClick={onDone}>Done</button>
+    </div>
+  );
 
   return (
     <>
@@ -133,39 +176,7 @@ export function PtzOverlay({ cam, videoRef, active, onDone, fallbackAspect = 259
         }}
         onKeyUp={(e) => { if (e.key.startsWith("Arrow")) stop(); }}
       />
-      <div className="ptz-tools" onPointerDown={stopAll} onClick={stopAll} onDoubleClick={stopAll} onWheel={stopAll}>
-        <div className="ptz-pad">
-          <span /><button className="ghost small" title="Tilt up (hold)" {...hold({ pan: 0, tilt: 0.5, zoom: 0 })}>▲</button><span />
-          <button className="ghost small" title="Pan left (hold)" {...hold({ pan: -0.5, tilt: 0, zoom: 0 })}>◀</button>
-          <button className="ghost small" title="Go home" onClick={() => after(api.ptzHome(cam))}>⌂</button>
-          <button className="ghost small" title="Pan right (hold)" {...hold({ pan: 0.5, tilt: 0, zoom: 0 })}>▶</button>
-          <span /><button className="ghost small" title="Tilt down (hold)" {...hold({ pan: 0, tilt: -0.5, zoom: 0 })}>▼</button><span />
-        </div>
-        <div className="segmented small-seg" title="Zoom (hold)">
-          <button {...hold({ pan: 0, tilt: 0, zoom: -0.5 })}>−</button>
-          <button {...hold({ pan: 0, tilt: 0, zoom: 0.5 })}>+</button>
-        </div>
-        <select value="" title="Go to a preset" onChange={(e) => { if (e.target.value) after(api.ptzGoto(cam, e.target.value)); }}>
-          <option value="">Preset…</option>
-          {info?.presets.filter((p) => !p.system).map((p) => <option key={p.token} value={p.token}>{p.is_home ? "★ " : ""}{p.name}</option>)}
-          {info?.presets.some((p) => p.system) && (
-            <optgroup label="Camera">{info.presets.filter((p) => p.system).map((p) => <option key={p.token} value={p.token}>{p.name}</option>)}</optgroup>
-          )}
-        </select>
-        <button className="ghost small" title="Save the current view as a new preset" onClick={async () => {
-          const name = await promptDialog("Save this view as a preset", { label: "Name", confirmLabel: "Save" });
-          if (name?.trim()) after(api.ptzSavePreset(cam, name.trim()).then(() => toast.success(`Preset "${name.trim()}" saved`)));
-        }}>Save as…</button>
-        {s?.relay && (
-          <button className={`ghost small ${s.relay.state ? "on" : ""}`} title={`Relay output (${s.relay.mode})`}
-            onClick={() => after(api.relay(cam, s.relay!.mode === "monostable" ? true : !s.relay!.state))}>
-            ⚡ {s.relay.label}{s.relay.mode === "monostable" ? " · pulse" : s.relay.state == null ? "" : s.relay.state ? " · on" : " · off"}
-          </button>
-        )}
-        {s?.input && <span className={`ptz-chip ${s.input.state ? "on" : ""}`} title="Digital input">⏺ {s.input.label}: {s.input.state == null ? "?" : s.input.state ? "active" : "idle"}</span>}
-        <span className="muted-on-dark">{statusText(s)}</span>
-        <button className="small" onClick={onDone}>Done</button>
-      </div>
+      {dock ? createPortal(tools, dock) : tools}
     </>
   );
 }

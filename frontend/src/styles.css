@@ -704,6 +704,14 @@ body:has(.drag-ghost) { cursor: grabbing; user-select: none; }
 .ptz-tools { position: absolute; right: 6px; bottom: 6px; z-index: 3; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; justify-content: flex-end;
   padding: 6px 8px; background: rgb(0 0 0 / .72); border-radius: 8px; color: #fff; font-size: 12px; max-width: calc(100% - 12px); }
 .ptz-tools .muted-on-dark { opacity: .75; }
+/* docked under the picture (LiveTile): nothing covers the video */
+.ptz-dock:empty { display: none; }
+.ptz-tools.docked { position: static; border-radius: 0; background: var(--panel-2, var(--panel)); color: inherit; border-top: 1px solid var(--border);
+  padding: 4px 8px; max-width: none; justify-content: flex-start; }
+.ptz-tools.docked .ptz-pad { grid-template-columns: repeat(3, 24px); grid-auto-rows: 24px; }
+.ptz-tools.docked .ptz-pad button { font-size: 11px; }
+.ptz-tools.docked .ptz-chip { background: var(--border); }
+.ptz-tools.docked .ptz-status { cursor: help; }
 .ptz-tools select { max-width: 150px; }
 .ptz-pad { display: grid; grid-template-columns: repeat(3, 34px); grid-auto-rows: 34px; gap: 2px; }
 .ptz-pad button { padding: 0; font-size: 14px; user-select: none; touch-action: none; }
@@ -714,7 +722,8 @@ body:has(.drag-ghost) { cursor: grabbing; user-select: none; }
 .ptz-badge { display: inline-flex; gap: 4px; align-items: center; color: var(--vehicle, #e0a020); font-size: 12px; }
 .ptz-badge .linkish { color: inherit; }
 .ptz-settings .preset-row { display: flex; gap: 8px; align-items: center; padding: 3px 0; border-bottom: 1px solid var(--border); }
-@media (max-width: 767px) { .ptz-tools { flex-direction: column; align-items: stretch; right: 4px; bottom: 4px; max-width: 52%; } .ptz-tools select { max-width: 100%; } }
+@media (max-width: 767px) { .ptz-tools:not(.docked) { flex-direction: column; align-items: stretch; right: 4px; bottom: 4px; max-width: 52%; } .ptz-tools:not(.docked) select { max-width: 100%; }
+  .ptz-tools.docked .ptz-status { display: none; } }
 
 /* Settings -> System -> Cloud hub: the claim code */
 .hub-claim { margin: 6px 0; }
