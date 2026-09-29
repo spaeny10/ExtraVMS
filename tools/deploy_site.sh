@@ -2,6 +2,7 @@
 # Install or update a NewVMS site on Ubuntu 24.04 (run as root). Idempotent: safe to re-run after copying new code.
 #
 #   1. copy the repo to /opt/nvr (rsync/scp from the dev PC, or git clone), including models/ and frontend/dist
+#      (never the dev PC's .env: it holds that site's camera passwords and keys)
 #   2. bash /opt/nvr/tools/deploy_site.sh [--recordings-disk /dev/sdX] [--cpu]
 #
 # --recordings-disk formats that whole disk as ext4 (ALL DATA ON IT IS LOST) and mounts it at /srv/nvr/recordings.
@@ -67,7 +68,7 @@ fi
 (cd "$NVR_DIR/backend" && "$PIP" install -q -r requirements.txt)
 
 echo "== .env"
-ENV="$NVR_DIR/backend/.env"
+ENV="$NVR_DIR/.env"   # the site reads its .env from the repo root (nvr/config.py ROOT)
 if [ ! -f "$ENV" ]; then
   cat > "$ENV" <<EOF
 NVR_RECORDINGS_DIR=/srv/nvr/recordings
