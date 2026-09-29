@@ -88,8 +88,8 @@ def test_bitrate_target_follows_pixels_scene_and_codec():
 
 def test_framerate_above_eight_is_flagged():
     fs = advisor.check_framerate(ctx())          # cam1 16 fps, cam2 15 fps in the fixture
-    assert sorted(f.key for f in fs) == ["fps:cam1", "fps:cam2"] and "16 fps; 8 is enough" in fs[0].title and fs[0].impact == "low"
-    c = ctx(); c["probe"]["cam1"]["fps"] = 25.0; c["probe"]["cam2"]["fps"] = 8.0
+    assert sorted(f.key for f in fs) == ["fps:cam1", "fps:cam2"] and "16 fps; 10 is enough" in fs[0].title and fs[0].impact == "low"
+    c = ctx(); c["probe"]["cam1"]["fps"] = 25.0; c["probe"]["cam2"]["fps"] = 10.0
     fs = advisor.check_framerate(c)
     assert [f.key for f in fs] == ["fps:cam1"] and fs[0].impact == "medium"
 

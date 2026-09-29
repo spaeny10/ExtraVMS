@@ -34,7 +34,7 @@ BITRATE_HIGH_MBPS = 3.2      # fallback when the stream could not be probed: abo
 SHORT_EVENT_S = 1.5
 FRAGMENT_GAP_S = 10.0
 PROBE_TTL_S = 6 * 3600       # re-read a camera's resolution / frame rate from its newest recording this often
-FPS_MAX = 8.0                # security recording above this buys little: the camera's analytics and YOLO both work at 8
+FPS_MAX = 10.0               # security recording above this buys little: the camera's analytics and YOLO both work at 10
 # Bits per pixel per frame that keep a clean H.265 picture for YOLO and Qwen. Indexed by (scene, activity).
 BPP_H265 = {("indoor", "quiet"): 0.025, ("indoor", "normal"): 0.035, ("indoor", "busy"): 0.045,
             ("outdoor", "quiet"): 0.040, ("outdoor", "normal"): 0.055, ("outdoor", "busy"): 0.075}
