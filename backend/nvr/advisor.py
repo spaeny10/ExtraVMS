@@ -436,7 +436,7 @@ async def summarize(findings: list[Finding], n_cameras: int, use_ai: bool = True
                   "mention the expected gain in plain terms, group small items together. No bullet points, no headings, no "
                   "markdown, no invented facts beyond the findings.")
         text = json.dumps([{k: v for k, v in asdict(f).items() if k in ("impact", "title", "why", "effect")} for f in findings])
-        r = await asyncio.wait_for(vlmroute.router.chat_json("assistant", system, text, [], {"type": "object", "properties": {"paragraph": {"type": "string"}}, "required": ["paragraph"]}, 220, 0.2, "chat"), 90)
+        r = await asyncio.wait_for(vlmroute.router.chat_json("assistant", system, text, [], {"type": "object", "properties": {"paragraph": {"type": "string"}}, "required": ["paragraph"]}, 220, 0.2, "chat"), 40)
         p = (r or {}).get("paragraph", "").strip()
         return {"text": p, "model": r.get("_model")} if p else fallback
     except Exception as e:

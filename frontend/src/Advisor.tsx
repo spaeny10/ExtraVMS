@@ -14,9 +14,21 @@ export function Advisor({ onAsk }: { onAsk?: (q: string) => void }) {
   const [report, setReport] = useState<AdvisorReport | null>(null);
   const [busy, setBusy] = useState(false);
   const [showHidden, setShowHidden] = useState(false);
-  const run = async (ai = true) => {
+  const [summarising, setSummarising] = useState(false);
+  // measurements first (a second or two), then Qwen's paragraph fills in when it arrives
+  const run = async () => {
     setBusy(true);
-    try { setReport(await api.advisor(ai)); } catch (e) { toast.error(e); } finally { setBusy(false); }
+    try {
+      const quick = await api.advisor(false);
+      setReport(quick);
+      setBusy(false);
+      if (quick.findings.length) {
+        setSummarising(true);
+        try { const full = await api.advisor(true); setReport((r) => r && { ...r, summary: full.summary }); }
+        catch { /* the plain summary stays */ }
+        finally { setSummarising(false); }
+      }
+    } catch (e) { toast.error(e); setBusy(false); }
   };
   const dismiss = async (f: AdvisorFinding) => {
     try { await api.advisorDismiss(f.key, f.fingerprint); setReport((r) => r && { ...r, findings: r.findings.filter((x) => x.key !== f.key), hidden: [...r.hidden, f] }); }
@@ -42,7 +54,7 @@ export function Advisor({ onAsk }: { onAsk?: (q: string) => void }) {
           <h3><Icon name="sparkle" size={18} /> Optimize my system</h3>
           <p className="muted small">Measures your cameras, storage, detections and the AI, then suggests what to change and why. Nothing changes until you apply it.</p>
         </div>
-        <button className="ask-btn" disabled={busy} onClick={() => run(true)}>{busy ? "Checking…" : report ? "Check again" : "✦ Check my system"}</button>
+        <button className="ask-btn" disabled={busy} onClick={run}>{busy ? "Measuring…" : report ? "Check again" : "✦ Check my system"}</button>
       </div>
 
       {report && (
@@ -50,7 +62,7 @@ export function Advisor({ onAsk }: { onAsk?: (q: string) => void }) {
           <div className={`adv-summary ${report.findings.length === 0 ? "ok" : ""}`}>
             <p>{report.summary.text}</p>
             <div className="muted small adv-meta">
-              {report.summary.model ? <span className="model-tag">{report.summary.model}</span> : <span>plain summary</span>}
+              {report.summary.model ? <span className="model-tag">{report.summary.model}</span> : summarising ? <span>✦ Qwen is writing its read…</span> : <span>plain summary</span>}
               <span> · {report.cameras} cameras</span>
               {report.facts.gb_per_day != null && <span> · {report.facts.gb_per_day} GB/day</span>}
               {report.facts.median_synopsis_s != null && <span> · synopses {report.facts.median_synopsis_s} s</span>}
