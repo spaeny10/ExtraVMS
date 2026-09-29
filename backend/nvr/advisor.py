@@ -14,7 +14,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
 import statistics
+import subprocess
 import time
 from collections import Counter
 from dataclasses import asdict, dataclass, field
@@ -28,10 +30,15 @@ from .db import db
 log = logging.getLogger("nvr.advisor")
 
 IMPACT = ("high", "medium", "low")
-BITRATE_HIGH_MBPS = 3.2      # above this an indoor/yard camera gains little
-BITRATE_TARGET = "2–2.5 Mbps, VBR"
+BITRATE_HIGH_MBPS = 3.2      # fallback when the stream could not be probed: above this a 1440p-class camera gains little
 SHORT_EVENT_S = 1.5
 FRAGMENT_GAP_S = 10.0
+PROBE_TTL_S = 6 * 3600       # re-read a camera's resolution / frame rate from its newest recording this often
+# Bits per pixel per frame that keep a clean H.265 picture for YOLO and Qwen. Indexed by (scene, activity).
+BPP_H265 = {("indoor", "quiet"): 0.025, ("indoor", "normal"): 0.035, ("indoor", "busy"): 0.045,
+            ("outdoor", "quiet"): 0.040, ("outdoor", "normal"): 0.055, ("outdoor", "busy"): 0.075}
+CODEC_FACTOR = {"hevc": 1.0, "h265": 1.0, "h264": 1.6, "avc": 1.6}
+OUTDOOR_WORDS = ("yard", "lot", "parking", "road", "highway", "street", "drive", "gate", "outdoor", "outside", "exterior", "dock", "field")
 
 
 @dataclass
@@ -69,6 +76,8 @@ async def gather(state) -> dict:
         ctx["retention"] = None
     ctx["vlm"] = await _vlm_facts(state)
     ctx["events"] = _event_facts(ctx["now"])
+    ctx["probe"] = await asyncio.to_thread(_probe_streams, ctx["cameras"], ctx["now"])
+    ctx["activity"] = _activity_facts(ctx["cameras"], ctx["events"], ctx["now"])
     ctx["ptz"] = _ptz_facts(state, ctx["now"])
     ctx["clocks"] = _clock_facts(state)
     try:
@@ -107,6 +116,76 @@ async def _vlm_facts(state) -> dict:
     except Exception:
         pass
     return out
+
+
+def probe_segment(path) -> dict | None:
+    """Resolution, average frame rate and codec of one recorded segment (ffprobe), or None."""
+    exe = shutil.which("ffprobe") or r"C:\ffmpeg\bin\ffprobe.exe"
+    try:
+        out = subprocess.run([exe, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height,avg_frame_rate,r_frame_rate,codec_name",
+                              "-of", "json", str(path)], capture_output=True, text=True, timeout=20).stdout
+        st = (json.loads(out).get("streams") or [None])[0]
+        if not st or not st.get("width"):
+            return None
+        fps = None
+        for key in ("avg_frame_rate", "r_frame_rate"):
+            n, _, d = (st.get(key) or "").partition("/")
+            if n and d and float(d) > 0 and 1 <= float(n) / float(d) <= 120:
+                fps = round(float(n) / float(d), 1)
+                break
+        return {"width": int(st["width"]), "height": int(st["height"]), "fps": fps or 15.0, "codec": (st.get("codec_name") or "").lower()}
+    except Exception as e:
+        log.debug("ffprobe failed for %s: %s", path, e)
+        return None
+
+
+def _probe_streams(cameras: list[dict], now: float) -> dict[str, dict]:
+    """Per camera: {width, height, fps, codec}, from the newest recording, cached in settings for PROBE_TTL_S."""
+    cache = db.get_setting("advisor_probe", {}) or {}
+    out: dict[str, dict] = {}
+    changed = False
+    for c in cameras:
+        hit = cache.get(c["id"])
+        if hit and now - hit.get("at", 0) < PROBE_TTL_S:
+            out[c["id"]] = hit
+            continue
+        try:
+            segs = retention.camera_segments(c["id"])
+        except Exception:
+            segs = []
+        info = probe_segment(segs[-1][1]) if segs else None
+        if info:
+            info["at"] = now
+            cache[c["id"]] = out[c["id"]] = info
+            changed = True
+        elif hit:
+            out[c["id"]] = hit
+    if changed:
+        db.set_setting("advisor_probe", cache)
+    return out
+
+
+def _activity_facts(cameras: list[dict], events: dict, now: float) -> dict[str, dict]:
+    """Per camera: how busy the scene is and whether it looks outdoors, from 24 h of events and the scene notes."""
+    since = now - 86400
+    out: dict[str, dict] = {}
+    for c in cameras:
+        rows = db.all("SELECT start_ts, end_ts, camera_class FROM events WHERE camera_id=? AND start_ts>? AND status IN ('verified','open','pending')", [c["id"], since])
+        tracked_s = sum(min(600.0, max(0.0, (r["end_ts"] or r["start_ts"]) - r["start_ts"])) for r in rows)
+        per_day = len(rows)
+        share = tracked_s / 86400
+        activity = "busy" if share > 0.05 or per_day > 150 else "quiet" if share < 0.005 and per_day < 15 else "normal"
+        notes = (c.get("scene_notes") or "").lower() + " " + (c.get("name") or "").lower()
+        vehicles = sum(1 for r in rows if r["camera_class"] == "vehicle")
+        outdoor = vehicles >= 3 or any(w in notes for w in OUTDOOR_WORDS)
+        out[c["id"]] = {"activity": activity, "scene": "outdoor" if outdoor else "indoor", "tracked_share": round(share, 4), "events_per_day": per_day}
+    return out
+
+
+def bitrate_target_mbps(probe: dict, activity: str, scene: str) -> float:
+    """Bits per second that keep the picture clean for this camera's pixels, frame rate, codec and scene."""
+    bpp = BPP_H265[(scene, activity)] * CODEC_FACTOR.get(probe.get("codec", "hevc"), 1.0)
+    return round(bpp * probe["width"] * probe["height"] * probe["fps"] / 1e6, 2)
 
 
 def _event_facts(now: float) -> dict:
@@ -192,21 +271,44 @@ def _cam_name(ctx: dict, cid: str) -> str:
 
 
 def check_bitrate(ctx: dict) -> list[Finding]:
+    """Measured bitrate against a target from the camera's pixels, frame rate, codec, scene and activity."""
     out = []
     for c in ctx["cameras"]:
         h = ctx["health"].get(c["id"]) or {}
         mbps = h.get("bitrate_mbps")
-        if mbps is None or mbps < BITRATE_HIGH_MBPS:
+        if mbps is None:
             continue
         gbd = h.get("gb_per_day")
-        out.append(Finding(
-            key=f"bitrate:{c['id']}", area="cameras", impact="medium", camera_id=c["id"], camera=c["name"],
-            title=f"{c['name']} records at {mbps:.1f} Mbps",
-            why=f"Its main stream averages {mbps:.1f} Mbps" + (f", about {gbd:.0f} GB a day" if gbd else "") + ". Indoor and yard scenes at this resolution look the same at {BITRATE_TARGET}.".replace("{BITRATE_TARGET}", BITRATE_TARGET),
-            effect=f"Roughly {max(0, (1 - 2.3 / mbps) * 100):.0f}% less disk per day and the same saving in remote playback bandwidth. Detection and Qwen are unaffected: they read frames, not bitrate.",
-            steps=[f"Open the camera's web page ({c['host']}) → Video → main stream.", f"Set the bitrate mode to VBR and the target to {BITRATE_TARGET} (keep the frame rate and H.265).",
-                   "Save; MediaMTX picks up the new stream within a few seconds."],
-            fingerprint=f"{mbps:.0f}"))
+        probe = (ctx.get("probe") or {}).get(c["id"])
+        act = (ctx.get("activity") or {}).get(c["id"]) or {"activity": "normal", "scene": "indoor", "events_per_day": 0}
+        if not probe:
+            if mbps >= BITRATE_HIGH_MBPS:
+                out.append(Finding(key=f"bitrate:{c['id']}", area="cameras", impact="low", camera_id=c["id"], camera=c["name"],
+                                   title=f"{c['name']} records at {mbps:.1f} Mbps (resolution unknown)",
+                                   why=f"Its main stream averages {mbps:.1f} Mbps; the recording could not be probed yet, so this is a rough flag.",
+                                   effect="Probably less disk and remote bandwidth; check again once a recording exists.",
+                                   steps=[f"Camera web page ({c['host']}) → Video → main stream: VBR, and compare with cameras of the same resolution."], fingerprint=f"{mbps:.0f}"))
+            continue
+        target = bitrate_target_mbps(probe, act["activity"], act["scene"])
+        desc = f"{probe['width']}×{probe['height']} at {probe['fps']:.0f} fps, {'H.265' if probe['codec'] in ('hevc', 'h265') else 'H.264' if probe['codec'] in ('h264', 'avc') else probe['codec']}, {act['scene']}, {act['activity']} scene ({act['events_per_day']} events a day)"
+        if mbps >= target * 1.4 and mbps >= 1.0:
+            lo, hi = round(target * 0.9, 1), round(target * 1.15, 1)
+            out.append(Finding(
+                key=f"bitrate:{c['id']}", area="cameras", impact="medium" if mbps >= target * 1.8 else "low", camera_id=c["id"], camera=c["name"],
+                title=f"{c['name']} records at {mbps:.1f} Mbps; about {target:.1f} would do",
+                why=f"{desc}. That picture stays clean for YOLO and Qwen at about {target:.1f} Mbps; the camera sends {mbps:.1f}" + (f", about {gbd:.0f} GB a day" if gbd else "") + ".",
+                effect=f"Roughly {(1 - target / mbps) * 100:.0f}% less disk per day and the same saving in remote playback bandwidth, with no change to detection: the camera's analytics work on the sensor image, and YOLO verifies from a picture this rate keeps sharp.",
+                steps=[f"Open the camera's web page ({c['host']}) → Video → main stream.", f"Set the bitrate mode to VBR with a target of {lo}–{hi} Mbps (keep the resolution, frame rate and codec).",
+                       "Save; MediaMTX picks up the new stream within a few seconds. Check the live picture for blockiness on a busy moment."],
+                fingerprint=f"{mbps:.0f}:{target:.0f}"))
+        elif mbps < target * 0.5 and act["activity"] == "busy":
+            out.append(Finding(
+                key=f"bitrate-low:{c['id']}", area="cameras", impact="medium", camera_id=c["id"], camera=c["name"],
+                title=f"{c['name']} is starved at {mbps:.1f} Mbps",
+                why=f"{desc}. A busy scene this size wants about {target:.1f} Mbps; at {mbps:.1f} fast movement smears, which costs YOLO confirmations and Qwen detail.",
+                effect="Sharper clips and fewer missed verifications on busy moments.",
+                steps=[f"Camera web page ({c['host']}) → Video → main stream: raise the VBR target toward {target:.1f} Mbps."],
+                fingerprint=f"{mbps:.0f}:{target:.0f}"))
     return out
 
 
@@ -216,7 +318,8 @@ def check_codecs(ctx: dict) -> list[Finding]:
         tracks = ctx["tracks"].get(c["id"]) or []
         if not tracks:
             continue
-        if "H264" in tracks and "H265" not in tracks:
+        probe = (ctx.get("probe") or {}).get(c["id"]) or {}
+        if ("H264" in tracks and "H265" not in tracks) or probe.get("codec") in ("h264", "avc"):
             out.append(Finding(key=f"codec:{c['id']}", area="cameras", impact="low", camera_id=c["id"], camera=c["name"],
                                title=f"{c['name']} records H.264", why="The main stream is H.264; H.265 halves the bytes for the same picture and this NVR records and plays it.",
                                effect="About half the disk and remote playback bandwidth for this camera.",

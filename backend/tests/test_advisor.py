@@ -32,6 +32,8 @@ def ctx(**over):
                    "cam2": {"total": 50, "rejected": 2, "short": 3, "fragments": 12, "away": 0, "vehicles": 0, "verified": 48}},
         "ptz": {"cam1": {"home_token": "8", "return_home_min": 0, "away_s_24h": 5400}},
         "clocks": {"cam2": 41.0},
+        "probe": {"cam1": {"width": 2592, "height": 1520, "fps": 16.0, "codec": "hevc"}, "cam2": {"width": 1920, "height": 1080, "fps": 15.0, "codec": "h264"}},
+        "activity": {"cam1": {"activity": "normal", "scene": "outdoor", "events_per_day": 100}, "cam2": {"activity": "normal", "scene": "indoor", "events_per_day": 50}},
         "named": {"person": set(), "vehicle": {"BIGView truck"}},
         "baseline": [],
     }
@@ -46,7 +48,9 @@ def keys(findings):
 def test_checks_fire_on_the_right_measurements():
     fs = advisor.run_checks(ctx())
     ks = keys(fs)
-    assert "bitrate:cam1" in ks and "bitrate:cam2" not in ks          # 4.3 Mbps yes, 1.9 no
+    # cam1: outdoor/normal 2592x1520@16 H.265 -> target ~3.5 Mbps; 4.3 measured is under 1.4x -> no card.
+    # cam2: indoor/normal 1080p@15 H.264 -> target ~1.7 Mbps; 1.9 measured -> no card.
+    assert "bitrate:cam1" not in ks and "bitrate:cam2" not in ks
     assert "codec:cam2" in ks and "audio:cam1" in ks                    # H.264 main; AAC audio
     assert "ai:vram" in ks and "ai:slow" in ks and "ai:mix:same_person" in ks
     assert "events:rejected:cam1" in ks and "events:fragments:cam2" in ks and "zones:cam1" in ks
@@ -60,6 +64,28 @@ def test_checks_fire_on_the_right_measurements():
     assert all(f.why and f.effect and (f.steps or f.apply) for f in fs)
 
 
+def test_bitrate_target_follows_pixels_scene_and_codec():
+    p = {"width": 2592, "height": 1520, "fps": 16.0, "codec": "hevc"}
+    indoor = advisor.bitrate_target_mbps(p, "normal", "indoor")
+    assert 2.0 <= indoor <= 2.4                                     # Kitchen-class camera: ~2.2 Mbps
+    assert advisor.bitrate_target_mbps(p, "busy", "outdoor") > indoor * 1.8
+    assert advisor.bitrate_target_mbps({**p, "codec": "h264"}, "normal", "indoor") > indoor * 1.5
+    assert advisor.bitrate_target_mbps({**p, "width": 1920, "height": 1080}, "normal", "indoor") < indoor
+    # a 4.4 Mbps indoor Kitchen gets the card with the target in it; the same rate outdoors and busy does not
+    c = ctx(health={"cam1": {"bitrate_mbps": 4.4, "gb_per_day": 46}, "cam2": {"bitrate_mbps": 1.9}},
+            activity={"cam1": {"activity": "normal", "scene": "indoor", "events_per_day": 100}, "cam2": {"activity": "normal", "scene": "indoor", "events_per_day": 50}})
+    fs = advisor.check_bitrate(c)
+    assert [f.key for f in fs] == ["bitrate:cam1"] and "about 2.2 would do" in fs[0].title and "2592×1520" in fs[0].why
+    c["activity"]["cam1"] = {"activity": "busy", "scene": "outdoor", "events_per_day": 300}
+    assert advisor.check_bitrate(c) == []
+    # a busy outdoor camera starved at 1.2 Mbps gets the opposite card
+    c["health"]["cam1"]["bitrate_mbps"] = 1.2
+    assert [f.key for f in advisor.check_bitrate(c)] == ["bitrate-low:cam1"]
+    # unknown resolution falls back to the rough flag
+    del c["probe"]["cam1"]; c["health"]["cam1"]["bitrate_mbps"] = 4.4
+    assert "resolution unknown" in advisor.check_bitrate(c)[0].title
+
+
 def test_quiet_system_has_nothing_to_say():
     quiet = ctx(health={"cam1": {"bitrate_mbps": 2.0, "gb_per_day": 20}, "cam2": {"bitrate_mbps": 1.9, "gb_per_day": 20}},
                 tracks={"cam1": ["H265", "G711"], "cam2": ["H265"]},
@@ -68,6 +94,7 @@ def test_quiet_system_has_nothing_to_say():
                 vlm={"ready": True, "size_gb": 5.4, "vram_gb": 5.4, "queue": 0, "latency_s": [12, 15, 20, 11, 14], "calls": {"synopsis": 90, "same_person": 5}},
                 events={"cam1": {"total": 30, "rejected": 3, "short": 1, "fragments": 2, "away": 0, "vehicles": 10, "verified": 27}},
                 ptz={"cam1": {"home_token": "8", "return_home_min": 5, "away_s_24h": 300}}, clocks={"cam2": 2.0},
+                probe={"cam1": {"width": 2592, "height": 1520, "fps": 16.0, "codec": "hevc"}, "cam2": {"width": 2592, "height": 1520, "fps": 16.0, "codec": "hevc"}},
                 named={"person": set(), "vehicle": {"BIGView truck", "Ghost truck"}})
     fs = advisor.run_checks(quiet)
     assert fs == [], keys(fs)
@@ -82,16 +109,16 @@ def test_storage_short_and_alert():
 
 def test_dismiss_hides_until_the_measurement_changes():
     fs = advisor.run_checks(ctx())
-    f = next(x for x in fs if x.key == "bitrate:cam1")
+    f = next(x for x in fs if x.key == "codec:cam2")
     advisor.dismiss(f.key, f.fingerprint)
     shown, hidden = advisor.visible(fs)
     assert f.key in keys(hidden) and f.key not in keys(shown)
-    # the camera changed: bitrate now 6 Mbps -> different fingerprint -> back in view
-    fs2 = advisor.run_checks(ctx(health={"cam1": {"bitrate_mbps": 6.0, "gb_per_day": 60}, "cam2": {"bitrate_mbps": 1.9}}))
+    # the measurement changed -> different fingerprint -> back in view
+    fs2 = advisor.run_checks(ctx(health={"cam1": {"bitrate_mbps": 9.0, "gb_per_day": 90}, "cam2": {"bitrate_mbps": 1.9}}))
     shown2, _ = advisor.visible(fs2)
-    assert "bitrate:cam1" in keys(shown2)
+    assert "bitrate:cam1" in keys(shown2) and "codec:cam2" not in keys(shown2)
     advisor.undismiss(f.key)
-    assert "bitrate:cam1" in keys(advisor.visible(fs)[0])
+    assert "codec:cam2" in keys(advisor.visible(fs)[0])
     assert db.get_setting("advisor_dismissed") == {}
 
 
