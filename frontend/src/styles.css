@@ -818,3 +818,7 @@ body:has(.drag-ghost) { cursor: grabbing; user-select: none; }
 .adv-steps li { margin: 2px 0; }
 .adv-hidden { padding: 8px 18px 14px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 4px; }
 @media (max-width: 700px) { .adv-hero { flex-direction: column; align-items: stretch; } .adv-list { grid-template-columns: 1fr; padding: 12px; } }
+
+/* top bar: link back to the fleet hub (shown when this site is enrolled) */
+.hub-link { color: var(--text); text-decoration: none; padding: 4px 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 13px; }
+.hub-link:hover { border-color: var(--accent); color: var(--accent); }

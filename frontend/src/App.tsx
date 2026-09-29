@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { decodeCells, regions } from "./region";
-import { api, subscribe, type Camera, type NvrEvent } from "./api";
+import { BASE, api, subscribe, type Camera, type HubStatus, type NvrEvent } from "./api";
 import { CamerasView, LiveView, SystemView } from "./Views";
 import { Dialogs, Icon, OfflineBanner, Toaster } from "./ui";
 import { FindView } from "./Find";
@@ -49,6 +49,7 @@ export default function App() {
   const [recent, setRecent] = useState<NvrEvent[]>([]);
   const [live, setLive] = useState<NvrEvent | null>(null);
   const [focus, setFocus] = useState<TimelineFocus | null>(null);
+  const [hub, setHub] = useState<HubStatus | null>(null);   // for the "Hub" link in the top bar
 
   const choose = useCallback((t: Tab) => {
     setTab(t);
@@ -108,6 +109,9 @@ export default function App() {
     api.system().then((s) => setPort(s.webrtc_port)).catch(() => {});
     api.events({ limit: 20, status: "open,pending,verified" }).then(setRecent).catch(() => {});
     const t = setInterval(loadCameras, 15000);
+    const loadHub = () => api.hub().then(setHub).catch(() => {});
+    loadHub();
+    const th = setInterval(loadHub, 60000);
     const unsub = subscribe((e) => {
       setLive(e);
       setRecent((prev) => {
@@ -125,9 +129,12 @@ export default function App() {
     });
     return () => {
       clearInterval(t);
+      clearInterval(th);
       unsub();
     };
   }, [loadCameras]);
+  // Back to the hub: through the hub it is this origin; on the site itself, the address the site dialled into
+  const hubHref = BASE ? "/" : hub?.enrolled ? hub.hub_url.replace(/^ws(s?):\/\//, "http$1://").replace(/\/agent\/?$/, "/") : null;
 
   const online = cameras.filter((c) => c.status?.stream_ready).length;
   const active = recent.filter((e) => e.status === "open" || e.status === "pending").length;
@@ -149,6 +156,7 @@ export default function App() {
           ))}
         </nav>
         <div className="top-status">
+          {hubHref && <a className="hub-link" href={hubHref} title={hub?.org ? `Back to the fleet hub (${hub.org})` : "Back to the fleet hub"}>⇱ Hub</a>}
           <span><span className={`dot ${online === cameras.length && online > 0 ? "ok" : "bad"}`} /> {online}/{cameras.length} cameras</span>
           {active > 0 && <span className="badge status-open">{active} tracking</span>}
           <ThemeToggle />
