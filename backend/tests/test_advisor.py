@@ -86,15 +86,23 @@ def test_bitrate_target_follows_pixels_scene_and_codec():
     assert "resolution unknown" in advisor.check_bitrate(c)[0].title
 
 
+def test_framerate_above_eight_is_flagged():
+    fs = advisor.check_framerate(ctx())          # cam1 16 fps, cam2 15 fps in the fixture
+    assert sorted(f.key for f in fs) == ["fps:cam1", "fps:cam2"] and "16 fps; 8 is enough" in fs[0].title and fs[0].impact == "low"
+    c = ctx(); c["probe"]["cam1"]["fps"] = 25.0; c["probe"]["cam2"]["fps"] = 8.0
+    fs = advisor.check_framerate(c)
+    assert [f.key for f in fs] == ["fps:cam1"] and fs[0].impact == "medium"
+
+
 def test_quiet_system_has_nothing_to_say():
-    quiet = ctx(health={"cam1": {"bitrate_mbps": 2.0, "gb_per_day": 20}, "cam2": {"bitrate_mbps": 1.9, "gb_per_day": 20}},
+    quiet = ctx(health={"cam1": {"bitrate_mbps": 1.2, "gb_per_day": 12}, "cam2": {"bitrate_mbps": 1.0, "gb_per_day": 10}},
                 tracks={"cam1": ["H265", "G711"], "cam2": ["H265"]},
                 retention={"cameras": [{"gb_per_day": 20, "continuous_gb": 200, "kept_gb": 1}, {"gb_per_day": 20, "continuous_gb": 200, "kept_gb": 1}],
                            "disk": {"total_gb": 1000, "free_gb": 400}, "alert": None},
                 vlm={"ready": True, "size_gb": 5.4, "vram_gb": 5.4, "queue": 0, "latency_s": [12, 15, 20, 11, 14], "calls": {"synopsis": 90, "same_person": 5}},
                 events={"cam1": {"total": 30, "rejected": 3, "short": 1, "fragments": 2, "away": 0, "vehicles": 10, "verified": 27}},
                 ptz={"cam1": {"home_token": "8", "return_home_min": 5, "away_s_24h": 300}}, clocks={"cam2": 2.0},
-                probe={"cam1": {"width": 2592, "height": 1520, "fps": 16.0, "codec": "hevc"}, "cam2": {"width": 2592, "height": 1520, "fps": 16.0, "codec": "hevc"}},
+                probe={"cam1": {"width": 2592, "height": 1520, "fps": 8.0, "codec": "hevc"}, "cam2": {"width": 2592, "height": 1520, "fps": 8.0, "codec": "hevc"}},
                 named={"person": set(), "vehicle": {"BIGView truck", "Ghost truck"}})
     fs = advisor.run_checks(quiet)
     assert fs == [], keys(fs)

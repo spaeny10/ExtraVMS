@@ -34,6 +34,7 @@ BITRATE_HIGH_MBPS = 3.2      # fallback when the stream could not be probed: abo
 SHORT_EVENT_S = 1.5
 FRAGMENT_GAP_S = 10.0
 PROBE_TTL_S = 6 * 3600       # re-read a camera's resolution / frame rate from its newest recording this often
+FPS_MAX = 8.0                # security recording above this buys little: the camera's analytics and YOLO both work at 8
 # Bits per pixel per frame that keep a clean H.265 picture for YOLO and Qwen. Indexed by (scene, activity).
 BPP_H265 = {("indoor", "quiet"): 0.025, ("indoor", "normal"): 0.035, ("indoor", "busy"): 0.045,
             ("outdoor", "quiet"): 0.040, ("outdoor", "normal"): 0.055, ("outdoor", "busy"): 0.075}
@@ -319,6 +320,28 @@ def check_bitrate(ctx: dict) -> list[Finding]:
     return out
 
 
+def check_framerate(ctx: dict) -> list[Finding]:
+    """Recording above FPS_MAX costs bits and disk for smoother motion nobody reviews at full speed."""
+    out = []
+    for c in ctx["cameras"]:
+        probe = (ctx.get("probe") or {}).get(c["id"])
+        if not probe or probe.get("fps") is None or probe["fps"] <= FPS_MAX + 0.5:
+            continue
+        fps = probe["fps"]
+        h = ctx["health"].get(c["id"]) or {}
+        mbps = h.get("bitrate_mbps")
+        saving = 1 - (FPS_MAX / fps) ** 0.7   # bitrate does not fall linearly with frame rate; ~40% for 16 -> 8
+        out.append(Finding(
+            key=f"fps:{c['id']}", area="cameras", impact="medium" if fps >= 20 else "low", camera_id=c["id"], camera=c["name"],
+            title=f"{c['name']} records at {fps:.0f} fps; {FPS_MAX:.0f} is enough",
+            why=f"The main stream runs at {fps:.0f} frames a second" + (f" and {mbps:.1f} Mbps" if mbps else "") + f". The camera's own analytics, YOLO verification and Qwen all work from a few frames per event; {FPS_MAX:.0f} fps keeps every walking step and every passing vehicle.",
+            effect=f"About {saving * 100:.0f}% less bitrate at the same quality setting, or a sharper picture at the same bitrate, plus lighter live decoding in browsers.",
+            steps=[f"Open the camera's web page ({c['host']}) → Video → main stream.", f"Set the frame rate to {FPS_MAX:.0f} fps and set the I-frame (GOP) interval to about 2 s ({FPS_MAX * 2:.0f} frames).",
+                   "Save; the stream reconnects on its own. The bitrate card, if any, is recalculated for the new frame rate."],
+            fingerprint=f"{fps:.0f}"))
+    return out
+
+
 def check_codecs(ctx: dict) -> list[Finding]:
     out = []
     for c in ctx["cameras"]:
@@ -504,7 +527,7 @@ def check_clocks(ctx: dict) -> list[Finding]:
     return out
 
 
-CHECKS = [check_bitrate, check_codecs, check_storage, check_vlm, check_events, check_rules, check_ptz, check_clocks]
+CHECKS = [check_bitrate, check_framerate, check_codecs, check_storage, check_vlm, check_events, check_rules, check_ptz, check_clocks]
 
 
 def run_checks(ctx: dict) -> list[Finding]:
