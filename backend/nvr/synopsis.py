@@ -176,7 +176,10 @@ class OllamaServer:
                "OLLAMA_KEEP_ALIVE": "-1", "OLLAMA_NUM_PARALLEL": "1",
                # 8 GB shared with the Windows desktop: a q8 KV cache (needs flash attention) keeps the whole
                # model and its context in VRAM instead of spilling layers to the CPU, which made calls take minutes.
-               "OLLAMA_FLASH_ATTENTION": "1", "OLLAMA_KV_CACHE_TYPE": "q8_0"}
+               "OLLAMA_FLASH_ATTENTION": "1", "OLLAMA_KV_CACHE_TYPE": "q8_0",
+               # requests through the OpenAI-compatible /v1 (the hub's shared AI for other sites) can't set num_ctx
+               # per call, so the server default must be the same context the native calls ask for
+               "OLLAMA_CONTEXT_LENGTH": str(settings.vlm_num_ctx)}
         if not settings.ollama_exe.exists():
             log.error("Ollama not found at %s; synopses disabled", settings.ollama_exe)
             return
