@@ -791,3 +791,30 @@ body:has(.drag-ghost) { cursor: grabbing; user-select: none; }
 /* phones: one column, no editing */
 .dash-grid.phone .dash-resize { display: none; }
 @media (max-width: 700px) { .dash-toolbar select { max-width: 100%; } }
+
+/* ---- Optimize my system (Advisor.tsx) */
+.adv { padding: 0; }
+.adv-hero { display: flex; align-items: center; gap: 16px; padding: 16px 18px; background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 14%, var(--panel)), var(--panel)); }
+.adv-hero h3 { margin: 0 0 4px; display: flex; align-items: center; gap: 8px; }
+.adv-hero p { margin: 0; max-width: 60ch; }
+.adv-hero-text { flex: 1; }
+.adv-summary { padding: 14px 18px; border-top: 1px solid var(--border); font-size: 15px; line-height: 1.5; }
+.adv-summary p { margin: 0 0 6px; }
+.adv-summary.ok { color: var(--ok, #2ea043); }
+.adv-meta { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.adv-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 12px; padding: 12px 18px 18px; border-top: 1px solid var(--border); }
+.adv-card { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; background: var(--panel-2); display: flex; flex-direction: column; gap: 6px; }
+.adv-card.impact-high { border-color: color-mix(in srgb, var(--bad) 55%, var(--border)); }
+.adv-card.impact-medium { border-color: color-mix(in srgb, var(--vehicle, #e0a020) 55%, var(--border)); }
+.adv-card header { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.adv-card h4 { margin: 0; font-size: 15px; }
+.adv-card p { margin: 0; font-size: 13px; }
+.adv-why { color: var(--muted); }
+.adv-impact { padding: 2px 8px; border-radius: 99px; font-weight: 600; font-size: 11px; background: var(--panel); border: 1px solid var(--border); }
+.adv-impact.high { color: var(--bad); border-color: var(--bad); }
+.adv-impact.medium { color: var(--vehicle, #e0a020); border-color: var(--vehicle, #e0a020); }
+.adv-area { color: var(--muted); }
+.adv-steps { margin: 4px 0 0; padding-left: 20px; font-size: 13px; }
+.adv-steps li { margin: 2px 0; }
+.adv-hidden { padding: 8px 18px 14px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 4px; }
+@media (max-width: 700px) { .adv-hero { flex-direction: column; align-items: stretch; } .adv-list { grid-template-columns: 1fr; padding: 12px; } }

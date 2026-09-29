@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
 import cv2
@@ -30,6 +31,7 @@ class Pipeline:
         self._synopsis_seq = 0
         self.synopsis_pending: set[int] = set()  # queued or being written now; the UI shows "Qwen is writing…"
         self.synopsis_hold: dict[int, float] = {}  # verified events waiting for a possible follow-on fragment (merge.py)
+        self.synopsis_times: deque[float] = deque(maxlen=50)  # seconds per synopsis, for Optimize my system
         self.journey_q: asyncio.Queue[int] = asyncio.Queue()
         self.tracker = Tracker(self.verify_q.put)
         self.gpu = ThreadPoolExecutor(max_workers=1, thread_name_prefix="yolo")
@@ -290,6 +292,7 @@ class Pipeline:
             policy.check(event_id, camera)          # site rules (who may tow what) now that Qwen has looked
             baseline.apply(event_id, rescore=False)  # threat changed: update priority
         await self.reindex(event_id)
+        self.synopsis_times.append(round(time.time() - t0, 1))
         log.info("event %s synopsis in %.1fs: %s", event_id, time.time() - t0, summary[:120])
 
     @staticmethod

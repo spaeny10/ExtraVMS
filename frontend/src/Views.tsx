@@ -5,6 +5,7 @@ import { EventDetail } from "./EventDetail";
 import { LivePlayer } from "./LivePlayer";
 import { ZoneEditor } from "./ZoneEditor";
 import { PolicyForm, RetentionPanel } from "./RetentionPanel";
+import { Advisor } from "./Advisor";
 import { QwenFeedbackInfo } from "./QwenFeedbackInfo";
 import { NeighborsEditor } from "./Neighbors";
 import { Skeleton, confirmDialog, errorText, swipeHandlers, toast, useIsPhone } from "./ui";
@@ -481,6 +482,7 @@ export function SystemView() {
   const total = Object.values(s.events).reduce((a, b) => a + b, 0);
   return (
     <div className="view system">
+      <Advisor onAsk={(q) => { try { sessionStorage.setItem("findAsk", q); } catch { /* ignore */ } window.dispatchEvent(new CustomEvent("nvr:go", { detail: "Find" })); }} />
       <section className="sys-group">
         <h3>Status</h3>
         <Row label="Recording disk" value={<><strong>{s.recordings_disk.free_gb.toLocaleString()} GB</strong> free of {s.recordings_disk.total_gb.toLocaleString()} GB</>}

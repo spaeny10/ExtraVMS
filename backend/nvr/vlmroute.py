@@ -14,6 +14,7 @@ works the same with no remote configured, no internet, or a remote that is still
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 import base64
 import contextlib
 import datetime as dt
@@ -171,6 +172,7 @@ class Router:
         self.last_end = 0.0               # end of the last remote request (for idle billing)
         self._sem: asyncio.Semaphore | None = None
         self.last_latency: float | None = None
+        self.task_calls: Counter = Counter()   # calls per task since start-up (Optimize my system)
 
     # -- configuration
     @property
@@ -253,6 +255,7 @@ class Router:
     async def chat_json(self, task: str, system: str, text: str, images: list[bytes], schema: dict,
                         num_predict: int = 300, temperature: float = 0.1, priority: str = "background") -> dict:
         """Structured answer; the result carries "_model" (which model wrote it)."""
+        self.task_calls[task] += 1
         messages = [{"role": "system", "content": system}, {"role": "user", "content": text, "images": images}]
         if self.use_remote(task):
             timeout = settings.remote_interactive_timeout_s * 2 if priority == "chat" else settings.remote_background_timeout_s
@@ -276,6 +279,7 @@ class Router:
                      priority: str = "chat") -> AsyncIterator[tuple[str, str]]:
         """Yields ("model", name) once, then ("delta", text) chunks. If the remote hasn't produced its first
         token within remote_interactive_timeout_s (cold start), the local model answers instead."""
+        self.task_calls[task] += 1
         if self.use_remote(task):
             t0 = time.time()
             gen = self.remote.stream(messages, num_predict, temperature, settings.remote_interactive_timeout_s)

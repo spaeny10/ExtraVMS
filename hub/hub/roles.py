@@ -29,6 +29,7 @@ RULES: list[tuple[set[str], re.Pattern, str]] = [
     ({"POST", "DELETE"}, re.compile(r"^/api/(locks|layouts|dashboards)(/|$)"), "operator"),
     ({"POST"}, re.compile(r"^/api/remote/test$"), "admin"),
     ({"POST"}, re.compile(r"^/api/config/import$"), "admin"),
+    ({"POST"}, re.compile(r"^/api/advisor/"), "operator"),
     ({"PUT"}, re.compile(r"^/api/(layouts|dashboards)/"), "operator"),
     ({"POST"}, re.compile(r"^/api/briefings/generate$"), "operator"),
     ({"DELETE"}, re.compile(r"^/api/assistant/threads/"), "operator"),

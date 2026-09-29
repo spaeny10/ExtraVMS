@@ -272,6 +272,14 @@ export type SystemInfo = {
   backup?: { dir: string; last: { at: number; path: string; bytes: number; count: number } | null };
 };
 
+export type AdvisorFinding = {
+  key: string; area: string; impact: "high" | "medium" | "low"; title: string; why: string; effect: string; steps: string[];
+  apply: Record<string, unknown> | null; fingerprint: string; camera_id: string | null; camera: string | null;
+};
+export type AdvisorReport = {
+  generated_at: number; cameras: number; summary: { text: string; model: string | null }; findings: AdvisorFinding[]; hidden: AdvisorFinding[];
+  facts: { gb_per_day: number | null; vlm: { size_gb?: number | null; vram_gb?: number | null; queue?: number | null }; median_synopsis_s: number | null };
+};
 export type SiteDashboard = { id: number; name: string; config: DashboardConfig; created_at: number; updated_at: number };
 
 /** URL prefix when this UI is served through the fleet hub ("/s/<site>"); empty on the site itself. */
@@ -400,6 +408,10 @@ export function makeApi(base: string) {
       `/api/recordings/${camera}?${qs({ start, end })}`,
     ),
   system: () => req<SystemInfo>("/api/system"),
+  advisor: (ai = true) => req<AdvisorReport>(`/api/advisor?ai=${ai}`),
+  advisorDismiss: (key: string, fingerprint: string) => req("/api/advisor/dismiss", json("POST", { key, fingerprint })),
+  advisorUndismiss: (key: string) => req("/api/advisor/undismiss", json("POST", { key })),
+  advisorApply: (a: Record<string, unknown>) => req<{ message: string }>("/api/advisor/apply", json("POST", a)),
   correctSynopsis: (id: number, s: Synopsis) => req<NvrEvent>(`/api/events/${id}/synopsis`, json("PUT", s)),
   revertSynopsis: (id: number) => req<NvrEvent>(`/api/events/${id}/synopsis/correction`, { method: "DELETE" }),
   generateSynopsis: (id: number) => req(`/api/events/${id}/synopsis/generate`, { method: "POST" }),

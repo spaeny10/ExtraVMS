@@ -79,6 +79,13 @@ export default function App() {
     history.replaceState(null, "", timelineHash(e.camera_id, e.id, !!m, e.start_ts));
   }, [choose]);
 
+  // Other views ask to switch tab (e.g. Settings → Optimize → "Ask about this" hands a question to Find)
+  useEffect(() => {
+    const on = (e: Event) => { const t = (e as CustomEvent<Tab>).detail; if (TABS.includes(t)) choose(t); };
+    window.addEventListener("nvr:go", on);
+    return () => window.removeEventListener("nvr:go", on);
+  }, [choose]);
+
   // Deep link: #timeline?cam=cam1&event=123
   useEffect(() => {
     const target = parseTimelineHash(location.hash);

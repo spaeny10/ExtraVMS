@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 
 from . import assistant, backup, baseline, footage, frames, health, identities, journeys, keep, mediamtx, policy, ptz, retention, zones
 from . import synopsis as vlm
-from . import hub_agent, siteconfig
+from . import advisor, hub_agent, siteconfig
 from . import vlmroute
 from .config import ROOT, settings
 from .db import db
@@ -141,6 +141,52 @@ class HubIn(BaseModel):
 @app.get("/api/hub")
 async def hub_status():
     return state.hub.status()
+
+
+@app.get("/api/advisor")
+async def advisor_report(ai: bool = True):
+    """Optimize my system: measured findings plus Qwen's one-paragraph read (ai=false for the plain summary)."""
+    return await advisor.report(state, use_ai=ai)
+
+
+class DismissIn(BaseModel):
+    key: str = Field(min_length=1, max_length=80)
+    fingerprint: str = Field(default="", max_length=80)
+
+
+@app.post("/api/advisor/dismiss")
+async def advisor_dismiss(body: DismissIn):
+    advisor.dismiss(body.key, body.fingerprint)
+    return {"ok": True}
+
+
+@app.post("/api/advisor/undismiss")
+async def advisor_undismiss(body: DismissIn):
+    advisor.undismiss(body.key)
+    return {"ok": True}
+
+
+class ApplyIn(BaseModel):
+    action: str
+    camera_id: str | None = None
+    minutes: int | None = None
+    days: int | None = None
+
+
+@app.post("/api/advisor/apply")
+async def advisor_apply(body: ApplyIn):
+    """The few suggestions the NVR can carry out itself."""
+    if body.action == "ptz_return_home" and body.camera_id:
+        p = state.ptz.cameras.get(body.camera_id) if state.ptz else None
+        if not p:
+            raise HTTPException(404, "no PTZ camera")
+        p.set_config(return_home_min=max(1, min(1440, body.minutes or 5)))
+        return {"message": f"{body.camera_id} now returns home after {body.minutes or 5} min"}
+    if body.action == "retention_days" and body.days:
+        merged = keep._merge(keep.DEFAULT_POLICY, {**keep.site_policy(), "continuous_days": max(1, min(365, body.days))})
+        db.set_setting("retention_policy", merged)
+        return {"message": f"Continuous retention set to {body.days} days"}
+    raise HTTPException(400, "unknown action")
 
 
 @app.get("/api/config/export")
