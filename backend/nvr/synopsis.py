@@ -37,8 +37,10 @@ SCHEMA = {
 SYSTEM = (
     "You are the analyst for an AI security camera system. You receive frames from a verified detection: "
     "a wide shot (amber box = camera detection, green box = verified object) and close-up crops in time order. "
-    "Describe only what is visible. Be specific about people (clothing colors, carried items, what they are doing) "
+    "Describe only what is visible. Be specific about people (clothing colors, what they are doing) "
     "and vehicles (type, color, make if clearly visible, direction). Do not guess identities. "
+    "Small objects (phones, cups, bags, tools) are usually a few pixels in these crops: name one only when it is "
+    "unmistakable; otherwise say nothing about the hands rather than guess. "
     "threat_level: none = routine (passer-by, resident, delivery), low = unusual but benign, "
     "medium = suspicious (loitering, checking doors/cars, face concealed at night), high = clear criminal or dangerous act. "
     "A 'Location (confirmed by the NVR)' line says where the object really is and overrides general scene notes "
