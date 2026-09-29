@@ -36,11 +36,26 @@ def _overlap(p: list, q: list) -> bool:
     return not (r1 <= l2 or r2 <= l1 or b1 <= t2 or b2 <= t1)
 
 
+def _last_box(path: list) -> list | None:
+    """The last well-formed path point [ts, l, t, r, b, ...]; extended paths can carry shorter entries."""
+    for p in reversed(path or []):
+        if isinstance(p, (list, tuple)) and len(p) >= 5:
+            return list(p)
+    return None
+
+
+def _first_box(path: list) -> list | None:
+    for p in path or []:
+        if isinstance(p, (list, tuple)) and len(p) >= 5:
+            return list(p)
+    return None
+
+
 def continuous(a_path: list, b_path: list, max_dist: float | None = None) -> bool:
     """B's first box is where A's last box was (centres within max_dist, or overlapping)."""
-    if not a_path or not b_path:
+    p, q = _last_box(a_path), _first_box(b_path)
+    if p is None or q is None:
         return False
-    p, q = a_path[-1], b_path[0]
     if _overlap(p, q):
         return True
     (x1, y1), (x2, y2) = _box_centre(p), _box_centre(q)

@@ -110,11 +110,20 @@ async def _vlm_facts(state) -> dict:
 
 
 def _event_facts(now: float) -> dict:
-    """Last 24 h per camera: totals, rejected share, very short events, back-to-back fragments, away share."""
+    """Last 24 h per camera: totals, rejected share, very short events, unmerged fragments, away share.
+
+    `fragments` counts back-to-back pairs the NVR *would* merge but could not: the camera gave the same track
+    id, or re-ID says the same person, yet they are still two events. Different people passing the same spot
+    in sequence are not fragments and don't count."""
     since = now - 86400
-    rows = db.all("SELECT camera_id, camera_class, track_id, start_ts, end_ts, status, ptz_preset FROM events WHERE start_ts>? ORDER BY camera_id, start_ts", [since])
+    rows = db.all("SELECT id, camera_id, camera_class, track_id, start_ts, end_ts, status, ptz_preset FROM events WHERE start_ts>? ORDER BY camera_id, start_ts", [since])
     out: dict[str, dict] = {}
     prev: dict[str, dict] = {}
+    try:
+        from . import merge
+        reid_sim = merge.reid_sim
+    except Exception:  # pragma: no cover
+        reid_sim = lambda a, b: None  # noqa: E731
     for r in rows:
         f = out.setdefault(r["camera_id"], {"total": 0, "rejected": 0, "short": 0, "fragments": 0, "away": 0, "vehicles": 0, "verified": 0})
         f["total"] += 1
@@ -129,8 +138,14 @@ def _event_facts(now: float) -> dict:
         if r["end_ts"] and r["end_ts"] - r["start_ts"] < SHORT_EVENT_S:
             f["short"] += 1
         p = prev.get(r["camera_id"])
-        if p and p["camera_class"] == r["camera_class"] and r["start_ts"] - (p["end_ts"] or p["start_ts"]) <= FRAGMENT_GAP_S:
-            f["fragments"] += 1
+        if (p and p["camera_class"] == r["camera_class"] and p["status"] == r["status"] == "verified"
+                and r["start_ts"] - (p["end_ts"] or p["start_ts"]) <= FRAGMENT_GAP_S):
+            if p["track_id"] == r["track_id"]:
+                f["fragments"] += 1
+            elif r["camera_class"] == "person":
+                sim = reid_sim(p["id"], r["id"])
+                if sim is not None and sim >= settings.merge_reid_min:
+                    f["fragments"] += 1
         prev[r["camera_id"]] = r
     return out
 
@@ -310,10 +325,10 @@ def check_events(ctx: dict) -> list[Finding]:
                                steps=[f"Camera web page ({next((c['host'] for c in ctx['cameras'] if c['id'] == cid), '')}) → Event / Smart analytics: raise the sensitivity threshold or shrink the detection area.",
                                       "Or paint an exclude zone in Settings → Cameras → Zones over the trigger area."],
                                fingerprint=f"{int(f['rejected'] / f['total'] * 10)}"))
-        if f["total"] >= 20 and f["fragments"] / f["total"] > 0.35:
+        if f["total"] >= 20 and f["fragments"] >= 8 and f["fragments"] / f["total"] > 0.15:
             out.append(Finding(key=f"events:fragments:{cid}", area="events", impact="low", camera_id=cid, camera=name,
                                title=f"{name} splits visits into many short events",
-                               why=f"{f['fragments']} of {f['total']} events in 24 h started within {FRAGMENT_GAP_S:.0f} s of the previous one. The camera drops the track and hands out a new id; the NVR merges what it can.",
+                               why=f"{f['fragments']} of {f['total']} events in 24 h are the same person (or the same camera track) re-appearing within {FRAGMENT_GAP_S:.0f} s, still recorded as separate events. The NVR merges fragments that continue where the last one ended; these re-appeared somewhere else in the frame.",
                                effect="One event per visit: fewer cards, one synopsis, cleaner journeys.",
                                steps=["Camera web page → analytics / object tracking: raise the 'object lost' or 'disappear' tolerance to 5–10 s if offered.",
                                       "Or lower the minimum object size so the person isn't dropped when partly hidden."],

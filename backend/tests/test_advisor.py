@@ -29,7 +29,7 @@ def ctx(**over):
                       "disk": {"total_gb": 8000, "free_gb": 7400}, "alert": None},
         "vlm": {"ready": True, "size_gb": 6.3, "vram_gb": 5.5, "queue": 3, "latency_s": [90, 120, 70, 100, 130], "calls": {"synopsis": 40, "same_person": 60}},
         "events": {"cam1": {"total": 100, "rejected": 60, "short": 10, "fragments": 5, "away": 0, "vehicles": 80, "verified": 40},
-                   "cam2": {"total": 50, "rejected": 2, "short": 3, "fragments": 25, "away": 0, "vehicles": 0, "verified": 48}},
+                   "cam2": {"total": 50, "rejected": 2, "short": 3, "fragments": 12, "away": 0, "vehicles": 0, "verified": 48}},
         "ptz": {"cam1": {"home_token": "8", "return_home_min": 0, "away_s_24h": 5400}},
         "clocks": {"cam2": 41.0},
         "named": {"person": set(), "vehicle": {"BIGView truck"}},
