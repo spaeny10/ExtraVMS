@@ -21,6 +21,11 @@ SIZE = 224
 TEMPLATES = ("a photo of {}.", "a security camera photo of {}.", "{}")
 
 
+def precision_for(device: str) -> str:
+    """fp16 on a GPU (half the memory, same features); fp32 on a CPU, where half precision is slow or unsupported."""
+    return "fp32" if str(device).startswith("cpu") else "fp16"
+
+
 class Clip:
     def __init__(self, device: str | None = None) -> None:
         import os
@@ -28,8 +33,9 @@ class Clip:
             os.environ.setdefault("HF_HUB_OFFLINE", "1")
         import open_clip
         self.device = device or settings.yolo_device
+        self.precision = precision_for(self.device)
         self.model, _, _ = open_clip.create_model_and_transforms(
-            MODEL, pretrained=PRETRAINED, cache_dir=str(CACHE_DIR), device=self.device, precision="fp16")
+            MODEL, pretrained=PRETRAINED, cache_dir=str(CACHE_DIR), device=self.device, precision=self.precision)
         self.model.eval()
         self.tokenizer = open_clip.get_tokenizer(MODEL)
         cfg = getattr(self.model.visual, "preprocess_cfg", {}) or {}
@@ -47,7 +53,9 @@ class Clip:
         """BGR images -> (n, 512) float32, L2-normalised."""
         if not images:
             return np.zeros((0, DIM), np.float32)
-        x = torch.from_numpy(np.stack([self._prep(i) for i in images])).to(self.device).half()
+        x = torch.from_numpy(np.stack([self._prep(i) for i in images])).to(self.device)
+        if self.precision == "fp16":
+            x = x.half()
         with self.lock:
             f = self.model.encode_image(x).float()
         return torch.nn.functional.normalize(f, dim=-1).cpu().numpy()

@@ -328,6 +328,9 @@ class Indexer:
         return removed
 
     async def run(self) -> None:
+        if not settings.footage_index_enabled:
+            log.info("footage index disabled (NVR_FOOTAGE_INDEX_ENABLED=0): footage search is off on this site")
+            return
         while self.p.verifier is None:  # let YOLO load first
             await asyncio.sleep(2)
         await asyncio.sleep(5)

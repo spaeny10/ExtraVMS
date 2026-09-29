@@ -170,6 +170,39 @@ def test_stream_remote_and_cold_start_fallback():
     assert time.time() - t0 < 2.5 and r.state() != "down"  # a cold start doesn't open the breaker
 
 
+def test_remote_only_site_never_touches_local():
+    """A site without Ollama: every task (synopses and chat included) goes remote; a remote failure is an error,
+    not a silent fallback; nothing configured means not ready rather than a local call."""
+    settings.local_vlm_enabled = False
+    try:
+        r = fresh(configured=True, tasks=())
+        assert r.use_remote("synopsis") and r.use_remote("chat") and "synopsis" in r.tasks()
+        restore = mock_remote(lambda req: httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({"ok": True, "who": "remote"})}}]}))
+        try:
+            out = run(r.chat_json("synopsis", "sys", "describe", [], SCHEMA))
+            assert out["who"] == "remote" and out["_model"] == "big-72b" and not calls
+        finally:
+            restore()
+        restore = mock_remote(lambda req: httpx.Response(500, text="boom"))
+        try:
+            failed = False
+            try:
+                run(r.chat_json("synopsis", "sys", "describe", [], SCHEMA))
+            except RuntimeError as e:
+                failed = "local Qwen is disabled" in str(e)
+            assert failed and not calls
+        finally:
+            restore()
+        r2 = fresh(configured=False)
+        assert not r2.use_remote("synopsis")
+        try:
+            run(r2.chat_json("synopsis", "sys", "x", [], SCHEMA)); assert False, "should not reach local"
+        except RuntimeError as e:
+            assert "not configured" in str(e) and not calls
+    finally:
+        settings.local_vlm_enabled = True
+
+
 def test_truncated_json_salvage():
     assert vlmroute.parse_json('{"summary": "He went \\"out\\"", "tags": ["a') == {"summary": 'He went "out"'}
 

@@ -63,6 +63,11 @@ class Settings(BaseSettings):
     synopsis_labels: list[str] = ["person"]  # Qwen runs only for these; YOLO verifies every label
     anomaly_synopsis_min: float = 0.75  # ...and for any other label once it is this unusual for its camera
 
+    # A small site without a GPU: no local Ollama at all, every Qwen task goes to the remote model (the hub's
+    # shared AI, or the three NVR_REMOTE_VLM_* below). Search is keyword-only there (no local embeddings).
+    local_vlm_enabled: bool = True
+    footage_index_enabled: bool = True      # CLIP footage search index; off on a 2-core box (vehicle fingerprints still work)
+
     # Optional larger remote Qwen (OpenAI-compatible, e.g. a RunPod Serverless vLLM endpoint). Put these three in
     # .env only. Unset = everything runs on the local model. See nvr/vlmroute.py.
     remote_vlm_url: str = ""            # e.g. https://api.runpod.ai/v2/<endpoint_id>/openai/v1

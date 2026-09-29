@@ -31,7 +31,7 @@ from .db import db
 
 log = logging.getLogger("nvr.vlmroute")
 
-TASKS = ("assistant", "briefing", "journey", "unusual_review", "footage_verify")
+TASKS = ("assistant", "briefing", "journey", "unusual_review", "footage_verify", "synopsis", "chat")
 REMOTE_CONCURRENCY = 2
 DOWN_S = 300
 
@@ -180,6 +180,8 @@ class Router:
         return bool(settings.remote_vlm_url and settings.remote_vlm_key and settings.remote_vlm_model)
 
     def tasks(self) -> list[str]:
+        if not settings.local_vlm_enabled:
+            return list(TASKS)   # no local model: everything is remote
         return [t for t in db.get_setting("remote_tasks", settings.remote_tasks) if t in TASKS]
 
     def set_tasks(self, tasks: list[str]) -> None:
@@ -211,8 +213,14 @@ class Router:
         return settings.remote_rate_usd_per_s > 0 and self.spent_usd() >= settings.remote_daily_budget_usd
 
     def use_remote(self, task: str) -> bool:
+        if not settings.local_vlm_enabled:
+            return self.configured   # no local model to fall back to: always try the remote
         return (self.configured and task in self.tasks() and time.time() >= self.down_until
                 and not self.over_budget())
+
+    def _no_local(self, task: str, e: Exception | None = None) -> RuntimeError:
+        return RuntimeError(f"no model for {task}: local Qwen is disabled and the remote "
+                            + (f"failed ({type(e).__name__}: {str(e)[:120]})" if e else "is not configured"))
 
     def state(self) -> str:
         if not self.configured:
@@ -271,6 +279,10 @@ class Router:
                 self._record(t0, time.time())
                 # a user-facing call that timed out is probably a cold start: fall back now, don't mark down
                 self._fail(task, e, mark_down=not (priority == "chat" and isinstance(e, httpx.TimeoutException)))
+                if not settings.local_vlm_enabled:
+                    raise self._no_local(task, e) from e
+        if not settings.local_vlm_enabled:
+            raise self._no_local(task)
         async with self._local_turn(priority):
             r = await self.local.chat_json(messages, schema, num_predict, temperature, 180)
         return {**r, "_model": self.local.model}
@@ -304,7 +316,11 @@ class Router:
                     raise
                 cold = isinstance(e, (asyncio.TimeoutError, httpx.TimeoutException))
                 self._fail(task, e if not cold else TimeToFirstToken("remote still waking up"), mark_down=not cold)
+                if not settings.local_vlm_enabled:
+                    raise self._no_local(task, e) from e
                 yield ("fallback", "remote waking up" if cold else "remote unavailable")
+        if not settings.local_vlm_enabled:
+            raise self._no_local(task)
         async with self._local_turn(priority):
             yield ("model", self.local.model)
             async for chunk in self.local.stream(messages, num_predict, temperature, 240):

@@ -242,6 +242,8 @@ async def synopsis(event: dict, camera: dict, images: list[bytes], examples: lis
 
 
 async def embed(text: str) -> list[float] | None:
+    if not settings.local_vlm_enabled:
+        return None   # no local Ollama: the search index stays keyword-only
     try:
         async with httpx.AsyncClient(timeout=30) as c:
             r = await c.post(f"{settings.ollama_url}/api/embed",
@@ -275,28 +277,16 @@ async def chat_stream(event: dict, camera: dict, frames: list[tuple[float, bytes
     )
     messages = [
         {"role": "system", "content": CHAT_SYSTEM},
-        {"role": "user", "content": context, "images": [base64.b64encode(b).decode() for _, b in frames]},
+        {"role": "user", "content": context, "images": [b for _, b in frames]},   # raw bytes: each backend encodes
         {"role": "assistant", "content": "Understood. I have the frames and event details. What would you like to know?"},
         *history[-8:],
         {"role": "user", "content": question},
     ]
-    body = {"model": settings.vlm_model, "messages": messages, "stream": True,
-            "options": {"temperature": 0.3, "num_ctx": settings.vlm_num_ctx, "num_predict": 500}}
-    async with httpx.AsyncClient(timeout=httpx.Timeout(240, connect=10)) as c:
-        async with c.stream("POST", f"{settings.ollama_url}/api/chat", json=body) as r:
-            if r.status_code >= 400:
-                raise RuntimeError(f"Qwen request failed ({r.status_code}): {(await r.aread()).decode()[:300]}")
-            async for line in r.aiter_lines():
-                if not line:
-                    continue
-                msg = json.loads(line)
-                if msg.get("error"):
-                    raise RuntimeError(msg["error"])
-                chunk = msg.get("message", {}).get("content", "")
-                if chunk:
-                    yield chunk
-                if msg.get("done"):
-                    break
+    # routed like every other task (vlmroute): the local Qwen, or the remote when "chat" is a remote task or
+    # the site has no local model
+    async for kind, val in vlmroute.router.stream("chat", messages, 500, 0.3, "chat"):
+        if kind == "delta" and val:
+            yield val
 
 
 class VlmGate:

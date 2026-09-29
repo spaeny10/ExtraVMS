@@ -393,6 +393,15 @@ class Pipeline:
         return await asyncio.get_running_loop().run_in_executor(self.decode, work)
 
     async def start_vlm(self) -> None:
+        if not settings.local_vlm_enabled:
+            # No Ollama here: Qwen work is remote (hub shared AI or NVR_REMOTE_VLM_*). Ready whenever a remote is
+            # configured; the hub may push that config after start-up, so keep looking.
+            while True:
+                ready = vlmroute.router.configured
+                if ready != self.vlm_ready:
+                    log.info("remote VLM %s", f"ready: {settings.remote_vlm_model}" if ready else "not configured; Qwen tasks wait")
+                self.vlm_ready, self.vlm_state = ready, "ready" if ready else "starting"
+                await asyncio.sleep(30)
         if await vlm.wait_ready():
             try:
                 await vlm.ensure_models()
@@ -407,8 +416,8 @@ class Pipeline:
     async def restart_vlm(self) -> None:
         """Qwen stopped answering: restart Ollama and warm the model; keep trying every 5 min while it stays down
         (a GPU that fell off the bus needs a reboot, which Settings → System and the advisor say)."""
-        if self.vlm_state == "unresponsive":
-            return
+        if self.vlm_state == "unresponsive" or not settings.local_vlm_enabled:
+            return   # nothing local to restart: the router's circuit breaker handles a remote outage
         self.vlm_ready, self.vlm_state, self.vlm_down_since = False, "unresponsive", time.time()
         log.error("Qwen is not answering: restarting Ollama")
         while not self.vlm_ready:

@@ -1,6 +1,8 @@
-# PyTorch with CUDA: install first from the CUDA index
+# PyTorch: install first. With an NVIDIA GPU use the CUDA index, on a CPU-only box the CPU index:
 #   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 ultralytics
+open_clip_torch
 fastapi
 uvicorn[standard]
 pydantic-settings
