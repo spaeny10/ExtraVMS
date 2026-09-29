@@ -75,6 +75,7 @@ async def lifespan(app: FastAPI):
     state.pipeline = Pipeline()
     state.mtx = mediamtx.MediaMTX()
     state.ollama = vlm.OllamaServer()
+    state.pipeline.ollama = state.ollama   # the watchdog restarts it when Qwen stops answering
     state.mtx.write_config(db.cameras(enabled_only=True))
     p = state.pipeline
     state.footage = footage.Indexer(p)
@@ -1318,6 +1319,7 @@ async def system():
         "retention_alert": retention.alert,
         "queues": {"verify": state.pipeline.verify_q.qsize(), "synopsis": state.pipeline.synopsis_q.qsize()},
         "vlm_ready": state.pipeline.vlm_ready, "vlm_model": settings.vlm_model,
+        "vlm_state": state.pipeline.vlm_state, "vlm_down_since": state.pipeline.vlm_down_since,
         "yolo_ready": state.pipeline.verifier is not None, "yolo_model": settings.yolo_model,
         "events": counts,
         "webrtc_port": settings.mediamtx_webrtc_port,

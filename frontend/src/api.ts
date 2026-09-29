@@ -265,6 +265,8 @@ export type SystemInfo = {
   queues: { verify: number; synopsis: number };
   vlm_ready: boolean;
   vlm_model: string;
+  vlm_state?: "starting" | "ready" | "unresponsive";
+  vlm_down_since?: number | null;
   yolo_ready: boolean;
   yolo_model: string;
   events: Record<string, number>;

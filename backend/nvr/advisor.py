@@ -85,7 +85,8 @@ async def gather(state) -> dict:
 
 async def _vlm_facts(state) -> dict:
     out: dict = {"ready": bool(getattr(getattr(state, "pipeline", None), "vlm_ready", False)), "size_gb": None, "vram_gb": None,
-                 "queue": None, "latency_s": [], "calls": {}}
+                 "queue": None, "latency_s": [], "calls": {}, "state": getattr(getattr(state, "pipeline", None), "vlm_state", "ready"),
+                 "down_since": getattr(getattr(state, "pipeline", None), "vlm_down_since", None)}
     p = getattr(state, "pipeline", None)
     if p is not None:
         out["queue"] = p.synopsis_q.qsize()
@@ -255,6 +256,14 @@ def check_storage(ctx: dict) -> list[Finding]:
 def check_vlm(ctx: dict) -> list[Finding]:
     v = ctx["vlm"]
     out = []
+    if v.get("state") == "unresponsive":
+        since = v.get("down_since")
+        mins = (ctx["now"] - since) / 60 if since else 0
+        out.append(Finding(key="ai:down", area="ai", impact="high", title="Qwen has stopped answering",
+                           why=f"Synopses have been timing out for {mins:.0f} min; the NVR is restarting Ollama every 5 minutes without success.",
+                           effect="Synopses, Ask, briefings and journeys come back.",
+                           steps=["Run nvidia-smi: if it says a GPU is lost, reboot the machine.", "Otherwise check that nothing else is using Qwen's GPU memory."],
+                           fingerprint=f"{int(mins // 15)}"))
     if v.get("size_gb") and v.get("vram_gb") is not None and v["vram_gb"] < v["size_gb"] * 0.98:
         out.append(Finding(key="ai:vram", area="ai", impact="high", title="Qwen is partly running on the CPU",
                            why=f"Ollama holds {v['vram_gb']} of {v['size_gb']} GB of the model in VRAM; the rest runs on the CPU, which makes every synopsis several times slower.",

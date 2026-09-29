@@ -490,7 +490,8 @@ export function SystemView() {
           <div className="meter"><div style={{ width: `${used * 100}%` }} /></div>
         </Row>
         <Row label="YOLO" value={<><Status ok={s.yolo_ready} /> {s.yolo_ready ? "Ready" : "Loading"} · {s.yolo_model}</>} sub={s.queues.verify ? `${s.queues.verify} waiting` : "queue empty"} />
-        <Row label="Qwen" value={<><Status ok={s.vlm_ready} /> {s.vlm_ready ? "Ready" : "Starting"} · {s.vlm_model}</>} sub={s.queues.synopsis ? `${s.queues.synopsis} waiting` : "queue empty"}
+        <Row label="Qwen" value={<><Status ok={s.vlm_ready} /> {s.vlm_ready ? "Ready" : s.vlm_state === "unresponsive" ? "Not answering · restarting Ollama" : "Starting"} · {s.vlm_model}</>}
+          sub={s.vlm_state === "unresponsive" ? `down since ${s.vlm_down_since ? fmtTime(s.vlm_down_since) : "?"} · if nvidia-smi says the GPU is lost, reboot` : s.queues.synopsis ? `${s.queues.synopsis} waiting` : "queue empty"}
           action={<QwenFeedbackInfo />} />
         <RemoteRow />
         <FootageRow />

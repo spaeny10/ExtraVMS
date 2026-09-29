@@ -9,6 +9,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
 import cv2
+import httpx
 
 from . import baseline, cells, identities, journeys, policy, vlmroute, zones, merge
 from . import synopsis as vlm
@@ -38,6 +39,10 @@ class Pipeline:
         self.verifier: Verifier | None = None
         self.subscribers: set[asyncio.Queue] = set()
         self.vlm_ready = False
+        self.vlm_state = "starting"       # starting | ready | unresponsive (shown on Settings → System and by the advisor)
+        self.vlm_timeouts = 0             # consecutive Qwen calls that timed out
+        self.vlm_down_since: float | None = None
+        self.ollama = None                # synopsis.OllamaServer, set by the API at startup (for restarts)
         self.cameras: dict[str, dict] = {}
         self.gate = vlm.VlmGate()
         vlmroute.router.gate = self.gate  # local Qwen calls take turns here; remote ones don't need to
@@ -206,6 +211,15 @@ class Pipeline:
                 continue
             try:
                 await self._synopsis(event_id)
+                self.vlm_timeouts = 0
+            except (httpx.TimeoutException, asyncio.TimeoutError) as ex:
+                self.vlm_timeouts += 1
+                log.warning("synopsis %s timed out (%s in a row): %s", event_id, self.vlm_timeouts, type(ex).__name__)
+                self.synopsis_pending.discard(event_id)
+                if self.vlm_timeouts >= 2 and self.vlm_ready:
+                    asyncio.create_task(self.restart_vlm(), name="vlm-restart")
+                self.queue_synopsis(event_id)   # not the event's fault: it goes back to the queue (behind the restart)
+                continue
             except Exception as ex:
                 log.exception("synopsis %s failed", event_id)
                 db.update_event(event_id, error=f"synopsis: {ex}")
@@ -384,11 +398,30 @@ class Pipeline:
                 await vlm.ensure_models()
                 log.info("loading %s into VRAM...", settings.vlm_model)
                 log.info("VLM ready: %s (loaded and warmed in %.0fs)", settings.vlm_model, await vlm.warm_up())
-                self.vlm_ready = True
+                self.vlm_ready, self.vlm_state, self.vlm_timeouts, self.vlm_down_since = True, "ready", 0, None
             except Exception:
                 log.exception("could not prepare Ollama models")
         else:
             log.error("Ollama did not start at %s", settings.ollama_url)
+
+    async def restart_vlm(self) -> None:
+        """Qwen stopped answering: restart Ollama and warm the model; keep trying every 5 min while it stays down
+        (a GPU that fell off the bus needs a reboot, which Settings → System and the advisor say)."""
+        if self.vlm_state == "unresponsive":
+            return
+        self.vlm_ready, self.vlm_state, self.vlm_down_since = False, "unresponsive", time.time()
+        log.error("Qwen is not answering: restarting Ollama")
+        while not self.vlm_ready:
+            try:
+                if self.ollama is not None:
+                    await self.ollama.stop()   # its supervisor loop starts a fresh `ollama serve` in 5 s
+                    await asyncio.sleep(8)
+                await asyncio.wait_for(self.start_vlm(), 240)
+            except Exception as e:
+                log.warning("Qwen restart did not succeed: %s", e)
+            if not self.vlm_ready:
+                log.error("Qwen still down (%.0f min); next try in 5 min. If nvidia-smi reports the GPU as lost, reboot.", (time.time() - (self.vlm_down_since or time.time())) / 60)
+                await asyncio.sleep(300)
 
     def synopsis_labels(self, camera_id: str) -> list[str]:
         """What Qwen describes on this camera: its own choice (Cameras -> Edit), else the site default."""
