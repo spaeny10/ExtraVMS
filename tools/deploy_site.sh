@@ -109,6 +109,7 @@ Restart=always
 RestartSec=5
 LimitNOFILE=65536
 Environment=PYTHONUNBUFFERED=1
+Environment=YOLO_CONFIG_DIR=$NVR_DIR/runtime/ultralytics
 
 [Install]
 WantedBy=multi-user.target
