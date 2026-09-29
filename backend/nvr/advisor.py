@@ -174,11 +174,18 @@ def _activity_facts(cameras: list[dict], events: dict, now: float) -> dict[str, 
         tracked_s = sum(min(600.0, max(0.0, (r["end_ts"] or r["start_ts"]) - r["start_ts"])) for r in rows)
         per_day = len(rows)
         share = tracked_s / 86400
-        activity = "busy" if share > 0.05 or per_day > 150 else "quiet" if share < 0.005 and per_day < 15 else "normal"
+        # "quiet" needs evidence: a camera with no events at all may be new, or its analytics may not be feeding us
+        activity = "busy" if share > 0.05 or per_day > 150 else "quiet" if 1 <= per_day < 15 and share < 0.005 else "normal"
         notes = (c.get("scene_notes") or "").lower() + " " + (c.get("name") or "").lower()
         vehicles = sum(1 for r in rows if r["camera_class"] == "vehicle")
-        outdoor = vehicles >= 3 or any(w in notes for w in OUTDOOR_WORDS)
-        out[c["id"]] = {"activity": activity, "scene": "outdoor" if outdoor else "indoor", "tracked_share": round(share, 4), "events_per_day": per_day}
+        indoor_words = ("kitchen", "office", "hall", "room", "bathroom", "lobby", "indoor", "inside", "warehouse", "shop floor")
+        if vehicles >= 3 or any(w in notes for w in OUTDOOR_WORDS):
+            scene = "outdoor"
+        elif per_day >= 15 and any(w in notes for w in indoor_words):
+            scene = "indoor"
+        else:
+            scene = "outdoor"   # unknown: the outdoor table asks for more bits, the safe direction
+        out[c["id"]] = {"activity": activity, "scene": scene, "tracked_share": round(share, 4), "events_per_day": per_day}
     return out
 
 
