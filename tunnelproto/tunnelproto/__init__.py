@@ -17,7 +17,9 @@ import json
 import struct
 
 PROTO = 1
-WINDOW = 256 * 1024      # bytes a sender may have unacknowledged per stream
+WINDOW = 2 * 1024 * 1024  # bytes a sender may have unacknowledged per stream. 256 KB capped a stream at ~40 Mbit/s on a
+                          # 50 ms round trip (window / RTT), which is what made far-back Timeline chunks crawl through
+                          # the hub; 2 MB allows ~300 Mbit/s. Each side applies its own value, so versions may differ.
 CHUNK = 64 * 1024        # largest single binary frame
 HEARTBEAT_S = 30
 OFFLINE_AFTER_S = 90     # three missed heartbeats

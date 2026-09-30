@@ -2,7 +2,7 @@ import { RegionBadge, RegionOverlay } from "./RegionPaint";
 import { useEffect, useRef, useState } from "react";
 import { playbackUrl } from "./api";
 import type { Camera } from "./api";
-import { chunkLen, isBuffered, spanAt, useLatestFrame, type Span } from "./playback";
+import { PREFETCH_LEAD_S, chunkLen, dropPrefetch, firstChunkLen, isBuffered, prefetchChunk, spanAt, useLatestFrame, type Prefetched, type Span } from "./playback";
 
 export type TileStatus = "idle" | "paused" | "playing" | "buffering" | "gap";
 const DRIFT_S = 0.5;      // paused: re-seek a tile further than this from the shared clock
@@ -30,8 +30,10 @@ export function SyncTile({
   statusRef: React.RefObject<Record<string, TileStatus>>;
 }) {
   const video = useRef<HTMLVideoElement>(null);
-  const [chunk, setChunk] = useState<{ start: number; key: number; len: number } | null>(null);
+  const [chunk, setChunk] = useState<{ start: number; key: number; len: number; src: string } | null>(null);
   const loaded = useRef(false);
+  const prefetch = useRef<Prefetched | null>(null);   // the chunk after the current one, downloading ahead of need
+  const blobInUse = useRef<string | null>(null);      // the current chunk's blob URL, revoked when it is replaced
   const [status, setStatus] = useState<TileStatus>("idle");
   const frames = useLatestFrame(previewWidth);
   const props = useRef({ playing, speed, spans, scrubbing });
@@ -43,9 +45,32 @@ export function SyncTile({
     statusRef.current![cam] = s;
     setStatus((prev) => (prev === s ? prev : s));
   };
-  const load = (t: number) => {
+  /** Start a chunk at `t`. A seek (`cont` false) far back uses a short first chunk so video appears within a
+   *  second; a continuation (`cont` true) uses the full length and the prefetched download when it has one. */
+  const load = (t: number, cont = false) => {
     loaded.current = false;
-    setChunk({ start: t, key: Date.now(), len: chunkLen(t) });
+    if (blobInUse.current) URL.revokeObjectURL(blobInUse.current);
+    blobInUse.current = null;
+    let len = cont ? chunkLen(t) : firstChunkLen(t);
+    let src = playbackUrl(cam, t, len);
+    const p = prefetch.current;
+    if (p && Math.abs(p.start - t) < 1 && p.url) {
+      len = p.len;
+      src = p.url;
+      blobInUse.current = p.url;
+      prefetch.current = null;           // handed over; not revoked
+    } else {
+      dropPrefetch(p);                   // stale or unfinished: a new one starts once this chunk plays
+      prefetch.current = null;
+    }
+    setChunk({ start: t, key: Date.now(), len, src });
+  };
+  /** The current chunk is running out: download the next one now so the switch is seamless. */
+  const prefetchNext = (c: { start: number; len: number }) => {
+    const next = c.start + c.len + 0.1;
+    if (prefetch.current || !spanAt(props.current.spans, next)) return;
+    const len = chunkLen(next);
+    prefetch.current = prefetchChunk(playbackUrl(cam, next, len), next, len);
   };
 
   // Follow the shared clock.
@@ -88,6 +113,7 @@ export function SyncTile({
       if (Math.abs(v.playbackRate - rate) > 0.01) v.playbackRate = rate;
       if (playing && v.paused) v.play().catch(() => {});
       if (!playing && !v.paused) v.pause();
+      if (playing && c.start + c.len - t < PREFETCH_LEAD_S * Math.max(1, speed)) prefetchNext(c);
       report(!playing ? "paused" : v.readyState >= 3 && !v.paused ? "playing" : "buffering");
     };
     tick();
@@ -95,6 +121,10 @@ export function SyncTile({
     return () => {
       window.clearInterval(id);
       delete statusRef.current![cam];
+      dropPrefetch(prefetch.current);
+      prefetch.current = null;
+      if (blobInUse.current) URL.revokeObjectURL(blobInUse.current);
+      blobInUse.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cam]);
@@ -131,7 +161,7 @@ export function SyncTile({
         <video
           key={chunk.key}
           ref={video}
-          src={playbackUrl(cam, chunk.start, chunk.len)}
+          src={chunk.src}
           muted
           playsInline
           onLoadedMetadata={(e) => {
@@ -143,7 +173,7 @@ export function SyncTile({
           onEnded={(e) => {
             const d = e.currentTarget.duration;
             const next = chunk.start + (Number.isFinite(d) && d > 0 ? d : chunk.len) + 0.1;
-            if (spanAt(props.current.spans, next)) load(next);
+            if (spanAt(props.current.spans, next)) load(next, true);
           }}
         />
       )}

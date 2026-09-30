@@ -3,8 +3,34 @@ import { frameUrl } from "./api";
 
 export const CHUNK = 600; // seconds of recording loaded per playback request near live
 export const FAR_CHUNK = 120; // ...and when scrubbing back in time: several cameras each pulling a 10-minute file over a remote link is what buffers
+export const FIRST_FAR_CHUNK = 20; // the first chunk after a far-back seek: small, so playback starts within a second; the next one is prefetched
+export const PREFETCH_LEAD_S = 15; // start fetching the next chunk this long before the current one ends
+export const FAR_S = 1800;
+export const isFar = (t: number): boolean => nowS() - t >= FAR_S;
 /** How long a playback chunk starting at `t` should be. */
-export const chunkLen = (t: number): number => (nowS() - t < 1800 ? CHUNK : FAR_CHUNK);
+export const chunkLen = (t: number): number => (isFar(t) ? FAR_CHUNK : CHUNK);
+/** ...and for the first chunk after a seek: a short one far back, so the tile shows video quickly while the
+ *  full-length continuation downloads behind it. */
+export const firstChunkLen = (t: number): number => (isFar(t) ? FIRST_FAR_CHUNK : CHUNK);
+
+export type Prefetched = { start: number; len: number; url: string | null; ctrl: AbortController; done: boolean };
+
+/** Download the chunk at `start` into memory (a blob URL) so the next <video> starts from cache, not the network. */
+export function prefetchChunk(fetchUrl: string, start: number, len: number): Prefetched {
+  const ctrl = new AbortController();
+  const p: Prefetched = { start, len, url: null, ctrl, done: false };
+  fetch(fetchUrl, { signal: ctrl.signal })
+    .then((r) => (r.ok ? r.blob() : null))
+    .then((b) => { if (b && !ctrl.signal.aborted) p.url = URL.createObjectURL(b); })
+    .catch(() => { /* aborted or offline: the tile falls back to a network URL */ })
+    .finally(() => { p.done = true; });
+  return p;
+}
+export function dropPrefetch(p: Prefetched | null): void {
+  if (!p) return;
+  if (!p.done) p.ctrl.abort();
+  if (p.url) URL.revokeObjectURL(p.url);
+}
 export const LIVE_LAG = 3; // MediaMTX flushes fMP4 parts every second; stay a little behind "now"
 
 export type Span = { start: number; end: number };
