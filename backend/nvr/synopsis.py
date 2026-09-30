@@ -178,7 +178,7 @@ class OllamaServer:
                # Vulkan ignores CUDA_VISIBLE_DEVICES and would expose the YOLO GPU too.
                "OLLAMA_VULKAN": "0", "GGML_VK_VISIBLE_DEVICES": "",
                # GPU 1 is Qwen's: never unload it (a reload costs 1-3 min on Windows)
-               "OLLAMA_KEEP_ALIVE": "-1", "OLLAMA_NUM_PARALLEL": "1",
+               "OLLAMA_KEEP_ALIVE": "-1", "OLLAMA_NUM_PARALLEL": str(settings.ollama_parallel),
                # 8 GB shared with the Windows desktop: a q8 KV cache (needs flash attention) keeps the whole
                # model and its context in VRAM instead of spilling layers to the CPU, which made calls take minutes.
                "OLLAMA_FLASH_ATTENTION": "1", "OLLAMA_KV_CACHE_TYPE": "q8_0",

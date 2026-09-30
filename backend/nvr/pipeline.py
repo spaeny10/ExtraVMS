@@ -251,7 +251,7 @@ class Pipeline:
 
     RETRY_MAX = 3            # attempts per event before it stays undescribed (the error is shown on the card)
     RETRY_BACKOFF_S = 300    # after a failure, wait this long before trying the backlog again
-    RETRY_BATCH = 25
+    RETRY_BATCH = 10         # per minute at most: the backlog must not crowd out live events on a shared model
     RETRY_WINDOW_S = 7 * 86400
 
     def retry_failed_synopses(self, limit: int = RETRY_BATCH) -> int:

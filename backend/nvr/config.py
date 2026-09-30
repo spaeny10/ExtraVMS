@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     ollama_gpu: str = "1"
     vlm_model: str = "qwen2.5vl:7b"
     vlm_num_ctx: int = 6144
+    # Requests Qwen serves at once. 1 on an 8 GB card. A 24 GB card serving several sites through the hub can
+    # take 2: one request's image encoding overlaps another's token generation (~+40% throughput; each slot
+    # holds its own vlm_num_ctx KV cache).
+    ollama_parallel: int = 1
     chat_frames: int = 4                    # frames per chat question (~1,050 tokens each)
     embed_model: str = "nomic-embed-text"
     synopsis_images: int = 4
