@@ -63,7 +63,7 @@ PIP="$NVR_DIR/.venv/bin/pip"
 if [ "$CPU" = 1 ]; then
   "$PIP" install -q torch torchvision --index-url https://download.pytorch.org/whl/cpu
 else
-  "$PIP" install -q torch torchvision --index-url https://download.pytorch.org/whl/cu126
+  "$PIP" install -q torch torchvision --index-url https://download.pytorch.org/whl/cu128
 fi
 (cd "$NVR_DIR/backend" && "$PIP" install -q -r requirements.txt)
 

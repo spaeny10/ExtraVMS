@@ -1,5 +1,6 @@
 # PyTorch: install first. With an NVIDIA GPU use the CUDA index, on a CPU-only box the CPU index:
-#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+#   (cu128 or newer: the cu126 build has no kernels for Blackwell cards such as the RTX PRO 4000, "no kernel image is available")
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 #   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 ultralytics
 open_clip_torch
