@@ -77,3 +77,11 @@ def test_retry_due_gates_on_ready_idle_backoff_and_breaker():
     finally:
         vlmroute.router.down_until = old
     assert p.retry_due()
+
+
+if __name__ == "__main__":
+    for name, fn in list(globals().items()):
+        if name.startswith("test_"):
+            fn()
+            print("ok", name)
+    print("all passed")

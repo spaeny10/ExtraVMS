@@ -112,7 +112,8 @@ async def lifespan(app: FastAPI):
     for ing in state.ingests.values():
         ing.stop()
     await state.mtx.stop()
-    await state.ollama.stop()
+    if state.ollama is not None:   # a site without a local model has no Ollama to stop
+        await state.ollama.stop()
     for t in state.tasks:
         t.cancel()
 

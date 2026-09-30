@@ -1,7 +1,10 @@
 """VlmGate: chat ahead of background, re-entrant within one task (an Ask must never wait on itself)."""
 import asyncio
+import sys
+from pathlib import Path
 
-from nvr.synopsis import VlmGate
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from nvr.synopsis import VlmGate  # noqa: E402
 
 
 def run(coro):
@@ -63,3 +66,11 @@ def test_background_nested_in_background_passes_through():
                 assert g.lock.locked()
         assert not g.lock.locked()
     run(main())
+
+
+if __name__ == "__main__":
+    for name, fn in list(globals().items()):
+        if name.startswith("test_"):
+            fn()
+            print("ok", name)
+    print("all passed")
