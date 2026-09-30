@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import contextvars
 import datetime as dt
 import json
 import logging
@@ -294,22 +295,42 @@ async def chat_stream(event: dict, camera: dict, frames: list[tuple[float, bytes
             yield val
 
 
+_gate_held: contextvars.ContextVar[bool] = contextvars.ContextVar("vlm_gate_held", default=False)
+
+
 class VlmGate:
-    """One VLM request at a time; interactive chat always goes ahead of background synopses."""
+    """One VLM request at a time; interactive chat always goes ahead of background synopses.
+
+    Re-entrant within a task: a request that already holds the gate (an Ask whose handler and the router both
+    take a chat turn) passes straight through instead of waiting on itself, which once froze every synopsis.
+    A background turn that waits unusually long is logged, so a stuck holder shows up in the log."""
+
+    WAIT_WARN_S = 120
 
     def __init__(self) -> None:
         self.lock = asyncio.Lock()
         self.chat_waiting = 0
         self.no_chat = asyncio.Event()
         self.no_chat.set()
+        self.held_since: float | None = None
+        self.holder = ""
 
     @contextlib.asynccontextmanager
     async def chat(self):
+        if _gate_held.get():
+            yield
+            return
         self.chat_waiting += 1
         self.no_chat.clear()
         try:
             async with self.lock:
-                yield
+                token = _gate_held.set(True)
+                self.held_since, self.holder = time.time(), "chat"
+                try:
+                    yield
+                finally:
+                    _gate_held.reset(token)
+                    self.held_since = None
         finally:
             self.chat_waiting -= 1
             if not self.chat_waiting:
@@ -317,15 +338,31 @@ class VlmGate:
 
     @contextlib.asynccontextmanager
     async def background(self):
+        if _gate_held.get():
+            yield
+            return
+        t0, warned = time.time(), False
         while True:
-            await self.no_chat.wait()
-            await self.lock.acquire()
+            try:
+                await asyncio.wait_for(self.no_chat.wait(), self.WAIT_WARN_S)
+                await asyncio.wait_for(self.lock.acquire(), self.WAIT_WARN_S)
+            except asyncio.TimeoutError:
+                if not warned:
+                    warned = True
+                    log.warning("VLM gate: a background call has waited %.0fs (held by %s for %.0fs, %d chat waiting)",
+                                time.time() - t0, self.holder or "nobody",
+                                time.time() - self.held_since if self.held_since else 0, self.chat_waiting)
+                continue
             if not self.chat_waiting:
                 break
             self.lock.release()
+        token = _gate_held.set(True)
+        self.held_since, self.holder = time.time(), "background"
         try:
             yield
         finally:
+            _gate_held.reset(token)
+            self.held_since = None
             self.lock.release()
 
 

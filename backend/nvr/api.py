@@ -813,10 +813,11 @@ async def post_chat(event_id: int, body: ChatIn):
                 raise RuntimeError("no recording available for this event")
             frames_meta = [{"file": name, "t": t} for t, _, name in frames]
             yield json.dumps({"type": "frames", "frames": frames_meta}) + "\n"
-            async with p.gate.chat():
-                async for chunk in vlm.chat_stream(e, camera, [(t, b) for t, b, _ in frames], history, body.message):
-                    answer += chunk
-                    yield json.dumps({"type": "delta", "text": chunk}) + "\n"
+            # chat_stream takes the Qwen gate itself (vlmroute, "chat" priority). Taking it here as well made one
+            # Ask wait on its own lock forever and froze every synopsis behind it.
+            async for chunk in vlm.chat_stream(e, camera, [(t, b) for t, b, _ in frames], history, body.message):
+                answer += chunk
+                yield json.dumps({"type": "delta", "text": chunk}) + "\n"
             msg_id = db.add_chat(event_id, "assistant", answer.strip(), frames=frames_meta, at=body.at)
             yield json.dumps({"type": "done", "id": msg_id}) + "\n"
         except Exception as ex:  # surface errors to the UI instead of a broken stream
