@@ -10,6 +10,8 @@ import json
 import logging
 import os
 import re
+import signal
+import subprocess
 import time
 
 import httpx
@@ -188,15 +190,35 @@ class OllamaServer:
             return
         log_file = open(settings.runtime_dir / "ollama.log", "ab")
         while True:
+            # own process group / session so stop() can take the model runners (llama-server) down with the server
+            kw = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
             self.proc = await asyncio.create_subprocess_exec(str(settings.ollama_exe), "serve", env=env,
-                                                             stdout=log_file, stderr=log_file)
+                                                             stdout=log_file, stderr=log_file, **kw)
             code = await self.proc.wait()
             log.warning("ollama serve exited (%s); restarting in 5s", code)
             await asyncio.sleep(5)
 
     async def stop(self) -> None:
+        """Stop `ollama serve` and its runner children. Terminating only the server orphaned one llama-server per
+        watchdog restart while a GPU was lost; each kept ~7 GB committed and twelve of them exhausted the machine."""
         if self.proc and self.proc.returncode is None:
-            self.proc.terminate()
+            await kill_tree(self.proc.pid)
+
+
+async def kill_tree(pid: int) -> None:
+    """Kill a process and every descendant (Windows: taskkill /T; POSIX: the process group it leads)."""
+    try:
+        if os.name == "nt":
+            p = await asyncio.create_subprocess_exec("taskkill", "/PID", str(pid), "/T", "/F",
+                                                     stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+            await p.wait()
+        else:
+            os.killpg(pid, signal.SIGTERM)
+            await asyncio.sleep(3)
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(pid, signal.SIGKILL)
+    except (ProcessLookupError, OSError) as e:
+        log.debug("kill_tree %s: %s", pid, e)
 
 
 async def wait_ready(timeout: float = 60) -> bool:

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -20,6 +21,22 @@ from .tracker import Tracker
 from .verifier import Verifier, event_dir, grab_frames
 
 log = logging.getLogger("nvr.pipeline")
+_ATTEMPT = re.compile(r"^synopsis \(attempt (\d+)\)")
+
+
+def synopsis_attempts(e: dict | None) -> int:
+    """How many times Qwen has failed on this event, read back from its error text (no schema change)."""
+    err = (e or {}).get("error") or ""
+    if not err.startswith("synopsis"):
+        return 0
+    m = _ATTEMPT.match(err)
+    return int(m.group(1)) if m else 1
+
+
+def synopsis_error(e: dict | None, ex: Exception) -> str:
+    """Error text for a failed synopsis; the second failure onwards carries the attempt count for retry_loop."""
+    n = synopsis_attempts(e) + 1
+    return f"synopsis: {ex}" if n == 1 else f"synopsis (attempt {n}): {ex}"
 
 
 class Pipeline:
@@ -33,6 +50,7 @@ class Pipeline:
         self.synopsis_pending: set[int] = set()  # queued or being written now; the UI shows "Qwen is writing…"
         self.synopsis_hold: dict[int, float] = {}  # verified events waiting for a possible follow-on fragment (merge.py)
         self.synopsis_times: deque[float] = deque(maxlen=50)  # seconds per synopsis, for Optimize my system
+        self.synopsis_failed_at = 0.0    # last synopsis that ended in an error (retry_loop backs off from it)
         self.journey_q: asyncio.Queue[int] = asyncio.Queue()
         self.tracker = Tracker(self.verify_q.put)
         self.gpu = ThreadPoolExecutor(max_workers=1, thread_name_prefix="yolo")
@@ -121,6 +139,7 @@ class Pipeline:
         asyncio.create_task(self._vehicle_backfill(), name="vehicle-backfill")
         asyncio.create_task(self._cells_backfill(), name="cells-backfill")
         asyncio.create_task(self.hold_loop(), name="synopsis-hold")
+        asyncio.create_task(self.retry_loop(), name="synopsis-retry")
         while True:
             event_id = await self.verify_q.get()
             try:
@@ -222,12 +241,52 @@ class Pipeline:
                 continue
             except Exception as ex:
                 log.exception("synopsis %s failed", event_id)
-                db.update_event(event_id, error=f"synopsis: {ex}")
+                self.synopsis_failed_at = time.time()
+                db.update_event(event_id, error=synopsis_error(db.event(event_id), ex))
             finally:
                 self.synopsis_pending.discard(event_id)
             self.publish(event_id)
             # Link across cameras after the synopsis, so Qwen can also compare both descriptions.
             await self.journey_q.put(event_id)
+
+    RETRY_MAX = 3            # attempts per event before it stays undescribed (the error is shown on the card)
+    RETRY_BACKOFF_S = 300    # after a failure, wait this long before trying the backlog again
+    RETRY_BATCH = 25
+    RETRY_WINDOW_S = 7 * 86400
+
+    def retry_failed_synopses(self, limit: int = RETRY_BATCH) -> int:
+        """Requeue verified events whose synopsis failed (Qwen or the remote AI was down): newest first, at most
+        RETRY_MAX attempts each, only events from the last week that this camera still wants described."""
+        n = 0
+        for r in db.all("SELECT id FROM events WHERE status='verified' AND synopsis IS NULL AND error LIKE 'synopsis%' "
+                        "AND start_ts > ? ORDER BY start_ts DESC", [time.time() - self.RETRY_WINDOW_S]):
+            e = db.event(r["id"])
+            if not e or synopsis_attempts(e) >= self.RETRY_MAX or not self.wants_synopsis(e):
+                continue
+            if self.queue_synopsis(e["id"]):
+                n += 1
+                if n >= limit:
+                    break
+        if n:
+            log.info("Qwen is back: retrying %d events whose synopsis failed", n)
+        return n
+
+    def retry_due(self, now: float | None = None) -> bool:
+        """Retry only when the model is ready, the live queue is idle, nothing failed recently, and (remote AI) the
+        router's circuit breaker is not open. Keeps a dead remote from being hammered and live events first."""
+        now = now or time.time()
+        if not self.vlm_ready or self.synopsis_pending or now - self.synopsis_failed_at < self.RETRY_BACKOFF_S:
+            return False
+        return now >= vlmroute.router.down_until
+
+    async def retry_loop(self) -> None:
+        while True:
+            await asyncio.sleep(60)
+            try:
+                if self.retry_due():
+                    self.retry_failed_synopses()
+            except Exception:
+                log.exception("synopsis retry pass failed")
 
     async def journey_loop(self) -> None:
         while True:
