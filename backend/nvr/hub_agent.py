@@ -38,6 +38,7 @@ CLAIM_TTL_S = 15 * 60
 _ENV_PINNED = frozenset(settings.model_fields_set) & {"remote_vlm_url", "remote_vlm_key", "remote_vlm_model"}
 CLAIM_ALPHABET = string.ascii_uppercase.replace("O", "").replace("I", "") + "23456789"
 IN_PROCESS_CLIENT = ("hub", 0)   # scope["client"] marker: the request came down the tunnel, not from the LAN
+BULK_FRAME = 1024 * 1024         # video bodies go up the tunnel in 1 MB frames (uvicorn's WebSocket limit at the hub is 16 MB)
 
 
 def new_claim() -> dict:
@@ -131,8 +132,10 @@ class HubAgent:
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
             kw["ssl"] = ctx
+        # compression=None: the client library enables permessage-deflate by default, and zlib-compressing
+        # incompressible H.265 playback ate a whole CPU core (88% of the process in deflate; ~20 MB/s cap).
         async with websockets.connect(url, additional_headers={"Authorization": self._auth_header()},
-                                      max_size=CHUNK + 1024, ping_interval=None, open_timeout=15, **kw) as ws:
+                                      max_size=CHUNK + 1024, ping_interval=None, open_timeout=15, compression=None, **kw) as ws:
             self._ws = ws
             cams = [{"id": c["id"], "name": c["name"]} for c in db.cameras(enabled_only=True)]
             await self._send({"t": "hello", "proto": PROTO, "site_version": __version__, "cameras": cams, "now": time.time(),
@@ -238,6 +241,8 @@ class HubAgent:
                  "query_string": query.encode(), "root_path": "", "headers": headers,
                  "client": IN_PROCESS_CLIENT, "server": ("hub", 0), "state": {}}
         started = False
+        bulk = False
+        pending = bytearray()
 
         async def receive():
             data = await s.read()
@@ -246,21 +251,29 @@ class HubAgent:
             return {"type": "http.request", "body": data, "more_body": True}
 
         async def send(msg):
-            nonlocal started
+            nonlocal started, bulk
             if s.aborted:
                 raise asyncio.CancelledError
             if msg["type"] == "http.response.start":
                 started = True
                 hdrs = {k.decode(): v.decode() for k, v in msg.get("headers", [])}
+                # Video bodies arrive from MediaMTX in small pieces; sending each as its own frame made the
+                # tunnel CPU-bound (~160 Mbit/s on loopback). Coalesce them into big frames; interactive
+                # bodies (Ask NDJSON, events) keep flowing piece by piece.
+                bulk = hdrs.get("content-type", "").lower().startswith(("video/", "application/octet-stream"))
                 await self._send({"t": "res", "id": s.id, "status": msg["status"], "headers": hdrs})
             elif msg["type"] == "http.response.body":
-                body = msg.get("body", b"")
-                for piece in split(body):
+                last = not msg.get("more_body", False)
+                pending.extend(msg.get("body", b""))
+                if bulk and len(pending) < BULK_FRAME and not last:
+                    return
+                for piece in split(bytes(pending), BULK_FRAME if bulk else CHUNK):
                     await s.take_credit(len(piece))
                     if s.aborted:
                         raise asyncio.CancelledError
                     await self._send_bytes(chunk(s.id, piece))
-                if not msg.get("more_body", False):
+                pending.clear()
+                if last:
                     await self._send({"t": "end", "id": s.id})
 
         try:
