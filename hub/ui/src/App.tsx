@@ -29,7 +29,7 @@ export default function App() {
     <>
       <OfflineBanner />
       <header className="hub-top">
-        <span className="brand"><img className="logo" src="/axiom.webp" alt="Axiom" /> Vision</span>
+        <span className="brand"><img className="logo" src="/axiom.webp" alt="Axiom Vision" /></span>
         <nav>{PAGES.map(([p, label]) => <a key={p} href={p} className={(p === "/" ? page === "home" : path.startsWith(p)) ? "active" : ""} onClick={(e) => { e.preventDefault(); navigate(p); }}>{label}</a>)}</nav>
         <span className="spacer" />
         {orgs.length > 1 && <select value={current?.id ?? ""} onChange={(e) => setOrg(e.target.value)}>{orgs.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select>}
