@@ -5,6 +5,7 @@ timestamps, run YOLO, and check that YOLO sees the same class where the camera s
 """
 from __future__ import annotations
 
+import gc
 import logging
 import os
 from pathlib import Path
@@ -165,6 +166,10 @@ def grab_frames(clip: Path, clip_start: float, targets: list[float]) -> dict[flo
                         best[w] = (d, img)
             if t > last_target + 0.6:
                 break
+    # Frame-threaded decoding leaves the decoder's frames in reference cycles that only the cyclic collector
+    # frees. On a CPU-only site (Python 3.14, 4K HEVC) that leaked ~14 MB per decoded frame, ~600 MB per event,
+    # and the kernel killed the service every five minutes. Collect now, while the frames are still small in number.
+    gc.collect()
     return {w: v[1] for w, v in best.items()}
 
 
