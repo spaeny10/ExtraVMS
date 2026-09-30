@@ -74,7 +74,7 @@ if [ ! -f "$ENV" ]; then
 NVR_RECORDINGS_DIR=/srv/nvr/recordings
 NVR_BACKUP_DIR=/srv/nvr/backups
 NVR_MEDIAMTX_EXE=$MTX_DIR/mediamtx
-NVR_HUB_URL=ws://192.168.105.105:8000/agent
+NVR_HUB_URL=wss://hub.axiomvision.ai/agent
 EOF
   if [ "$CPU" = 1 ]; then
     cat >> "$ENV" <<EOF

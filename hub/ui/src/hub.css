@@ -1,6 +1,7 @@
 /* Hub pages on top of the site toolkit's tokens (styles.css). */
 .hub-top { display: flex; align-items: center; gap: 14px; padding: 8px 16px; border-bottom: 1px solid var(--border); background: var(--panel); position: sticky; top: 0; z-index: 5; }
 .hub-top .brand { font-weight: 700; display: flex; align-items: center; gap: 8px; }
+.hub-top .logo { height: 20px; width: auto; display: block; filter: brightness(1.75); }
 .hub-top nav { display: flex; gap: 4px; }
 .hub-top nav a { padding: 6px 10px; border-radius: 6px; color: var(--text); text-decoration: none; }
 .hub-top nav a.active { background: var(--panel-2); }

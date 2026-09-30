@@ -58,7 +58,7 @@ async def _sweeper() -> None:
         await asyncio.sleep(30)
 
 
-app = FastAPI(title="NewVMS Hub", lifespan=lifespan)
+app = FastAPI(title="Axiom Vision Hub", lifespan=lifespan)
 
 
 @app.middleware("http")
@@ -136,7 +136,7 @@ async def change_password(body: PasswordIn, u: dict = Depends(user)):
 async def totp_setup(u: dict = Depends(user)):
     secret = pyotp.random_base32()
     db.run(sa.update(db.users).where(db.users.c.id == u["id"]).values(totp_secret=secret, totp_enabled=False))
-    return {"secret": secret, "uri": pyotp.TOTP(secret).provisioning_uri(name=u["email"], issuer_name="NewVMS Hub")}
+    return {"secret": secret, "uri": pyotp.TOTP(secret).provisioning_uri(name=u["email"], issuer_name="Axiom Vision")}
 
 
 class TotpIn(BaseModel):
@@ -210,7 +210,7 @@ async def org_usage(org_id: str, days: int = Query(30, ge=1, le=365), u: dict = 
     for r in rows:
         r["site_name"] = names.get(r["site_id"], r["site_id"])
     return {"ai_shared": bool(org and org.get("ai_shared")), "configured": vlm_proxy.configured(), "model": settings.vllm_model,
-            "turn": turn.configured(), "days": days, "sites": rows}
+            "provider": vlm_proxy.status(), "turn": turn.configured(), "days": days, "sites": rows}
 
 
 class MemberIn(BaseModel):

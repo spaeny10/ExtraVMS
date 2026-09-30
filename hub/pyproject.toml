@@ -1,7 +1,7 @@
 [project]
-name = "newvms-hub"
+name = "axiom-vision-hub"
 version = "0.1.0"
-description = "NewVMS fleet hub: one webpage for every site; sites dial out, nothing is port-forwarded."
+description = "Axiom Vision fleet hub: one webpage for every site; sites dial out, nothing is port-forwarded."
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.110",
@@ -13,6 +13,10 @@ dependencies = [
   "pyotp>=2.9",
   "pydantic-settings>=2",
   "httpx>=0.27",
+  "email-validator>=2",
+  "pywebpush>=2",
+  "py-vapid>=1.9",
+  "cryptography>=42",
   "tunnelproto",
 ]
 

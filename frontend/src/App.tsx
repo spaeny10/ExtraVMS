@@ -145,7 +145,7 @@ export default function App() {
       <OfflineBanner />
       <header className="topbar">
         <div className="brand">
-          <span className="logo" /> NewVMS
+          <img className="logo" src="axiom.webp" alt="Axiom" /> Vision
         </div>
         <nav>
           {TABS.map((t) => (

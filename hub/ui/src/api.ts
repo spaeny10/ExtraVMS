@@ -17,7 +17,7 @@ export type Fleet = { orgs: { org: Org; sites: Site[]; open_alerts: number }[]; 
 export type Alert = { id: number; org_id: string; site_id: string; site_name: string; kind: string; key: string; opened_at: number; closed_at: number | null; acked_by: string | null; detail: Record<string, unknown> };
 export type Member = { id: string; email: string; role: string; totp_enabled: boolean; last_login_at: number | null; sites: string[] };
 export type AuditRow = { id: number; ts: number; user_email: string | null; site_id: string | null; action: string; method: string | null; path: string | null; status: number | null; ip: string | null };
-export type Usage = { ai_shared: boolean; configured: boolean; model: string; turn: boolean; days: number; sites: { site_id: string; site_name: string; requests: number; prompt_tokens: number; completion_tokens: number; latency_ms: number; errors: number }[] };
+export type Usage = { ai_shared: boolean; configured: boolean; model: string; provider: { kind: "site" | "url" | "none"; site_id?: string; site_name?: string | null; online: boolean }; turn: boolean; days: number; sites: { site_id: string; site_name: string; requests: number; prompt_tokens: number; completion_tokens: number; latency_ms: number; errors: number }[] };
 export type FleetSearch = {
   q: string; sites: { site_id: string; site_name: string; error: string | null; events: number; footage: number }[]; offline: string[];
   events: (Record<string, unknown> & { id: number; camera_id: string; start_ts: number; synopsis?: string | null; camera_class: string; site_id: string; site_name: string; snapshot?: string | null })[];

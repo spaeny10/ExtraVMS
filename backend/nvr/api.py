@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 
 from . import assistant, backup, baseline, footage, frames, health, identities, journeys, keep, mediamtx, policy, ptz, retention, zones
 from . import synopsis as vlm
-from . import advisor, hub_agent, siteconfig
+from . import advisor, ai_serve, hub_agent, siteconfig
 from . import vlmroute
 from .config import ROOT, settings
 from .db import db
@@ -118,7 +118,8 @@ async def lifespan(app: FastAPI):
         t.cancel()
 
 
-app = FastAPI(title="NewVMS", lifespan=lifespan)
+app = FastAPI(title="Axiom Vision", lifespan=lifespan)
+app.include_router(ai_serve.router)   # this site's Qwen for the fleet, tunnel-only (see ai_serve.py)
 
 
 @app.middleware("http")

@@ -1,7 +1,8 @@
-# Production hub: Caddy (80/443, Let's Encrypt) -> hub -> Postgres. Only 80 and 443 are open; sites open nothing.
-#   cp hub/.env.example hub/.env   (set HUB_SECRET, HUB_PUBLIC_URL, POSTGRES_PASSWORD)
+# Production hub: Caddy (80/443, Let's Encrypt) -> hub -> Postgres, plus coturn. Only the hub opens ports; sites open nothing.
+#   cp hub/.env.example hub/.env   (set HUB_DOMAIN, HUB_PUBLIC_URL, HUB_SECRET, POSTGRES_PASSWORD, HUB_TURN_SECRET, HUB_VLLM_SITE)
 #   docker compose -f hub/docker-compose.yml up -d --build
 #   docker compose -f hub/docker-compose.yml exec hub python -m hub createsuper you@example.com
+# Update: git pull && docker compose -f hub/docker-compose.yml up -d --build
 services:
   caddy:
     image: caddy:2
@@ -12,22 +13,26 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     environment:
-      HUB_DOMAIN: ${HUB_DOMAIN:-cloudvms.bigview.ai}
+      HUB_DOMAIN: ${HUB_DOMAIN:-hub.axiomvision.ai}
     depends_on: [hub]
 
   hub:
     build: { context: .., dockerfile: hub/Dockerfile }
     restart: unless-stopped
     environment:
+      TZ: ${TZ:-America/Chicago}                       # digest (07:30) and backups (03:00) run in this zone
       HUB_DATABASE_URL: postgresql+psycopg://hub:${POSTGRES_PASSWORD:-change-me}@postgres:5432/hub
       HUB_SECRET: ${HUB_SECRET:?set HUB_SECRET in hub/.env}
-      HUB_PUBLIC_URL: ${HUB_PUBLIC_URL:-https://cloudvms.bigview.ai}
+      HUB_PUBLIC_URL: ${HUB_PUBLIC_URL:-https://hub.axiomvision.ai}
       HUB_COOKIE_SECURE: "1"
-      HUB_TURN_HOST: ${HUB_DOMAIN:-cloudvms.bigview.ai}
+      HUB_TURN_HOST: ${HUB_DOMAIN:-hub.axiomvision.ai}
       HUB_TURN_SECRET: ${HUB_TURN_SECRET:-}
-      HUB_VLLM_URL: ${HUB_VLLM_URL:-http://vllm:8000/v1}
-      HUB_VLLM_KEY: ${HUB_VLLM_KEY:-internal}
-      HUB_VLLM_MODEL: ${HUB_VLLM_MODEL:-Qwen/Qwen2.5-VL-32B-Instruct-AWQ}
+      # Shared AI: either a site whose local Qwen serves the fleet through its tunnel (no GPU on the hub) ...
+      HUB_VLLM_SITE: ${HUB_VLLM_SITE:-}
+      # ... or a vLLM/Ollama the hub reaches directly (the `ai` profile below, or any OpenAI-compatible URL).
+      HUB_VLLM_URL: ${HUB_VLLM_URL:-}
+      HUB_VLLM_KEY: ${HUB_VLLM_KEY:-}
+      HUB_VLLM_MODEL: ${HUB_VLLM_MODEL:-}
     depends_on:
       postgres: { condition: service_healthy }
     expose: ["8000"]
@@ -46,15 +51,16 @@ services:
       timeout: 3s
       retries: 20
 
-  # TURN relay so live video reaches browsers outside the sites' LANs. Open 3478/udp+tcp, 5349/tcp, 49152-49252/udp.
+  # TURN relay so live video reaches browsers outside the sites' LANs. Open 3478/udp+tcp and 49152-49252/udp.
   coturn:
     image: coturn/coturn:4
     restart: unless-stopped
     network_mode: host
     volumes: ["./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro"]
-    command: ["-c", "/etc/coturn/turnserver.conf", "--static-auth-secret=${HUB_TURN_SECRET:?set HUB_TURN_SECRET in hub/.env}", "--realm=${HUB_DOMAIN:-cloudvms.bigview.ai}"]
+    command: ["-c", "/etc/coturn/turnserver.conf", "--static-auth-secret=${HUB_TURN_SECRET:?set HUB_TURN_SECRET in hub/.env}", "--realm=${HUB_DOMAIN:-hub.axiomvision.ai}"]
 
-  # Shared AI (optional: docker compose --profile ai up): Qwen2.5-VL-32B on the hub's GPU, only reachable through the hub proxy.
+  # Shared AI on the hub's own GPU (optional: docker compose --profile ai up), e.g. Qwen2.5-VL-32B. Set
+  # HUB_VLLM_URL=http://vllm:8000/v1 and HUB_VLLM_KEY to match.
   vllm:
     image: vllm/vllm-openai:latest
     profiles: ["ai"]

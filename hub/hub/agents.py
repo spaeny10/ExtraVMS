@@ -266,7 +266,7 @@ class AgentRegistry:
     @staticmethod
     def vlm_config(org: dict | None, token: str | None) -> dict | None:
         """What a site should put in its remote-VLM settings: the hub's /v1 with its own device token as key."""
-        if not (org and org.get("ai_shared") and settings.vllm_url and settings.vllm_model and token):
+        if not (org and org.get("ai_shared") and (settings.vllm_url or settings.vllm_site) and settings.vllm_model and token):
             return None
         return {"url": settings.public_url.rstrip("/") + "/v1", "model": settings.vllm_model, "key": token}
 

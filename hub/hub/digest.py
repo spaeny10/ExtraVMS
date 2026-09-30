@@ -58,18 +58,15 @@ async def _summarise(org_name: str, parts: list[dict]) -> str | None:
         return None
     facts = "\n\n".join(f"Site: {p['site_name']} ({'online' if p['online'] else 'OFFLINE'})\nToday: {p['today']}\nCameras down: {p['cameras_down']}\n"
                         f"Open alerts: {p['open_alerts']}\nSite briefing: {p['text'] or p['headline'] or 'none'}" for p in parts)
-    body = {"model": settings.vllm_model, "max_tokens": 500, "temperature": 0.2, "messages": [
+    messages = [
         {"role": "system", "content": "You write the morning digest for a security operator who runs several sites. Be factual and brief: "
                                       "5-8 bullets, the important things first (offline sites, cameras down, site-rule breaks, unusual events), "
                                       "then a one-line note per quiet site. Use the site names given. No preamble."},
-        {"role": "user", "content": f"Organisation: {org_name}\n\n{facts}"}]}
+        {"role": "user", "content": f"Organisation: {org_name}\n\n{facts}"}]
     try:
-        r = await vlm_proxy.client().post("/chat/completions", json=body, headers={"Authorization": f"Bearer {settings.vllm_key}"} if settings.vllm_key else {})
-        if r.status_code == 200:
-            return r.json()["choices"][0]["message"]["content"].strip()
-        log.warning("digest: vLLM %s", r.status_code)
+        return await vlm_proxy.complete(messages, max_tokens=500, temperature=0.2)   # direct vLLM or a site's tunnel
     except Exception as e:
-        log.warning("digest: vLLM failed: %s", e)
+        log.warning("digest: shared AI failed: %s", e)
     return None
 
 

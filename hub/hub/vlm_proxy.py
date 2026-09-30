@@ -1,10 +1,16 @@
-"""Shared AI: an OpenAI-compatible /v1/chat/completions in front of the hub's vLLM.
+"""Shared AI: an OpenAI-compatible /v1/chat/completions the hub fronts for every site whose organisation
+has `ai_shared`.
+
+Two upstreams, chosen by settings:
+  * `vllm_site`: one site's local Qwen serves the fleet. The request goes down that site's tunnel to its
+    `/api/ai/v1/chat/completions` (backend/nvr/ai_serve.py), so the hub needs no GPU and the site no open port.
+  * `vllm_url`: a vLLM/Ollama the hub reaches directly (the `ai` compose profile, RunPod, ...).
 
 Sites authenticate with their device token (the hub told them to use it as the API key in `welcome`), so
-usage can be metered per site and organisation; the internal vLLM key never leaves the hub. Streams are
-passed through as they arrive; `stream_options.include_usage` is added so the final chunk carries token
-counts. Per-site and per-org concurrency caps return 429, which a site's own circuit breaker turns into
-"use the local model for a while".
+usage is metered per site and organisation; the upstream key never leaves the hub. Streams are passed through
+as they arrive; `stream_options.include_usage` is added so the final chunk carries token counts. Per-site and
+per-org concurrency caps return 429, which a site's own circuit breaker turns into "use the local model for a
+while".
 """
 from __future__ import annotations
 
@@ -12,6 +18,7 @@ import asyncio
 import json
 import logging
 import time
+from typing import AsyncIterator
 
 import httpx
 import sqlalchemy as sa
@@ -19,10 +26,15 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from . import db
+from .agents import TooManyStreams, registry
 from .config import settings
 
 log = logging.getLogger("hub.vlm")
 router = APIRouter()
+
+RELAY_PATH = "/api/ai/v1/chat/completions"
+RELAY_HEADERS = {"content-type": "application/json", "x-hub-internal": "ai", "x-hub-user": "hub", "x-hub-role": "system"}
+FIRST_BYTE_S = 300.0     # a non-streamed answer arrives whole, after generation
 
 _site_sem: dict[str, asyncio.Semaphore] = {}
 _org_sem: dict[str, asyncio.Semaphore] = {}
@@ -43,7 +55,20 @@ def set_client(c: httpx.AsyncClient | None) -> None:
 
 
 def configured() -> bool:
-    return bool(settings.vllm_url and settings.vllm_model)
+    return bool(settings.vllm_model and (settings.vllm_site or settings.vllm_url))
+
+
+def via_site() -> bool:
+    return bool(settings.vllm_site)
+
+
+def status() -> dict:
+    """For the org AI page: what serves the fleet and whether it is reachable right now."""
+    if via_site():
+        conn = registry.get(settings.vllm_site)
+        site = db.one(sa.select(db.sites).where(db.sites.c.id == settings.vllm_site))
+        return {"kind": "site", "site_id": settings.vllm_site, "site_name": site["name"] if site else None, "online": conn is not None}
+    return {"kind": "url" if settings.vllm_url else "none", "online": bool(settings.vllm_url)}
 
 
 def _site_for(request: Request) -> dict:
@@ -66,6 +91,101 @@ def _sem(store: dict, key: str, n: int) -> asyncio.Semaphore:
     return store[key]
 
 
+def _usage_from_sse(text: str) -> dict:
+    usage: dict = {}
+    for line in text.splitlines():
+        if line.startswith("data:") and line[5:].strip() not in ("", "[DONE]"):
+            try:
+                u = json.loads(line[5:]).get("usage")
+                if u:
+                    usage = u
+            except ValueError:
+                pass
+    return usage
+
+
+# ---------------------------------------------------------------- upstream: a site's tunnel
+
+class Upstream:
+    """One upstream answer: status, headers, and a body iterator. Same shape for both upstreams."""
+
+    def __init__(self, status_code: int, content_type: str, body: AsyncIterator[bytes], close) -> None:
+        self.status_code, self.content_type, self.body, self.close = status_code, content_type, body, close
+
+    async def read_all(self) -> bytes:
+        out = bytearray()
+        async for c in self.body:
+            out += c
+        return bytes(out)
+
+
+async def _open_site(body: dict, stream: bool) -> Upstream:
+    conn = registry.get(settings.vllm_site)
+    if conn is None:
+        raise HTTPException(503, "the site serving the shared AI is offline")
+    try:
+        s = await conn.request("POST", RELAY_PATH, "", RELAY_HEADERS, json.dumps(body).encode())
+    except TooManyStreams:
+        raise HTTPException(429, "shared AI is busy; use the local model")
+    try:
+        await asyncio.wait_for(s.head.wait(), settings.first_byte_timeout_s if stream else FIRST_BYTE_S)
+    except asyncio.TimeoutError:
+        await conn.abort(s, "timeout")
+        raise HTTPException(504, "the shared AI did not answer in time")
+    if s.aborted or s.status is None:
+        conn.finish(s)
+        raise HTTPException(503, f"shared AI aborted: {s.aborted or 'no response'}")
+
+    async def body_iter():
+        try:
+            while True:
+                c = await s.read()
+                if c is None:
+                    return
+                yield c
+                await conn.send({"t": "credit", "id": s.id, "bytes": len(c)})
+        finally:
+            conn.finish(s)
+
+    async def close():
+        await conn.abort(s, "client left")
+
+    return Upstream(s.status, s.headers.get("content-type", ""), body_iter(), close)
+
+
+async def _open_url(body: dict, stream: bool) -> Upstream:
+    headers = {"Authorization": f"Bearer {settings.vllm_key}"} if settings.vllm_key else {}
+    req = client().build_request("POST", "/chat/completions", json=body, headers=headers)
+    r = await client().send(req, stream=True)
+
+    async def body_iter():
+        try:
+            async for c in r.aiter_bytes():
+                yield c
+        finally:
+            await r.aclose()
+
+    return Upstream(r.status_code, r.headers.get("content-type", ""), body_iter(), r.aclose)
+
+
+async def _open(body: dict, stream: bool) -> Upstream:
+    return await (_open_site(body, stream) if via_site() else _open_url(body, stream))
+
+
+async def complete(messages: list[dict], max_tokens: int = 500, temperature: float = 0.2) -> str | None:
+    """A whole (non-streamed) answer for hub-side features such as the digest; None when unconfigured."""
+    if not configured():
+        return None
+    up = await _open({"model": settings.vllm_model, "messages": messages, "max_tokens": max_tokens, "temperature": temperature}, False)
+    raw = await up.read_all()
+    if up.status_code != 200:
+        log.warning("shared AI %s: %s", up.status_code, raw[:200])
+        return None
+    return json.loads(raw)["choices"][0]["message"]["content"].strip()
+
+
+# ---------------------------------------------------------------- the /v1 sites call
+
 @router.get("/v1/models")
 async def models(request: Request):
     _site_for(request)
@@ -77,6 +197,8 @@ async def chat_completions(request: Request):
     if not configured():
         raise HTTPException(503, "shared AI is not configured on this hub")
     site = _site_for(request)
+    if via_site() and site["id"] == settings.vllm_site:
+        raise HTTPException(409, "this site serves the shared AI itself; use its local model")
     body = await request.json()
     body["model"] = settings.vllm_model                      # sites can't pick other models
     stream = bool(body.get("stream"))
@@ -90,35 +212,31 @@ async def chat_completions(request: Request):
         raise HTTPException(429, "shared AI is busy; use the local model")
     async with ssem, osem:
         t0 = time.time()
-        headers = {"Authorization": f"Bearer {settings.vllm_key}"} if settings.vllm_key else {}
-        if not stream:
-            r = await client().post("/chat/completions", json=body, headers=headers)
-            usage = (r.json().get("usage") or {}) if r.headers.get("content-type", "").startswith("application/json") else {}
-            _record(site, task, usage, time.time() - t0, r.status_code, n_images, streamed=False)
-            return JSONResponse(r.json() if r.headers.get("content-type", "").startswith("application/json") else {"error": r.text[:300]},
-                                status_code=r.status_code)
-        req = client().build_request("POST", "/chat/completions", json=body, headers=headers)
-        r = await client().send(req, stream=True)
-        if r.status_code >= 400:
-            text = (await r.aread()).decode()[:300]
-            await r.aclose()
-            _record(site, task, {}, time.time() - t0, r.status_code, n_images, streamed=True)
-            return JSONResponse({"error": text}, status_code=r.status_code)
+        up = await _open(body, stream)
+        if not stream or up.status_code >= 400:
+            raw = await up.read_all()
+            is_json = up.content_type.startswith("application/json")
+            usage = (json.loads(raw).get("usage") or {}) if is_json and up.status_code == 200 else {}
+            _record(site, task, usage, time.time() - t0, up.status_code, n_images, streamed=stream)
+            if is_json:
+                return JSONResponse(json.loads(raw), status_code=up.status_code)
+            return JSONResponse({"error": raw.decode(errors="replace")[:300]}, status_code=up.status_code)
 
         async def gen():
+            tail = ""
             usage: dict = {}
             try:
-                async for line in r.aiter_lines():
-                    if line.startswith("data:") and line[5:].strip() not in ("", "[DONE]"):
-                        try:
-                            u = json.loads(line[5:]).get("usage")
-                            if u:
-                                usage = u
-                        except ValueError:
-                            pass
-                    yield (line + "\n").encode()
+                async for c in up.body:
+                    text = tail + c.decode(errors="replace")
+                    lines = text.split("\n")
+                    tail = lines.pop()                     # a line may straddle two chunks
+                    u = _usage_from_sse("\n".join(lines))
+                    if u:
+                        usage = u
+                    yield c
+                if tail:
+                    usage = _usage_from_sse(tail) or usage
             finally:
-                await r.aclose()
                 _record(site, task, usage, time.time() - t0, 200, n_images, streamed=True)
 
         return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})

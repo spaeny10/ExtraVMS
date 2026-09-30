@@ -1,0 +1,15 @@
+# Build context for hub/Dockerfile is the repo root: keep recordings, models, venvs and secrets out of it.
+.git
+.venv
+**/node_modules
+**/dist
+**/__pycache__
+data
+runtime
+bin
+models
+hub/hub.db
+hub/hub.db-*
+hub/.env
+.env
+*.log

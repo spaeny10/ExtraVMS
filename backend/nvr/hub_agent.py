@@ -1,6 +1,6 @@
 """Site side of the fleet hub: one outbound WebSocket to the hub, nothing inbound.
 
-The agent keeps a connection to `settings.hub_url` (wss://cloudvms.bigview.ai/agent). Over it the site sends a
+The agent keeps a connection to `settings.hub_url` (wss://hub.axiomvision.ai/agent). Over it the site sends a
 heartbeat every 30 s (summary.site_summary) and every live event message (the same payloads /api/ws gets),
 and the hub sends HTTP requests which are answered by calling this process's own ASGI app in-process:
 no loopback socket, streaming bodies (Ask NDJSON, fMP4 playback) flow chunk by chunk under the credit window

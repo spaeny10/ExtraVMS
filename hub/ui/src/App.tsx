@@ -29,7 +29,7 @@ export default function App() {
     <>
       <OfflineBanner />
       <header className="hub-top">
-        <span className="brand"><Icon name="home" /> NewVMS Hub</span>
+        <span className="brand"><img className="logo" src="/axiom.webp" alt="Axiom" /> Vision</span>
         <nav>{PAGES.map(([p, label]) => <a key={p} href={p} className={(p === "/" ? page === "home" : path.startsWith(p)) ? "active" : ""} onClick={(e) => { e.preventDefault(); navigate(p); }}>{label}</a>)}</nav>
         <span className="spacer" />
         {orgs.length > 1 && <select value={current?.id ?? ""} onChange={(e) => setOrg(e.target.value)}>{orgs.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select>}
@@ -74,7 +74,7 @@ function Login({ onDone }: { onDone: () => void }) {
   };
   return (
     <form className="login-box" onSubmit={submit}>
-      <h1>NewVMS Hub</h1>
+      <h1>Axiom Vision</h1>
       <label className="field"><span>Email</span><input type="email" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} autoFocus /></label>
       <label className="field"><span>Password</span><input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} /></label>
       {needTotp && <label className="field"><span>Authenticator code</span><input inputMode="numeric" autoComplete="one-time-code" value={totp} onChange={(e) => setTotp(e.target.value)} autoFocus /></label>}
@@ -446,7 +446,9 @@ function SharedAiBox({ org, canEdit }: { org: Org; canEdit: boolean }) {
       <h3>Shared AI &amp; relay</h3>
       <p className="muted small">
         Live video relay (TURN): {u.turn ? "configured" : "not configured on this hub — remote live view needs it"}.
-        Shared model: {u.configured ? u.model : "not configured on this hub"}.
+        Shared model: {u.configured ? u.model : "not configured on this hub"}
+        {u.configured && u.provider.kind === "site" && <> — served by the GPU at <b>{u.provider.site_name || u.provider.site_id}</b> through its tunnel ({u.provider.online ? "online" : "offline: sites fall back to their local model"})</>}
+        {u.configured && u.provider.kind === "url" && <> — served by the hub's own model server</>}.
       </p>
       <label className="row small">
         <input type="checkbox" checked={u.ai_shared} disabled={!canEdit || !u.configured} onChange={async (e) => { try { await api.patchOrg(org.id, { ai_shared: e.target.checked }); load(); toast.success(e.target.checked ? "Sites now use the hub's model" : "Sites are back on their local model"); } catch (err) { toast.error(err); } }} />
