@@ -1,4 +1,4 @@
-# NewVMS — AI-first NVR
+# Axiom Vision — AI-first NVR
 
 MediaMTX records IP cameras 24/7. The camera's own ONVIF Profile M analytics metadata starts events,
 YOLO checks each camera detection against the recorded video, and Qwen2.5-VL writes a synopsis of

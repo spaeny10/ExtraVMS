@@ -1,12 +1,12 @@
-/* NewVMS Hub service worker: web push for alerts. It caches nothing (the hub is always online-first) and is
+/* Axiom Vision hub service worker: web push for alerts. It caches nothing (the hub is always online-first) and is
    scoped to "/" only — never under a site's /s/<id>/ path. */
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
 
 self.addEventListener("push", (e) => {
   let data = {};
-  try { data = e.data ? e.data.json() : {}; } catch { data = { title: "NewVMS", body: e.data ? e.data.text() : "" }; }
-  e.waitUntil(self.registration.showNotification(data.title || "NewVMS Hub", {
+  try { data = e.data ? e.data.json() : {}; } catch { data = { title: "Axiom Vision", body: e.data ? e.data.text() : "" }; }
+  e.waitUntil(self.registration.showNotification(data.title || "Axiom Vision", {
     body: data.body || "", data: { url: data.url || "/" }, tag: `${data.kind || "alert"}:${data.site_id || ""}`, renotify: true,
     icon: "/icons/icon-192.png", badge: "/icons/icon-192.png",
   }));

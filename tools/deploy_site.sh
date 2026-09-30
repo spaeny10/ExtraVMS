@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install or update a NewVMS site on Ubuntu 24.04 (run as root). Idempotent: safe to re-run after copying new code.
+# Install or update an Axiom Vision site on Ubuntu 24.04 (run as root). Idempotent: safe to re-run after copying new code.
 #
 #   1. copy the repo to /opt/nvr (rsync/scp from the dev PC, or git clone), including models/ and frontend/dist
 #      (never the dev PC's .env: it holds that site's camera passwords and keys)
@@ -97,7 +97,7 @@ chown -R "$NVR_USER:$NVR_USER" "$NVR_DIR" /srv/nvr
 echo "== systemd"
 cat > /etc/systemd/system/nvr.service <<EOF
 [Unit]
-Description=NewVMS site (recording, detection, hub agent)
+Description=Axiom Vision site (recording, detection, hub agent)
 After=network-online.target
 Wants=network-online.target
 

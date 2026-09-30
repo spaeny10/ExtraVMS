@@ -81,7 +81,7 @@ class Rtsp:
     def request(self, method: str, uri: str, headers: dict[str, str] | None = None) -> tuple[int, dict, bytes]:
         for attempt in range(2):
             self.cseq += 1
-            h = {"CSeq": str(self.cseq), "User-Agent": "NewVMS-probe"}
+            h = {"CSeq": str(self.cseq), "User-Agent": "AxiomVision-probe"}
             if self.session:
                 h["Session"] = self.session
             auth = self._auth_header(method, uri)

@@ -1,7 +1,7 @@
 [project]
 name = "tunnelproto"
 version = "1.0.0"
-description = "Wire protocol shared by the NewVMS site agent and the fleet hub (frames, streams, flow control)."
+description = "Wire protocol shared by the Axiom Vision site agent and the fleet hub (frames, streams, flow control)."
 requires-python = ">=3.11"
 dependencies = []
 

@@ -1,4 +1,4 @@
-"""Wire protocol between a NewVMS site and the fleet hub, over one WebSocket the site opens to the hub.
+"""Wire protocol between an Axiom Vision site and the fleet hub, over one WebSocket the site opens to the hub.
 
 Text frames are JSON control messages with a type in "t"; binary frames carry stream bodies as a 4-byte
 big-endian stream id followed by bytes. The hub issues HTTP requests to the site as `req` streams (odd ids);

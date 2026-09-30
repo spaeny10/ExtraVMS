@@ -1,7 +1,7 @@
-/* NewVMS service worker: makes the UI installable and quick to open. It only caches the app itself
+/* Axiom Vision service worker: makes the UI installable and quick to open. It only caches the app itself
    (index.html and the hashed /assets files). Camera data, live video, recordings, snapshots and the API
    are never cached: they always come from the NVR, so nothing stale or private is kept on the phone. */
-const CACHE = "newvms-shell-v1";
+const CACHE = "axiom-shell-v1";
 const SHELL = ["/", "/manifest.webmanifest", "/icons/icon-192.png", "/icons/icon-512.png"];
 
 self.addEventListener("install", (e) => {
