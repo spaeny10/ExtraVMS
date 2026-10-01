@@ -336,7 +336,8 @@ def detect_event(detector: Detector, coco_model, event: dict, check: dict) -> di
                 boxes_by_ts[t] = pb
     ts_list = sorted(t for t in boxes_by_ts if t in imgs)
     dets = detector.detect([imgs[t] for t in ts_list])
-    frames = [{"ts": round(t, 3), "box": [round(v, 4) for v in boxes_by_ts[t]], "scores": item_scores(d, boxes_by_ts[t])}
+    # keep the exact frame time as the key: it indexes `imgs` below (rounding it broke the lookup)
+    frames = [{"ts": t, "box": [round(v, 4) for v in boxes_by_ts[t]], "scores": item_scores(d, boxes_by_ts[t])}
               for t, d in zip(ts_list, dets)]
     det_calls = assess(frames, check["required"])
     area = lambda f: (f["box"][2] - f["box"][0]) * (f["box"][3] - f["box"][1])
