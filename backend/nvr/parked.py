@@ -32,13 +32,19 @@ MEMORY_SPAN_S = 600.0           # sightings must span this long before the spot 
 EXPIRE_S = 86400.0              # forget spots not seen for a day
 STATIC_IOU = 0.75               # the same vehicle box, unmoved, in another sampled frame
 STATIC_FRAC = 0.8               # ...in at least this share of the other frames: it never moved during the clip
+STATIC_FRAC_PRE = 0.5           # ...or half of them, when it was already there in the pre-roll before the motion began
 
 
-def static_matches(detections: list) -> list[int]:
-    """Indices of matched frames whose matched YOLO vehicle box is present, unmoved, in (almost) every other
-    sampled frame of the clip: that vehicle was parked the whole time, so it cannot be what the camera saw move.
-    This catches the real Side Yard case: tiny camera boxes on a distant parked truck matched in 2 of 6 frames
-    (enough hits), while the whole-event checks below need the matches themselves to agree."""
+def _present(boxes: list | None, ref) -> bool:
+    return any(b.get("cls_id") in VEHICLE_CLS and iou(b["box"], ref) >= STATIC_IOU for b in boxes or [])
+
+
+def static_matches(detections: list, pre_boxes: list | None = None) -> list[int]:
+    """Indices of matched frames whose matched YOLO vehicle box never moved: present, unmoved, in (almost) every
+    other sampled frame of the clip, or in half of them plus the pre-roll frame from before the camera saw any
+    motion (a distant parked truck flickers in and out of YOLO's detections, but an arriving vehicle is never
+    in the pre-roll at its final spot). Such a vehicle cannot be what moved. This catches the real Side Yard
+    case: tiny camera boxes on a distant parked truck matched in 2 of 6 frames (enough hits)."""
     n = len(detections)
     if n < 3:
         return []
@@ -47,9 +53,9 @@ def static_matches(detections: list) -> list[int]:
         m = d.get("match")
         if not m or m.get("cls_id") not in VEHICLE_CLS:
             continue
-        present = sum(1 for j, o in enumerate(detections) if j != i
-                      and any(b.get("cls_id") in VEHICLE_CLS and iou(b["box"], m["box"]) >= STATIC_IOU for b in o.get("yolo") or []))
-        if present >= STATIC_FRAC * (n - 1):
+        present = sum(1 for j, o in enumerate(detections) if j != i and _present(o.get("yolo"), m["box"]))
+        if present >= STATIC_FRAC * (n - 1) or (pre_boxes is not None and _present(pre_boxes, m["box"])
+                                                 and present >= STATIC_FRAC_PRE * (n - 1)):
             out.append(i)
     return out
 

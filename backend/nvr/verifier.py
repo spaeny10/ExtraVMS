@@ -200,7 +200,7 @@ class Verifier:
             log.exception("re-ID embedding failed")
             return None
 
-    def _parked(self, event: dict, detections: list, hits: int, best, need: int, allowed: set):
+    def _parked(self, event: dict, detections: list, hits: int, best, need: int, allowed: set, pre_boxes: list | None = None):
         """Parked-vehicle check and the camera's parked-spot memory (parked.py). Returns
         (parked_info or None, detections, hits, best); the matches change only when another vehicle passing the
         parked one turns out to be what the camera saw."""
@@ -213,7 +213,7 @@ class Verifier:
         if settings.parked_suppress and label in parked.VEHICLE_LABELS:
             # Per-frame: a match on a vehicle that sits unmoved through the whole clip is not a hit. Only the
             # matches on something that moved (or appeared) count.
-            idx = parked.static_matches(detections)
+            idx = parked.static_matches(detections, pre_boxes)
             if idx:
                 dropped = [detections[i]["match"] for i in idx]
                 for i in idx:
@@ -230,7 +230,7 @@ class Verifier:
         if info:
             alt = [_matches(tuple(d["cam_box"]), parked.without(d["yolo"], info["box"]), allowed) for d in detections]
             trial = [{**d, "match": m, "iou": round(s, 3), "static": False} for d, (m, s) in zip(detections, alt)]
-            for i in parked.static_matches(trial):            # another parked vehicle is no better
+            for i in parked.static_matches(trial, pre_boxes):  # another parked vehicle is no better
                 trial[i] = {**trial[i], "match": None, "iou": 0.0, "static": True}
             if sum(d["match"] is not None for d in trial) >= need:
                 if parked.judge(label, trial, event.get("path") or [], entries, now) is None:
@@ -258,16 +258,26 @@ class Verifier:
         label = event["camera_class"]
         allowed = LABEL_CLASSES.get(label, set())
         samples = sample_path(event["path"], settings.verify_frames)
-        frames = grab_frames(clip, clip_start, [s[0] for s in samples])
+        # vehicles also get one pre-roll frame from before the camera saw motion: what was already parked there
+        pre_t = clip_start + 0.5 if (label in parked.VEHICLE_LABELS and settings.parked_suppress) else None
+        frames = grab_frames(clip, clip_start, [s[0] for s in samples] + ([pre_t] if pre_t else []))
         if not frames:
             return {"status": "error", "error": "no frames decoded from recording"}
 
         ts_list = [s[0] for s in samples if s[0] in frames]
+        has_pre = pre_t is not None and pre_t in frames and pre_t not in ts_list
         # YOLO only sees allowed areas: masked regions are painted grey before inference.
-        results = self.model.predict([zones.mask_frame(frames[t], zone_list) for t in ts_list], imgsz=settings.yolo_imgsz,
-                                     conf=settings.yolo_conf, device=settings.yolo_device, verbose=False,
+        results = self.model.predict([zones.mask_frame(frames[t], zone_list) for t in ts_list + ([pre_t] if has_pre else [])],
+                                     imgsz=settings.yolo_imgsz, conf=settings.yolo_conf, device=settings.yolo_device, verbose=False,
                                      classes=sorted(PERSON | VEHICLE))
         names = self.model.names
+        pre_boxes = None
+        if has_pre:
+            pre_res = results[len(ts_list)]
+            results = results[:len(ts_list)]
+            pre_boxes = [{"cls": names[int(c)], "cls_id": int(c), "conf": round(float(p), 3), "box": [round(float(v), 4) for v in b]}
+                         for b, c, p in zip(pre_res.boxes.xyxyn.tolist(), pre_res.boxes.cls.tolist(), pre_res.boxes.conf.tolist())]
+            pre_boxes = [b for b in pre_boxes if zones.allowed(zones.foot(b["box"]), zone_list)]
         detections, hits, best = [], 0, None
         sample_by_ts = {s[0]: s for s in samples}
         for ts, res in zip(ts_list, results):
@@ -311,7 +321,7 @@ class Verifier:
         # A parked vehicle "confirming" motion next to it (shimmer, shadows): rejected, with the reason recorded.
         parked_info = None
         if verified:
-            parked_info, detections, hits, best = self._parked(event, detections, hits, best, need, allowed)
+            parked_info, detections, hits, best = self._parked(event, detections, hits, best, need, allowed, pre_boxes)
             if parked_info:
                 verified = False
         # Where did it come from / go to? Cameras often report a person a step or two late, so the doorway
