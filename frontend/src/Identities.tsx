@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, fmtTime, media, type Camera, type IdentitiesResult, type IdentityCluster } from "./api";
+import { api, fmtTime, media, type Camera, type IdentitiesResult, type IdentityCluster, type NvrEvent } from "./api";
 import { EventCard } from "./Events";
 import { EventDetail } from "./EventDetail";
 import { confirmDialog, toast } from "./ui";
@@ -12,10 +12,14 @@ const clock = (ts: number) => new Date(ts * 1000).toLocaleTimeString(undefined, 
 const mins = (s: number) => (s < 90 ? `${Math.round(s)} s` : `${Math.round(s / 60)} min`);
 
 /** Repeated sightings grouped into people and vehicles (re-ID / CLIP fingerprints), with naming. */
-export function IdentitiesView({ cameras }: { cameras: Camera[] }) {
+export function IdentitiesView({ cameras, initialCamera = "", initialHours = 0 }: {
+  cameras: Camera[];
+  /** Find hands over its view's camera and time window (0 = today) as the starting point */
+  initialCamera?: string; initialHours?: number;
+}) {
   const [kind, setKind] = useState<Kind>("person");
-  const [hours, setHours] = useState(0);
-  const [cam, setCam] = useState("");
+  const [hours, setHours] = useState(() => (RANGES.some(([, h]) => h === initialHours) ? initialHours : 0));
+  const [cam, setCam] = useState(initialCamera);
   const [r, setR] = useState<IdentitiesResult | null>(null);
   const [err, setErr] = useState("");
   const [open, setOpen] = useState<number | null>(null);
@@ -113,8 +117,8 @@ export function IdentitiesView({ cameras }: { cameras: Camera[] }) {
                 {isOpen && (
                   <div className="event-grid identity-events">
                     {c.events.map((e) => (
-                      <EventCard key={e.id} e={{ ...e, camera_class: kind, status: "verified", threat: null, yolo_conf: null, yolo_hits: null,
-                        camera_conf: null, clip: null, error: null, track_id: "" } as never} cameraName={name(e.camera_id)} onOpen={() => setOpen(e.id)} />
+                      <EventCard key={e.id} e={{ ...e, camera_class: kind, status: "verified", yolo_hits: null, clip: null, error: null, track_id: "" } as NvrEvent}
+                        cameraName={name(e.camera_id)} onOpen={() => setOpen(e.id)} />
                     ))}
                   </div>
                 )}

@@ -14,6 +14,8 @@ def test_role_table_reads_right():
     assert required_role("PUT", "/api/events/12/feedback") == "operator"
     assert required_role("PUT", "/api/cameras/cam1") == "admin"
     assert required_role("PUT", "/api/hub") == "owner"
+    assert required_role("PUT", "/api/find/views") == "operator"          # Find saved views
+    assert required_role("GET", "/api/events/summary") == "viewer"
     assert required_role("POST", "/api/some/new/thing") == "admin"     # unknown writes need admin
     assert allows("owner", "admin") and allows("operator", "viewer") and not allows("viewer", "operator")
 

@@ -833,3 +833,34 @@ body:has(.drag-ghost) { cursor: grabbing; user-select: none; }
 /* top bar: link back to the fleet hub (shown when this site is enrolled) */
 .hub-link { color: var(--text); text-decoration: none; padding: 4px 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 13px; }
 .hub-link:hover { border-color: var(--accent); color: var(--accent); }
+
+/* Find: view tabs, flag chips, hour landmarks, compliance strip, tidy card footers */
+.find-views { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 10px; }
+.find-view { display: inline-flex; align-items: center; gap: 4px; padding: 4px 6px 4px 12px; border: 1px solid var(--border); border-radius: 99px; background: var(--panel); }
+.find-view > .linkish:first-child { color: var(--muted); font-size: 13px; font-weight: 600; }
+.find-view.active { background: var(--panel-2); border-color: var(--accent); }
+.find-view.active > .linkish:first-child { color: var(--text); }
+.find-view .star { color: var(--border); font-size: 13px; }
+.find-view .star.on, .find-view .star:hover { color: var(--t-medium); text-decoration: none; }
+.find-dirty { display: inline-flex; align-items: center; gap: 4px; }
+.find-flags { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 4px; }
+.find-flags .chip { cursor: pointer; color: var(--muted); }
+.find-flags .chip.on { color: var(--text); }
+.find-hour { margin: 14px 0 6px; font-size: 13px; font-weight: 600; color: var(--muted); }
+.event-card.focused { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent); }
+.event-foot .conf { margin-left: auto; white-space: nowrap; }
+.event-foot .badge.trunc { max-width: 24ch; overflow: hidden; text-overflow: ellipsis; text-transform: none; vertical-align: middle; }
+.find-summary { display: flex; flex-wrap: wrap; gap: 18px; align-items: stretch; padding: 10px 14px; margin: 8px 0; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); }
+.find-summary .fs-total { display: flex; flex-direction: column; justify-content: center; min-width: 56px; }
+.find-summary .fs-total b { font-size: 24px; line-height: 1; }
+.find-summary .fs-col { display: flex; flex-direction: column; gap: 3px; min-width: 120px; }
+.find-summary .fs-row { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; color: var(--text); text-align: left; }
+.find-summary button.fs-row:hover span { text-decoration: underline; }
+.find-summary .fs-row.active { color: var(--accent); }
+.find-summary .fs-days { display: flex; align-items: flex-end; gap: 3px; flex: 1; min-width: 160px; height: 64px; }
+.find-summary .fs-day { flex: 1; min-width: 6px; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 2px; padding: 0; background: none; border: 0; cursor: pointer; }
+.find-summary .fs-bar { width: 100%; min-height: 2px; border-radius: 3px 3px 0 0; background: color-mix(in srgb, var(--t-medium) 70%, transparent); }
+.find-summary .fs-day:hover .fs-bar, .find-summary .fs-day.active .fs-bar { background: var(--t-medium); }
+.find-summary .fs-day.active { outline: 1px solid var(--accent); outline-offset: 1px; }
+.find-summary .fs-day-label { font-size: 10px; color: var(--muted); white-space: nowrap; }
+@media (max-width: 700px) { .find-summary { gap: 10px; } .find-summary .fs-days { flex-basis: 100%; } }

@@ -1,42 +1,68 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api, ask, fmtTime, type AskMeta, type AssistantMessage, type AssistantThread, type Camera, type NvrEvent, type ParsedQuery } from "./api";
 import { Answer } from "./Ask";
 import { ConfidenceSlider, loadNumber, saveNumber } from "./ConfidenceSlider";
 import { EventCard } from "./Events";
 import { EventDetail } from "./EventDetail";
+import { FindSummary } from "./FindSummary";
+import {
+  DEFAULT_VIEW_KEY, FALLBACK_VIEW, FLAGS, PRESETS, PRIORITIES, SUGGESTIONS, buildQuery, defaultViewId, eventQuery, filterWindow,
+  fromSaved, hourGroups, matchesFilters, parseQuery, placeNames, resolveFilters, sameFilters, toSaved,
+  type FindFilters, type FindFlag, type FindMode, type FindView as View, type UrlState,
+} from "./findViews";
 import { FootageResults } from "./FootageSearch";
 import { IdentitiesView } from "./Identities";
-import { SkeletonGrid } from "./ui";
+import { promptDialog, SkeletonGrid, toast } from "./ui";
 
-const SUGGESTIONS = [
-  "What happened overnight?",
-  "Anything unusual today?",
-  "Did anyone go outside today?",
-  "How many people came through the East Door today?",
-  "When was the last vehicle in the side yard?",
-  "Was any camera offline in the last 24 hours?",
-];
-const RANGES: [string, number][] = [["Any time", 0], ["Last hour", 1], ["24 h", 24], ["7 days", 168]];
+const RANGES: [string, number][] = [["Any time", 0], ["Last hour", 1], ["24 h", 24], ["7 days", 168], ["30 days", 720]];
 const STATUSES: [string, string][] = [["verified", "Verified"], ["open,pending", "In progress"], ["rejected", "Rejected"], ["", "Everything"]];
 const PAGE = 60;
+const SEARCH_PAGE = 100;
+const THREADS_CAP = 30;  // /api/assistant/threads returns at most this many by default
+const RANK: Record<string, number> = { none: 0, low: 1, medium: 2, high: 3 };
 
 type Pending = { question: string; answer: string; meta?: AskMeta; model?: string; fallback?: string; error?: string };
 
-/** One page for events. With an empty box it browses the latest events (live, older ones as you scroll);
- * typed text searches events by meaning plus footage by looks; Ask has Qwen look things up and answer in
- * words above those same results. One filter bar serves all three. */
+const readDefault = () => { try { return localStorage.getItem(DEFAULT_VIEW_KEY); } catch { return null; } };
+const writeDefault = (id: string) => { try { localStorage.setItem(DEFAULT_VIEW_KEY, id); } catch { /* private mode */ } };
+/** The page's own query string only: under the hub the path is /s/<site>/ and must stay as it is. */
+const writeUrl = (query: string, push: boolean) => {
+  const url = `?${query}${location.hash}`;
+  if (`?${location.search.slice(1)}${location.hash}` === url) return;
+  try { (push ? history.pushState : history.replaceState).call(history, null, "", url); } catch { /* sandboxed */ }
+};
+
+/** One page for events. With an empty box it browses the latest events for the active view (live, older ones
+ * as you scroll); typed text searches events by meaning plus footage by looks; Ask has Qwen look things up and
+ * answer in words above those same results. Views (presets per role, plus saved ones) set the filters. */
 export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent | null }) {
-  const [q, setQ] = useState("");
+  // ---- views and filters (URL > starred default > Attention)
+  const initial = useMemo<UrlState & { id: string }>(() => {
+    const u = parseQuery(typeof location === "undefined" ? "" : location.search);
+    return { ...u, id: u.view ?? readDefault() ?? FALLBACK_VIEW };
+  }, []);
+  const storedYolo = () => loadNumber("minYolo.search");
+  const presetOf = (id: string) => PRESETS.find((v) => v.id === id);
+  const [saved, setSaved] = useState<View[] | null>(null);       // null until loaded
+  const [viewId, setViewId] = useState(initial.id);
+  const [filters, setFilters] = useState<FindFilters>(() => ({ ...resolveFilters(presetOf(initial.id) ?? presetOf(FALLBACK_VIEW), storedYolo()), ...initial.patch }));
+  const [mode, setMode] = useState<"sightings" | "grouped">(() => (initial.mode ?? presetOf(initial.id)?.mode) === "grouped" ? "grouped" : "sightings");
+  const [defaultId, setDefaultId] = useState(readDefault);
+  // a saved view named in the URL (or starred) is only known once the saved views load
+  const [ready, setReady] = useState(() => !!presetOf(initial.id));
+  const views = useMemo(() => [...PRESETS, ...(saved ?? [])], [saved]);
+  const view = views.find((v) => v.id === viewId) ?? presetOf(FALLBACK_VIEW)!;
+  const viewFilters = resolveFilters(view, filters.minYolo);  // the slider never counts as an unsaved change
+  const viewMode: FindMode = view.mode;
+  const findMode: FindMode = mode === "grouped" ? "grouped" : "events";
+  const dirty = !sameFilters(filters, viewFilters) || findMode !== viewMode;
+  const setF = (patch: Partial<FindFilters>) => setFilters((f) => ({ ...f, ...patch }));
+  const { camera, label, hours, day, minYolo, status } = filters;
+
+  const [q, setQ] = useState(initial.q);
   const [submitted, setSubmitted] = useState("");   // the text the results below are for ("" = browsing)
   const [parsed, setParsed] = useState<ParsedQuery | null>(null);  // time window / footage phrase read from it
-  // filters shared by browse and search
-  const [camera, setCamera] = useState("");
-  const [label, setLabel] = useState("");           // "" | person | vehicle
-  const [hours, setHours] = useState(24);
-  const [day, setDay] = useState("");                // yyyy-mm-dd: that day only (overrides the chips)
-  const [minYolo, setMinYolo] = useState(() => loadNumber("minYolo.search"));
-  const [status, setStatus] = useState("verified");  // browse only: review the verifier's other outcomes
-  const [mode, setMode] = useState<"sightings" | "grouped">(() => (loadNumber("eventsGrouped", 0) === 1 ? "grouped" : "sightings"));
+  const [ppeZone, setPpeZone] = useState("");       // summary strip: one PPE zone only (not part of a view)
   // results
   const [events, setEvents] = useState<NvrEvent[] | null>(null);
   const [more, setMore] = useState(false);
@@ -44,7 +70,9 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
   const [busy, setBusy] = useState(false);
   const [nonce, setNonce] = useState(0);
   const [open, setOpen] = useState<number | null>(null);
+  const [focus, setFocus] = useState<number | null>(null);  // keyboard: index into events
   const sentinel = useRef<HTMLDivElement>(null);
+  const searchInput = useRef<HTMLInputElement>(null);
   const loadingMore = useRef(false);
   // conversation
   const [threads, setThreads] = useState<AssistantThread[]>([]);
@@ -54,16 +82,76 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
   const [showHistory, setShowHistory] = useState(false);
   const answerRef = useRef<HTMLDivElement>(null);
   const name = (id: string) => cameras.find((c) => c.id === id)?.name ?? id;
-
-  /** The time window from the day picker or the chips: [since, until]. */
-  const window_ = (): [number | undefined, number | undefined] => {
-    if (day) {
-      const a = new Date(day + "T00:00:00"), b = new Date(day + "T23:59:59");
-      if (Number.isFinite(a.getTime())) return [a.getTime() / 1000, b.getTime() / 1000];
-    }
-    return [hours ? Date.now() / 1000 - hours * 3600 : undefined, undefined];
-  };
   const browsing = !submitted;
+
+  useEffect(() => {
+    api.findViews().then((r) => r.views.map(fromSaved)).catch(() => [] as View[]).then((list) => {
+      setSaved(list);
+      if (!ready) {  // the URL / star named a saved view: apply it now (or fall back to Attention)
+        const v = list.find((x) => x.id === initial.id);
+        if (!v) setViewId(FALLBACK_VIEW);
+        setFilters({ ...resolveFilters(v ?? presetOf(FALLBACK_VIEW), storedYolo()), ...initial.patch });
+        setMode((initial.mode ?? v?.mode) === "grouped" ? "grouped" : "sightings");
+        setReady(true);
+      }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /** Switch view: its filters replace the current ones (search text stays). */
+  const chooseView = (v: View) => {
+    setViewId(v.id);
+    setFilters(resolveFilters(v, minYolo));
+    setMode(v.mode === "grouped" ? "grouped" : "sightings");
+    setPpeZone("");
+    pushNext.current = true;
+    if (v.focusSearch) setTimeout(() => searchInput.current?.focus(), 0);
+  };
+  // URL state: a view switch is a history entry (back/forward), filter tweaks replace it
+  const pushNext = useRef(false);
+  useEffect(() => {
+    if (!ready) return;
+    writeUrl(buildQuery(view.id, filters, viewFilters, submitted, findMode, viewMode), pushNext.current);
+    pushNext.current = false;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, viewId, filters, submitted, mode]);
+  useEffect(() => {
+    const on = () => {
+      const u = parseQuery(location.search);
+      const v = views.find((x) => x.id === (u.view ?? defaultViewId(views, readDefault())));
+      if (!v) return;
+      setViewId(v.id);
+      setFilters({ ...resolveFilters(v, minYolo), ...u.patch });
+      setMode((u.mode ?? v.mode) === "grouped" ? "grouped" : "sightings");
+      if (u.q) { setQ(u.q); search(u.q); } else clearSearch();
+    };
+    window.addEventListener("popstate", on);
+    return () => window.removeEventListener("popstate", on);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [views, minYolo]);
+
+  const persistSaved = async (list: View[]) => {
+    try {
+      const r = await api.saveFindViews(list.map((v) => toSaved(v.id, v.name, resolveFilters(v), v.mode)));
+      setSaved(r.views.map(fromSaved));
+      return true;
+    } catch (e) { toast.error(e); return false; }
+  };
+  const saveCurrent = async (asNew: boolean) => {
+    const nm = asNew ? await promptDialog("Save this view", { label: "Name", initial: view.builtin ? `${view.name} (mine)` : view.name, confirmLabel: "Save" }) : view.name;
+    if (!nm?.trim()) return;
+    const id = asNew ? `v${Date.now().toString(36)}` : view.id;
+    const v: View = { id, name: nm.trim().slice(0, 60), icon: "★", filters: { ...filters }, mode: findMode, builtin: false };
+    const list = asNew ? [...(saved ?? []), v] : (saved ?? []).map((x) => (x.id === id ? v : x));
+    if (await persistSaved(list)) { setViewId(id); toast.success(`Saved "${v.name}"`); }
+  };
+  const deleteSaved = async (v: View) => {
+    if (await persistSaved((saved ?? []).filter((x) => x.id !== v.id))) {
+      if (defaultId === v.id) { writeDefault(FALLBACK_VIEW); setDefaultId(FALLBACK_VIEW); }
+      if (viewId === v.id) chooseView(presetOf(FALLBACK_VIEW)!);
+    }
+  };
+  const star = (v: View) => { writeDefault(v.id); setDefaultId(v.id); toast.success(`"${v.name}" opens by default`); };
 
   const loadThreads = () => api.assistantThreads().then(setThreads).catch(() => {});
   useEffect(() => {
@@ -73,6 +161,7 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
     let handed: string | null = null;
     try { handed = sessionStorage.getItem("findAsk"); sessionStorage.removeItem("findAsk"); } catch { /* ignore */ }
     if (handed) askNvr(handed);
+    else if (initial.q) search(initial.q);  // a link with ?q=…
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   useEffect(() => {
@@ -81,27 +170,24 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
   }, [threadId]);
 
   // ---- browse: the latest events for the filters, older ones as you scroll
-  const browseParams = () => {
-    const [since, until] = window_();
-    return { camera: camera || undefined, status: status || undefined, label: label || undefined, min_yolo: minYolo || undefined, since, until };
-  };
+  const browseParams = () => ({ ...eventQuery(filters), ppe_zone: ppeZone || undefined, sort: filters.sort });
+  const filtersKey = JSON.stringify(filters) + ppeZone;
   useEffect(() => {
-    if (!browsing || mode !== "sightings") return;
-    setBusy(true); setEvents(null);
+    if (!ready || !browsing || mode !== "sightings") return;
+    setBusy(true); setEvents(null); setFocus(null);
     api.events({ ...browseParams(), limit: PAGE }).then((r) => { setEvents(r); setMore(r.length === PAGE); }).catch(() => setEvents([])).finally(() => setBusy(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [browsing, mode, camera, status, label, minYolo, hours, day]);
+  }, [ready, browsing, mode, filtersKey]);
 
   // a new or updated event from the live feed slots into the browse grid when it matches the filters
   useEffect(() => {
     if (!live || !browsing || mode !== "sightings") return;
-    const [since, until] = window_();
-    const ok = (!status || status.split(",").includes(live.status)) && (!camera || camera === live.camera_id) && (!label || label === live.camera_class)
-      && (!minYolo || live.status === "open" || live.status === "pending" || (live.yolo_conf ?? 0) >= minYolo)
-      && (!since || live.start_ts >= since) && (!until || live.start_ts <= until);
+    const ok = matchesFilters(live, filters) && (!ppeZone || live.detections?.ppe?.zone === ppeZone);
+    const byPriority = filters.sort === "priority";
     setEvents((prev) => {
       const rest = (prev ?? []).filter((x) => x.id !== live.id);
-      return ok ? [live, ...rest].sort((a, b) => b.id - a.id) : rest;
+      if (!ok) return rest;
+      return [live, ...rest].sort((a, b) => (byPriority ? (RANK[b.priority ?? "none"] ?? 0) - (RANK[a.priority ?? "none"] ?? 0) : 0) || b.id - a.id);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [live]);
@@ -116,8 +202,10 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
     if (loadingMore.current || !more || !events?.length) return;
     loadingMore.current = true;
     try {
-      const r = await api.events({ ...browseParams(), limit: PAGE, before_id: events[events.length - 1]?.id });
-      setEvents((p) => [...(p ?? []), ...r]);
+      // newest-first pages by id (live inserts don't shift it); priority order pages by offset
+      const page = filters.sort === "priority" ? { offset: events.length } : { before_id: events[events.length - 1]?.id };
+      const r = await api.events({ ...browseParams(), limit: PAGE, ...page });
+      setEvents((p) => { const seen = new Set((p ?? []).map((x) => x.id)); return [...(p ?? []), ...r.filter((x) => !seen.has(x.id))]; });
       setMore(r.length === PAGE);
     } finally { loadingMore.current = false; }
   };
@@ -130,35 +218,50 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [events, more, browsing, mode]);
 
-  // ---- search
-  const search = async (text = q, conf = minYolo) => {
+  // ---- search: same filters as browse (status aside: search looks through every outcome)
+  const searchQuery = (f: FindFilters) => ({ ...eventQuery(f), status: undefined, ppe_zone: ppeZone || undefined });
+  const search = async (text = q, f = filters) => {
     const t = text.trim();
     if (!t) { clearSearch(); return; }
     setBusy(true);
-    setEvents(null); setMore(false);
+    setEvents(null); setMore(false); setFocus(null);
     // "today", "last night", "past 3 hours"... in the text set the window (over the time chips)
     const p = await api.parseQuery(t).catch(() => null);
     setParsed(p);
     setSubmitted(t);
     setNonce(Date.now());
-    const [ws, wu] = window_();
+    const [ws, wu] = filterWindow(f);
     const s = p?.time_label ? p.since ?? undefined : ws;
     const u = p?.time_label ? p.until ?? undefined : wu;
     try {
-      const r = await api.search(p?.text || t, camera || undefined, conf, s, u);
-      setEvents(label ? r.filter((e) => e.camera_class === label) : r);
+      const r = await api.search(p?.text || t, { ...searchQuery(f), since: s, until: u, limit: SEARCH_PAGE });
+      setEvents(r); setMore(r.length === SEARCH_PAGE);
     } catch { setEvents([]); }
     setBusy(false);
     // a time chip is hiding older matches? count them so the page can say so instead of looking empty
     setOlder(0);
-    if (s && !p?.time_label && !day) {
-      api.search(p?.text || t, camera || undefined, conf).then((all) => setOlder(all.filter((e) => e.start_ts < s).length)).catch(() => {});
+    if (s && !p?.time_label && !f.day) {
+      api.search(p?.text || t, { ...searchQuery(f), since: undefined, until: undefined, limit: 200 })
+        .then((all) => setOlder(all.filter((e) => e.start_ts < s).length)).catch(() => {});
     }
+  };
+  const searchMore = async () => {
+    if (!events?.length || busy) return;
+    const [ws, wu] = filterWindow(filters);
+    const s = parsed?.time_label ? parsed.since ?? undefined : ws;
+    const u = parsed?.time_label ? parsed.until ?? undefined : wu;
+    setBusy(true);
+    try {
+      const r = await api.search(parsed?.text || submitted, { ...searchQuery(filters), since: s, until: u, limit: SEARCH_PAGE, offset: events.length });
+      setEvents((p) => [...(p ?? []), ...r]); setMore(r.length === SEARCH_PAGE);
+    } catch { setMore(false); }
+    setBusy(false);
   };
   const clearSearch = () => { setSubmitted(""); setParsed(null); setQ(""); setOlder(0); };
   // filters changed: refresh the search results for the current text (browse refreshes through its own effect)
+  const searchKey = JSON.stringify({ ...filters, status: "", sort: "" }) + ppeZone;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { if (submitted) search(submitted); }, [camera, hours, day, label]);
+  useEffect(() => { if (submitted) search(submitted); }, [searchKey]);
 
   const askNvr = async (text = q) => {
     const question = text.trim();
@@ -191,20 +294,79 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
   };
 
   const onKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Escape") { e.currentTarget.blur(); return; }
     if (e.key !== "Enter") return;
     e.preventDefault();
     // a question (ends with "?") or Shift+Enter asks Qwen; plain Enter searches instantly
     if (e.shiftKey || q.trim().endsWith("?")) askNvr(); else search();
   };
 
+  // ---- keyboard: "/" focuses search, j/k (or ←/→) move between cards, Enter opens (Esc closes the detail)
+  useEffect(() => {
+    const on = (e: KeyboardEvent) => {
+      if (open !== null || e.ctrlKey || e.metaKey || e.altKey) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return;
+      if (e.key === "/") { e.preventDefault(); searchInput.current?.focus(); return; }
+      if (!events?.length || mode === "grouped") return;
+      const step = e.key === "j" || e.key === "ArrowRight" ? 1 : e.key === "k" || e.key === "ArrowLeft" ? -1 : 0;
+      if (step) {
+        e.preventDefault();
+        const next = Math.max(0, Math.min(events.length - 1, focus === null ? 0 : focus + step));
+        setFocus(next);
+        document.querySelector(`[data-event-id="${events[next].id}"]`)?.scrollIntoView({ block: "nearest" });
+      } else if (e.key === "Enter" && focus !== null && events[focus]) {
+        e.preventDefault();
+        setOpen(events[focus].id);
+      }
+    };
+    window.addEventListener("keydown", on);
+    return () => window.removeEventListener("keydown", on);
+  }, [events, focus, open, mode]);
+
   const hasConversation = messages.length > 0 || pending;
   const grouped = browsing && mode === "grouped";
+  const places = placeNames(cameras, camera);
+  if (filters.place && !places.includes(filters.place)) places.unshift(filters.place);
+  const showSummary = !grouped && (filters.flags.includes("ppe") || filters.flags.includes("rule"));
+  const suggestions = view.suggestions ?? SUGGESTIONS;
   const timeLabel = day ? new Date(day + "T12:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" }) : RANGES.find(([, h]) => h === hours)?.[0];
+  const filterLabel = [
+    camera ? name(camera) : "",
+    filters.attention ? "needs attention" : "",
+    filters.priority ? `${filters.priority}+ priority` : "",
+    ...filters.flags.map((f) => FLAGS.find((x) => x.id === f)?.label.replace(/^[^\p{L}]+/u, "").toLowerCase() ?? f),
+    filters.place ? `in ${filters.place}` : "",
+    ppeZone ? `PPE zone ${ppeZone}` : "",
+    browsing && status !== "verified" ? STATUSES.find(([v]) => v === status)?.[1].toLowerCase() ?? "" : "",
+  ].filter(Boolean).join(" · ");
+  const toggleFlag = (f: FindFlag) => setF({ flags: filters.flags.includes(f) ? filters.flags.filter((x) => x !== f) : [...filters.flags, f] });
+  const card = (e: NvrEvent, i: number) => <EventCard key={e.id} e={e} cameraName={name(e.camera_id)} onOpen={() => { setFocus(i); setOpen(e.id); }} focused={focus === i} />;
+  const identityHours = day ? 0 : hours >= 168 ? 168 : hours >= 72 ? 72 : hours >= 24 ? 24 : 0;
   return (
     <div className="view find">
+      <div className="find-views" role="tablist" aria-label="Views">
+        {views.map((v) => (
+          <span key={v.id} className={`find-view ${v.id === viewId ? "active" : ""}`}>
+            <button role="tab" aria-selected={v.id === viewId} className="linkish" onClick={() => chooseView(v)} title={v.title ?? v.name}>{v.icon} {v.name}</button>
+            <button className={`linkish star ${defaultId === v.id || (!defaultId && v.id === FALLBACK_VIEW) ? "on" : ""}`}
+              onClick={() => star(v)} title={defaultId === v.id ? "Opens by default" : "Open this view by default"} aria-label={`Open ${v.name} by default`}>★</button>
+            {!v.builtin && <button className="linkish small" onClick={() => deleteSaved(v)} title="Delete this saved view" aria-label={`Delete ${v.name}`}>✕</button>}
+          </span>
+        ))}
+        <button className="ghost small" onClick={() => saveCurrent(true)} title="Save the current filters as a view of your own">+ Save current…</button>
+        {dirty && (
+          <span className="muted small find-dirty">
+            unsaved changes ·{" "}
+            {!view.builtin && <><button className="linkish small" onClick={() => saveCurrent(false)}>Save</button> · </>}
+            {view.builtin && <><button className="linkish small" onClick={() => saveCurrent(true)}>Save as…</button> · </>}
+            <button className="linkish small" onClick={() => chooseView(view)}>Reset</button>
+          </span>
+        )}
+      </div>
       <form className="search-bar" onSubmit={(e) => { e.preventDefault(); search(); }}>
-        <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={onKey}
-          placeholder='Search "white pickup truck", or ask "Was anyone near the trailers after 6pm?"' />
+        <input ref={searchInput} autoFocus value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={onKey}
+          placeholder='Search "white pickup truck", or ask "Was anyone near the trailers after 6pm?"  ( / )' />
         {submitted && <button type="button" className="ghost" onClick={clearSearch} title="Back to the latest events">✕</button>}
         <button type="submit" disabled={busy || !q.trim()}>{busy && submitted ? "Searching…" : "Search"}</button>
         <button type="button" className="ask-btn" disabled={!!pending || !q.trim()} onClick={() => askNvr()} title="Have Qwen look it up and answer in words (Shift+Enter, or end with ?)">✦ Ask</button>
@@ -212,40 +374,67 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
       <div className="toolbar search-filters">
         {browsing && (
           <div className="segmented">
-            <button className={mode === "sightings" ? "active" : ""} onClick={() => { setMode("sightings"); saveNumber("eventsGrouped", 0); }} title="Every event as its own card">Events</button>
-            <button className={mode === "grouped" ? "active" : ""} onClick={() => { setMode("grouped"); saveNumber("eventsGrouped", 1); }} title="One row per person or vehicle, with all of their sightings">Grouped by who</button>
+            <button className={mode === "sightings" ? "active" : ""} onClick={() => setMode("sightings")} title="Every event as its own card">Events</button>
+            <button className={mode === "grouped" ? "active" : ""} onClick={() => setMode("grouped")} title="One row per person or vehicle, with all of their sightings">Grouped by who</button>
           </div>
         )}
         {!grouped && (
           <>
-            <select value={camera} onChange={(e) => setCamera(e.target.value)}>
+            <select value={camera} onChange={(e) => setF({ camera: e.target.value })}>
               <option value="">All cameras</option>
               {cameras.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
-            <select value={label} onChange={(e) => setLabel(e.target.value)}>
+            <select value={label} onChange={(e) => setF({ label: e.target.value })}>
               <option value="">Any type</option>
               <option value="person">People</option>
               <option value="vehicle">Vehicles</option>
             </select>
             <div className="segmented" title="Time window (a typed phrase like “last night” wins over these)">
-              {RANGES.map(([l, h]) => <button key={l} className={!day && hours === h ? "active" : ""} onClick={() => { setDay(""); setHours(h); }}>{l}</button>)}
+              {RANGES.map(([l, h]) => <button key={l} className={!day && hours === h ? "active" : ""} onClick={() => setF({ day: "", hours: h })}>{l}</button>)}
             </div>
             <label className="row small" title="One day">
-              <input type="date" value={day} max={new Date().toISOString().slice(0, 10)} onChange={(e) => setDay(e.target.value)} />
-              {day && <button className="linkish small" onClick={() => setDay("")}>✕</button>}
+              <input type="date" value={day} max={new Date().toISOString().slice(0, 10)} onChange={(e) => setF({ day: e.target.value })} />
+              {day && <button className="linkish small" onClick={() => setF({ day: "" })}>✕</button>}
             </label>
-            <ConfidenceSlider value={minYolo} onChange={(v) => { setMinYolo(v); saveNumber("minYolo.search", v); if (submitted) search(submitted, v); }} />
+            <select value={filters.priority} onChange={(e) => setF({ priority: e.target.value as FindFilters["priority"] })}
+              title="Minimum priority: the higher of Qwen's threat level and how unusual the event is for its camera">
+              {PRIORITIES.map(([v, l]) => <option key={l} value={v}>{l}</option>)}
+            </select>
+            {places.length > 0 && (
+              <select value={filters.place} onChange={(e) => setF({ place: e.target.value })} title="Walked into this named area">
+                <option value="">Any place</option>
+                {places.map((p) => <option key={p} value={p}>📍 {p}</option>)}
+              </select>
+            )}
             {browsing && (
-              <select value={status} onChange={(e) => setStatus(e.target.value)} title="Review: which of the verifier's outcomes to show">
+              <div className="segmented" title="Order of the list">
+                <button className={filters.sort === "newest" ? "active" : ""} onClick={() => setF({ sort: "newest" })}>Newest</button>
+                <button className={filters.sort === "priority" ? "active" : ""} onClick={() => setF({ sort: "priority" })}>Priority</button>
+              </div>
+            )}
+            <ConfidenceSlider value={minYolo} onChange={(v) => { setF({ minYolo: v }); saveNumber("minYolo.search", v); }} />
+            {browsing && (
+              <select value={status} onChange={(e) => setF({ status: e.target.value })} title="Review: which of the verifier's outcomes to show">
                 {STATUSES.map(([v, l]) => <option key={l} value={v}>{l}</option>)}
               </select>
             )}
           </>
         )}
         <span className="spacer" />
-        <button className="ghost small" onClick={() => setShowHistory(!showHistory)}>{showHistory ? "▾" : "▸"} Conversations{threads.length ? ` (${threads.length})` : ""}</button>
+        <button className="ghost small" onClick={() => setShowHistory(!showHistory)}>{showHistory ? "▾" : "▸"} Conversations{threads.length ? ` (${threads.length >= THREADS_CAP ? `${THREADS_CAP}+` : threads.length})` : ""}</button>
         {hasConversation && <button className="ghost small" onClick={() => { setThreadId(null); setPending(null); }}>New conversation</button>}
       </div>
+      {!grouped && (
+        <div className="find-flags" role="group" aria-label="Flags">
+          {filters.attention && (
+            <button className="chip on" onClick={() => setF({ attention: false })} title="Priority medium+, a broken rule, unusual or watched · click to drop">⚑ Needs attention ✕</button>
+          )}
+          {FLAGS.map((f) => (
+            <button key={f.id} className={`chip ${filters.flags.includes(f.id) ? "on" : ""}`} aria-pressed={filters.flags.includes(f.id)}
+              onClick={() => toggleFlag(f.id)} title={`${f.title}${filters.flags.length ? " (all chosen flags must hold)" : ""}`}>{f.label}</button>
+          ))}
+        </div>
+      )}
       {showHistory && (
         <div className="find-threads">
           {threads.length === 0 && <span className="muted small">No conversations yet.</span>}
@@ -256,6 +445,11 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
             </span>
           ))}
         </div>
+      )}
+
+      {showSummary && (
+        <FindSummary filters={filters} cameraName={name} zone={ppeZone} refresh={live?.policy ? live.id : undefined}
+          onCamera={(c) => setF({ camera: c })} onDay={(d) => setF({ day: d })} onZone={setPpeZone} />
       )}
 
       {hasConversation && (
@@ -277,33 +471,38 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
 
       {browsing && !hasConversation && (
         <div className="ask-suggestions" title="Search finds events by meaning and footage by looks; Ask has Qwen look things up and answer with links to the evidence">
-          {SUGGESTIONS.map((s) => <button key={s} className="ghost small" onClick={() => askNvr(s)}>✦ {s}</button>)}
+          {suggestions.map((s) => <button key={s} className="ghost small" onClick={() => askNvr(s)}>✦ {s}</button>)}
         </div>
       )}
 
-      {grouped ? <IdentitiesView cameras={cameras} /> : browsing ? (
+      {grouped ? <IdentitiesView key={`${camera}|${identityHours}`} cameras={cameras} initialCamera={camera} initialHours={identityHours} /> : browsing ? (
         <section>
-          <h3>Latest events <span className="muted small">{timeLabel}{camera ? ` · ${name(camera)}` : ""}{status !== "verified" ? ` · ${STATUSES.find(([v]) => v === status)?.[1].toLowerCase()}` : ""}</span></h3>
+          <h3>{view.name} <span className="muted small">{timeLabel}{filterLabel ? ` · ${filterLabel}` : ""}{filters.sort === "priority" ? " · most important first" : ""}</span></h3>
           {busy && !events && <SkeletonGrid n={6} />}
           {events && events.length === 0 && <div className="empty">No events match these filters{day || hours ? " in this period" : ""}.</div>}
-          <div className="event-grid">
-            {events?.map((e) => <EventCard key={e.id} e={e} cameraName={name(e.camera_id)} onOpen={() => setOpen(e.id)} />)}
-          </div>
+          {filters.sort === "newest" ? (() => {
+            let i = 0;
+            return hourGroups(events ?? []).map((g) => (
+              <Fragment key={g.key}>
+                <h4 className="find-hour">{g.label} <span className="muted small">· {g.events.length} {g.events.length === 1 ? "event" : "events"}</span></h4>
+                <div className="event-grid">{g.events.map((e) => card(e, i++))}</div>
+              </Fragment>
+            ));
+          })() : <div className="event-grid">{events?.map(card)}</div>}
           <div ref={sentinel} className="center muted small">{more && events?.length ? "Loading older events…" : events?.length ? "That's everything." : ""}</div>
         </section>
       ) : (
         <>
           <section>
-            <h3>Events <span className="muted small">matching "{parsed?.text || submitted}"{parsed?.time_label ? ` · ${parsed.time_label}` : timeLabel ? ` · ${timeLabel}` : ""}{events ? ` · ${events.length}` : ""}</span></h3>
+            <h3>Events <span className="muted small">matching "{parsed?.text || submitted}"{parsed?.time_label ? ` · ${parsed.time_label}` : timeLabel ? ` · ${timeLabel}` : ""}{filterLabel ? ` · ${filterLabel}` : ""}{events ? ` · ${events.length}${more ? "+" : ""}` : ""}</span></h3>
             {busy && !events && <SkeletonGrid n={3} />}
             {events && events.length === 0 && <div className="empty">No matching events {parsed?.time_label ? parsed.time_label : hours || day ? "in this period" : ""}.</div>}
-            <div className="event-grid">
-              {events?.map((e) => <EventCard key={e.id} e={e} cameraName={name(e.camera_id)} onOpen={() => setOpen(e.id)} />)}
-            </div>
+            <div className="event-grid">{events?.map(card)}</div>
+            {more && events && events.length > 0 && <div className="center"><button className="ghost" disabled={busy} onClick={searchMore}>{busy ? "Loading…" : `Show more matches`}</button></div>}
             {events && older > 0 && hours > 0 && !day && !parsed?.time_label && (
               <p className="muted small older-hint">
                 {older} more before {fmtTime(Date.now() / 1000 - hours * 3600)} ·{" "}
-                <button className="ghost small" onClick={() => setHours(0)}>Show any time</button>
+                <button className="ghost small" onClick={() => setF({ hours: 0 })}>Show any time</button>
               </p>
             )}
           </section>
@@ -311,7 +510,7 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
             <section>
               <h3>Footage <span className="muted small">frames that look like "{parsed?.footage_text ?? submitted}"{parsed?.time_label ? ` · ${parsed.time_label}` : ""} · Qwen checks the best 8 · the outline is the part that matched</span></h3>
               <FootageResults q={parsed?.footage_text ?? submitted} nonce={nonce} cameras={cameras} camera={camera} sinceHours={day ? 0 : hours}
-                window={parsed?.time_label ? { since: parsed.since, until: parsed.until } : day ? { since: window_()[0] ?? null, until: window_()[1] ?? null } : null} />
+                window={parsed?.time_label ? { since: parsed.since, until: parsed.until } : day ? { since: filterWindow(filters)[0] ?? null, until: filterWindow(filters)[1] ?? null } : null} />
             </section>
           )}
           {parsed && parsed.footage_text === null && (

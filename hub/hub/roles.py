@@ -31,6 +31,7 @@ RULES: list[tuple[set[str], re.Pattern, str]] = [
     ({"POST"}, re.compile(r"^/api/config/import$"), "admin"),
     ({"POST"}, re.compile(r"^/api/advisor/"), "operator"),
     ({"PUT"}, re.compile(r"^/api/(layouts|dashboards)/"), "operator"),
+    ({"PUT"}, re.compile(r"^/api/find/views$"), "operator"),                      # Find's saved views
     ({"POST"}, re.compile(r"^/api/briefings/generate$"), "operator"),
     ({"DELETE"}, re.compile(r"^/api/assistant/threads/"), "operator"),
     ({"POST"}, re.compile(r"^/api/journeys/\d+/regenerate$"), "operator"),

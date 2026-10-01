@@ -297,7 +297,8 @@ export type HomeData = {
 };
 
 /* ---- People & vehicles */
-export type IdentitySighting = Pick<NvrEvent, "id" | "camera_id" | "start_ts" | "end_ts" | "snapshot" | "synopsis" | "priority" | "anomaly" | "yolo_class">;
+export type IdentitySighting = Pick<NvrEvent, "id" | "camera_id" | "start_ts" | "end_ts" | "snapshot" | "synopsis" | "priority" | "anomaly" | "yolo_class"
+  | "yolo_conf" | "camera_conf" | "threat" | "watched" | "policy" | "areas" | "anomaly_json" | "corrected_at" | "ptz_preset" | "journey_id" | "journey_cameras" | "locked">;
 export type IdentityCluster = {
   key: string; kind: "person" | "vehicle"; identity_id: number | null; name: string | null; name_sim: number | null; fingerprinted: boolean; watch: boolean;
   sightings: number; first_ts: number; last_ts: number; on_site_s: number; cameras: string[]; cover: number; description: string | null;
@@ -345,6 +346,23 @@ const json = (method: string, body: unknown): RequestInit => ({
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify(body),
 });
+
+/** Event filters shared by browse, search and the summary (backend db.event_filters). */
+export type EventQuery = {
+  camera?: string; status?: string; label?: string; since?: number; until?: number; min_yolo?: number;
+  priority?: string; flags?: string[]; place?: string; ppe_zone?: string; attention?: boolean; limit?: number; offset?: number;
+};
+const eventQs = ({ flags, attention, ...rest }: EventQuery & Record<string, unknown>) =>
+  ({ ...rest, flags: flags?.length ? flags.join(",") : undefined, attention: attention ? "true" : undefined }) as Record<string, string | number | undefined>;
+export type EventSummary = {
+  total: number;
+  by_kind: { kind: string; n: number }[];
+  by_zone: { zone: string; n: number }[];
+  by_camera: { camera_id: string; n: number }[];
+  by_day: { day: string; n: number }[];
+};
+/** A Find view the user saved (findViews.ts FindView without the builtin bits). */
+export type SavedFindView = { id: string; name: string; icon?: string; filters: Record<string, unknown>; mode?: "events" | "grouped"; builtin?: boolean };
 
 const qs = (params: Record<string, string | number | undefined | null>) =>
   new URLSearchParams(
@@ -429,12 +447,14 @@ export function makeApi(base: string) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...c, enabled: Boolean(c.enabled) }),
     }),
-  events: (p: { camera?: string; status?: string; label?: string; threat?: string; before_id?: number; limit?: number; since?: number; until?: number; min_yolo?: number }) =>
-    req<NvrEvent[]>(`/api/events?${qs(p)}`),
+  events: (p: EventQuery & { threat?: string; before_id?: number; sort?: "newest" | "priority" }) =>
+    req<NvrEvent[]>(`/api/events?${qs(eventQs(p))}`),
+  /** Find's compliance strip: counts for the same filters (backend db.summary). */
+  eventsSummary: (p: EventQuery) => req<EventSummary>(`/api/events/summary?${qs(eventQs(p))}`),
   event: (id: number) => req<NvrEvent>(`/api/events/${id}`),
   reprocess: (id: number) => req(`/api/events/${id}/reprocess`, { method: "POST" }),
-  search: (q: string, camera?: string, minYolo?: number, since?: number, until?: number) =>
-    req<NvrEvent[]>(`/api/search?${qs({ q, camera, min_yolo: minYolo || undefined, since, until })}`),
+  search: (q: string, p: EventQuery = {}) =>
+    req<NvrEvent[]>(`/api/search?${qs({ q, ...eventQs({ ...p, min_yolo: p.min_yolo || undefined }) })}`),
   footageSearch: (q: string, camera?: string, since?: number, until?: number) =>
     req<FootageMoment[]>(`/api/footage/search?${qs({ q, camera, since, until })}`),
   parseQuery: (q: string) => req<ParsedQuery>(`/api/query/parse?${qs({ q })}`),
@@ -506,6 +526,9 @@ export function makeApi(base: string) {
   eventIdentity: (id: number) => req<(NamedIdentity & { sim: number }) | null>(`/api/events/${id}/identity`),
   deleteIdentity: (id: number) => req(`/api/identities/${id}`, { method: "DELETE" }),
   backupNow: () => req<{ at: number; path: string; bytes: number }>("/api/backup", { method: "POST" }),
+  /** Find's saved views (site settings key find_views; operators and up may save them under the hub). */
+  findViews: () => req<{ views: SavedFindView[] }>("/api/find/views"),
+  saveFindViews: (views: SavedFindView[]) => req<{ views: SavedFindView[] }>("/api/find/views", json("PUT", { views })),
   assistantThreads: () => req<AssistantThread[]>("/api/assistant/threads"),
   assistantThread: (id: number) => req<AssistantThread & { messages: AssistantMessage[] }>(`/api/assistant/threads/${id}`),
   deleteThread: (id: number) => req(`/api/assistant/threads/${id}`, { method: "DELETE" }),
@@ -571,6 +594,13 @@ export const subscribe: SiteApi["subscribe"] = (...args) => api.subscribe(...arg
 
 export const fmtTime = (ts: number) =>
   new Date(ts * 1000).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
+/** Card time: "3:56:45 PM" today, "Oct 1 · 3:56 PM" on other days. */
+export const fmtWhen = (ts: number, now = new Date()) => {
+  const d = new Date(ts * 1000);
+  if (d.toDateString() === now.toDateString()) return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", second: "2-digit" });
+  return `${d.toLocaleDateString(undefined, { month: "short", day: "numeric" })} · ${d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`;
+};
 
 export const fmtDuration = (e: Pick<NvrEvent, "start_ts" | "end_ts">) =>
   e.end_ts ? `${Math.max(1, Math.round(e.end_ts - e.start_ts))}s` : "live";

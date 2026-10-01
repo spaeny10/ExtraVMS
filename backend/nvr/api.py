@@ -24,7 +24,7 @@ from . import synopsis as vlm
 from . import advisor, ai_serve, hub_agent, siteconfig
 from . import vlmroute
 from .config import ROOT, settings
-from .db import db
+from .db import JOURNEY_CAMS_SQL, LOCKED_SQL, PRIORITY_RANK_SQL, db, event_filters
 from .ingest import CameraIngest
 from .onvif_soap import OnvifError
 from .pipeline import Pipeline
@@ -566,32 +566,34 @@ async def refresh_areas(camera_id: str) -> int:
 
 # ---------------------------------------------------------------- events
 
+def _event_filters(**kw) -> tuple[list[str], list]:
+    try:
+        return event_filters(**kw)
+    except ValueError as ex:
+        raise HTTPException(400, str(ex))
+
+
 @app.get("/api/events")
 async def list_events(camera: str | None = None, status: str | None = None, label: str | None = None,
                       threat: str | None = None, since: float | None = None, until: float | None = None,
                       before_id: int | None = None, min_yolo: float = Query(0, ge=0, le=1),
-                      limit: int = Query(50, le=500)):
-    where, params = [], []
-    if min_yolo > 0:  # events still being tracked/verified have no YOLO score yet; keep them
-        where.append("(yolo_conf >= ? OR status IN ('open','pending'))"); params.append(min_yolo)
-    for col, val in (("camera_id", camera), ("camera_class", label), ("threat", threat)):
-        if val:
-            where.append(f"{col}=?"); params.append(val)
-    if status:
-        statuses = status.split(",")
-        where.append(f"status IN ({','.join('?' * len(statuses))})"); params += statuses
-    if since:
-        where.append("start_ts>=?"); params.append(since)
-    if until:
-        where.append("start_ts<=?"); params.append(until)
+                      limit: int = Query(50, le=500), priority: str | None = None, flags: str | None = None,
+                      place: str | None = None, ppe_zone: str | None = None, attention: bool = False,
+                      sort: Literal["newest", "priority"] = "newest", offset: int = 0):
+    """Browse events. priority: at least this level; flags: comma list (rule, ppe, unusual, watched, multicam,
+    locked, corrected, false_alarm), all must hold; place: walked into this named area; attention: anything that
+    needs a look. sort=priority pages by offset (before_id only makes sense for newest-first)."""
+    where, params = _event_filters(camera=camera, label=label, threat=threat, status=status, since=since,
+                                   until=until, min_yolo=min_yolo, priority=priority, flags=flags, place=place,
+                                   ppe_zone=ppe_zone, attention=attention)
     if before_id:
         where.append("id<?"); params.append(before_id)
+    order = f"{PRIORITY_RANK_SQL} DESC, id DESC" if sort == "priority" else "id DESC"
     sql = ("SELECT id, camera_id, track_id, camera_class, camera_conf, start_ts, end_ts, status, yolo_class, "
            "yolo_conf, yolo_hits, snapshot, clip, synopsis, threat, priority, anomaly, anomaly_json, watched, areas, policy, cells, ptz_preset, error, corrected_at, feedback, "
-           "EXISTS(SELECT 1 FROM locks WHERE locks.event_id = events.id) AS locked, journey_id, "
-           "(SELECT COUNT(DISTINCT je.value) FROM journeys, json_each(journeys.cameras) je WHERE journeys.id = events.journey_id) AS journey_cameras FROM events"
-           + (f" WHERE {' AND '.join(where)}" if where else "") + " ORDER BY id DESC LIMIT ?")
-    rows = db.all(sql, [*params, limit])
+           f"{LOCKED_SQL} AS locked, journey_id, {JOURNEY_CAMS_SQL} AS journey_cameras FROM events"
+           + (f" WHERE {' AND '.join(where)}" if where else "") + f" ORDER BY {order} LIMIT ? OFFSET ?")
+    rows = db.all(sql, [*params, limit, max(0, int(offset or 0))])
     for r in rows:
         r["feedback"] = json.loads(r["feedback"]) if r["feedback"] else None
         r["anomaly_json"] = json.loads(r["anomaly_json"]) if r["anomaly_json"] else None
@@ -599,6 +601,45 @@ async def list_events(camera: str | None = None, status: str | None = None, labe
         r["policy"] = json.loads(r["policy"]) if r["policy"] else None
         state.pipeline.annotate(r)
     return rows
+
+
+# registered before /api/events/{event_id}, which would otherwise take "summary" as an id (422)
+@app.get("/api/events/summary")
+async def events_summary(camera: str | None = None, status: str | None = None, label: str | None = None,
+                         since: float | None = None, until: float | None = None, min_yolo: float = 0,
+                         priority: str | None = None, flags: str | None = None, place: str | None = None,
+                         ppe_zone: str | None = None, attention: bool = False):
+    """Find's compliance strip: counts for the filter window by broken-rule kind, PPE zone, camera and day."""
+    where, params = _event_filters(camera=camera, label=label, status=status, since=since, until=until,
+                                   min_yolo=min_yolo, priority=priority, flags=flags, place=place,
+                                   ppe_zone=ppe_zone, attention=attention)
+    return db.summary(where, params)
+
+
+# ---------------------------------------------------------------- Find: saved views
+# Site-wide for now; under the hub they should become per hub user (follow-up).
+
+class FindViewsIn(BaseModel):
+    views: list[dict]
+
+
+@app.get("/api/find/views")
+async def get_find_views():
+    return {"views": db.get_setting("find_views", [])}
+
+
+@app.put("/api/find/views")
+async def put_find_views(body: FindViewsIn):
+    if len(body.views) > 50:
+        raise HTTPException(400, "at most 50 saved views")
+    views = []
+    for v in body.views:
+        name = str(v.get("name") or "").strip()
+        if not name:
+            raise HTTPException(400, "every view needs a name")
+        views.append({**v, "name": name[:60], "builtin": False})
+    db.set_setting("find_views", views)
+    return {"views": views}
 
 
 @app.get("/api/events/{event_id}")
@@ -853,14 +894,19 @@ async def parse_query(q: str = Query(min_length=1, max_length=300)):
 @app.get("/api/search")
 async def search(q: str, camera: str | None = None, since: float | None = None, until: float | None = None,
                  label: str | None = None, min_yolo: float = Query(0, ge=0, le=1),
-                 limit: int = Query(30, le=200)):
+                 limit: int = Query(30, le=200), offset: int = 0, status: str | None = None,
+                 priority: str | None = None, flags: str | None = None, place: str | None = None,
+                 ppe_zone: str | None = None, attention: bool = False):
     win = assistant.time_window(q)
     if win:  # "…today", "…last night": the phrase sets the window (unless given) and isn't searched for as a word
         q = win["text"]
         if since is None and until is None:
             since, until = win["since"], win["until"]
     emb = await vlm.embed(f"search_query: {q}") if state.pipeline.vlm_ready else None
-    return db.search(q, emb, limit, camera, since, until, label or query_label(q), min_yolo)
+    _event_filters(status=status, priority=priority, flags=flags)  # 400 on unknown names
+    rows = db.search(q, emb, limit, camera, since, until, label or query_label(q), min_yolo, offset=max(0, offset),
+                     status=status, priority=priority, flags=flags, place=place, ppe_zone=ppe_zone, attention=attention)
+    return [state.pipeline.annotate(r) for r in rows]
 
 
 # ---------------------------------------------------------------- recordings

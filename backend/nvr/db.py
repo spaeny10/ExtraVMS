@@ -267,6 +267,72 @@ MIGRATIONS = [
 ]
 JSON_FIELDS = ("path", "rules", "detections", "synopsis_json", "synopsis_original", "feedback", "anomaly_json", "areas", "policy")
 
+# ---- event filters shared by browse (/api/events), search and the Find summary strip
+UNUSUAL_MIN = 0.75   # anomaly at/above this is "unusual" (frontend UNUSUAL_MIN)
+PRIORITY_RANK = {"none": 0, "low": 1, "medium": 2, "high": 3}
+PRIORITY_RANK_SQL = "(CASE priority WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END)"
+LOCKED_SQL = "EXISTS(SELECT 1 FROM locks WHERE locks.event_id = events.id)"
+JOURNEY_CAMS_SQL = ("(SELECT COUNT(DISTINCT je.value) FROM journeys, json_each(journeys.cameras) je "
+                    "WHERE journeys.id = events.journey_id)")
+# detections can be large and older rows may not be an object: only parse it when it is valid JSON
+PPE_ZONE_SQL = "json_extract(CASE WHEN json_valid(detections) THEN detections END, '$.ppe.zone')"
+FLAG_SQL = {
+    "rule": "policy IS NOT NULL",
+    "ppe": "json_extract(policy, '$.kind') = 'ppe'",
+    "unusual": f"anomaly >= {UNUSUAL_MIN}",
+    "watched": "watched IS NOT NULL",
+    "multicam": f"(journey_id IS NOT NULL AND {JOURNEY_CAMS_SQL} > 1)",
+    "locked": LOCKED_SQL,
+    "corrected": "corrected_at IS NOT NULL",
+    "false_alarm": "json_extract(feedback, '$.verdict') = 'false_alarm'",
+}
+# Find's "Attention" view: anything that needs a look (priority medium+, a broken rule, unusual, watched)
+ATTENTION_SQL = f"({PRIORITY_RANK_SQL} >= 2 OR policy IS NOT NULL OR anomaly >= {UNUSUAL_MIN} OR watched IS NOT NULL)"
+
+
+def event_filters(camera: str | None = None, label: str | None = None, threat: str | None = None,
+                  status: str | None = None, since: float | None = None, until: float | None = None,
+                  min_yolo: float = 0, keep_unverified: bool = True, priority: str | None = None,
+                  flags: str | list[str] | None = None, place: str | None = None, ppe_zone: str | None = None,
+                  attention: bool = False) -> tuple[list[str], list]:
+    """WHERE clauses + params for the event filters; all optional and AND-combined.
+
+    keep_unverified: with min_yolo, events still being tracked/verified (no YOLO score yet) stay in (browse).
+    flags: names from FLAG_SQL (list or comma string); unknown names or priorities raise ValueError.
+    """
+    where, params = [], []
+    if min_yolo and min_yolo > 0:
+        where.append("(yolo_conf >= ? OR status IN ('open','pending'))" if keep_unverified else "yolo_conf >= ?")
+        params.append(min_yolo)
+    for col, val in (("camera_id", camera), ("camera_class", label), ("threat", threat)):
+        if val:
+            where.append(f"{col}=?"); params.append(val)
+    if status:
+        statuses = [x for x in status.split(",") if x]
+        where.append(f"status IN ({','.join('?' * len(statuses))})"); params += statuses
+    if since:
+        where.append("start_ts>=?"); params.append(since)
+    if until:
+        where.append("start_ts<=?"); params.append(until)
+    if priority and priority != "none":
+        if priority not in PRIORITY_RANK:
+            raise ValueError(f"unknown priority {priority!r}")
+        where.append(f"{PRIORITY_RANK_SQL} >= ?"); params.append(PRIORITY_RANK[priority])
+    names = flags.split(",") if isinstance(flags, str) else (flags or [])
+    for f in dict.fromkeys(x.strip() for x in names if x and x.strip()):
+        if f not in FLAG_SQL:
+            raise ValueError(f"unknown flag {f!r} (known: {', '.join(FLAG_SQL)})")
+        where.append(FLAG_SQL[f])
+    if place:
+        where.append("EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(events.areas) THEN events.areas ELSE '[]' END) a "
+                     "WHERE json_extract(a.value, '$.name') = ?)")
+        params.append(place)
+    if ppe_zone:
+        where.append(f"(json_extract(policy, '$.kind') = 'ppe' AND {PPE_ZONE_SQL} = ?)"); params.append(ppe_zone)
+    if attention:
+        where.append(ATTENTION_SQL)
+    return where, params
+
 
 class Database:
     def __init__(self, path):
@@ -434,9 +500,39 @@ class Database:
         return self.execute("INSERT INTO chat_messages (event_id, role, content, frames, at, ts) VALUES (?,?,?,?,?,?)",
                             [event_id, role, content, json.dumps(frames or []), at, time.time()]).lastrowid
 
+    def enrich(self, rows: list[dict]) -> list[dict]:
+        """Add what browse cards show but SELECT * lacks: locked (footage lock) and journey_cameras."""
+        ids = [r["id"] for r in rows if "locked" not in r or "journey_cameras" not in r]
+        if ids:
+            extra = {r["id"]: r for r in self.all(
+                f"SELECT id, {LOCKED_SQL} AS locked, {JOURNEY_CAMS_SQL} AS journey_cameras FROM events "
+                f"WHERE id IN ({','.join('?' * len(ids))})", ids)}
+            for r in rows:
+                x = extra.get(r["id"])
+                if x:
+                    r.setdefault("locked", x["locked"])
+                    r.setdefault("journey_cameras", x["journey_cameras"])
+        return rows
+
+    def summary(self, where: list[str], params: list) -> dict:
+        """Counts for Find's compliance strip: by broken-rule kind, PPE zone, camera and local day."""
+        def w(*extra: str) -> str:
+            parts = [*where, *extra]
+            return f" WHERE {' AND '.join(parts)}" if parts else ""
+        total = self.one(f"SELECT COUNT(*) AS n FROM events{w()}", params)["n"]
+        by_kind = self.all(f"SELECT json_extract(policy, '$.kind') AS kind, COUNT(*) AS n FROM events"
+                           f"{w('policy IS NOT NULL')} GROUP BY kind ORDER BY n DESC", params)
+        by_zone = self.all(f"SELECT {PPE_ZONE_SQL} AS zone, COUNT(*) AS n FROM events"
+                           f"{w(FLAG_SQL['ppe'])} GROUP BY zone ORDER BY n DESC", params)
+        by_camera = self.all(f"SELECT camera_id, COUNT(*) AS n FROM events{w()} GROUP BY camera_id ORDER BY n DESC", params)
+        by_day = self.all(f"SELECT date(start_ts, 'unixepoch', 'localtime') AS day, COUNT(*) AS n FROM events"
+                          f"{w()} GROUP BY day ORDER BY day", params)
+        return {"total": total, "by_kind": by_kind, "by_zone": [z for z in by_zone if z["zone"]],
+                "by_camera": by_camera, "by_day": by_day}
+
     def search(self, query: str, embedding: list[float] | None, limit: int = 50,
                camera_id: str | None = None, since: float | None = None, until: float | None = None,
-               label: str | None = None, min_yolo: float = 0) -> list[dict]:
+               label: str | None = None, min_yolo: float = 0, offset: int = 0, **filters) -> list[dict]:
         """Hybrid search: reciprocal-rank fusion of FTS5 keyword and vector results.
 
         Vector kNN always returns its k nearest neighbours, however unrelated, so vector hits are kept only
@@ -446,17 +542,11 @@ class Database:
         # Filters first, ranking second: otherwise the 200 best matches from all history can all fall outside
         # "today" (or this camera) and the filter leaves nothing.
         eligible: set[int] | None = None
-        if camera_id or since or until or label or min_yolo > 0:
-            fw, fp = ["status != 'masked'"], []
-            for col, val in (("camera_id", camera_id), ("camera_class", label)):
-                if val:
-                    fw.append(f"{col}=?"); fp.append(val)
-            if since:
-                fw.append("start_ts>=?"); fp.append(since)
-            if until:
-                fw.append("start_ts<=?"); fp.append(until)
-            if min_yolo > 0:
-                fw.append("yolo_conf>=?"); fp.append(min_yolo)
+        # filters: status, priority, flags, place, ppe_zone, attention (event_filters)
+        fw, fp = event_filters(camera=camera_id, label=label, since=since, until=until, min_yolo=min_yolo,
+                               keep_unverified=False, **filters)
+        fw.insert(0, "status != 'masked'")
+        if len(fw) > 1:
             eligible = {r["id"] for r in self.all(f"SELECT id FROM events WHERE {' AND '.join(fw)}", fp)}
             if not eligible:
                 return []
@@ -479,19 +569,11 @@ class Database:
         if not scores:
             return []
         ids = list(scores)
-        where, params = [f"id IN ({','.join('?' * len(ids))})", "status != 'masked'"], list(ids)
-        for col, val in (("camera_id", camera_id), ("camera_class", label)):
-            if val:
-                where.append(f"{col}=?"); params.append(val)
-        if since:
-            where.append("start_ts>=?"); params.append(since)
-        if until:
-            where.append("start_ts<=?"); params.append(until)
-        if min_yolo > 0:
-            where.append("yolo_conf>=?"); params.append(min_yolo)
-        rows = [decode_event(r) for r in self.all(f"SELECT * FROM events WHERE {' AND '.join(where)}", params)]
+        rows = [decode_event(r) for r in self.all(
+            f"SELECT * FROM events WHERE id IN ({','.join('?' * len(ids))}) AND {' AND '.join(fw)}", [*ids, *fp])]
         rows.sort(key=lambda r: (-scores[r["id"]], -r["start_ts"]))  # equal relevance: newest first
-        return [{**r, "score": scores[r["id"]]} for r in rows[:limit]]
+        page = rows[offset:offset + limit]
+        return [{**r, "score": scores[r["id"]]} for r in self.enrich(page)]
 
 
 def decode_event(e: dict) -> dict:

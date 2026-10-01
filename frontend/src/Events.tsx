@@ -1,4 +1,4 @@
-import { api, fmtDuration, fmtTime, ppeBadge, UNUSUAL_MIN, type NvrEvent, type SiteApi } from "./api";
+import { api, fmtDuration, fmtWhen, ppeBadge, UNUSUAL_MIN, type NvrEvent, type SiteApi } from "./api";
 
 const STATUS_LABEL: Record<string, string> = {
   open: "Tracking",
@@ -14,6 +14,16 @@ export function StatusBadge({ e }: { e: Pick<NvrEvent, "status" | "threat"> }) {
   return <span className={`badge status-${e.status}`}>{STATUS_LABEL[e.status]}</span>;
 }
 
+/** Card chip: the combined priority (threat or unusualness, operator wins), hidden when there is none;
+ * events the verifier hasn't finished (or rejected) still say so. */
+export function CardStatus({ e }: { e: Pick<NvrEvent, "status" | "priority"> }) {
+  if (e.status !== "verified") return <span className={`badge status-${e.status}`}>{STATUS_LABEL[e.status]}</span>;
+  if (!e.priority || e.priority === "none") return null;
+  return <span className={`badge threat-${e.priority}`} title="Priority: the higher of Qwen's threat level and how unusual this is for the camera">{e.priority}</span>;
+}
+
+const clip = (t: string, n = 40) => (t.length > n ? `${t.slice(0, n - 1).trimEnd()}…` : t);
+
 /** What to show in place of a synopsis: Qwen's progress, or the YOLO result for labels Qwen skips. */
 export function placeholder(e: NvrEvent): string {
   if (e.status === "verified") {
@@ -25,13 +35,17 @@ export function placeholder(e: NvrEvent): string {
   return e.error ?? "Waiting for verification…";
 }
 
-export function EventCard({ e, cameraName, onOpen, site = api, siteName }: {
+export function EventCard({ e, cameraName, onOpen, site = api, siteName, focused }: {
   e: NvrEvent; cameraName: string; onOpen: () => void;
   /** the site the event belongs to (hub dashboard: another site than the page's); default: this site */
   site?: SiteApi; siteName?: string;
+  /** keyboard focus in Find (j/k) */
+  focused?: boolean;
 }) {
+  const unusual = (e.anomaly ?? 0) >= UNUSUAL_MIN;
+  const reasons = e.anomaly_json?.reasons ?? [];
   return (
-    <button className={`event-card ${e.status}`} onClick={onOpen}>
+    <button className={`event-card ${e.status}${focused ? " focused" : ""}`} onClick={onOpen} data-event-id={e.id}>
       <div className="thumb">
         {e.snapshot ? <img src={site.media(e, "snapshot.jpg")} loading="lazy" alt="" /> : <div className="thumb-empty">{e.camera_class}</div>}
         <span className={`label-chip ${e.camera_class}`}>{e.yolo_class ?? e.camera_class}</span>
@@ -39,21 +53,23 @@ export function EventCard({ e, cameraName, onOpen, site = api, siteName }: {
       <div className="event-body">
         <div className="event-meta">
           <span className="cam">{siteName ? `${siteName} · ` : ""}{cameraName}</span>
-          <span className="muted">{fmtTime(e.start_ts)} · {fmtDuration(e)}</span>
+          <span className="muted" title={new Date(e.start_ts * 1000).toLocaleString()}>{fmtWhen(e.start_ts)} · {fmtDuration(e)}</span>
         </div>
         <p className={e.synopsis ? "synopsis" : "synopsis muted"}>{e.synopsis ?? placeholder(e)}</p>
+        {/* fixed order, every slot optional, so footers line up: priority, rule, unusual, watched, places,
+            journey, camera away, lock / corrected / false alarm, then the confidence line on the right */}
         <div className="event-foot">
-          <StatusBadge e={e} />
-          {e.feedback?.verdict === "false_alarm" && <span className="badge status-error">False alarm</span>}
-          {e.corrected_at ? <span className="badge" title="Synopsis corrected by an operator">Corrected</span> : null}
-          {e.locked ? <span className="badge lock-badge" title="Footage locked: kept regardless of retention">🔒</span> : null}
+          <CardStatus e={e} />
+          {e.policy ? <span className={`badge trunc threat-${e.policy.priority === "medium" ? "medium" : "high"}`} title={e.policy.text}>{e.policy.kind === "ppe" ? `🦺 ${ppeBadge(e.policy)}` : `🚫 ${clip(e.policy.text || "Site rule")}`}</span> : null}
+          {unusual ? <span className="badge trunc unusual-badge" title={`Unusual for this camera:\n${reasons.join("\n")}`}>⚠ Unusual{reasons[0] ? ` · ${reasons[0]}` : ""}</span> : null}
           {e.watched ? <span className="badge threat-medium" title="On the watch list">👁 {e.watched}</span> : null}
-          {e.policy ? <span className={`badge threat-${e.policy.priority === "medium" ? "medium" : "high"}`} title={e.policy.text}>{e.policy.kind === "ppe" ? `🦺 ${ppeBadge(e.policy)}` : "🚫 Site rule"}</span> : null}
-          {e.ptz_preset ? <span className="badge ptz-badge" title="The camera was turned away from its home view: zones, places and the learned baseline did not apply">↗ {e.ptz_preset === "away" ? "camera away" : e.ptz_preset}</span> : null}
-          {e.areas?.length ? <span className="badge area-badge" title={`Went to: ${e.areas.map((a) => a.name).join(" → ")}`}>📍 {e.areas.map((a) => a.name).join(" → ")}</span> : null}
-          {(e.anomaly ?? 0) >= UNUSUAL_MIN ? <span className="badge unusual-badge" title={`Unusual for this camera:\n${(e.anomaly_json?.reasons ?? []).join("\n")}`}>⚠ Unusual</span> : null}
+          {e.areas?.length ? <span className="badge trunc area-badge" title={`Went to: ${e.areas.map((x) => x.name).join(" → ")}`}>📍 {e.areas.map((x) => x.name).join(" → ")}</span> : null}
           {e.journey_cameras && e.journey_cameras > 1 ? <span className="badge journey-badge" title="Same person seen on other cameras">🔗 {e.journey_cameras} cams</span> : null}
-          {e.yolo_conf != null && <span className="muted small">YOLO {(e.yolo_conf * 100).toFixed(0)}% · cam {((e.camera_conf ?? 0) * 100).toFixed(0)}%</span>}
+          {e.ptz_preset ? <span className="badge ptz-badge" title="The camera was turned away from its home view: zones, places and the learned baseline did not apply">↗ {e.ptz_preset === "away" ? "camera away" : e.ptz_preset}</span> : null}
+          {e.locked ? <span className="badge lock-badge" title="Footage locked: kept regardless of retention">🔒</span> : null}
+          {e.corrected_at ? <span className="badge" title="Synopsis corrected by an operator">Corrected</span> : null}
+          {e.feedback?.verdict === "false_alarm" && <span className="badge status-error">False alarm</span>}
+          {e.yolo_conf != null && <span className="muted small conf">YOLO {(e.yolo_conf * 100).toFixed(0)}% · cam {((e.camera_conf ?? 0) * 100).toFixed(0)}%</span>}
         </div>
       </div>
     </button>

@@ -32,7 +32,11 @@ log = logging.getLogger("nvr.identities")
 GROUP_SIM = {"person": 0.76, "vehicle": 0.86}
 NAME_SIM = {"person": 0.85, "vehicle": 0.87}   # conservative: a wrong name is worse than a missing one (indoor re-ID: different people reach ~0.82)
 VEC_TABLE = {"person": "reid_vec", "vehicle": "vehicle_vec"}
-EVENT_COLS = "id, camera_id, camera_class, start_ts, end_ts, synopsis, snapshot, yolo_class, yolo_conf, priority, anomaly, journey_id, watched"
+EVENT_COLS = ("id, camera_id, camera_class, start_ts, end_ts, synopsis, snapshot, yolo_class, yolo_conf, priority, anomaly, journey_id, watched, "
+              "camera_conf, threat, policy, areas, anomaly_json, corrected_at, ptz_preset")
+# what an event card in the grouped ("by who") view shows, so it matches the browse cards
+CARD_KEYS = ("id", "camera_id", "start_ts", "end_ts", "snapshot", "synopsis", "priority", "anomaly", "yolo_class", "yolo_conf",
+             "camera_conf", "threat", "watched", "policy", "areas", "anomaly_json", "corrected_at", "ptz_preset", "journey_id")
 
 
 # ---------------------------------------------------------------- vehicle fingerprints (CLIP)
@@ -253,10 +257,19 @@ def clusters(kind: str, since: float, until: float | None = None, camera_id: str
     for e in unfingerprinted:  # no crops saved (old events): shown on their own
         out.append(_summary(kind, [e], cams, None, 0.0, fingerprinted=False))
     out.sort(key=lambda c: -c["last_ts"])
+    db.enrich([ev for c in out for ev in c["events"]])  # locked / journey_cameras, as on the browse cards
     for i, c in enumerate(out):
         c["key"] = f"{kind[0]}{i + 1}"
     return {"kind": kind, "since": since, "until": until, "clusters": out, "sightings": len(events),
             "named": [{k: v for k, v in n.items() if k not in ("vec", "vecs")} for n in names]}
+
+
+def _card(e: dict) -> dict:
+    c = {k: e.get(k) for k in CARD_KEYS}
+    for k in ("policy", "areas", "anomaly_json"):
+        if isinstance(c[k], str):
+            c[k] = json.loads(c[k])
+    return c
 
 
 def _summary(kind: str, members: list[dict], cams: dict, identity: dict | None, sim: float, fingerprinted: bool = True) -> dict:
@@ -272,7 +285,7 @@ def _summary(kind: str, members: list[dict], cams: dict, identity: dict | None, 
         "cover": cover["id"], "description": desc,
         "priority": max((e.get("priority") or "none" for e in members), key=lambda p: ["none", "low", "medium", "high"].index(p)),
         "unusual": any((e.get("anomaly") or 0) >= 0.75 for e in members),
-        "events": [{k: e[k] for k in ("id", "camera_id", "start_ts", "end_ts", "snapshot", "synopsis", "priority", "anomaly", "yolo_class")} for e in members],
+        "events": [_card(e) for e in members],
     }
 
 

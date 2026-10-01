@@ -15,6 +15,7 @@ const TAB_ICON: Record<Tab, string> = { Home: "home", Live: "live", Find: "find"
 
 /** "#ask", "#live"... (home-screen shortcuts) open that tab */
 const hashTab = (): Tab | null => {
+  if (new URLSearchParams(location.search).has("view")) return "Find";  // a Find link (?view=…&flags=…)
   const h = location.hash.toLowerCase();
   if (h === "#ask" || h === "#search" || h === "#events") return "Find";  // Events merged into Find
   if (h === "#cameras" || h === "#system") return "Settings";
@@ -53,6 +54,8 @@ export default function App() {
 
   const choose = useCallback((t: Tab) => {
     setTab(t);
+    // Find keeps its filters in the query string; other tabs shouldn't carry them
+    if (t !== "Find" && location.search) history.replaceState(null, "", location.pathname + location.hash);
     if (t !== "Timeline") {
       setFocus(null); // an event focus only applies to the visit it was opened for
       if (location.hash.startsWith("#timeline")) history.replaceState(null, "", location.pathname);
