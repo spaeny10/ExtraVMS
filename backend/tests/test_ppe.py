@@ -113,8 +113,9 @@ def test_plan_needs_min_dwell_and_starts_after_grace():
     (c,) = ppe.plan(e, [YARD])
     assert c["zone"] == "Yard" and c["required"] == ["hard_hat", "vest"] and c["priority"] == "medium"
     assert c["window"] == [T0 + settings.ppe_grace_s, T0 + 12]
-    passing = {"camera_class": "person", "status": "verified", "path": walk(T0, 3)}
-    assert ppe.plan(passing, [YARD]) == []                          # through the zone in < min_dwell_s: no check
+    passing = {"camera_class": "person", "status": "verified", "path": walk(T0, 1.5)}
+    assert ppe.plan(passing, [YARD]) == []                          # through the zone in < min_dwell_s (3 s): no check
+    assert ppe.plan({**e, "path": walk(T0, 4)}, [YARD])            # a brisk walk across the zone (~4 s) is checked
     assert ppe.plan({**e, "camera_class": "vehicle"}, [YARD]) == []
     assert ppe.plan(e, [{**YARD, "min_dwell_s": 20}]) == []          # per-zone dwell
     assert ppe.plan(e, [{**YARD, "type": "area"}]) == []
