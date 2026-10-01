@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     ppe_conf: float = 0.4                   # a frame calls an item present / missing at this detector confidence
     ppe_imgsz: int = 960
     ppe_frames: int = 4                     # frames checked per person per zone
-    ppe_min_dwell_s: float = 5.0            # zone default: seconds inside before the person is checked
+    ppe_min_dwell_s: float = 3.0            # zone default: seconds inside before the person is checked (a brisk walk across a yard zone is ~4 s)
     ppe_grace_s: float = 3.0                # zone default: frames from this long after walking in (time to put a hat on)
     ppe_vlm_confirm: bool = True            # Qwen looks at the person when the detector says missing or can't tell
     ppe_vlm_all: bool = False               # ...or at every checked person (Qwen decides; ~1 s each): catches caps the
