@@ -39,11 +39,12 @@ def _present(boxes: list | None, ref) -> bool:
     return any(b.get("cls_id") in VEHICLE_CLS and iou(b["box"], ref) >= STATIC_IOU for b in boxes or [])
 
 
-def static_matches(detections: list, pre_boxes: list | None = None) -> list[int]:
+def static_matches(detections: list, pre_boxes: list | None = None, spots: list | None = None) -> list[int]:
     """Indices of matched frames whose matched YOLO vehicle box never moved: present, unmoved, in (almost) every
     other sampled frame of the clip, or in half of them plus the pre-roll frame from before the camera saw any
     motion (a distant parked truck flickers in and out of YOLO's detections, but an arriving vehicle is never
-    in the pre-roll at its final spot). Such a vehicle cannot be what moved. This catches the real Side Yard
+    in the pre-roll at its final spot), or sitting on a remembered parking spot (`spots`, see memory below).
+    Such a vehicle cannot be what moved. This catches the real Side Yard
     case: tiny camera boxes on a distant parked truck matched in 2 of 6 frames (enough hits)."""
     n = len(detections)
     if n < 3:
@@ -54,8 +55,9 @@ def static_matches(detections: list, pre_boxes: list | None = None) -> list[int]
         if not m or m.get("cls_id") not in VEHICLE_CLS:
             continue
         present = sum(1 for j, o in enumerate(detections) if j != i and _present(o.get("yolo"), m["box"]))
-        if present >= STATIC_FRAC * (n - 1) or (pre_boxes is not None and _present(pre_boxes, m["box"])
-                                                 and present >= STATIC_FRAC_PRE * (n - 1)):
+        remembered = any(iou(m["box"], sp) >= MEMORY_IOU for sp in spots or [])   # a known parking spot (memory)
+        if present >= STATIC_FRAC * (n - 1) or remembered or (pre_boxes is not None and _present(pre_boxes, m["box"])
+                                                              and present >= STATIC_FRAC_PRE * (n - 1)):
             out.append(i)
     return out
 

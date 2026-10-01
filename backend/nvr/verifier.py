@@ -213,7 +213,8 @@ class Verifier:
         if settings.parked_suppress and label in parked.VEHICLE_LABELS:
             # Per-frame: a match on a vehicle that sits unmoved through the whole clip is not a hit. Only the
             # matches on something that moved (or appeared) count.
-            idx = parked.static_matches(detections, pre_boxes)
+            spots = [e["box"] for e in parked.active(entries, now)]
+            idx = parked.static_matches(detections, pre_boxes, spots)
             if idx:
                 dropped = [detections[i]["match"] for i in idx]
                 for i in idx:
@@ -230,7 +231,7 @@ class Verifier:
         if info:
             alt = [_matches(tuple(d["cam_box"]), parked.without(d["yolo"], info["box"]), allowed) for d in detections]
             trial = [{**d, "match": m, "iou": round(s, 3), "static": False} for d, (m, s) in zip(detections, alt)]
-            for i in parked.static_matches(trial, pre_boxes):  # another parked vehicle is no better
+            for i in parked.static_matches(trial, pre_boxes, [e["box"] for e in parked.active(entries, now)]):  # another parked vehicle is no better
                 trial[i] = {**trial[i], "match": None, "iou": 0.0, "static": True}
             if sum(d["match"] is not None for d in trial) >= need:
                 if parked.judge(label, trial, event.get("path") or [], entries, now) is None:
