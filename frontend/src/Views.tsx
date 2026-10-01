@@ -400,9 +400,10 @@ export function CamerasView({ cameras, port, reload }: { cameras: Camera[]; port
 function zoneSummary(zones: Zone[]): string {
   const valid = zones.filter((z) => z.points.length >= 3);
   if (!valid.length) return "Full frame";
-  const masks = valid.filter((z) => z.type === "exclude").length;
-  const areas = valid.length - masks;
-  return [masks && `${masks} mask${masks > 1 ? "s" : ""}`, areas && `${areas} detect-only area${areas > 1 ? "s" : ""}`].filter(Boolean).join(", ");
+  const count = (t: string) => valid.filter((z) => (z.type ?? "include") === t).length;
+  const masks = count("exclude"), areas = count("include"), places = count("area"), ppe = count("ppe");
+  return [masks && `${masks} mask${masks > 1 ? "s" : ""}`, areas && `${areas} detect-only area${areas > 1 ? "s" : ""}`,
+    places && `${places} place${places > 1 ? "s" : ""}`, ppe && `${ppe} PPE zone${ppe > 1 ? "s" : ""}`].filter(Boolean).join(", ");
 }
 
 function Health({ ok }: { ok?: boolean }) {
@@ -541,7 +542,7 @@ function BackupRow({ s }: { s: SystemInfo }) {
 
 const TASK_LABELS: Record<string, string> = {
   assistant: "Ask the NVR", briefing: "Briefings", journey: "Journeys (same person? + narratives)",
-  unusual_review: "Unusual-event synopses", footage_verify: "Footage search checks",
+  unusual_review: "Unusual-event synopses", footage_verify: "Footage search checks", ppe: "PPE checks (hard hat / vest)",
 };
 
 /** Optional larger remote Qwen (e.g. RunPod Serverless): status, which tasks use it, spend, and a test. */

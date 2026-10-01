@@ -99,6 +99,11 @@ def _event_line(e: dict) -> str:
         extra.append(f"WATCH LIST: {e['watched']}")
     if e.get("priority") and e["priority"] != "none":
         extra.append(f"priority {e['priority']}")
+    pol = e.get("policy")
+    if isinstance(pol, str):
+        pol = json.loads(pol)
+    if pol:  # a broken site rule, e.g. "No hard hat in PPE zone 'Yard' (40 s)"
+        extra.append(f"SITE RULE BROKEN: {pol['text']}")
     if an and an.get("reasons"):
         extra.append("unusual: " + "; ".join(an["reasons"]))
     fb = e.get("feedback")
@@ -397,7 +402,7 @@ def _where(a: dict, extra: list[str] | None = None) -> tuple[str, list]:
 
 
 EVENT_COLS = ("id, camera_id, camera_class, yolo_class, start_ts, end_ts, synopsis, snapshot, priority, anomaly, "
-              "anomaly_json, feedback, journey_id, watched, areas")
+              "anomaly_json, feedback, journey_id, watched, areas, policy")
 
 
 async def t_search_events(a: dict, refs: Refs) -> tuple[list[str], int]:

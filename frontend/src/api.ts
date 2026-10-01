@@ -1,7 +1,60 @@
 import { connection } from "./ui";
 import type { DashboardConfig } from "./dashboard/types";
-/** include = detect only here; exclude = mask out; area = just a name for a place (never filters) */
-export type Zone = { name: string; type?: "include" | "exclude" | "area"; points: [number, number][] };
+/** include = detect only here; exclude = mask out; area = just a name for a place (never filters);
+ * ppe = people who stay in it must wear the required items (backend/nvr/ppe.py; never filters) */
+export type ZoneType = "include" | "exclude" | "area" | "ppe";
+export type PpeItem = "hard_hat" | "vest";
+export type Zone = {
+  name: string; type?: ZoneType; points: [number, number][];
+  /** ppe zones: what people inside must wear; min_dwell_s / grace_s override the site defaults (5 s / 3 s) */
+  required?: PpeItem[]; min_dwell_s?: number; grace_s?: number;
+};
+export const PPE_ITEMS: { id: PpeItem; label: string }[] = [{ id: "hard_hat", label: "Hard hat" }, { id: "vest", label: "Hi-vis vest" }];
+
+/** A newly drawn zone of the given type: a default name, and for a PPE zone both items required. */
+export function newZone(type: ZoneType, existing: Zone[], points: [number, number][]): Zone {
+  const n = existing.filter((z) => (z.type ?? "include") === type).length + 1;
+  const name = `${{ exclude: "Mask", area: "Place", include: "Area", ppe: "PPE zone" }[type]} ${n}`;
+  return type === "ppe" ? { name, type, points, required: ["hard_hat", "vest"] } : { name, type, points };
+}
+
+/** Change a zone's type: PPE fields only on PPE zones (a new PPE zone requires both items until one is unticked). */
+export function retypeZone(z: Zone, type: ZoneType): Zone {
+  const { required, min_dwell_s, grace_s, ...rest } = z;
+  if (type !== "ppe") return { ...rest, type };
+  return { ...rest, type, required: required?.length ? required : ["hard_hat", "vest"],
+    ...(min_dwell_s != null ? { min_dwell_s } : {}), ...(grace_s != null ? { grace_s } : {}) };
+}
+
+/** Tick / untick a required item, keeping the backend's order (hard_hat, vest). */
+export function togglePpeItem(z: Zone, item: PpeItem, on: boolean): Zone {
+  const set = new Set(z.required ?? []);
+  if (on) set.add(item); else set.delete(item);
+  return { ...z, required: PPE_ITEMS.map((i) => i.id).filter((i) => set.has(i)) };
+}
+
+/** "Hard hat missing · Hi-vis vest worn" for a PPE check's final (or detector / Qwen) answers. */
+export function ppeItemsText(calls: Partial<Record<PpeItem, PpeCall>> | null | undefined, required: PpeItem[]): string {
+  const word = { present: "worn", missing: "missing", unclear: "unclear" } as const;
+  return PPE_ITEMS.filter((i) => required.includes(i.id)).map((i) => `${i.label} ${word[calls?.[i.id] ?? "unclear"]}`).join(" · ");
+}
+
+/** Short badge text for a broken PPE rule: "No hard hat", "No hard hat / vest". */
+export function ppeBadge(rule: { kind: string; tags?: string[] } | null | undefined): string | null {
+  if (rule?.kind !== "ppe") return null;
+  const items = (rule.tags ?? []).filter((t) => t.startsWith("no ")).map((t) => t.slice(3));
+  return items.length ? `No ${items.join(" / ")}` : "PPE";
+}
+
+/** The stored PPE check of an event (events.detections.ppe, backend/nvr/ppe.py). */
+export type PpeCall = "present" | "missing" | "unclear";
+export type PpeResult = {
+  zone: string; required: PpeItem[]; dwell_s: number;
+  verdict: "violation" | "compliant" | "unclear" | "unavailable" | "error";
+  violation: PpeItem[]; items?: Partial<Record<PpeItem, PpeCall>>; detector?: Partial<Record<PpeItem, PpeCall>>;
+  vlm?: ({ head?: string; torso?: string; model?: string } & Partial<Record<PpeItem, PpeCall>>) | null;
+  overruled?: PpeItem[]; marked?: string | null; error?: string;
+};
 /** [x, y, class, event_id, status] foot point of a recent detection */
 export type DetectionPoint = [number, number, string, number, string];
 
@@ -23,7 +76,7 @@ export function zoneAllowed(x: number, y: number, zones: Zone[]): boolean {
 
 /** A site rule checked by code after Qwen describes a vehicle (backend policy.py). */
 export type SiteRule = { kind: "towing" | "entry"; asset?: string; area?: string; allowed: string[]; priority: "medium" | "high" };
-export type BrokenRule = { kind: string; text: string; priority: string };
+export type BrokenRule = { kind: string; text: string; priority: string; tags?: string[] };
 
 export type Camera = {
   id: string;
@@ -129,7 +182,7 @@ export type NvrEvent = {
   // detail only
   path?: number[][];
   rules?: { ts: number; topic: string; rule: string | null }[];
-  detections?: { samples: Detection[]; keyframes: { file: string; ts: number; kind: string }[]; needed: number; time_shift_s?: number };
+  detections?: { samples: Detection[]; keyframes: { file: string; ts: number; kind: string }[]; needed: number; time_shift_s?: number; ppe?: PpeResult };
   synopsis_json?: Synopsis | null;
   synopsis_original?: Synopsis | null;
   clip_start?: number | null;

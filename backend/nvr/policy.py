@@ -8,6 +8,9 @@ Rule shapes (cameras.policies, JSON list):
   -> a person whose track starts at that named place (an exterior door) and who is not recognised as one of
      the named people in `allowed` breaks the rule. Checked right after verification (no Qwen needed).
 
+  -> PPE zones (zones of type "ppe", ppe.py) are site rules too: a person who stayed in one without the
+     required hard hat / hi-vis vest breaks it (kind "ppe", medium priority unless the zone says otherwise).
+
 A broken rule is stored on the event (events.policy = {"kind", "text", "priority"}), lifts its priority,
 puts it under Needs attention on Home and into the search index. The rule text is also given to Qwen so its
 own threat rating agrees. A vehicle the system has never seen breaks the rule once, until it is named.
@@ -105,6 +108,8 @@ def check(event_id: int, camera: dict | None = None) -> dict | None:
                       "text": f"Unknown vehicle towing a {towed}: {who} to tow a {r.get('asset', 'equipment')} "
                               f"(allowed: {', '.join(r.get('allowed') or []) or 'none'})"}
             break
+    if broken is None and e["camera_class"] == "person":
+        broken = ppe_rule(e, camera)
     if (e.get("policy") or None) != broken:
         db.update_event(event_id, policy=broken)
         from . import baseline
@@ -112,6 +117,19 @@ def check(event_id: int, camera: dict | None = None) -> dict | None:
         if broken:
             log.info("event %s breaks a site rule: %s", event_id, broken["text"])
     return broken
+
+
+def ppe_rule(e: dict, camera: dict | None) -> dict | None:
+    """The PPE check's violation as a broken rule, while the camera still has that PPE zone."""
+    from . import ppe
+    res = (e.get("detections") or {}).get("ppe")
+    if not res or res.get("verdict") != "violation":
+        return None
+    names = {(z.get("name") or "PPE zone").strip() for z in ppe.ppe_zones((camera or {}).get("zones"))}
+    if res.get("zone") not in names:
+        return None
+    return {"kind": "ppe", "priority": res.get("priority") or "medium", "text": ppe.describe(res),
+            "tags": ppe.tags(res)}
 
 
 def recheck(camera_id: str, days: float = 7) -> int:

@@ -78,6 +78,8 @@ async def gather(state) -> dict:
     ctx["vlm"] = await _vlm_facts(state)
     ctx["events"] = _event_facts(ctx["now"])
     ctx["probe"] = await asyncio.to_thread(_probe_streams, ctx["cameras"], ctx["now"])
+    from .config import ROOT
+    ctx["ppe_model_present"] = (ROOT / "models" / settings.ppe_model).exists()
     ctx["activity"] = _activity_facts(ctx["cameras"], ctx["events"], ctx["now"])
     ctx["ptz"] = _ptz_facts(state, ctx["now"])
     ctx["clocks"] = _clock_facts(state)
@@ -492,6 +494,25 @@ def check_rules(ctx: dict) -> list[Finding]:
     return out
 
 
+def check_ppe(ctx: dict) -> list[Finding]:
+    """A PPE zone is painted but the PPE detector's weights aren't on disk: nobody in it is being checked."""
+    from . import ppe
+    if ctx.get("ppe_model_present", True):
+        return []
+    cams = [c for c in ctx["cameras"] if ppe.ppe_zones(c.get("zones"))]
+    if not cams:
+        return []
+    names = ", ".join(c["name"] for c in cams)
+    return [Finding(key="ppe:model", area="rules", impact="high",
+                    title=f"PPE zone{'s' if len(cams) > 1 else ''} on {names} but the PPE detector is missing",
+                    why=f"models/{settings.ppe_model} is not on disk, so people in the PPE-required zones are not checked "
+                        "for hard hats or hi-vis vests.",
+                    effect="Hard hat / hi-vis vest violations show up as medium-priority events again.",
+                    steps=[f"Copy the PPE model to models/{settings.ppe_model} (or set NVR_PPE_MODEL to the file you have) "
+                           "and restart the NVR."],
+                    fingerprint=settings.ppe_model)]
+
+
 def check_ptz(ctx: dict) -> list[Finding]:
     out = []
     for cid, p in ctx["ptz"].items():
@@ -527,7 +548,8 @@ def check_clocks(ctx: dict) -> list[Finding]:
     return out
 
 
-CHECKS = [check_bitrate, check_framerate, check_codecs, check_storage, check_vlm, check_events, check_rules, check_ptz, check_clocks]
+CHECKS = [check_bitrate, check_framerate, check_codecs, check_storage, check_vlm, check_events, check_rules, check_ppe, check_ptz,
+          check_clocks]
 
 
 def run_checks(ctx: dict) -> list[Finding]:

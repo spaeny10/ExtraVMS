@@ -107,6 +107,22 @@ def _zone_fact(event: dict, camera: dict) -> str | None:
             f"on the property; do not call it background or highway traffic.")
 
 
+def ppe_fact(event: dict) -> str | None:
+    """The stored PPE check in plain words for the synopsis / chat prompt (None if the person wasn't checked)."""
+    from . import ppe
+    r = (event.get("detections") or {}).get("ppe")
+    if not r or r.get("verdict") not in ("violation", "compliant"):
+        return None
+    zone = r.get("zone", "the PPE zone")
+    if r["verdict"] == "compliant":
+        return (f"PPE check (confirmed by the NVR): in the PPE-required zone '{zone}' this person wore the required "
+                + " and ".join(ppe.ITEM_WORDS[i] for i in r.get("required") or []) + ".")
+    missing = " or ".join(ppe.ITEM_WORDS[i] for i in r["violation"])
+    return (f"PPE violation (confirmed by the NVR): this person spent {r.get('dwell_s', 0):.0f} s in the PPE-required "
+            f"zone '{zone}' without a {missing}. Say so in the summary (e.g. 'not wearing a {missing} in {zone}'), "
+            f"and rate the threat at least medium for the safety breach.")
+
+
 def event_facts(event: dict, camera: dict) -> str:
     """Shared factual context for synopsis and chat prompts."""
     start = dt.datetime.fromtimestamp(event["start_ts"]).astimezone()
@@ -148,6 +164,9 @@ def event_facts(event: dict, camera: dict) -> str:
     reasons = (event.get("anomaly_json") or {}).get("reasons")
     if reasons:  # learned baseline for this camera; lets the threat judgement account for what's normal here
         lines.append("Unusual for this camera: " + "; ".join(reasons))
+    ppe_line = ppe_fact(event)
+    if ppe_line:  # the PPE check (detector + Qwen on doubt) already decided: the synopsis must agree
+        lines.append(ppe_line)
     from . import policy
     rule = policy.prompt_lines(camera) if event["camera_class"] == "vehicle" else None
     if rule:  # operator's site rules, e.g. who may tow the solar towers

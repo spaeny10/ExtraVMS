@@ -1,7 +1,8 @@
 """Detection zones: include / exclude / area polygons in normalized (0-1) image coordinates.
 
 "area" zones never filter anything: they only name a place ("Bathroom 2", "Exit door") so each event can
-record which places the object walked into (areas_visited).
+record which places the object walked into (areas_visited). "ppe" zones don't filter either: people who stay
+in one are checked for the hard hat / hi-vis vest it requires (ppe.py).
 
 One rule everywhere (tracker, YOLO verification, past-event masking, the UI preview):
 an object's point is the bottom-centre of its box (where it touches the ground). It is *allowed* if
@@ -61,14 +62,22 @@ def edge_of(x: float, y: float, margin: float = 0.12) -> str | None:
     return None
 
 
+PPE_ITEMS = ("hard_hat", "vest")
+
+
 def normalize(zones: list[dict] | None) -> list[dict]:
-    """Valid zones only, with a type (zones saved before exclude existed are include zones)."""
+    """Valid zones only, with a type (zones saved before exclude existed are include zones).
+    A ppe zone's `required` is kept to the known items (hard_hat, vest), in that order."""
     out = []
     for z in zones or []:
         pts = z.get("points") or []
         if len(pts) >= 3:
             t = z.get("type")
-            out.append({**z, "type": t if t in ("exclude", "area") else "include", "points": pts})
+            nz = {**z, "type": t if t in ("exclude", "area", "ppe") else "include", "points": pts}
+            if nz["type"] == "ppe":
+                req = z.get("required")
+                nz["required"] = [i for i in PPE_ITEMS if i in (req if isinstance(req, list) else PPE_ITEMS)]
+            out.append(nz)
     return out
 
 
@@ -130,13 +139,14 @@ def areas_visited(path: list, zones: list[dict], min_points: int = 2) -> list[di
 
 
 def draw_outlines(img: np.ndarray, zones: list[dict]) -> np.ndarray:
-    """Thin zone outlines for snapshots (blue = include, red = exclude; areas aren't drawn). Draws in place."""
+    """Thin zone outlines for snapshots (blue = include, red = exclude, yellow = PPE required; areas aren't drawn).
+    Draws in place."""
     h, w = img.shape[:2]
     for z in zones:
         if z["type"] == "area":
             continue
         pts = np.array([[int(x * w), int(y * h)] for x, y in z["points"]], dtype=np.int32)
-        color = (60, 60, 230) if z["type"] == "exclude" else (230, 150, 50)
+        color = {"exclude": (60, 60, 230), "ppe": (0, 210, 240)}.get(z["type"], (230, 150, 50))
         cv2.polylines(img, [pts], True, color, 2, cv2.LINE_AA)
     return img
 

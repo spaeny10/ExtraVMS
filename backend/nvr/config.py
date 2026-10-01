@@ -46,6 +46,17 @@ class Settings(BaseSettings):
     verify_min_hits: int = 2                # frames where YOLO must agree with the camera
     verify_iou: float = 0.2
 
+    # PPE compliance (ppe.py): people who stay in a "ppe" zone are checked for the hard hat / hi-vis vest it requires
+    ppe_model: str = "ppe_yolov8s.pt"       # under models/; Apache-2.0 YOLOv8s (huggingface killuminati1/construction-ppe-yolov8)
+    ppe_conf: float = 0.4                   # a frame calls an item present / missing at this detector confidence
+    ppe_imgsz: int = 960
+    ppe_frames: int = 4                     # frames checked per person per zone
+    ppe_min_dwell_s: float = 5.0            # zone default: seconds inside before the person is checked
+    ppe_grace_s: float = 3.0                # zone default: frames from this long after walking in (time to put a hat on)
+    ppe_vlm_confirm: bool = True            # Qwen looks at the person when the detector says missing or can't tell
+    ppe_vlm_all: bool = False               # ...or at every checked person (Qwen decides; ~1 s each): catches caps the
+                                            # detector takes for hard hats (eval: hat recall 0.89 -> 0.97)
+
     # Qwen via Ollama (a dedicated `ollama serve` pinned to GPU 1)
     ollama_exe: Path = Path.home() / "AppData/Local/Programs/Ollama/ollama.exe"
     ollama_url: str = "http://127.0.0.1:11435"

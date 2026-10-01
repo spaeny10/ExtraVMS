@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, frameUrl, zoneAllowed, type Camera, type DetectionPoint, type Zone } from "./api";
+import { api, frameUrl, newZone, PPE_ITEMS, retypeZone, togglePpeItem, zoneAllowed, type Camera, type DetectionPoint, type Zone, type ZoneType } from "./api";
 
 type Pt = [number, number];
 const ASPECT = 2592 / 1520; // main stream frame
@@ -12,7 +12,7 @@ const VB_H = VB_W / ASPECT;
  */
 export function ZoneEditor({ camera, onClose, onSaved }: { camera: Camera; onClose: () => void; onSaved: () => void }) {
   const [zones, setZones] = useState<Zone[]>(() => camera.zones.map((z) => ({ ...z, type: z.type ?? "include", points: [...z.points] })));
-  const [draft, setDraft] = useState<{ type: "include" | "exclude" | "area"; points: Pt[] } | null>(null);
+  const [draft, setDraft] = useState<{ type: ZoneType; points: Pt[] } | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
   const [cursor, setCursor] = useState<Pt | null>(null);
   const [stillT, setStillT] = useState(() => Date.now() / 1000 - 5);
@@ -60,8 +60,7 @@ export function ZoneEditor({ camera, onClose, onSaved }: { camera: Camera; onClo
     // A double-click also delivers two clicks; drop the near-duplicate points they add.
     const pts = draft.points.filter((p, i, a) => i === 0 || Math.hypot(p[0] - a[i - 1][0], p[1] - a[i - 1][1]) > 0.004);
     if (pts.length < 3) return;
-    const n = zones.filter((z) => z.type === draft.type).length + 1;
-    setZones([...zones, { name: `${draft.type === "exclude" ? "Mask" : draft.type === "area" ? "Place" : "Area"} ${n}`, type: draft.type, points: pts }]);
+    setZones([...zones, newZone(draft.type, zones, pts)]);
     setSelected(zones.length);
     setDraft(null);
   };
@@ -187,11 +186,15 @@ export function ZoneEditor({ camera, onClose, onSaved }: { camera: Camera; onClo
                 <button className={`ghost ${draft?.type === "area" ? "on" : ""}`} onClick={() => { setSelected(null); setDraft({ type: "area", points: [] }); }}>
                   <span className="swatch area" /> Name a place
                 </button>
+                <button className={`ghost ${draft?.type === "ppe" ? "on" : ""}`} onClick={() => { setSelected(null); setDraft({ type: "ppe", points: [] }); }}>
+                  <span className="swatch ppe" /> PPE required
+                </button>
               </div>
               <p className="muted small">
                 <strong>Mask out</strong> = ignore that area (e.g. the highway). <strong>Detect only in</strong> = if any exist, everything
                 outside them is ignored. <strong>Name a place</strong> = filters nothing; each sighting records which named places it
-                walked into ("Bathroom 2", "Exit door"), used in synopses, search and Ask.
+                walked into ("Bathroom 2", "Exit door"), used in synopses, search and Ask. <strong>PPE required</strong> = filters nothing;
+                a person who stays inside without the ticked items (hard hat, hi-vis vest) becomes a medium-priority event.
               </p>
             </section>
 
@@ -199,15 +202,33 @@ export function ZoneEditor({ camera, onClose, onSaved }: { camera: Camera; onClo
               <h3>Zones</h3>
               {zones.length === 0 && <p className="muted small">None: the whole frame is watched.</p>}
               {zones.map((z, i) => (
-                <div key={i} className={`zone-row ${selected === i ? "selected" : ""}`} onClick={() => setSelected(i)}>
-                  <span className={`swatch ${z.type}`} />
-                  <input value={z.name} onChange={(e) => setZone(i, { name: e.target.value })} />
-                  <select value={z.type} onChange={(e) => setZone(i, { type: e.target.value as Zone["type"] })}>
-                    <option value="exclude">Mask out</option>
-                    <option value="include">Detect only</option>
-                    <option value="area">Named place</option>
-                  </select>
-                  <button className="ghost small" onClick={(e) => { e.stopPropagation(); setZones(zones.filter((_, j) => j !== i)); setSelected(null); }} aria-label="Delete zone">✕</button>
+                <div key={i} className={`zone-item ${selected === i ? "selected" : ""}`} onClick={() => setSelected(i)}>
+                  <div className="zone-row">
+                    <span className={`swatch ${z.type}`} />
+                    <input value={z.name} onChange={(e) => setZone(i, { name: e.target.value })} />
+                    <select value={z.type} onChange={(e) => setZones(zones.map((x, j) => (j === i ? retypeZone(x, e.target.value as ZoneType) : x)))}>
+                      <option value="exclude">Mask out</option>
+                      <option value="include">Detect only</option>
+                      <option value="area">Named place</option>
+                      <option value="ppe">PPE required</option>
+                    </select>
+                    <button className="ghost small" onClick={(e) => { e.stopPropagation(); setZones(zones.filter((_, j) => j !== i)); setSelected(null); }} aria-label="Delete zone">✕</button>
+                  </div>
+                  {z.type === "ppe" && (
+                    <div className="row small ppe-items" onClick={(e) => e.stopPropagation()}>
+                      {PPE_ITEMS.map((it) => (
+                        <label key={it.id}>
+                          <input type="checkbox" checked={(z.required ?? []).includes(it.id)}
+                            onChange={(e) => setZones(zones.map((x, j) => (j === i ? togglePpeItem(x, it.id, e.target.checked) : x)))} /> {it.label}
+                        </label>
+                      ))}
+                      <label title="Seconds inside the zone before the person is checked">
+                        after <input type="number" min={1} max={120} step={1} value={z.min_dwell_s ?? 5}
+                          onChange={(e) => setZone(i, { min_dwell_s: Math.max(1, Number(e.target.value) || 5) })} /> s
+                      </label>
+                      {!(z.required ?? []).length && <span className="muted">nothing ticked: no check</span>}
+                    </div>
+                  )}
                 </div>
               ))}
             </section>

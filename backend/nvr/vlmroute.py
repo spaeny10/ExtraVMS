@@ -31,7 +31,7 @@ from .db import db
 
 log = logging.getLogger("nvr.vlmroute")
 
-TASKS = ("assistant", "briefing", "journey", "unusual_review", "footage_verify", "synopsis", "chat")
+TASKS = ("assistant", "briefing", "journey", "unusual_review", "footage_verify", "synopsis", "chat", "ppe")
 REMOTE_CONCURRENCY = 2
 DOWN_S = 300
 

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   type NamedIdentity,
-  api, askClip, fmtDuration, fmtTime, media,
+  api, askClip, fmtDuration, fmtTime, media, ppeItemsText,
   type ChatMessage, type Feedback, type Journey, type NvrEvent, type Synopsis, type Threat, type Verdict,
 } from "./api";
 import { StatusBadge, placeholder } from "./Events";
@@ -265,6 +265,7 @@ function Details({ e, setE, notes, onUnsave, seek }: {
   const activity = s?.activity && !(e.synopsis ?? "").toLowerCase().includes(s.activity.toLowerCase().slice(0, 40)) ? s.activity : null;
   const tags = s?.tags ?? [];
   const frames = e.detections?.samples?.length ?? 0;
+  const ppe = e.detections?.ppe;
   const rules = e.rules?.length ? [...new Set(e.rules.map((r) => r.topic.split("/").slice(-2, -1)[0] || r.topic))] : [];
 
   return (
@@ -297,8 +298,14 @@ function Details({ e, setE, notes, onUnsave, seek }: {
             {e.ptz_preset ? (
               <div className="d-line" title="Zones, named places, painted regions and the learned baseline describe the home view and were not applied">↗ Camera was turned away from its home view{e.ptz_preset !== "away" ? ` (at preset '${e.ptz_preset}')` : ""}</div>
             ) : null}
-            {e.policy ? (
+            {e.policy && e.policy.kind !== "ppe" ? (
               <div className="d-line rule-broken" title="A site rule from Settings → Cameras → Site rules">🚫 <strong>Site rule:</strong> {e.policy.text}</div>
+            ) : null}
+            {ppe && ["violation", "compliant", "unclear"].includes(ppe.verdict) ? (
+              <div className={`d-line ${ppe.verdict === "violation" ? "rule-broken" : ""}`} title="PPE zone from Settings → Cameras → Zones. The PPE detector checks the recorded frames; Qwen looks when it is unsure.">
+                🦺 <strong>PPE in '{ppe.zone}':</strong> {ppe.verdict === "violation" ? (e.policy?.kind === "ppe" ? e.policy.text : "violation") : ppe.verdict === "compliant" ? "required items worn" : "could not tell"}
+                <span className="muted small"> · {ppeItemsText(ppe.items, ppe.required)}{ppe.marked ? <> · <a href={media(e, ppe.marked)} target="_blank" rel="noreferrer">marked frame</a></> : null}</span>
+              </div>
             ) : null}
             {e.anomaly_json?.reasons?.length ? (
               <div className="d-line unusual-why" title="From what this camera normally sees (learned from the last 4 weeks)">
@@ -358,6 +365,13 @@ function Details({ e, setE, notes, onUnsave, seek }: {
               <tr><td>YOLO</td><td>{e.yolo_class ?? "—"} {e.yolo_conf != null && `· ${(e.yolo_conf * 100).toFixed(0)}%`}</td></tr>
               <tr><td>Agreement</td><td>{e.yolo_hits ?? 0} of {frames} frames (need {e.detections?.needed ?? "—"}){e.detections?.time_shift_s ? ` · clock shift ${e.detections.time_shift_s} s` : ""}</td></tr>
               {rules.length > 0 && <tr><td>Rules</td><td>{rules.join(", ")}</td></tr>}
+              {ppe && <tr><td>PPE check</td><td>
+                {ppe.error ? `${ppe.verdict}: ${ppe.error}` : <>
+                  detector: {ppeItemsText(ppe.detector, ppe.required)}
+                  {ppe.vlm ? <> · Qwen: {ppeItemsText(ppe.vlm, ppe.required)}{ppe.vlm.head ? ` (head: ${ppe.vlm.head})` : ""}</> : " · Qwen not needed"}
+                  {ppe.overruled?.length ? " · Qwen changed the detector's answer" : ""} · {ppe.dwell_s.toFixed(0)} s in zone
+                </>}
+              </td></tr>}
             </tbody>
           </table>
         </details>

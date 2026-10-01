@@ -86,6 +86,26 @@ models in `models/` and Ollama's model store.
 - **Dry run:** `NVR_RETENTION_DRY_RUN=1` logs every decision without deleting anything.
   `GET /api/retention/preview?camera=cam1` shows what the next 24 h of age-outs would keep or delete.
 
+## PPE compliance (hard hat / hi-vis vest)
+
+- **Set up:** Cameras → Zones → *PPE required*: paint the area (a yard, a job-site gate) and tick what it requires (hard hat,
+  hi-vis vest). Optional: *after N s* (default 5) is how long a person must stay inside before they are checked. PPE zones never
+  filter detections. Nothing extra runs on cameras without one.
+- **How it checks** (`backend/nvr/ppe.py`): after YOLO verifies a person whose feet stayed in the zone for the dwell time, up to 4
+  recorded frames from 3 s after they walked in go through a PPE detector (`models/ppe_yolov8s.pt`, YOLOv8s, Apache-2.0, from
+  Hugging Face `killuminati1/construction-ppe-yolov8`). Each item is *worn*, *missing* or *unclear*. Only when an item is missing
+  or unclear does Qwen look at crops of the person (task `ppe`, a strict "a cap is not a hard hat" prompt) and decide it.
+- **A violation** becomes a broken site rule (medium priority): the event card shows 🦺 *No hard hat*, the marked frame becomes
+  the snapshot, and it appears under Needs attention, in the digest, hub alerts and push. Search finds it ("no hard hat",
+  "ppe violation"); the synopsis states it. Event → Details → Verification shows the detector's and Qwen's answers.
+- **Settings:** `NVR_PPE_MODEL`, `NVR_PPE_CONF` (0.4), `NVR_PPE_MIN_DWELL_S` (5), `NVR_PPE_GRACE_S` (3), `NVR_PPE_VLM_CONFIRM`
+  (on), `NVR_PPE_VLM_ALL` (off: when on, Qwen checks every person in the zone, ~1 s each, and also catches caps the detector
+  takes for hard hats).
+- **Measured** on 153 people in 44 public construction photos: detector alone ~90% correct per item; detector + Qwen on doubt
+  93-94% with almost no false alarms (hat 0.97 / vest 1.0 precision for "missing"); Qwen on everyone 96-97%. The detector's
+  typical mistakes are caps and beanies read as hard hats and plain orange overalls read as vests.
+- The check runs on new events only; painting a zone does not re-check past footage.
+
 ## Camera notes (Milesight MS-C5367-X23PE, firmware 61.8.0.5-r6)
 
 - Object metadata (Human / Vehicle, confidence, box, track ID) is on the `/main` RTSP metadata track.

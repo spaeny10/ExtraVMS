@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 import cv2
 import httpx
 
-from . import baseline, cells, identities, journeys, policy, vlmroute, zones, merge
+from . import baseline, cells, identities, journeys, policy, ppe, vlmroute, zones, merge
 from . import synopsis as vlm
 from .config import settings
 from .db import db
@@ -55,6 +55,7 @@ class Pipeline:
         self.tracker = Tracker(self.verify_q.put)
         self.gpu = ThreadPoolExecutor(max_workers=1, thread_name_prefix="yolo")
         self.verifier: Verifier | None = None
+        self.ppe = ppe.Detector()  # PPE YOLO, loaded on the GPU thread the first time a camera has a PPE zone
         self.subscribers: set[asyncio.Queue] = set()
         self.vlm_ready = False
         self.vlm_state = "starting"       # starting | ready | unresponsive (shown on Settings → System and by the advisor)
@@ -206,6 +207,7 @@ class Pipeline:
             db.update_event(event_id, anomaly=None, anomaly_json=None, priority=None)
         else:
             self.record_areas(event_id)
+            await self.check_ppe(event_id)          # hard hat / hi-vis vest in a PPE zone (before the rules: it is one)
             policy.check(event_id, self.cameras.get(e["camera_id"]))  # e.g. an unrecognised person entering by an exterior door
             a = baseline.apply(event_id) or {}
         if a.get("reasons"):
@@ -408,6 +410,10 @@ class Pipeline:
             notes.append("Unusual for this camera: " + "; ".join(an["reasons"]))
         if e.get("policy"):  # a broken site rule, so "unknown truck towing" finds it
             notes.append("Site rule broken: " + e["policy"]["text"])
+        ppe_res = (e.get("detections") or {}).get("ppe")
+        if ppe_res and ppe_res.get("verdict") == "compliant":  # so "who wore a hard hat in the yard" finds it too
+            notes.append(f"Wore the required PPE in '{ppe_res.get('zone')}': "
+                         + ", ".join(ppe.ITEM_WORDS[i] for i in ppe_res.get("required") or []))
         if e.get("ptz_preset"):  # so "when the camera was on the parking lot" finds it
             notes.append("Camera turned away from its usual view" + (f" (at preset '{e['ptz_preset']}')" if e["ptz_preset"] != "away" else ""))
         if e.get("journey_id"):  # cross-camera narrative, so e.g. "went outside" finds every leg
@@ -417,6 +423,7 @@ class Pipeline:
         labels = " ".join(filter(None, [
             *(a["name"] for a in (e.get("areas") or [])),
             e["camera_class"], e["yolo_class"], *s.get("tags", []), *(o.get("type", "") for o in s.get("objects", [])),
+            *ppe.tags(ppe_res),
             (fb.get("verdict") or "").replace("_", " "), fb.get("correct_class"),
         ]))
         doc = " ".join(filter(None, [
@@ -521,6 +528,35 @@ class Pipeline:
             return True
         samples = (e.get("detections") or {}).get("samples", [])
         return any(s.get("match") and zones.allowed(zones.foot(s["match"]["box"]), zl) for s in samples)
+
+    async def check_ppe(self, event_id: int) -> dict | None:
+        """People who stayed in a PPE zone: detector on the recorded frames, Qwen on doubt; stored in detections["ppe"]
+        (policy.check turns a violation into the event's broken rule). Nothing runs on cameras without a PPE zone."""
+        e = db.event(event_id)
+        if not e or e["camera_class"] != "person":
+            return None
+        cam = self.cameras.get(e["camera_id"]) or {}
+        det = dict(e.get("detections") or {})
+        loop = asyncio.get_running_loop()
+        try:
+            res = await ppe.check_event(e, cam.get("zones"), lambda fn, *a: loop.run_in_executor(self.gpu, fn, *a),
+                                        self.ppe, self.verifier.model if self.verifier else None, self.vlm_ready)
+        except Exception as ex:  # a PPE problem must not lose the event
+            log.exception("PPE check for event %s failed", event_id)
+            res = {"verdict": "error", "error": str(ex)[:200], "violation": [], "checked_at": round(time.time(), 1)}
+        if res is None:
+            if "ppe" in det:  # the zone was removed or the person no longer stays long enough: drop the old answer
+                det.pop("ppe")
+                db.update_event(event_id, detections=det)
+            return None
+        images = res.pop("_images", None) or {}
+        if images:
+            res["marked"] = await loop.run_in_executor(self.decode, ppe.save_marked, event_id, res, images)
+        det["ppe"] = res
+        db.update_event(event_id, detections=det)
+        log.info("event %s PPE in '%s': %s%s (%s)", event_id, res.get("zone"), res["verdict"],
+                 f" {res['violation']}" if res.get("violation") else "", "Qwen asked" if res.get("vlm") else "detector only")
+        return res
 
     def record_areas(self, event_id: int) -> list[dict]:
         """Store which named areas (zones of type "area") the object walked into."""
