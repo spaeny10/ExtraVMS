@@ -4,7 +4,7 @@ import {
   api, askClip, fmtDuration, fmtTime, media, ppeItemsText,
   type ChatMessage, type Feedback, type Journey, type NvrEvent, type Synopsis, type Threat, type Verdict,
 } from "./api";
-import { StatusBadge, placeholder } from "./Events";
+import { StatusBadge, placeholder, rejectedReason } from "./Events";
 import { useNav } from "./nav";
 import { Icon, confirmDialog, toast, useIsPhone } from "./ui";
 
@@ -364,6 +364,7 @@ function Details({ e, setE, notes, onUnsave, seek }: {
               <tr><td>Camera</td><td>{e.camera_class} · {((e.camera_conf ?? 0) * 100).toFixed(0)}% · track {e.track_id}</td></tr>
               <tr><td>YOLO</td><td>{e.yolo_class ?? "—"} {e.yolo_conf != null && `· ${(e.yolo_conf * 100).toFixed(0)}%`}</td></tr>
               <tr><td>Agreement</td><td>{e.yolo_hits ?? 0} of {frames} frames (need {e.detections?.needed ?? "—"}){e.detections?.time_shift_s ? ` · clock shift ${e.detections.time_shift_s} s` : ""}</td></tr>
+              {e.detections?.rejected && <tr><td>Rejected</td><td>{rejectedReason(e)}{e.detections.parked ? ` · ${e.detections.parked.cls} sat still ${e.detections.parked.via === "memory" ? "on a remembered parking spot" : "while the camera's boxes were small movements on it"}` : ""}</td></tr>}
               {rules.length > 0 && <tr><td>Rules</td><td>{rules.join(", ")}</td></tr>}
               {ppe && <tr><td>PPE check</td><td>
                 {ppe.error ? `${ppe.verdict}: ${ppe.error}` : <>

@@ -33,6 +33,7 @@ IMPACT = ("high", "medium", "low")
 BITRATE_HIGH_MBPS = 3.2      # fallback when the stream could not be probed: above this a 1440p-class camera gains little
 SHORT_EVENT_S = 1.5
 FRAGMENT_GAP_S = 10.0
+PARKED_MIN = 20          # parked-vehicle rejections in 24 h before the camera's VCA settings are worth changing
 PROBE_TTL_S = 6 * 3600       # re-read a camera's resolution / frame rate from its newest recording this often
 FPS_MAX = 10.0               # security recording above this buys little: the camera's analytics and YOLO both work at 10
 # Bits per pixel per frame that keep a clean H.265 picture for YOLO and Qwen. Indexed by (scene, activity).
@@ -236,6 +237,17 @@ def _event_facts(now: float) -> dict:
                 if sim is not None and sim >= settings.merge_reid_min:
                     f["fragments"] += 1
         prev[r["camera_id"]] = r
+    # Vehicle events rejected because a parked vehicle "confirmed" motion next to it (verifier / parked.py)
+    try:
+        from .parked import REASON
+        for r in db.all("SELECT camera_id, COUNT(*) AS n, json_extract(detections, '$.parked.box') AS box, MAX(start_ts) "
+                        "FROM events WHERE start_ts>? AND status='rejected' AND json_extract(detections, '$.rejected')=? "
+                        "GROUP BY camera_id", [since, REASON]):
+            if r["camera_id"] in out:
+                out[r["camera_id"]]["parked"] = r["n"]
+                out[r["camera_id"]]["parked_box"] = json.loads(r["box"]) if r["box"] else None
+    except Exception:
+        log.exception("parked-vehicle facts failed")
     return out
 
 
@@ -452,14 +464,27 @@ def check_events(ctx: dict) -> list[Finding]:
     out = []
     for cid, f in ctx["events"].items():
         name = _cam_name(ctx, cid)
-        if f["total"] >= 20 and f["rejected"] / f["total"] > 0.5:
+        parked = f.get("parked", 0)
+        if parked >= PARKED_MIN:
+            box = f.get("parked_box")
+            spot = (f" The vehicle sits at about {box[0]:.0%}–{box[2]:.0%} across and {box[1]:.0%}–{box[3]:.0%} down the picture."
+                    if box else "")
+            out.append(Finding(key=f"events:parked:{cid}", area="events", impact="medium", camera_id=cid, camera=name,
+                               title=f"{name}: {parked} events were a parked vehicle",
+                               why=f"In 24 h the camera reported {parked} moving vehicles where YOLO saw a vehicle that never moved; the camera's motion boxes were small movements next to it (shimmer, shadows, a flapping strap). The NVR rejects these, but each one still costs a clip and a YOLO check.{spot}",
+                               effect="Fewer wasted clips and verifications; real arrivals and departures stand out.",
+                               steps=[f"Camera web page ({next((c['host'] for c in ctx['cameras'] if c['id'] == cid), '')}) → Event / Smart analytics (VCA): raise the minimum object size for vehicles so small boxes are ignored.",
+                                      "Or exclude the parking area from the camera's detection region (the vehicle is still recorded; driving in or out of the area still starts an event)."],
+                               fingerprint=f"{parked // 20}"))
+        rej = f["rejected"] - parked  # parked-vehicle rejections have their own finding
+        if f["total"] >= 20 and rej / f["total"] > 0.5:
             out.append(Finding(key=f"events:rejected:{cid}", area="events", impact="medium", camera_id=cid, camera=name,
-                               title=f"{name}: {f['rejected'] / f['total']:.0%} of detections are rejected by YOLO",
-                               why=f"{f['rejected']} of {f['total']} camera detections in 24 h were not confirmed. The camera's own analytics are firing on something YOLO doesn't see (shadows, rain, reflections).",
+                               title=f"{name}: {rej / f['total']:.0%} of detections are rejected by YOLO",
+                               why=f"{rej} of {f['total']} camera detections in 24 h were not confirmed. The camera's own analytics are firing on something YOLO doesn't see (shadows, rain, reflections).",
                                effect="Fewer wasted clips and verifications; a cleaner timeline.",
                                steps=[f"Camera web page ({next((c['host'] for c in ctx['cameras'] if c['id'] == cid), '')}) → Event / Smart analytics: raise the sensitivity threshold or shrink the detection area.",
                                       "Or paint an exclude zone in Settings → Cameras → Zones over the trigger area."],
-                               fingerprint=f"{int(f['rejected'] / f['total'] * 10)}"))
+                               fingerprint=f"{int(rej / f['total'] * 10)}"))
         if f["total"] >= 20 and f["fragments"] >= 8 and f["fragments"] / f["total"] > 0.15:
             out.append(Finding(key=f"events:fragments:{cid}", area="events", impact="low", camera_id=cid, camera=name,
                                title=f"{name} splits visits into many short events",

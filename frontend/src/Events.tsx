@@ -24,6 +24,13 @@ export function CardStatus({ e }: { e: Pick<NvrEvent, "status" | "priority"> }) 
 
 const clip = (t: string, n = 40) => (t.length > n ? `${t.slice(0, n - 1).trimEnd()}…` : t);
 
+/** Why the verifier rejected an event, when it recorded one (detections.rejected, e.g. backend/nvr/parked.py):
+ * "parked vehicle, motion elsewhere" -> "Parked vehicle · motion elsewhere". */
+export function rejectedReason(e: Pick<NvrEvent, "status" | "detections">): string | null {
+  const r = e.status === "rejected" ? e.detections?.rejected : null;
+  return r ? (r.charAt(0).toUpperCase() + r.slice(1)).replace(/, /g, " · ") : null;
+}
+
 /** What to show in place of a synopsis: Qwen's progress, or the YOLO result for labels Qwen skips. */
 export function placeholder(e: NvrEvent): string {
   if (e.status === "verified") {
@@ -31,7 +38,7 @@ export function placeholder(e: NvrEvent): string {
     if (e.camera_class !== "person") return e.error ?? `${e.yolo_class ?? e.camera_class} confirmed by YOLO in ${e.yolo_hits ?? 0} frames.`;
     return e.error ?? "Writing synopsis…";
   }
-  if (e.status === "rejected") return "YOLO did not confirm the camera detection.";
+  if (e.status === "rejected") return rejectedReason(e) ?? "YOLO did not confirm the camera detection.";
   return e.error ?? "Waiting for verification…";
 }
 

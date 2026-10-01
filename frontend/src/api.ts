@@ -182,7 +182,11 @@ export type NvrEvent = {
   // detail only
   path?: number[][];
   rules?: { ts: number; topic: string; rule: string | null }[];
-  detections?: { samples: Detection[]; keyframes: { file: string; ts: number; kind: string }[]; needed: number; time_shift_s?: number; ppe?: PpeResult };
+  detections?: { samples: Detection[]; keyframes: { file: string; ts: number; kind: string }[]; needed: number; time_shift_s?: number; ppe?: PpeResult;
+    /** why the verifier rejected it despite YOLO agreeing (e.g. "parked vehicle, motion elsewhere") */
+    rejected?: string;
+    /** the still YOLO box the camera's motion sat on (backend/nvr/parked.py); via "memory" = a remembered parking spot */
+    parked?: { box: number[]; cls: string; via: "clip" | "memory" } };
   synopsis_json?: Synopsis | null;
   synopsis_original?: Synopsis | null;
   clip_start?: number | null;

@@ -45,6 +45,12 @@ class Settings(BaseSettings):
     verify_frames: int = 6                  # frames sampled per event
     verify_min_hits: int = 2                # frames where YOLO must agree with the camera
     verify_iou: float = 0.2
+    # Parked vehicles (parked.py): the camera's analytics fire on shimmer/shadows near a parked machine and the
+    # big, confident YOLO box around it "confirms" every one. Such events are rejected (reason in detections.rejected).
+    parked_suppress: bool = True            # reject vehicle events whose YOLO box sat still while the camera saw motion
+    parked_max_move: float = 0.02           # YOLO box centre (and size) may wander this much of the frame and still be parked
+    parked_cam_box_ratio: float = 0.25      # camera box smaller than this share of the YOLO box: the motion is not the vehicle
+    parked_memory_min_events: int = 3       # static sightings (over >= 10 min) before a spot is remembered as a parking place
 
     # PPE compliance (ppe.py): people who stay in a "ppe" zone are checked for the hard hat / hi-vis vest it requires
     ppe_model: str = "ppe_yolov8s.pt"       # under models/; Apache-2.0 YOLOv8s (huggingface killuminati1/construction-ppe-yolov8)

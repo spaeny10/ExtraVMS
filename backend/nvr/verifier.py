@@ -16,7 +16,7 @@ import av
 import cv2
 import numpy as np
 
-from . import zones
+from . import parked, zones
 from .config import ROOT, settings
 
 log = logging.getLogger("nvr.verifier")
@@ -200,6 +200,40 @@ class Verifier:
             log.exception("re-ID embedding failed")
             return None
 
+    def _parked(self, event: dict, detections: list, hits: int, best, need: int, allowed: set):
+        """Parked-vehicle check and the camera's parked-spot memory (parked.py). Returns
+        (parked_info or None, detections, hits, best); the matches change only when another vehicle passing the
+        parked one turns out to be what the camera saw."""
+        label, cam, now = event["camera_class"], event.get("camera_id"), event.get("start_ts") or 0.0
+        try:
+            entries = parked.load(cam) if cam else []
+        except Exception:
+            entries = []
+        info = parked.judge(label, detections, event.get("path") or [], entries, now)
+        if info:
+            alt = [_matches(tuple(d["cam_box"]), parked.without(d["yolo"], info["box"]), allowed) for d in detections]
+            if sum(m is not None for m, _ in alt) >= need:
+                trial = [{**d, "match": m, "iou": round(s, 3)} for d, (m, s) in zip(detections, alt)]
+                if parked.judge(label, trial, event.get("path") or [], entries, now) is None:
+                    detections, info = trial, None
+                    hits = sum(d["match"] is not None for d in trial)
+                    top = max((d for d in trial if d["match"]), key=lambda d: d["match"]["conf"])
+                    best = (top["ts"], top["match"], tuple(top["cam_box"]))
+        if info:
+            log.info("event %s: %s %s sat still (%s), camera motion elsewhere: rejected as parked",
+                     event.get("id"), info["cls"], info["box"], info["via"])
+        # Remember (or forget) parking spots: verified events (and the parked ones) only; others never matched anything.
+        if cam and (entries or label in parked.VEHICLE_LABELS):
+            ref = info["box"] if info else (parked.static_box(detections) if label in parked.VEHICLE_LABELS else None)
+            cls = info["cls"] if info else (best[1]["cls"] if best and ref else None)
+            new = parked.update([dict(e) for e in entries], detections, ref, cls, now)
+            if new != entries:
+                try:
+                    parked.save(cam, new)
+                except Exception:
+                    log.exception("saving parked spots for %s failed", cam)
+        return info, detections, hits, best
+
     def verify(self, event: dict, clip: Path, clip_start: float, zone_list: list[dict] | None = None) -> dict:
         zone_list = zones.normalize(zone_list)
         label = event["camera_class"]
@@ -255,6 +289,12 @@ class Verifier:
             else:
                 shift = 0.0
         verified = hits >= need
+        # A parked vehicle "confirming" motion next to it (shimmer, shadows): rejected, with the reason recorded.
+        parked_info = None
+        if verified:
+            parked_info, detections, hits, best = self._parked(event, detections, hits, best, need, allowed)
+            if parked_info:
+                verified = False
         # Where did it come from / go to? Cameras often report a person a step or two late, so the doorway
         # is on the pre-roll but not in the camera's path. Follow the verified object into the pre- and
         # post-roll with YOLO and extend the path (stored in camera-clock time, i.e. frame time + shift).
@@ -301,7 +341,8 @@ class Verifier:
             "yolo_conf": best[1]["conf"] if best else None,
             "yolo_hits": hits,
             "detections": {"samples": detections, "keyframes": keyframes, "needed": need, "time_shift_s": shift,
-                           "path_extended": path_ext},
+                           "path_extended": path_ext,
+                           **({"rejected": parked.REASON, "parked": parked_info} if parked_info else {})},
             "snapshot": str(snapshot.relative_to(settings.data_dir)),
             "clip_start": clip_start,
             **({"path": path} if path_ext["before"] or path_ext["after"] else {}),
