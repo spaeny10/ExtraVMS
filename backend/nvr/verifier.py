@@ -209,11 +209,30 @@ class Verifier:
             entries = parked.load(cam) if cam else []
         except Exception:
             entries = []
-        info = parked.judge(label, detections, event.get("path") or [], entries, now)
+        info = None
+        if settings.parked_suppress and label in parked.VEHICLE_LABELS:
+            # Per-frame: a match on a vehicle that sits unmoved through the whole clip is not a hit. Only the
+            # matches on something that moved (or appeared) count.
+            idx = parked.static_matches(detections)
+            if idx:
+                dropped = [detections[i]["match"] for i in idx]
+                for i in idx:
+                    detections[i] = {**detections[i], "match": None, "iou": 0.0, "static": True}
+                hits = sum(d["match"] is not None for d in detections)
+                live = [d for d in detections if d["match"]]
+                best = max(((d["ts"], d["match"], tuple(d["cam_box"])) for d in live), key=lambda t: t[1]["conf"], default=None)
+                if hits < need:
+                    top = max(dropped, key=lambda m: m["conf"])
+                    info = {"box": top["box"], "cls": top["cls"], "via": "static"}
+                    best = best or (detections[idx[0]]["ts"], top, tuple(detections[idx[0]]["cam_box"]))  # class still shown
+        if info is None:
+            info = parked.judge(label, detections, event.get("path") or [], entries, now)
         if info:
             alt = [_matches(tuple(d["cam_box"]), parked.without(d["yolo"], info["box"]), allowed) for d in detections]
-            if sum(m is not None for m, _ in alt) >= need:
-                trial = [{**d, "match": m, "iou": round(s, 3)} for d, (m, s) in zip(detections, alt)]
+            trial = [{**d, "match": m, "iou": round(s, 3), "static": False} for d, (m, s) in zip(detections, alt)]
+            for i in parked.static_matches(trial):            # another parked vehicle is no better
+                trial[i] = {**trial[i], "match": None, "iou": 0.0, "static": True}
+            if sum(d["match"] is not None for d in trial) >= need:
                 if parked.judge(label, trial, event.get("path") or [], entries, now) is None:
                     detections, info = trial, None
                     hits = sum(d["match"] is not None for d in trial)

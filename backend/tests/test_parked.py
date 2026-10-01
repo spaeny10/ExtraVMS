@@ -104,7 +104,7 @@ def test_parked_truck_with_tiny_wandering_boxes_is_rejected():
     assert r["status"] == "rejected", r["status"]
     assert r["yolo_class"] == "truck"
     assert r["detections"]["rejected"] == parked.REASON
-    assert r["detections"]["parked"]["via"] == "clip"
+    assert r["detections"]["parked"]["via"] in ("clip", "static")
     assert parked.iou(r["detections"]["parked"]["box"], JCB) > 0.9
 
 
@@ -147,6 +147,28 @@ def test_arriving_vehicle_is_verified():
     assert r["status"] == "verified", r["status"]
 
 
+def test_distant_parked_truck_matched_in_a_few_frames_is_rejected():
+    """The real Side Yard case: a small parked truck in the background sits unmoved in every frame; the camera's
+    boxes overlap it in only 2 of 6 frames (enough hits), while the JCB in the foreground is also parked."""
+    reset()
+    small = (0.053, 0.136, 0.161, 0.224)
+    path = track(T0, 20.0, lambda t: (0.07, 0.10, 0.14, 0.22) if 8 < t < 14 else (0.11, 0.10, 0.14, 0.15))
+    r = run(lambda ts: [(TRUCK, 0.85, jitter(JCB, ts, 0.002)), (TRUCK, 0.5, jitter(small, ts, 0.002))], path)
+    assert r["status"] == "rejected", r["status"]
+    assert r["detections"]["rejected"] == parked.REASON and r["detections"]["parked"]["via"] == "static"
+    assert r["yolo_class"] == "truck" and r["yolo_hits"] == 0
+    assert sum(1 for d in r["detections"]["samples"] if d.get("static")) >= 2
+
+
+def test_several_distant_parked_vehicles_are_rejected():
+    """Shimmer over three different parked vehicles far away: each match is on a box that never moves."""
+    reset()
+    cars = [(0.65, 0.16, 0.68, 0.18), (0.73, 0.17, 0.76, 0.19), (0.81, 0.17, 0.84, 0.20)]
+    path = track(T0, 12.0, lambda t: cars[min(2, int(t / 4))])
+    r = run(lambda ts: [(TRUCK, 0.6, (0.0, 0.65, 0.34, 1.0))] + [(CAR, 0.3, c) for c in cars], path)
+    assert r["status"] == "rejected" and r["detections"]["rejected"] == parked.REASON
+
+
 def test_car_passing_the_parked_truck_is_verified():
     reset()
     dur = 8.0
@@ -159,16 +181,17 @@ def test_car_passing_the_parked_truck_is_verified():
 
 def test_memory_learns_rejects_and_forgets():
     reset()
-    # three static sightings with the camera box the machine's size: verified (nothing tells them apart yet)
+    # three static sightings with the camera box the machine's size: a vehicle that never moves during the clip is
+    # rejected from the first one (per-frame static rule); the spot is remembered all the same
     for minutes in (0, 5, 11):
         r = run(parked_scene, big_box(T0 + minutes * 60))
-        assert r["status"] == "verified", (minutes, r["status"])
+        assert r["status"] == "rejected" and r["detections"]["rejected"] == parked.REASON, (minutes, r["status"])
     spots = parked.load("cam1")
     assert len(spots) == 1 and spots[0]["count"] == 3, spots
     assert parked.active(spots, T0 + 20 * 60), spots
-    # the same again later: the spot is remembered, so it is rejected even with a large camera box
+    # the same again later: still rejected, and the memory keeps counting
     r = run(parked_scene, big_box(T0 + 20 * 60))
-    assert r["status"] == "rejected" and r["detections"]["parked"]["via"] == "memory", r["status"]
+    assert r["status"] == "rejected" and r["detections"]["parked"]["via"] in ("static", "memory"), r["status"]
     assert parked.load("cam1")[0]["count"] == 4
     # it drives away: the departure is kept and the spot forgotten
     dur, t0 = 8.0, T0 + 30 * 60
@@ -176,9 +199,9 @@ def test_memory_learns_rejects_and_forgets():
     r = run(lambda ts: [(TRUCK, 0.9, leave(ts - t0))] if ts <= t0 + dur else [], track(t0, dur, leave))
     assert r["status"] == "verified", r["status"]
     assert parked.load("cam1") == [], parked.load("cam1")
-    # back on the spot later, large camera box: verified again (a fresh sighting, not yet a parking place)
+    # back on the spot later and static for the whole clip: rejected again; the memory starts over
     r = run(parked_scene, big_box(T0 + 50 * 60))
-    assert r["status"] == "verified", r["status"]
+    assert r["status"] == "rejected", r["status"]
     assert parked.load("cam1")[0]["count"] == 1
 
 

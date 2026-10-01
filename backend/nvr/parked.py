@@ -30,6 +30,28 @@ MEMORY_IOU = 0.8                # a new static box is the remembered parked one
 PRESENT_IOU = 0.5               # a vehicle box still occupies the remembered spot
 MEMORY_SPAN_S = 600.0           # sightings must span this long before the spot is remembered
 EXPIRE_S = 86400.0              # forget spots not seen for a day
+STATIC_IOU = 0.75               # the same vehicle box, unmoved, in another sampled frame
+STATIC_FRAC = 0.8               # ...in at least this share of the other frames: it never moved during the clip
+
+
+def static_matches(detections: list) -> list[int]:
+    """Indices of matched frames whose matched YOLO vehicle box is present, unmoved, in (almost) every other
+    sampled frame of the clip: that vehicle was parked the whole time, so it cannot be what the camera saw move.
+    This catches the real Side Yard case: tiny camera boxes on a distant parked truck matched in 2 of 6 frames
+    (enough hits), while the whole-event checks below need the matches themselves to agree."""
+    n = len(detections)
+    if n < 3:
+        return []
+    out = []
+    for i, d in enumerate(detections):
+        m = d.get("match")
+        if not m or m.get("cls_id") not in VEHICLE_CLS:
+            continue
+        present = sum(1 for j, o in enumerate(detections) if j != i
+                      and any(b.get("cls_id") in VEHICLE_CLS and iou(b["box"], m["box"]) >= STATIC_IOU for b in o.get("yolo") or []))
+        if present >= STATIC_FRAC * (n - 1):
+            out.append(i)
+    return out
 
 
 def _area(b) -> float:
