@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     ollama_exe: Path = Path.home() / "AppData/Local/Programs/Ollama/ollama.exe"
     ollama_url: str = "http://127.0.0.1:11435"
     ollama_gpu: str = "1"
-    vlm_model: str = "qwen2.5vl:7b"
+    vlm_model: str = "qwen3.5:9b"            # same speed as qwen2.5vl:7b, ~40% of the image tokens, better grounding
     vlm_num_ctx: int = 6144
     # Requests Qwen serves at once. 1 on an 8 GB card. A 24 GB card serving several sites through the hub can
     # take 2: one request's image encoding overlaps another's token generation (~+40% throughput; each slot

@@ -57,6 +57,7 @@ async def chat_completions(request: Request):
     guard(request)
     body = await request.json()
     body["model"] = settings.vlm_model           # whatever the hub calls it, this site has one model
+    body.setdefault("reasoning_effort", "none")  # Qwen3.x: answer directly instead of spending the budget thinking
     if not body.get("stream"):
         r = await client().post("/chat/completions", json=body)
         return Response(r.content, status_code=r.status_code, media_type=r.headers.get("content-type", "application/json"))

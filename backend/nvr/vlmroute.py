@@ -70,7 +70,9 @@ class OllamaBackend:
 
     async def chat_json(self, messages: list[dict], schema: dict, num_predict: int, temperature: float,
                         timeout: float) -> dict:
-        body = {"model": self.model, "messages": self._messages(messages), "format": schema, "stream": False,
+        # think=False: Qwen3.x reason by default and would spend the whole token budget thinking (empty JSON);
+        # Ollama ignores the flag for models without a thinking mode (Qwen2.5-VL)
+        body = {"model": self.model, "messages": self._messages(messages), "format": schema, "stream": False, "think": False,
                 "options": {"temperature": temperature, "num_ctx": settings.vlm_num_ctx, "num_predict": num_predict}}
         async with httpx.AsyncClient(timeout=timeout) as c:
             r = await c.post(f"{settings.ollama_url}/api/chat", json=body)
@@ -79,7 +81,7 @@ class OllamaBackend:
 
     async def stream(self, messages: list[dict], num_predict: int, temperature: float,
                      first_token_timeout: float) -> AsyncIterator[str]:
-        body = {"model": self.model, "messages": self._messages(messages), "stream": True,
+        body = {"model": self.model, "messages": self._messages(messages), "stream": True, "think": False,
                 "options": {"temperature": temperature, "num_ctx": settings.vlm_num_ctx, "num_predict": num_predict}}
         async with httpx.AsyncClient(timeout=httpx.Timeout(240, connect=10)) as c:
             async with c.stream("POST", f"{settings.ollama_url}/api/chat", json=body) as r:
@@ -127,7 +129,7 @@ class OpenAIBackend:
     async def chat_json(self, messages: list[dict], schema: dict, num_predict: int, temperature: float,
                         timeout: float) -> dict:
         body = {"model": self.model, "messages": self._messages(messages), "max_tokens": num_predict,
-                "temperature": temperature,
+                "temperature": temperature, "reasoning_effort": "none",   # no hidden thinking: the answer, not the budget
                 "response_format": {"type": "json_schema", "json_schema": {"name": "answer", "schema": schema}}}
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=15)) as c:
             r = await c.post(self._url(), json=body, headers=self._headers())
@@ -138,7 +140,7 @@ class OpenAIBackend:
     async def stream(self, messages: list[dict], num_predict: int, temperature: float,
                      first_token_timeout: float) -> AsyncIterator[str]:
         body = {"model": self.model, "messages": self._messages(messages), "max_tokens": num_predict,
-                "temperature": temperature, "stream": True}
+                "temperature": temperature, "stream": True, "reasoning_effort": "none"}
         timeout = httpx.Timeout(connect=15, read=first_token_timeout, write=30, pool=15)
         async with httpx.AsyncClient(timeout=timeout) as c:
             async with c.stream("POST", self._url(), json=body, headers=self._headers()) as r:
