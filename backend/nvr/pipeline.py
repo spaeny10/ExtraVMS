@@ -183,6 +183,15 @@ class Pipeline:
             return
         # A continuation of the fragment just before it? Fold it in and verify the whole visit as one event.
         found = merge.candidate(db.event(event_id))
+        if not found and (long_a := merge.candidate_long(db.event(event_id))):
+            # A person who stood still between two fragments: merge only if the recording shows them there throughout.
+            reason = await asyncio.get_running_loop().run_in_executor(
+                self.gpu, merge.footage_check, long_a, db.event(event_id),
+                None if away else self.cameras.get(e["camera_id"], {}).get("zones"), self.verifier.model)
+            a_now, b_now = db.event(long_a["id"]), db.event(event_id)
+            ok = bool(reason and a_now and b_now and b_now["status"] == "verified" and a_now["status"] in ("verified", "pending"))
+            if ok and merge.untouched(a_now) and merge.untouched(b_now):
+                found = (a_now, reason)
         if found:
             target, reason = found
             self.synopsis_hold.pop(event_id, None)

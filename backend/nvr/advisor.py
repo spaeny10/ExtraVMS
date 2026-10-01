@@ -461,7 +461,7 @@ def check_events(ctx: dict) -> list[Finding]:
         if f["total"] >= 20 and f["fragments"] >= 8 and f["fragments"] / f["total"] > 0.15:
             out.append(Finding(key=f"events:fragments:{cid}", area="events", impact="low", camera_id=cid, camera=name,
                                title=f"{name} splits visits into many short events",
-                               why=f"{f['fragments']} of {f['total']} events in 24 h are the same person (or the same camera track) re-appearing within {FRAGMENT_GAP_S:.0f} s, still recorded as separate events. The NVR merges fragments that continue where the last one ended; these re-appeared somewhere else in the frame.",
+                               why=f"{f['fragments']} of {f['total']} events in 24 h are the same person (or the same camera track) re-appearing within {FRAGMENT_GAP_S:.0f} s, still recorded as separate events. The NVR merges fragments that continue where the last one ended (and, for people, longer gaps when the recording shows them still standing there); these re-appeared somewhere else in the frame.",
                                effect="One event per visit: fewer cards, one synopsis, cleaner journeys.",
                                steps=["Camera web page → analytics / object tracking: raise the 'object lost' or 'disappear' tolerance to 5–10 s if offered.",
                                       "Or lower the minimum object size so the person isn't dropped when partly hidden."],

@@ -7,17 +7,23 @@ fragment B is verified we look for the fragment A just before it on the same cam
     - same class, same PTZ view, A not too long already and untouched by an operator, and
     - the camera gave both the same track id, or B starts where A ended and (for people) the re-ID
       appearance embeddings agree.
+A person who stands still is often dropped by the camera's analytics for a minute or two, so a longer gap
+(up to `merge_long_gap`) also merges, for people only, when the recording proves they never left: YOLO is run
+on a frame every `merge_gap_step_s` across the gap and must find a person where A ended / B started in every
+one of them (`candidate_long` + `footage_check`).
 The merged A goes back through verification as one span (clip, YOLO, keyframes, re-ID, cells) and is
 described once. Every merge is logged with its reason so a wrong one is easy to spot.
 """
 from __future__ import annotations
 
+import gc
 import logging
+import math
 import shutil
 
 import numpy as np
 
-from . import cells
+from . import cells, zones
 from .config import settings
 from .db import db
 
@@ -106,6 +112,105 @@ def candidate(b: dict) -> tuple[dict, str] | None:
             return a, f"continuous, gap {gap:.1f}s, re-ID {sim:.2f}"
         return a, f"continuous, gap {gap:.1f}s"
     return None
+
+
+def candidate_long(b: dict) -> dict | None:
+    """People only: the event A that B may continue across a gap too long for `candidate` (track_merge_gap <
+    gap <= merge_long_gap), passing every rule except the footage check, which the caller runs on the GPU."""
+    if b["status"] != "verified" or b["end_ts"] is None or b["camera_class"] != "person":
+        return None
+    if settings.merge_long_gap <= settings.track_merge_gap:
+        return None
+    rows = db.all("SELECT id FROM events WHERE camera_id=? AND id!=? AND camera_class='person' AND status IN ('verified','pending') "
+                  "AND end_ts IS NOT NULL AND end_ts>=? AND end_ts<? ORDER BY end_ts DESC LIMIT 5",
+                  [b["camera_id"], b["id"], b["start_ts"] - settings.merge_long_gap, b["start_ts"] - settings.track_merge_gap])
+    for r in rows:
+        a = db.event(r["id"])
+        if not a:
+            continue
+        gap = b["start_ts"] - a["end_ts"]
+        if gap <= settings.track_merge_gap or gap > settings.merge_long_gap:
+            continue
+        if (a.get("ptz_preset") or None) != (b.get("ptz_preset") or None):
+            continue
+        if b["end_ts"] - a["start_ts"] > settings.merge_max_seconds or not untouched(a):
+            continue
+        if not continuous(a.get("path") or [], b.get("path") or []):
+            continue
+        sim = reid_sim(a["id"], b["id"])
+        if sim is None or sim < settings.merge_reid_min:
+            continue
+        return a
+    return None
+
+
+GAP_IOU = 0.2           # a YOLO person box this close to where A ended / B started / in between counts as "still there"
+FRAME_TOL_S = 10.0      # the decoded (keyframe) frame must be within this of the requested time
+
+
+def gap_times(t0: float, t1: float) -> list[float]:
+    """Sample times from t0 (A's last point) to t1 (B's first point), both included, every merge_gap_step_s
+    (the step widens so there are never more than merge_gap_max_frames)."""
+    if t1 <= t0:
+        return [t0]
+    cap = max(2, settings.merge_gap_max_frames)
+    n = max(2, math.ceil((t1 - t0) / max(settings.merge_gap_step_s, 0.1)) + 1)
+    n = min(n, cap)
+    step = (t1 - t0) / (n - 1)
+    return [t0 + i * step for i in range(n)]
+
+
+def _near(box, ref) -> bool:
+    """box and ref (both [l, t, r, b]) are the same standing person: overlap enough, or one's centre in the other."""
+    from .verifier import center_inside, iou
+    return iou(box, ref) > GAP_IOU or center_inside(box, ref) or center_inside(ref, box)
+
+
+def frame_person_boxes(camera_id: str, t: float, zone_list: list[dict] | None, model) -> list[list[float]] | None:
+    """YOLO person boxes (normalised [l, t, r, b]) in the recorded frame at t, masked zones honoured as in
+    `Verifier.verify`; None when there is no recording at t. Blocking: call on the GPU executor."""
+    import cv2
+    from . import frames
+    from .verifier import PERSON
+    got = frames.preview_jpeg(camera_id, t, width=1280)
+    if not got:
+        return None
+    jpeg, frame_t, _ = got
+    if abs(frame_t - t) > FRAME_TOL_S:
+        return None
+    img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        return None
+    zone_list = zones.normalize(zone_list)
+    res = model.predict([zones.mask_frame(img, zone_list)], imgsz=settings.yolo_imgsz, conf=settings.yolo_conf,
+                        device=settings.yolo_device, verbose=False, classes=sorted(PERSON))[0]
+    boxes = [[float(v) for v in b] for b in res.boxes.xyxyn.tolist()]
+    return [b for b in boxes if zones.allowed(zones.foot(b), zone_list)]
+
+
+def footage_check(a: dict, b: dict, zone_list: list[dict] | None = None, model=None) -> str | None:
+    """The merge reason if the recording shows a person where A ended / B started (or in between) in every
+    sampled frame across the gap; None otherwise (including no recording). Blocking: run on the GPU executor."""
+    p, q = _last_box(a.get("path") or []), _first_box(b.get("path") or [])
+    if p is None or q is None:
+        return None
+    t0, t1 = p[0], q[0]
+    times = gap_times(t0, t1)
+    try:
+        for t in times:
+            boxes = frame_person_boxes(a["camera_id"], t, zone_list, model)
+            if boxes is None:
+                log.info("no long merge of %s into %s: no recording at %.0f", b["id"], a["id"], t)
+                return None
+            f = 0.0 if t1 <= t0 else min(1.0, max(0.0, (t - t0) / (t1 - t0)))
+            mid = [p[i] + (q[i] - p[i]) * f for i in range(1, 5)]
+            if not any(_near(bx, ref) for bx in boxes for ref in (p[1:5], q[1:5], mid)):
+                log.info("no long merge of %s into %s: nobody there at %+.0fs of a %.0fs gap",
+                         b["id"], a["id"], t - t0, t1 - t0)
+                return None
+    finally:
+        gc.collect()  # PyAV frames are freed late (see verifier.grab_frames)
+    return f"footage: person stayed in view for {b['start_ts'] - a['end_ts']:.0f} s ({len(times)} frames checked)"
 
 
 def apply(a: dict, b: dict, reason: str = "") -> dict:

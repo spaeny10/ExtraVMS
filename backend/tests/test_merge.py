@@ -91,6 +91,128 @@ def test_vehicles_need_no_reid():
     assert found and found[0]["id"] == a and found[1].startswith("continuous")
 
 
+def _still_pair(start, gap, cls="person", same=True):
+    """A person standing at x~0.4 who the camera dropped for `gap` seconds, then re-found as a new track."""
+    seed = int(start) % 100000
+    base = vec(seed)
+    a = make(track=f"s{start}", cls=cls, start=start, dur=10, x0=0.4, x1=0.4); db.set_reid(a, base)
+    b = make(track=f"s{start}b", cls=cls, start=start + 10 + gap, dur=10, x0=0.41, x1=0.41)
+    db.set_reid(b, vec(seed + 1, base) if same else vec(seed + 50000))
+    return a, b
+
+
+class FakeFrames:
+    """Stands in for frame_person_boxes: a person at the standing spot, except at the listed times."""
+    def __init__(self, empty_at=(), missing_at=(), elsewhere=False):
+        self.calls, self.empty_at, self.missing_at, self.elsewhere = [], empty_at, missing_at, elsewhere
+
+    def __call__(self, camera_id, t, zone_list, model):
+        self.calls.append(t)
+        if any(abs(t - m) < 1 for m in self.missing_at):
+            return None
+        if any(abs(t - m) < 1 for m in self.empty_at):
+            return []
+        cx = 0.85 if self.elsewhere else 0.405
+        return [[cx - 0.05, 0.36, cx + 0.05, 0.64]]
+
+
+def _footage(a, b, fake):
+    old = merge.frame_person_boxes
+    merge.frame_person_boxes = fake
+    try:
+        return merge.footage_check(db.event(a), db.event(b), [], model=None)
+    finally:
+        merge.frame_person_boxes = old
+
+
+def test_long_gap_person_present_throughout_merges():
+    a, b = _still_pair(T0 + 30000, gap=64)
+    assert merge.candidate(db.event(b)) is None                    # too long for the short-gap rule
+    assert merge.candidate_long(db.event(b))["id"] == a
+    fake = FakeFrames()
+    reason = _footage(a, b, fake)
+    assert reason and reason.startswith("footage: person stayed in view for 64 s")
+    t0, t1 = T0 + 30000 + 10, T0 + 30000 + 10 + 64
+    assert abs(fake.calls[0] - t0) < 1e-6 and abs(fake.calls[-1] - t1) < 1e-6   # A's last point and B's first point
+    assert len(fake.calls) == 14 and all(y - x <= settings.merge_gap_step_s + 1e-6 for x, y in zip(fake.calls, fake.calls[1:]))
+    merged = merge.apply(db.event(a), db.event(b), reason)
+    assert merged["end_ts"] == t1 + 10 and db.event(b) is None
+
+
+def test_long_gap_one_empty_frame_refuses():
+    a, b = _still_pair(T0 + 31000, gap=64)
+    assert _footage(a, b, FakeFrames(empty_at=[T0 + 31000 + 10 + 30])) is None
+    assert _footage(a, b, FakeFrames(elsewhere=True)) is None      # a person, but not where this one stood
+
+
+def test_long_gap_missing_recording_refuses():
+    a, b = _still_pair(T0 + 32000, gap=40)
+    fake = FakeFrames(missing_at=[T0 + 32000 + 10 + 20])
+    assert _footage(a, b, fake) is None and len(fake.calls) == 5   # stops at the first missing frame
+    assert merge.frame_person_boxes("cam1", T0, [], None) is None  # no recordings at all in the scratch dir
+
+
+def test_long_gap_limits():
+    a, b = _still_pair(T0 + 33000, gap=settings.merge_long_gap + 5)
+    assert merge.candidate_long(db.event(b)) is None               # beyond merge_long_gap
+    a, b = _still_pair(T0 + 34000, gap=60, cls="vehicle")
+    assert merge.candidate_long(db.event(b)) is None               # vehicles: no footage check
+    a, b = _still_pair(T0 + 35000, gap=60, same=False)
+    assert merge.candidate_long(db.event(b)) is None               # a different person (re-ID)
+    a, b = _still_pair(T0 + 36000, gap=5)
+    assert merge.candidate_long(db.event(b)) is None and merge.candidate(db.event(b))[0]["id"] == a  # short gaps unchanged
+
+
+def test_long_gap_frame_budget():
+    old = (settings.merge_long_gap, settings.merge_gap_step_s, settings.merge_gap_max_frames)
+    settings.merge_gap_step_s, settings.merge_gap_max_frames = 1.0, 40
+    try:
+        a, b = _still_pair(T0 + 37000, gap=170)
+        assert merge.candidate_long(db.event(b))["id"] == a
+        fake = FakeFrames()
+        assert _footage(a, b, fake) and len(fake.calls) == 40
+        assert abs(fake.calls[-1] - (T0 + 37000 + 10 + 170)) < 1e-6
+    finally:
+        settings.merge_long_gap, settings.merge_gap_step_s, settings.merge_gap_max_frames = old
+
+
+def test_long_gap_runs_on_gpu_in_pipeline():
+    """_verify asks the GPU executor for the footage check and merges when it passes."""
+    import threading
+    from nvr import pipeline as pl
+    from nvr.pipeline import Pipeline
+    a, b = _still_pair(T0 + 38000, gap=27)
+    db.update_event(b, status="pending")
+    p = Pipeline()
+    threads = []
+
+    class V:
+        model = "M"
+
+        def verify(self, e, clip, clip_start, zl):
+            return {"status": "verified"}
+    p.verifier = V()
+
+    def fake(camera_id, t, zone_list, model):
+        threads.append(threading.current_thread().name); assert model == "M"
+        return [[0.355, 0.36, 0.455, 0.64]]
+    old, old_fetch = merge.frame_person_boxes, pl.fetch_clip
+    merge.frame_person_boxes = fake
+
+    async def no_fetch(*a, **k):
+        return None
+    pl.fetch_clip = no_fetch
+    settings_lag = (settings.recording_lag, settings.clip_post_roll)
+    settings.recording_lag, settings.clip_post_roll = -1e12, 0
+    try:
+        asyncio.run(p._verify(b))
+    finally:
+        merge.frame_person_boxes, pl.fetch_clip = old, old_fetch
+        settings.recording_lag, settings.clip_post_roll = settings_lag
+    assert threads and all(n.startswith("yolo") for n in threads)
+    assert db.event(b) is None and db.event(a)["status"] == "pending" and p.verify_q.get_nowait() == a
+
+
 def test_hold_loop_queues_once():
     from nvr import mediamtx
     from nvr.pipeline import Pipeline

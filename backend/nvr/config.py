@@ -64,6 +64,9 @@ class Settings(BaseSettings):
     merge_max_seconds: float = 300.0        # never grow one event beyond this
     merge_max_dist: float = 0.25            # normalised centre distance between the last and first boxes
     merge_reid_min: float = 0.75            # people: appearance similarity needed when the camera gave a new track id
+    merge_long_gap: float = 180.0           # people: gaps up to this merge too if YOLO sees them standing there throughout
+    merge_gap_step_s: float = 5.0           # one recorded frame checked every this many seconds across such a gap
+    merge_gap_max_frames: int = 40          # at most this many frames checked per pair (the step widens to fit)
     synopsis_labels: list[str] = ["person"]  # Qwen runs only for these; YOLO verifies every label
     anomaly_synopsis_min: float = 0.75  # ...and for any other label once it is this unusual for its camera
 
