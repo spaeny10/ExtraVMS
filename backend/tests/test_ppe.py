@@ -186,7 +186,7 @@ def test_check_event_unclear_asks_qwen_and_qwen_no_overrules():
 
 
 def test_passing_through_is_not_checked():
-    eid = make(walk(T0 + 200, 3), start=T0 + 200)
+    eid = make(walk(T0 + 200, 1.5), start=T0 + 200)      # inside for 1.5 s: under the 3 s default dwell
     res, det = run_check(eid, [hat(0.1)])
     assert res is None and det.calls == 0
 
