@@ -423,7 +423,7 @@ def check_vlm(ctx: dict) -> list[Finding]:
         med = statistics.median(lat)
         if med > 60:
             out.append(Finding(key="ai:slow", area="ai", impact="high", title=f"Synopses take {med:.0f} s each",
-                               why=f"The median of the last {len(lat)} synopses is {med:.0f} s; a resident 7B model does them in 10–30 s.",
+                               why=f"The median of the last {len(lat)} synopses is {med:.0f} s; a resident 7-9B model does them in 10–30 s.",
                                effect="The event feed catches up and Ask answers promptly.",
                                steps=["Check the VRAM finding above; if the model is resident, look at what else uses Qwen (below)."],
                                fingerprint=f"{int(med // 30)}"))

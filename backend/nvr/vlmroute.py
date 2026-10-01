@@ -1,4 +1,4 @@
-"""Where each Qwen request runs: the local 7B (Ollama, GPU 1) or an optional larger remote model.
+"""Where each Qwen request runs: the local model (Ollama; qwen3.5:9b by default) or an optional larger remote model.
 
 The remote is any OpenAI-compatible endpoint, typically a RunPod Serverless vLLM worker running
 Qwen2.5-VL-32B/72B. Only the reasoning-heavy tasks listed in `remote_tasks` go there. Anything else
