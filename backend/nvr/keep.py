@@ -75,7 +75,7 @@ def keep_windows(camera: dict, start: float, end: float, policy: dict) -> tuple[
         [camera["id"], end + pb, start - pa])
     noted = {r["event_id"] for r in db.all(
         "SELECT DISTINCT event_id FROM chat_messages WHERE saved=1 AND event_id IN "
-        f"({','.join(str(e['id']) for e in events) or 'NULL'})")}
+        f"({','.join(str(e['id']) for e in events if e.get('id') is not None) or 'NULL'})")}
     for e in events:
         s, t = e["start_ts"] - pb, (e["end_ts"] or e["start_ts"]) + pa
         person = e["camera_class"] == "person"

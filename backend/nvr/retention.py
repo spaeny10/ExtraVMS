@@ -108,6 +108,8 @@ def curate_camera(cam: dict, now: float, dry_run: bool, stats: Counter) -> None:
                 stats["freed_bytes"] += before - after
         except OSError as e:  # e.g. MediaMTX is serving the file right now; retry next pass
             log.warning("[%s] could not curate %s: %s", cam["id"], f.name, e)
+        except Exception:  # one odd segment must not stop the pass: the rest of the disk still needs curating
+            log.exception("[%s] curating %s failed; skipped", cam["id"], f.name)
 
 
 def _record(camera_id: str, f: Path, start: float, end: float, windows: list[dict]) -> None:

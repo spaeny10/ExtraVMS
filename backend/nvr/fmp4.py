@@ -11,7 +11,7 @@ from __future__ import annotations
 import datetime as dt
 import os
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 CONTAINERS = {"moov", "trak", "mdia", "minf", "stbl", "moof", "traf", "udta", "mvex", "edts"}
@@ -39,11 +39,14 @@ def _boxes(buf: bytes, off: int, end: int, path: str = ""):
 class Fragment:
     start: int          # byte offset of moof
     end: int            # byte offset after the following mdat
-    t: float            # seconds from segment start (tfdt / timescale)
+    t: float            # seconds from segment start (video track's tfdt / its timescale)
     duration: float
-    keyframe: bool      # first sample is a sync sample
-    tfdt_pos: int       # byte offset of the tfdt value (for rebasing)
+    keyframe: bool      # first video sample is a sync sample
+    tfdt_pos: int       # byte offset of the video track's tfdt value (for rebasing)
     tfdt_v1: bool
+    # every track's tfdt in this moof: (byte offset of the value, 64-bit?, track id). A camera with audio writes
+    # one traf per track; each must be rebased in its own track's timescale.
+    tfdts: list = field(default_factory=list)
 
 
 @dataclass
@@ -55,6 +58,7 @@ class Segment:
     mvhd: tuple[int, int, int] | None  # (duration field offset, version, movie timescale); MediaMTX reads length here
     fragments: list[Fragment]
     data: bytes
+    timescales: dict = field(default_factory=dict)   # track id -> timescale (audio and video differ)
 
     @property
     def duration(self) -> float:
@@ -63,9 +67,13 @@ class Segment:
 
 def parse(path: Path) -> Segment:
     data = Path(path).read_bytes()
-    timescale, header_end, mtxi_pos, mvhd = 90000, 0, None, None
+    header_end, mtxi_pos, mvhd = 0, None, None
+    timescales: dict[int, int] = {}       # track id -> timescale
+    video_track: int | None = None
+    trak_id: int | None = None
     frags: list[Fragment] = []
     cur: dict | None = None
+    traf: dict | None = None
     for p, start, body, end in _boxes(data, 0, len(data)):
         top = p.count("/") == 1
         if p == "/moov":
@@ -74,24 +82,42 @@ def parse(path: Path) -> Segment:
             v = data[body]
             ts = struct.unpack(">I", data[body + (12 if v == 0 else 20):body + (16 if v == 0 else 24)])[0]
             mvhd = (body + (16 if v == 0 else 24), v, ts)
+        elif p == "/moov/trak/tkhd":
+            v = data[body]
+            trak_id = struct.unpack(">I", data[body + (12 if v == 0 else 20):body + (16 if v == 0 else 24)])[0]
         elif p.endswith("/mdhd"):
             v = data[body]
-            timescale = struct.unpack(">I", data[body + 12:body + 16] if v == 0 else data[body + 20:body + 24])[0]
+            ts = struct.unpack(">I", data[body + 12:body + 16] if v == 0 else data[body + 20:body + 24])[0]
+            timescales[trak_id if trak_id is not None else len(timescales) + 1] = ts
+        elif p.endswith("/hdlr") and data[body + 8:body + 12] == b"vide" and video_track is None:
+            video_track = trak_id
         elif p.endswith("/mtxi"):
             mtxi_pos = body
         elif p == "/moof":
-            cur = {"start": start, "tfdt": 0, "tfdt_pos": 0, "v1": False, "dur": 0, "key": True}
-        elif p.endswith("/tfdt") and cur is not None:
+            cur = {"start": start, "trafs": []}
+        elif p == "/moof/traf" and cur is not None:
+            traf = {"track": None, "tfdt": 0, "tfdt_pos": 0, "v1": False, "dur": 0, "key": True}
+            cur["trafs"].append(traf)
+        elif p.endswith("/tfhd") and traf is not None:
+            traf["track"] = struct.unpack(">I", data[body + 4:body + 8])[0]
+        elif p.endswith("/tfdt") and traf is not None:
             v1 = data[body] == 1
-            cur["v1"], cur["tfdt_pos"] = v1, body + 4
-            cur["tfdt"] = struct.unpack(">Q" if v1 else ">I", data[body + 4:body + (12 if v1 else 8)])[0]
-        elif p.endswith("/trun") and cur is not None:
-            cur["dur"], cur["key"] = _trun_info(data, body)
-        elif top and p == "/mdat" and cur is not None:
-            frags.append(Fragment(cur["start"], end, cur["tfdt"] / timescale, cur["dur"] / timescale,
-                                  cur["key"], cur["tfdt_pos"], cur["v1"]))
-            cur = None
-    return Segment(Path(path), header_end, timescale, mtxi_pos, mvhd, frags, data)
+            traf["v1"], traf["tfdt_pos"] = v1, body + 4
+            traf["tfdt"] = struct.unpack(">Q" if v1 else ">I", data[body + 4:body + (12 if v1 else 8)])[0]
+        elif p.endswith("/trun") and traf is not None:
+            traf["dur"], traf["key"] = _trun_info(data, body)
+        elif top and p == "/mdat" and cur is not None and cur["trafs"]:
+            # the fragment's time comes from the video track (the one MediaMTX indexes on); first traf if none
+            lead = next((t for t in cur["trafs"] if t["track"] == video_track), cur["trafs"][0])
+            ts = timescales.get(lead["track"]) or 90000
+            frags.append(Fragment(cur["start"], end, lead["tfdt"] / ts, lead["dur"] / ts, lead["key"],
+                                  lead["tfdt_pos"], lead["v1"],
+                                  [(t["tfdt_pos"], t["v1"], t["track"]) for t in cur["trafs"] if t["tfdt_pos"]]))
+            cur, traf = None, None
+    main_ts = timescales.get(video_track) if video_track is not None else None
+    if main_ts is None:
+        main_ts = next(iter(timescales.values()), 90000)
+    return Segment(Path(path), header_end, main_ts, mtxi_pos, mvhd, frags, data, timescales)
 
 
 def _trun_info(data: bytes, body: int) -> tuple[int, bool]:
@@ -171,13 +197,13 @@ def trim(seg: Segment, seg_start: float, windows: list[tuple[float, float]], des
         body = bytearray()
         for f in kept:
             chunk = bytearray(seg.data[f.start:f.end])
-            rel = f.tfdt_pos - f.start
-            if f.tfdt_v1:
-                old = struct.unpack(">Q", chunk[rel:rel + 8])[0]
-                struct.pack_into(">Q", chunk, rel, old - base_units)
-            else:
-                old = struct.unpack(">I", chunk[rel:rel + 4])[0]
-                struct.pack_into(">I", chunk, rel, old - base_units)
+            # rebase every track's decode time in its own timescale (audio and video differ); never below zero
+            for pos, v1, track in (f.tfdts or [(f.tfdt_pos, f.tfdt_v1, None)]):
+                rel = pos - f.start
+                units = round(base_t * (seg.timescales.get(track) or seg.timescale)) if track is not None else base_units
+                fmt, width = (">Q", 8) if v1 else (">I", 4)
+                old = struct.unpack(fmt, chunk[rel:rel + width])[0]
+                struct.pack_into(fmt, chunk, rel, max(0, old - units))
             body += chunk
         dest = Path(dest_dir) / segment_name(new_start)
         tmp = dest.with_suffix(".mp4.part")
