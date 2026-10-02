@@ -31,7 +31,7 @@ apt-get install -y -qq python3-venv python3-dev ffmpeg ethtool curl rsync >/dev/
 
 echo "== user and folders"
 id -u "$NVR_USER" >/dev/null 2>&1 || useradd --system --home "$NVR_DIR" --shell /usr/sbin/nologin "$NVR_USER"
-mkdir -p /srv/nvr/backups "$NVR_DIR/data" "$NVR_DIR/runtime"
+mkdir -p /srv/nvr/backups "$NVR_DIR/data" "$NVR_DIR/runtime/ultralytics"   # YOLO_CONFIG_DIR: must exist, writable by the service user
 
 if [ -n "$DISK" ]; then
   echo "== recordings disk $DISK"
