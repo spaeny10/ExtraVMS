@@ -39,7 +39,7 @@ class Settings(BaseSettings):
 
     # YOLO
     yolo_model: str = "yolo11s.pt"
-    yolo_device: str = "cuda:0"
+    yolo_device: str = "cuda:0"             # "cuda:0", "cpu", or "hailo" (Hailo-8 PCIe; yolo_model is then a .hef, see hailo.py)
     yolo_imgsz: int = 1280
     yolo_conf: float = 0.25
     verify_frames: int = 6                  # frames sampled per event
@@ -116,6 +116,12 @@ class Settings(BaseSettings):
     hub_enabled: bool = True
     hub_url: str = "wss://hub.axiomvision.ai/agent"   # the settings table can override (Settings -> System)
     hub_insecure: bool = False                         # NVR_HUB_INSECURE=1: accept a self-signed hub cert (dev only)
+
+    @property
+    def torch_device(self) -> str:
+        """Where the torch models (PPE YOLO .pt, CLIP, re-ID) run: the YOLO device, except on a Hailo site, where only
+        the verifier's HEF runs on the Hailo and everything torch stays on the CPU."""
+        return "cpu" if self.yolo_device == "hailo" else self.yolo_device
 
 
 settings = Settings()

@@ -327,6 +327,8 @@ export type SystemInfo = {
   vlm_down_since?: number | null;
   yolo_ready: boolean;
   yolo_model: string;
+  yolo_device?: string;           // "cuda:0", "cpu", "hailo-8"
+  yolo_frame_ms?: number | null;  // median YOLO time per verified frame
   events: Record<string, number>;
   webrtc_port: number;
   backup?: { dir: string; last: { at: number; path: string; bytes: number; count: number } | null };

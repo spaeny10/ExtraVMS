@@ -106,6 +106,32 @@ models in `models/` and Ollama's model store.
   typical mistakes are caps and beanies read as hard hats and plain orange overalls read as vests.
 - The check runs on new events only; painting a zone does not re-check past footage.
 
+## Hailo-8 sites
+
+A lite site (no NVIDIA GPU) with a Hailo-8 M.2/PCIe accelerator runs YOLO verification on the Hailo; PPE, CLIP and
+re-ID stay on torch on the CPU (`settings.torch_device`).
+
+```bash
+bash /opt/nvr/tools/deploy_site.sh --hailo          # new site: --cpu plus the Hailo
+bash /opt/nvr/tools/hailo_setup.sh --env && systemctl restart nvr   # existing site
+```
+
+`tools/hailo_setup.sh` (root, Ubuntu 24.04, idempotent, public sources only, no Hailo login) builds the `hailo_pci`
+driver with DKMS for every installed kernel (6.17 and 7.0 tested), installs the firmware, builds HailoRT 4.24.0 and
+`hailortcli` into `/usr/local` and the `hailo_platform` Python bindings into the venv, downloads the Model Zoo v2.19.0
+`yolov11s.hef` (Hailo-8, COCO, NMS in the HEF) to `models/`, and with `--env` sets `NVR_YOLO_DEVICE=hailo`,
+`NVR_YOLO_MODEL=yolov11s.hef`. HailoRT 4.24 is the last line for Hailo-8 (5.x is Hailo-10/15 only); a HEF must come
+from the Model Zoo release that matches it.
+
+- `nvr/hailo.py` `HailoYOLO` answers `.names` and `.predict(...)` like ultralytics: letterbox to the HEF's 640x640,
+  one frame at a time on a device that stays open, the NMS output parsed and mapped back to the original frame.
+- Settings → System shows `YOLO · yolov11s.hef on hailo-8` and the median ms per frame; Optimize my system flags a CPU
+  site whose YOLO is slow (and suggests the Hailo).
+- The service holds the device: stop `nvr` before `hailortcli run` or another HailoRT program.
+- **Measured** on hailo-t1 (Ryzen 5 3501U, Hailo-8 M.2), 6 frames of a 1080p clip: yolov11s on the Hailo 22 ms a frame
+  (28 ms from 4K; 10 ms of it on the device), yolov8s 17 ms; on the CPU yolo11n 55-62 ms, yolo11s 150 ms. A whole
+  6-frame `verify()` (decode included) 1.4 s on the Hailo vs 2.3 s with CPU yolo11n. Boxes match CPU yolo11s to ~0.005.
+
 ## Camera notes (Milesight MS-C5367-X23PE, firmware 61.8.0.5-r6)
 
 - Object metadata (Human / Vehicle, confidence, box, track ID) is on the `/main` RTSP metadata track.

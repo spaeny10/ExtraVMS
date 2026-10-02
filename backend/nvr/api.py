@@ -1358,6 +1358,11 @@ async def playback(camera_id: str, start: float, duration: float = Query(60, le=
 
 # ---------------------------------------------------------------- system
 
+def _median(xs) -> float | None:
+    xs = sorted(xs or [])
+    return round(xs[len(xs) // 2], 1) if xs else None
+
+
 @app.get("/api/system")
 async def system():
     rec = shutil.disk_usage(settings.recordings_dir)
@@ -1372,6 +1377,8 @@ async def system():
         "local_vlm": settings.local_vlm_enabled,
         "vlm_state": state.pipeline.vlm_state, "vlm_down_since": state.pipeline.vlm_down_since,
         "yolo_ready": state.pipeline.verifier is not None, "yolo_model": settings.yolo_model,
+        "yolo_device": getattr(state.pipeline.verifier, "device", None) or settings.yolo_device,
+        "yolo_frame_ms": _median(getattr(state.pipeline.verifier, "frame_ms", None)),
         "events": counts,
         "webrtc_port": settings.mediamtx_webrtc_port,
         "backup": backup.status(),

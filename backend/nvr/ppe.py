@@ -105,8 +105,8 @@ class Detector:
         if self._model is None:
             from ultralytics import YOLO
             self._model = YOLO(str(self.weights))
-            self._model.to(settings.yolo_device)
-            log.info("PPE model %s loaded on %s (%s)", self.weights.name, settings.yolo_device,
+            self._model.to(settings.torch_device)
+            log.info("PPE model %s loaded on %s (%s)", self.weights.name, settings.torch_device,
                      ", ".join(self._model.names.values()))
         return self._model
 
@@ -115,7 +115,7 @@ class Detector:
         if not images:
             return []
         m = self._load()
-        res = m.predict(images, imgsz=settings.ppe_imgsz, conf=0.15, device=settings.yolo_device, verbose=False)
+        res = m.predict(images, imgsz=settings.ppe_imgsz, conf=0.15, device=settings.torch_device, verbose=False)
         out = []
         for r in res:
             boxes = []

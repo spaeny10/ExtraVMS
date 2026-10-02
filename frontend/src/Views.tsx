@@ -490,7 +490,8 @@ export function SystemView() {
           sub={`${s.retention_days} days continuous, then AI-selected`}>
           <div className="meter"><div style={{ width: `${used * 100}%` }} /></div>
         </Row>
-        <Row label="YOLO" value={<><Status ok={s.yolo_ready} /> {s.yolo_ready ? "Ready" : "Loading"} · {s.yolo_model}</>} sub={s.queues.verify ? `${s.queues.verify} waiting` : "queue empty"} />
+        <Row label="YOLO" value={<><Status ok={s.yolo_ready} /> {s.yolo_ready ? "Ready" : "Loading"} · {s.yolo_model}{s.yolo_device ? ` on ${s.yolo_device}` : ""}</>}
+          sub={[s.queues.verify ? `${s.queues.verify} waiting` : "queue empty", s.yolo_frame_ms != null ? `${s.yolo_frame_ms} ms a frame` : ""].filter(Boolean).join(" · ")} />
         <Row label="Qwen" value={<><Status ok={s.vlm_ready} /> {s.vlm_ready ? "Ready" : s.vlm_state === "unresponsive" ? "Not answering · restarting Ollama" : "Starting"} · {s.vlm_model}</>}
           sub={s.vlm_state === "unresponsive" ? `down since ${s.vlm_down_since ? fmtTime(s.vlm_down_since) : "?"} · if nvidia-smi says the GPU is lost, reboot` : s.queues.synopsis ? `${s.queues.synopsis} waiting` : "queue empty"}
           action={<QwenFeedbackInfo />} />

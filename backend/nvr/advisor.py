@@ -77,6 +77,7 @@ async def gather(state) -> dict:
     except Exception:
         ctx["retention"] = None
     ctx["vlm"] = await _vlm_facts(state)
+    ctx["yolo"] = _yolo_facts(state)
     ctx["events"] = _event_facts(ctx["now"])
     ctx["probe"] = await asyncio.to_thread(_probe_streams, ctx["cameras"], ctx["now"])
     from .config import ROOT
@@ -94,6 +95,13 @@ async def gather(state) -> dict:
     except Exception:
         ctx["baseline"] = []
     return ctx
+
+
+def _yolo_facts(state) -> dict:
+    """Which device YOLO verification runs on and how long it takes per frame (Verifier.frame_ms)."""
+    v = getattr(getattr(state, "pipeline", None), "verifier", None)
+    return {"device": getattr(v, "device", None) or settings.yolo_device, "model": settings.yolo_model,
+            "frame_ms": list(getattr(v, "frame_ms", None) or [])}
 
 
 async def _vlm_facts(state) -> dict:
@@ -460,6 +468,37 @@ def check_vlm(ctx: dict) -> list[Finding]:
     return out
 
 
+YOLO_SLOW_MS = {"cpu": 400.0, "hailo": 150.0, "cuda": 150.0}  # median per verified frame before it is worth a finding
+
+
+def check_yolo(ctx: dict) -> list[Finding]:
+    y = ctx.get("yolo") or {}
+    ms = y.get("frame_ms") or []
+    if len(ms) < 5:
+        return []
+    med = statistics.median(ms)
+    dev = str(y.get("device") or "cpu")
+    kind = "hailo" if dev.startswith("hailo") else "cuda" if dev.startswith("cuda") else "cpu"
+    if med <= YOLO_SLOW_MS[kind]:
+        return []
+    frames = settings.verify_frames
+    if kind == "cpu":
+        return [Finding(key="ai:yolo_slow", area="ai", impact="medium", title=f"YOLO takes {med:.0f} ms a frame on the CPU",
+                        why=f"Verification runs {y.get('model')} on the processor: the median of the last {len(ms)} checks is {med:.0f} ms a frame, "
+                            f"about {med * frames / 1000:.1f} s of YOLO per event ({frames} frames), and the CPU is busy recording at the same time.",
+                        effect="Verification in a few milliseconds a frame (Hailo-8: ~10 ms with yolov11s), leaving the CPU to recording and decoding.",
+                        steps=["Fit a Hailo-8 M.2/PCIe accelerator and run tools/hailo_setup.sh (or deploy_site.sh --hailo); it switches YOLO to the Hailo.",
+                               "Or an NVIDIA GPU: NVR_YOLO_DEVICE=cuda:0.", "Meanwhile NVR_YOLO_IMGSZ=640 and NVR_VERIFY_FRAMES=4 keep it down."],
+                        fingerprint=f"{int(med // 200)}")]
+    return [Finding(key="ai:yolo_slow", area="ai", impact="low", title=f"YOLO takes {med:.0f} ms a frame on {dev}",
+                    why=f"The median of the last {len(ms)} checks is {med:.0f} ms a frame on {dev} ({y.get('model')}); this accelerator should need "
+                        f"well under {YOLO_SLOW_MS[kind]:.0f} ms, so the time goes elsewhere (the host resizing 4K frames, or the device shared with another process).",
+                    effect="Events verified sooner after they end.",
+                    steps=["hailortcli monitor shows whether another process holds the Hailo." if kind == "hailo" else "nvidia-smi shows what else uses the GPU.",
+                           "Check the box's CPU load: frame decoding and resizing run there."],
+                    fingerprint=f"{kind}:{int(med // 100)}")]
+
+
 def check_events(ctx: dict) -> list[Finding]:
     out = []
     for cid, f in ctx["events"].items():
@@ -573,7 +612,7 @@ def check_clocks(ctx: dict) -> list[Finding]:
     return out
 
 
-CHECKS = [check_bitrate, check_framerate, check_codecs, check_storage, check_vlm, check_events, check_rules, check_ppe, check_ptz,
+CHECKS = [check_bitrate, check_framerate, check_codecs, check_storage, check_vlm, check_yolo, check_events, check_rules, check_ppe, check_ptz,
           check_clocks]
 
 
@@ -657,4 +696,6 @@ async def report(state, use_ai: bool = True) -> dict:
             "findings": [asdict(f) for f in shown], "hidden": [asdict(f) for f in hidden],
             "facts": {"gb_per_day": round(sum(c["gb_per_day"] for c in (ctx["retention"] or {}).get("cameras", [])), 1) if ctx.get("retention") else None,
                       "vlm": {k: v for k, v in ctx["vlm"].items() if k in ("size_gb", "vram_gb", "queue")},
-                      "median_synopsis_s": round(statistics.median(ctx["vlm"]["latency_s"]), 1) if len(ctx["vlm"].get("latency_s") or []) >= 3 else None}}
+                      "median_synopsis_s": round(statistics.median(ctx["vlm"]["latency_s"]), 1) if len(ctx["vlm"].get("latency_s") or []) >= 3 else None,
+                      "yolo": {"device": ctx["yolo"]["device"], "model": ctx["yolo"]["model"],
+                               "median_frame_ms": round(statistics.median(ctx["yolo"]["frame_ms"]), 1) if ctx["yolo"]["frame_ms"] else None}}}

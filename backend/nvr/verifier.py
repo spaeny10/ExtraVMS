@@ -8,6 +8,8 @@ from __future__ import annotations
 import gc
 import logging
 import os
+import time
+from collections import deque
 from pathlib import Path
 
 os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")  # GPU indices match nvidia-smi / Ollama
@@ -173,19 +175,43 @@ def grab_frames(clip: Path, clip_start: float, targets: list[float]) -> dict[flo
     return {w: v[1] for w, v in best.items()}
 
 
+def load_yolo():
+    """(model, device label) for settings.yolo_device: a Hailo-8 HEF (hailo.py), or ultralytics on CUDA / the CPU.
+    Both answer .names and .predict(...) the same way."""
+    weights = ROOT / "models" / settings.yolo_model
+    if settings.yolo_device == "hailo":
+        if weights.suffix != ".hef":
+            raise ValueError(f"NVR_YOLO_DEVICE=hailo needs a Hailo .hef in NVR_YOLO_MODEL, not {settings.yolo_model}")
+        from .hailo import HailoYOLO
+        model = HailoYOLO(weights)
+        return model, model.device_name
+    from ultralytics import YOLO  # heavy import; keep module import cheap
+
+    weights.parent.mkdir(exist_ok=True)
+    if not weights.exists():
+        from ultralytics.utils.downloads import attempt_download_asset
+        attempt_download_asset(str(weights))
+    model = YOLO(str(weights))
+    model.to(settings.yolo_device)
+    return model, settings.yolo_device
+
+
 class Verifier:
     def __init__(self) -> None:
-        from ultralytics import YOLO  # heavy import; keep module import cheap
-
-        weights = ROOT / "models" / settings.yolo_model
-        weights.parent.mkdir(exist_ok=True)
-        if not weights.exists():
-            from ultralytics.utils.downloads import attempt_download_asset
-            attempt_download_asset(str(weights))
-        self.model = YOLO(str(weights))
-        self.model.to(settings.yolo_device)
+        self.model, self.device = load_yolo()
+        self.frame_ms: deque[float] = deque(maxlen=200)  # YOLO time per frame (ms), for Optimize my system
         self._reid = None  # person re-ID (loaded on first person event)
-        log.info("YOLO %s loaded on %s", settings.yolo_model, settings.yolo_device)
+        log.info("YOLO %s loaded on %s", settings.yolo_model, self.device)
+
+    def _predict(self, images: list) -> list:
+        """YOLO on the verifier's frames (masked), timed per frame."""
+        if not images:
+            return []
+        t0 = time.perf_counter()
+        res = self.model.predict(images, imgsz=settings.yolo_imgsz, conf=settings.yolo_conf, device=settings.yolo_device,
+                                 verbose=False, classes=sorted(PERSON | VEHICLE))
+        self.__dict__.setdefault("frame_ms", deque(maxlen=200)).append(round((time.perf_counter() - t0) * 1000 / len(images), 1))
+        return res
 
     def _reid_embedding(self, frames: dict, detections: list) -> list[float] | None:
         """Appearance fingerprint of the verified person (tight crops of YOLO's matched boxes)."""
@@ -268,9 +294,7 @@ class Verifier:
         ts_list = [s[0] for s in samples if s[0] in frames]
         has_pre = pre_t is not None and pre_t in frames and pre_t not in ts_list
         # YOLO only sees allowed areas: masked regions are painted grey before inference.
-        results = self.model.predict([zones.mask_frame(frames[t], zone_list) for t in ts_list + ([pre_t] if has_pre else [])],
-                                     imgsz=settings.yolo_imgsz, conf=settings.yolo_conf, device=settings.yolo_device, verbose=False,
-                                     classes=sorted(PERSON | VEHICLE))
+        results = self._predict([zones.mask_frame(frames[t], zone_list) for t in ts_list + ([pre_t] if has_pre else [])])
         names = self.model.names
         pre_boxes = None
         if has_pre:
@@ -339,9 +363,7 @@ class Verifier:
             extra = grab_frames(clip, clip_start, targets) if targets else {}
             if extra:
                 ts_extra = [t for t in targets if t in extra]
-                res_extra = self.model.predict([zones.mask_frame(extra[t], zone_list) for t in ts_extra], imgsz=settings.yolo_imgsz,
-                                               conf=settings.yolo_conf, device=settings.yolo_device, verbose=False,
-                                               classes=sorted(PERSON | VEHICLE))
+                res_extra = self._predict([zones.mask_frame(extra[t], zone_list) for t in ts_extra])
                 by_ts = {}
                 for t, res in zip(ts_extra, res_extra):
                     bx = [{"cls_id": int(c), "conf": round(float(p), 3), "box": [round(float(v), 4) for v in b]}

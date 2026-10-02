@@ -152,7 +152,7 @@ class OSNet(nn.Module):
 
 class ReID:
     def __init__(self, device: str | None = None):
-        self.device = torch.device(device or settings.yolo_device if torch.cuda.is_available() else "cpu")
+        self.device = torch.device(device or settings.torch_device if torch.cuda.is_available() else "cpu")
         if not WEIGHTS_PATH.exists():
             WEIGHTS_PATH.parent.mkdir(parents=True, exist_ok=True)
             log.info("downloading re-ID weights (~3 MB)")

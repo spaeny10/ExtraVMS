@@ -3,10 +3,12 @@
 #
 #   1. copy the repo to /opt/nvr (rsync/scp from the dev PC, or git clone), including models/ and frontend/dist
 #      (never the dev PC's .env: it holds that site's camera passwords and keys)
-#   2. bash /opt/nvr/tools/deploy_site.sh [--recordings-disk /dev/sdX] [--cpu]
+#   2. bash /opt/nvr/tools/deploy_site.sh [--recordings-disk /dev/sdX] [--cpu | --hailo]
 #
 # --recordings-disk formats that whole disk as ext4 (ALL DATA ON IT IS LOST) and mounts it at /srv/nvr/recordings.
 # --cpu writes a .env for a box without an NVIDIA GPU: YOLO on the CPU, no local Ollama (Qwen via the hub).
+# --hailo is --cpu plus a Hailo-8 PCIe accelerator: tools/hailo_setup.sh installs its driver, HailoRT and the YOLO HEF,
+#         and the .env gets NVR_YOLO_DEVICE=hailo, NVR_YOLO_MODEL=yolov11s.hef (re-run safe on an existing .env too).
 set -euo pipefail
 
 NVR_DIR=/opt/nvr
@@ -14,10 +16,12 @@ NVR_USER=nvr
 MEDIAMTX_VERSION=v1.21.1
 DISK=""
 CPU=0
+HAILO=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --recordings-disk) DISK="$2"; shift 2 ;;
     --cpu) CPU=1; shift ;;
+    --hailo) CPU=1; HAILO=1; shift ;;
     *) echo "unknown option $1"; exit 2 ;;
   esac
 done
@@ -91,6 +95,11 @@ EOF
   echo "wrote $ENV (edit NVR_HUB_URL for a real hub)"
 fi
 
+if [ "$HAILO" = 1 ]; then
+  echo "== Hailo-8"
+  bash "$NVR_DIR/tools/hailo_setup.sh" --env --venv "$NVR_DIR/.venv"
+fi
+
 echo "== permissions"
 chown -R "$NVR_USER:$NVR_USER" "$NVR_DIR" /srv/nvr
 
@@ -110,6 +119,7 @@ RestartSec=5
 LimitNOFILE=65536
 Environment=PYTHONUNBUFFERED=1
 Environment=YOLO_CONFIG_DIR=$NVR_DIR/runtime/ultralytics
+Environment=HAILORT_LOGGER_PATH=$NVR_DIR/runtime
 
 [Install]
 WantedBy=multi-user.target

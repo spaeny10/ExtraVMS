@@ -32,7 +32,7 @@ class Clip:
         if any(CACHE_DIR.glob("models--*/snapshots/*/*")):  # weights already downloaded: don't phone home
             os.environ.setdefault("HF_HUB_OFFLINE", "1")
         import open_clip
-        self.device = device or settings.yolo_device
+        self.device = device or settings.torch_device
         self.precision = precision_for(self.device)
         self.model, _, _ = open_clip.create_model_and_transforms(
             MODEL, pretrained=PRETRAINED, cache_dir=str(CACHE_DIR), device=self.device, precision=self.precision)
