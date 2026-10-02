@@ -249,7 +249,9 @@ class SiteRule(BaseModel):
 class CameraIn(BaseModel):
     id: str = Field(pattern=r"^[a-z0-9_]{1,32}$")
     name: str
-    host: str
+    # an IP address or hostname only: a name typed into this field once produced an invalid RTSP URL that stopped
+    # MediaMTX for every camera on the site
+    host: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9.\-]{0,252}$", description="camera IP address or hostname")
     onvif_port: int = 80
     rtsp_port: int = 554
     username: str = "admin"

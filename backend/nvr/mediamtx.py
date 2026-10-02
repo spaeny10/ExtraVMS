@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
+import re
 import urllib.parse
 
 import httpx
@@ -13,6 +14,13 @@ from .config import settings
 from .db import db
 
 log = logging.getLogger("nvr.mediamtx")
+
+
+HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.\-]{0,252}$")   # IP address or hostname; anything else breaks the RTSP URL
+
+
+def valid_host(host: str | None) -> bool:
+    return bool(host) and HOST_RE.match(host) is not None
 
 
 def camera_url(cam: dict, path: str) -> str:
@@ -25,6 +33,11 @@ def build_config(cameras: list[dict]) -> dict:
     rec_root = settings.recordings_dir.as_posix()
     paths: dict = {}
     for cam in cameras:
+        if not valid_host(cam.get("host")):
+            # MediaMTX refuses to start on one malformed source URL, taking every camera down with it: leave this
+            # camera out (it shows as down in Settings) and keep the others recording.
+            log.error("[%s] address %r is not an IP address or hostname: camera left out of MediaMTX", cam["id"], cam.get("host"))
+            continue
         # Main stream: always pulled and recorded 24/7. The NVR also reads the ONVIF
         # metadata track from this path, so the camera only serves one main session.
         paths[cam["id"]] = {
