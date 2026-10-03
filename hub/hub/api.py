@@ -16,7 +16,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, W
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, EmailStr, Field
 
-from . import __version__, alerts, auth, backups, dashboards, db, digest, proxy, push, turn, vlm_proxy
+from . import __version__, alerts, auth, backups, dashboards, db, digest, fleet_actions, proxy, push, turn, vlm_proxy
 from . import fleet as fleet_mod
 from fastapi.responses import StreamingResponse
 from .agents import registry
@@ -286,7 +286,7 @@ class ClaimIn(BaseModel):
 @app.get("/api/orgs/{org_id}/sites")
 async def list_sites(org_id: str, u: dict = Depends(user)):
     auth.require_role(u, org_id, "viewer")
-    return [_site_card(s) for s in auth.visible_sites(u, org_id)]
+    return [_site_card(s) for s in auth.visible_sites(u, org_id, include_retired=True)]
 
 
 @app.get("/api/claims/{code}")
@@ -346,6 +346,20 @@ async def rotate_token(site_id: str, u: dict = Depends(user)):
     return {"ok": True, "pushed": pushed}
 
 
+class RetireIn(BaseModel):
+    retired: bool = True
+
+
+@app.post("/api/sites/{site_id}/retire")
+async def retire_site(site_id: str, body: RetireIn, u: dict = Depends(user)):
+    """Hide a site from Fleet, Home, Find, Ask and alerts (or bring it back). Its tunnel and data are untouched."""
+    site, _ = auth.site_access(u, site_id)
+    auth.require_role(u, site["org_id"], "admin")
+    fleet_actions.retire(site_id, body.retired)
+    _audit(u, site["org_id"], site_id, f"site {'retired' if body.retired else 'restored'}: {site['name']}")
+    return _site_card(db.one(sa.select(db.sites).where(db.sites.c.id == site_id)))
+
+
 @app.delete("/api/sites/{site_id}")
 async def revoke_site(site_id: str, u: dict = Depends(user)):
     site, _ = auth.site_access(u, site_id)
@@ -364,21 +378,23 @@ def _site_card(s: dict) -> dict:
     open_alerts = db.one(sa.select(sa.func.count()).select_from(db.alerts).where(db.alerts.c.site_id == s["id"], db.alerts.c.closed_at.is_(None)))
     return {"id": s["id"], "org_id": s["org_id"], "name": s["name"], "location": s["location"], "online": bool(s["online"]) and s["id"] in registry.by_site,
             "last_seen_at": s["last_seen_at"], "version": s["version"], "hostname": s["hostname"], "clock_skew_s": s["clock_skew_s"],
-            "summary": summ, "open_alerts": list(open_alerts.values())[0] if open_alerts else 0}
+            "summary": summ, "open_alerts": list(open_alerts.values())[0] if open_alerts else 0, "retired_at": s.get("retired_at")}
 
 
 # ---------------------------------------------------------------- fleet, alerts, audit
 
 @app.get("/api/fleet")
-async def fleet(org: str | None = None, u: dict = Depends(user)):
+async def fleet(org: str | None = None, include_retired: bool = False, u: dict = Depends(user)):
     orgs = auth.user_orgs(u["id"]) if not u["is_super"] else [{**o, "role": "owner"} for o in db.rows(sa.select(db.orgs).order_by(db.orgs.c.name))]
     if org:
         orgs = [o for o in orgs if o["id"] == org]
     out = []
     for o in orgs:
-        sites = [_site_card(s) for s in auth.visible_sites(u, o["id"])]
+        every = auth.visible_sites(u, o["id"], include_retired=True)
+        sites = [_site_card(s) for s in every if include_retired or not s.get("retired_at")]
         out.append({"org": {"id": o["id"], "name": o["name"], "slug": o["slug"], "role": o["role"]}, "sites": sites,
-                    "open_alerts": sum(s["open_alerts"] for s in sites)})
+                    "open_alerts": sum(s["open_alerts"] for s in sites if not s["retired_at"]),
+                    "retired": sum(1 for s in every if s.get("retired_at"))})
     return {"orgs": out, "now": time.time(), "offline_after_s": settings.offline_after_s}
 
 
@@ -440,6 +456,44 @@ class FleetAskIn(BaseModel):
 async def fleet_ask(body: FleetAskIn, u: dict = Depends(user)):
     auth.require_role(u, body.org, "viewer")
     return StreamingResponse(fleet_mod.ask(u, body.org, body.message), media_type="application/x-ndjson")
+
+
+class ActionPlanIn(BaseModel):
+    text: str = Field(min_length=1, max_length=500)
+
+
+class ActionExecIn(BaseModel):
+    plan_id: str | None = Field(None, max_length=40)
+    plan: dict | None = None    # or the fields themselves: {action, source_site, target_site, cameras, days, new_name}
+
+
+@app.post("/api/orgs/{org_id}/actions/plan")
+async def action_plan(org_id: str, body: ActionPlanIn, u: dict = Depends(user)):
+    """Is this Ask text a fleet instruction? {"action": "none"} if not; else the plan and its confirmation card.
+    No side effects. Anyone in the org may see a card; only admins can confirm it."""
+    role = auth.require_role(u, org_id, "viewer")
+    out = await fleet_actions.plan_for(u, org_id, body.text)
+    return out | {"allowed": auth.allows(role, "admin")} if out["action"] != "none" else out
+
+
+@app.post("/api/orgs/{org_id}/actions/execute")
+async def action_execute(org_id: str, body: ActionExecIn, u: dict = Depends(user)):
+    auth.require_role(u, org_id, "admin")
+    if body.plan_id:
+        p = fleet_actions.get(body.plan_id, org_id)
+        if p is None:
+            raise HTTPException(404, "that plan expired (plans last 10 minutes); ask again")
+    elif body.plan:
+        try:
+            p = await fleet_actions.build(u, org_id, fleet_actions.from_fields(body.plan), f"(api) {body.plan.get('action')}", "api")
+        except fleet_actions.ActionError as e:
+            raise HTTPException(422, str(e))
+    else:
+        raise HTTPException(422, "plan_id or plan required")
+    try:
+        return await fleet_actions.execute(p, u)
+    except fleet_actions.ActionError as e:
+        raise HTTPException(409, str(e))
 
 
 @app.get("/api/orgs/{org_id}/digests")

@@ -17,7 +17,7 @@ log = logging.getLogger("hub.digest")
 
 
 async def collect(org_id: str) -> dict:
-    sites = db.rows(sa.select(db.sites).where(db.sites.c.org_id == org_id).order_by(db.sites.c.name))
+    sites = db.rows(sa.select(db.sites).where(db.sites.c.org_id == org_id, db.sites.c.retired_at.is_(None)).order_by(db.sites.c.name))
     parts = []
     for s in sites:
         conn = registry.get(s["id"])

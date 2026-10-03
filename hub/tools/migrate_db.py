@@ -15,12 +15,14 @@ import sys
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql, sqlite
 
-from hub.db import metadata
+from hub.db import metadata, upgrade
 
 
 def copy(src_url: str, dst_url: str, batch: int = 500) -> None:
     src, dst = sa.create_engine(src_url), sa.create_engine(dst_url)
+    upgrade(src)   # an older source lacks columns the current schema selects
     metadata.create_all(dst)
+    upgrade(dst)
     with src.connect() as s, dst.begin() as d:
         for table in metadata.sorted_tables:
             rows = [dict(r._mapping) for r in s.execute(sa.select(table))]

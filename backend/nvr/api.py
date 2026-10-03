@@ -215,6 +215,38 @@ async def config_import(body: ConfigImportIn):
     return counts
 
 
+@app.get("/api/config/handoff")
+async def config_handoff(request: Request, cameras: str = ""):
+    """Fleet actions: the chosen cameras (comma-separated ids; all when empty) WITH their passwords, so the hub
+    can move them to another site. Tunnel-only: the request must come through the in-process hub bridge and
+    carry `x-hub-internal: handoff` (the hub's public /s/<site>/api proxy strips x-hub-* and refuses this path),
+    so neither the LAN nor a browser through the hub can read camera passwords."""
+    if request.scope.get("client") != hub_agent.IN_PROCESS_CLIENT or request.headers.get("x-hub-internal") != "handoff":
+        raise HTTPException(403, "camera credentials are only handed to the fleet hub")
+    ids = [c for c in cameras.split(",") if c] or None
+    log.info("camera handoff to the hub: %s (by %s)", ",".join(ids) if ids else "all cameras", request.headers.get("x-hub-user", "?"))
+    return siteconfig.handoff(ids)
+
+
+class ConfigMergeIn(BaseModel):
+    data: dict
+
+
+@app.post("/api/config/merge")
+async def config_merge(body: ConfigMergeIn):
+    """Add the cameras of a partial export (camera handoff) to this site; this site's own settings, layouts,
+    dashboards and other cameras are left alone."""
+    try:
+        counts = siteconfig.merge_cameras(body.data)
+    except (ValueError, KeyError, TypeError) as e:
+        raise HTTPException(400, f"bad camera handoff: {type(e).__name__}")
+    for cid in set(counts["ids"].values()):  # restart readers of cameras that were updated in place
+        if cid in state.ingests:
+            state.ingests.pop(cid).stop()
+    sync_cameras()
+    return counts
+
+
 @app.get("/api/turn")
 async def turn_servers():
     """ICE servers for a browser on the site's own address (through the hub, the hub answers /s/<site>/api/turn)."""
@@ -308,8 +340,12 @@ async def put_camera(camera_id: str, cam: CameraIn):
 
 
 @app.delete("/api/cameras/{camera_id}")
-async def delete_camera(camera_id: str):
+async def delete_camera(camera_id: str, moved_to: str | None = Query(None, max_length=120)):
+    """Stops pulling the camera (disabled, not deleted: its events reference it). `moved_to` notes the site
+    a fleet action moved it to."""
     db.execute("UPDATE cameras SET enabled=0 WHERE id=?", [camera_id])
+    if moved_to:
+        siteconfig.mark_moved(camera_id, moved_to)
     sync_cameras()
     return {"ok": True}
 

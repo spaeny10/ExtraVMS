@@ -28,7 +28,7 @@ RULES: list[tuple[set[str], re.Pattern, str]] = [
     ({"POST"}, re.compile(r"^/api/links/\d+/reject$"), "operator"),                       # "not the same person"
     ({"POST", "DELETE"}, re.compile(r"^/api/(locks|layouts|dashboards)(/|$)"), "operator"),
     ({"POST"}, re.compile(r"^/api/remote/test$"), "admin"),
-    ({"POST"}, re.compile(r"^/api/config/import$"), "admin"),
+    ({"POST"}, re.compile(r"^/api/config/(import|merge)$"), "admin"),
     ({"POST"}, re.compile(r"^/api/advisor/"), "operator"),
     ({"PUT"}, re.compile(r"^/api/(layouts|dashboards)/"), "operator"),
     ({"PUT"}, re.compile(r"^/api/find/views$"), "operator"),                      # Find's saved views

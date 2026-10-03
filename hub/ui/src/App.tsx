@@ -5,10 +5,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Dialogs, Icon, OfflineBanner, Toaster, confirmDialog, promptDialog, toast } from "@site/ui";
 import { ThemeToggle } from "@site/ThemeToggle";
+import { ActionCard } from "./ActionCard";
 import { GroupsBox } from "./Groups";
 import { HomePage } from "./HomePage";
 import { navigate, usePath } from "./nav";
-import { type Alert, type AuditRow, type Backup, type ClaimPreview, type Digest, type Fleet, type FleetSearch, type Me, type Member, type Org, type PushInfo, type Site, type Usage, ago, api, fleetAsk, fmtTime } from "./api";
+import { type ActionPlan, type Alert, type AuditRow, type Backup, type ClaimPreview, type Digest, type Fleet, type FleetSearch, type Me, type Member, type Org, type PushInfo, type Site, type Usage, ago, api, fleetAsk, fmtTime } from "./api";
 
 const PAGES = [["/", "Home"], ["/fleet", "Fleet"], ["/find", "Find"], ["/alerts", "Alerts"], ["/org", "Organisation"], ["/audit", "Audit"], ["/account", "Account"]] as const;
 const ROLES = ["viewer", "operator", "admin", "owner"];
@@ -87,7 +88,8 @@ function Login({ onDone }: { onDone: () => void }) {
 
 function FleetPage({ org, me }: { org: Org | undefined; me: Me }) {
   const [fleet, setFleet] = useState<Fleet | null>(null);
-  const load = useCallback(() => api.fleet(org?.id).then(setFleet).catch((e) => toast.error(e)), [org?.id]);
+  const [showRetired, setShowRetired] = useState(false);
+  const load = useCallback(() => api.fleet(org?.id, showRetired).then(setFleet).catch((e) => toast.error(e)), [org?.id, showRetired]);
   useEffect(() => { load(); const t = setInterval(load, 15000); return () => clearInterval(t); }, [load]);
   if (!fleet) return null;
   const groups = me.user.is_super && !org ? fleet.orgs : fleet.orgs.filter((g) => !org || g.org.id === org.id);
@@ -95,7 +97,8 @@ function FleetPage({ org, me }: { org: Org | undefined; me: Me }) {
     <>
       {groups.map((g) => (
         <section key={g.org.id}>
-          <h2>{g.org.name} <span className="muted small">{g.sites.filter((s) => s.online).length} of {g.sites.length} online{g.open_alerts ? ` · ${g.open_alerts} open alerts` : ""}</span></h2>
+          <h2>{g.org.name} <span className="muted small">{g.sites.filter((s) => s.online && !s.retired_at).length} of {g.sites.filter((s) => !s.retired_at).length} online{g.open_alerts ? ` · ${g.open_alerts} open alerts` : ""}</span>
+            {(g.retired ?? 0) > 0 && <label className="small muted" style={{ marginLeft: 12, fontWeight: 400 }}><input type="checkbox" checked={showRetired} onChange={(e) => setShowRetired(e.target.checked)} /> Show retired ({g.retired})</label>}</h2>
           {g.sites.length === 0 && <p className="muted">No sites yet. Enrol one under Organisation → Add site.</p>}
           <div className="site-grid">{g.sites.map((s) => <SiteCard key={s.id} s={s} now={fleet.now} />)}</div>
           <DigestCard org={g.org} />
@@ -112,10 +115,10 @@ function SiteCard({ s, now }: { s: Site; now: number }) {
   const today = Object.entries(sm.today ?? {}).map(([k, v]) => `${v} ${k}`).join(" · ");
   const diskDays = sm.disk && sm.bitrate_mbps ? Math.round(sm.disk.free_gb / ((sm.bitrate_mbps * 86400) / 8 / 1000)) : null;
   return (
-    <a className={`site-card ${s.online ? "" : "offline"}`} href={`/s/${s.id}/`}>
+    <a className={`site-card ${s.online ? "" : "offline"} ${s.retired_at ? "retired" : ""}`} href={`/s/${s.id}/`}>
       <div className="head">
         <span className={`dot ${s.online ? "ok" : "bad"}`} title={s.online ? "Online" : `Offline · last seen ${ago(s.last_seen_at, now)}`} />
-        <strong>{s.name}</strong>
+        <strong>{s.name}</strong>{s.retired_at ? <span className="alert-kind">retired</span> : null}
         <span className="spacer" />
         <span className="muted small">{s.online ? "online" : `offline · ${ago(s.last_seen_at, now)}`}</span>
       </div>
@@ -161,9 +164,10 @@ function FindPage({ org }: { org: Org }) {
   const [busy, setBusy] = useState(false);
   const [answers, setAnswers] = useState<Record<string, { name: string; text: string; error?: string; done?: boolean }>>({});
   const [asking, setAsking] = useState(false);
+  const [action, setAction] = useState<Exclude<ActionPlan, { action: "none" }> | null>(null);
   const search = async () => {
     if (!q.trim()) return;
-    setBusy(true); setAnswers({});
+    setBusy(true); setAnswers({}); setAction(null);
     try { setRes(await api.fleetSearch(org.id, q.trim())); } catch (e) { toast.error(e); } finally { setBusy(false); }
   };
   // arrived from a dashboard Ask box: run the question once, then drop it from the URL
@@ -173,7 +177,11 @@ function FindPage({ org }: { org: Org }) {
   }, []);
   const ask = async () => {
     if (!q.trim()) return;
-    setAsking(true); setRes(null); setAnswers({});
+    setAsking(true); setRes(null); setAnswers({}); setAction(null);
+    // an instruction ("Migrate Ironsight to Hailo T1") gets a confirmation card instead of going to the sites;
+    // if the planner fails the question is simply asked as before
+    const plan = await api.actionPlan(org.id, q.trim()).catch(() => null);
+    if (plan && plan.action !== "none") { setAction(plan); setAsking(false); return; }
     try {
       await fleetAsk(org.id, q.trim(), (c) => {
         const site = c.site as string | undefined;
@@ -195,8 +203,9 @@ function FindPage({ org }: { org: Org }) {
       <form className="row" onSubmit={(e) => { e.preventDefault(); search(); }}>
         <input style={{ flex: 1, minWidth: 260 }} value={q} onChange={(e) => setQ(e.target.value)} placeholder='Search every site: "white pickup truck", "person at the back door last night"…' />
         <button type="submit" disabled={busy || !q.trim()}>Search</button>
-        <button type="button" className="ghost" disabled={asking || !q.trim()} onClick={ask} title="Every site's assistant answers from its own footage">✦ Ask all sites</button>
+        <button type="button" className="ghost" disabled={asking || !q.trim()} onClick={ask} title="Every site's assistant answers from its own footage. Instructions such as &quot;Migrate Ironsight to Hailo T1&quot; show a confirmation card instead">✦ Ask all sites</button>
       </form>
+      {action && <ActionCard key={action.id} org={org.id} plan={action} onClose={() => setAction(null)} />}
       {res && (
         <>
           <p className="muted small">{res.sites.map((s) => `${s.site_name}: ${s.events} events, ${s.footage} moments${s.error ? ` (${s.error})` : ""}`).join(" · ")}{res.offline.length ? ` · offline: ${res.offline.join(", ")}` : ""}</p>
@@ -305,7 +314,7 @@ function OrgPage({ org, me, onChanged }: { org: Org; me: Me; onChanged: () => vo
               <tr key={s.id}>
                 <td><a href={`/s/${s.id}/`}>{s.name}</a> <span className="muted small">{s.id}</span></td>
                 <td>{s.location}</td>
-                <td>{s.online ? "online" : `offline · ${ago(s.last_seen_at)}`}</td>
+                <td>{s.online ? "online" : `offline · ${ago(s.last_seen_at)}`}{s.retired_at ? <> · <span className="alert-kind">retired</span></> : null}</td>
                 <td className="muted small">{s.hostname}</td>
                 <td>{s.version}</td>
                 <td className="row">
@@ -313,6 +322,8 @@ function OrgPage({ org, me, onChanged }: { org: Org; me: Me; onChanged: () => vo
                   {admin && <button className="ghost small" onClick={async () => { const loc = await promptDialog("Location", { initial: s.location, label: "Location" }); if (loc != null) { await api.updateSite(s.id, { location: loc.trim() }); load(); } }}>Location</button>}
                   {admin && <button className="ghost small" title="Issue a new device token (the old one stops working after 10 minutes)" onClick={async () => { if (await confirmDialog(`Rotate ${s.name}'s token?`)) { await api.rotateSite(s.id); toast.success("New token sent to the site"); } }}>Rotate token</button>}
                   {admin && <BackupsButton site={s} />}
+                  {admin && <button className="ghost small" title={s.retired_at ? "Show it in Fleet, Home, Find and alerts again" : "Hide it from Fleet, Home, Find and alerts (the site keeps running)"}
+                    onClick={async () => { if (s.retired_at || await confirmDialog(`Retire ${s.name}?`, { message: "It disappears from Fleet, Home, Find, Ask and alerts. The site, its tunnel and its recordings are untouched; you can restore it here.", confirmLabel: "Retire" })) { await api.retireSite(s.id, !s.retired_at); load(); } }}>{s.retired_at ? "Restore" : "Retire"}</button>}
                   {admin && <button className="ghost small" onClick={async () => { if (await confirmDialog(`Remove ${s.name}?`, { message: "The site is told to unenrol; recordings stay at the site.", confirmLabel: "Remove", danger: true })) { await api.removeSite(s.id); load(); } }}>Remove</button>}
                 </td>
               </tr>))}

@@ -18,6 +18,9 @@ def open(site: dict, kind: str, key: str = "", detail: dict | None = None) -> bo
                                                 db.alerts.c.key == key, db.alerts.c.closed_at.is_(None)))
     if exists:
         return False
+    row = db.one(sa.select(db.sites.c.retired_at).where(db.sites.c.id == site["id"]))
+    if row and row["retired_at"]:
+        return False   # a retired site (fleet actions) raises no new alerts
     db.insert(db.alerts, {"org_id": site["org_id"], "site_id": site["id"], "kind": kind, "key": key,
                           "opened_at": time.time(), "closed_at": None, "acked_by": None, "acked_at": None, "detail": detail or {}})
     if on_open is not None:

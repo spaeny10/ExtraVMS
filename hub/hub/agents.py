@@ -306,7 +306,7 @@ class AgentRegistry:
                 except Exception:
                     pass
         if time.time() - self.started_at > 120:  # not in the first two minutes after a restart
-            for s in db.rows(sa.select(db.sites).where(db.sites.c.online == False)):  # noqa: E712
+            for s in db.rows(sa.select(db.sites).where(db.sites.c.online == False, db.sites.c.retired_at.is_(None))):  # noqa: E712
                 if s["last_seen_at"] and s["last_seen_at"] < cutoff:
                     alerts.open(s, "offline", "", {"last_seen_at": s["last_seen_at"]})
 

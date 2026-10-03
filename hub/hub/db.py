@@ -42,7 +42,8 @@ sites = Table("sites", metadata,
               Column("last_seen_at", Float, nullable=True), Column("online", Boolean, nullable=False, default=False),
               Column("version", String(32), nullable=True), Column("summary", sa.JSON, nullable=True),
               Column("clock_skew_s", Float, nullable=True), Column("agent_ip", String(64), nullable=True),
-              Column("hostname", String(120), nullable=True))
+              Column("hostname", String(120), nullable=True),
+              Column("retired_at", Float, nullable=True))   # fleet actions: hidden from Fleet/Home, tunnel left alone
 claims = Table("claims", metadata,
                Column("code", String(16), primary_key=True), Column("hint", sa.JSON, nullable=True),
                Column("agent_ip", String(64), nullable=True), Column("first_seen_at", Float, nullable=False),
@@ -111,7 +112,24 @@ def engine() -> Engine:
         kw = {"connect_args": {"check_same_thread": False}} if url.startswith("sqlite") else {"pool_pre_ping": True}
         _engine = sa.create_engine(url, future=True, **kw)
         metadata.create_all(_engine)
+        upgrade(_engine)
     return _engine
+
+
+# columns added after a table first shipped: create_all never alters an existing table
+ADDED_COLUMNS = [("sites", "retired_at")]
+
+
+def upgrade(eng: Engine) -> None:
+    """Add any ADDED_COLUMNS an older database lacks (SQLite and Postgres both take ADD COLUMN)."""
+    insp = sa.inspect(eng)
+    for table, col in ADDED_COLUMNS:
+        if table not in insp.get_table_names():
+            continue
+        if col not in {c["name"] for c in insp.get_columns(table)}:
+            ctype = metadata.tables[table].c[col].type.compile(dialect=eng.dialect)
+            with eng.begin() as c:
+                c.execute(sa.text(f"ALTER TABLE {table} ADD COLUMN {col} {ctype}"))
 
 
 def reset_engine() -> None:

@@ -172,11 +172,15 @@ async def _open(body: dict, stream: bool) -> Upstream:
     return await (_open_site(body, stream) if via_site() else _open_url(body, stream))
 
 
-async def complete(messages: list[dict], max_tokens: int = 500, temperature: float = 0.2) -> str | None:
-    """A whole (non-streamed) answer for hub-side features such as the digest; None when unconfigured."""
+async def complete(messages: list[dict], max_tokens: int = 500, temperature: float = 0.2, schema: dict | None = None) -> str | None:
+    """A whole (non-streamed) answer for hub-side features such as the digest; None when unconfigured.
+    `schema`: a JSON schema the answer must follow (OpenAI `response_format` json_schema, strict)."""
     if not configured():
         return None
-    up = await _open({"model": settings.vllm_model, "messages": messages, "max_tokens": max_tokens, "temperature": temperature}, False)
+    body = {"model": settings.vllm_model, "messages": messages, "max_tokens": max_tokens, "temperature": temperature}
+    if schema is not None:
+        body["response_format"] = {"type": "json_schema", "json_schema": {"name": "answer", "schema": schema, "strict": True}}
+    up = await _open(body, False)
     raw = await up.read_all()
     if up.status_code != 200:
         log.warning("shared AI %s: %s", up.status_code, raw[:200])

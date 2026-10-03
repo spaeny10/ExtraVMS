@@ -132,6 +132,37 @@ from the Model Zoo release that matches it.
   (28 ms from 4K; 10 ms of it on the device), yolov8s 17 ms; on the CPU yolo11n 55-62 ms, yolo11s 150 ms. A whole
   6-frame `verify()` (decode included) 1.4 s on the Hailo vs 2.3 s with CPU yolo11n. Boxes match CPU yolo11s to ~0.005.
 
+## Fleet actions
+
+The hub's Find page Ask box also takes instructions. "Migrate Ironsight to Hailo T1", "Move the front door camera from
+Ironsight to Qwenbot", "Retire Ironsight", "Set Qwenbot to 7 days of recording" and "Rename cam3 on Hailo T1 to Loading
+Dock" show a confirmation card instead of asking the sites. Nothing happens until an org admin clicks Confirm.
+
+- **Reading the text** (`hub/hub/fleet_actions.py`): questions ("how many people today?", "did anyone move the
+  ladder?") are never actions and go to the sites as before. An instruction goes to the shared AI with a strict JSON
+  schema and the org's real site and camera names, or to a rule parser for the five verbs when the shared AI is not
+  configured. Names are matched on the hub (case, spacing, part of a name, camera ids such as `cam3`). A name that
+  doesn't match, an unclear reading, or a site that is offline puts a question or blocker on the card and leaves
+  Confirm disabled.
+- **The card** lists what moves (each camera with its address, bitrate, zones, places and site rules; links between
+  the moved cameras; named people and vehicles), what stays (recordings and event clips stay where they were
+  recorded; the destination's own settings, layouts and other cameras are untouched), and warnings: the destination
+  already has a camera at that address, it would pull more than 60 Mbps, or it runs detection on the CPU and would
+  have more than 4 cameras.
+- **Moving cameras**: the source hands the cameras over with their passwords (`GET /api/config/handoff`, which the
+  site only serves down its hub tunnel with `x-hub-internal: handoff`; the LAN and the hub's `/s/<site>/api` proxy
+  get 403/404). The hub passes them straight to the destination's `POST /api/config/merge` (adds cameras, never
+  replaces settings; a camera at an address the site already has is updated in place, a clashing id gets a new
+  one). Once the destination lists them, the source disables them (`DELETE /api/cameras/{id}?moved_to=...`). It
+  disables rather than deletes, because events reference the camera. Passwords are never stored, logged or audited.
+- **Migrate** moves every enabled camera, then **retires** the source: the site is hidden from Fleet, Home,
+  Find, Ask, the digest and alerts. Fleet → "Show retired" lists it, its page still opens, and Organisation →
+  Sites → Restore brings it back. The tunnel stays connected.
+- Every executed action writes one Audit row ("fleet action: ...") with what was done and the outcome.
+- API: `POST /api/orgs/{org}/actions/plan {"text"}` returns `{"action":"none"}` or a plan with its card (no side
+  effects; plans last 10 minutes). `POST /api/orgs/{org}/actions/execute {"plan_id"}` needs admin. Instead of a
+  `plan_id` you can send `{"plan": {"action", "source_site", "target_site", "cameras", "days", "new_name"}}`.
+
 ## Camera notes (Milesight MS-C5367-X23PE, firmware 61.8.0.5-r6)
 
 - Object metadata (Human / Vehicle, confidence, box, track ID) is on the `/main` RTSP metadata track.

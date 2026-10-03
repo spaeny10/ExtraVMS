@@ -12,8 +12,17 @@ export type SiteSummary = {
   queues?: { verify: number; synopsis: number }; yolo_ready?: boolean; vlm_ready?: boolean; vlm_model?: string;
   cameras?: SiteCamera[]; today?: Record<string, number>; attention?: unknown[]; backup_last?: number | null; bitrate_mbps?: number;
 };
-export type Site = { id: string; org_id: string; name: string; location: string; online: boolean; last_seen_at: number | null; version: string | null; hostname: string | null; clock_skew_s: number | null; summary: SiteSummary; open_alerts: number };
-export type Fleet = { orgs: { org: Org; sites: Site[]; open_alerts: number }[]; now: number; offline_after_s: number };
+export type Site = { id: string; org_id: string; name: string; location: string; online: boolean; last_seen_at: number | null; version: string | null; hostname: string | null; clock_skew_s: number | null; summary: SiteSummary; open_alerts: number; retired_at?: number | null };
+export type Fleet = { orgs: { org: Org; sites: Site[]; open_alerts: number; retired?: number }[]; now: number; offline_after_s: number };
+/** Fleet actions (hub/hub/fleet_actions.py): an Ask-box instruction turned into a plan with a confirmation card. */
+export type ActionSiteRef = { id: string; name: string; online: boolean };
+export type ActionCardData = { title: string; moves: string[]; stays: string[]; warnings: string[]; blockers: string[]; needs: string[]; can_execute: boolean };
+export type ActionPlan = { action: "none" } | {
+  action: "move_cameras" | "migrate_site" | "retire_site" | "set_retention" | "rename_camera"; id: string; summary: string; parser: string; confidence: string;
+  source: ActionSiteRef | null; target: ActionSiteRef | null; site: ActionSiteRef | null; cameras: { id: string; name: string; host?: string | null }[];
+  days: number | null; new_name: string | null; needs: string[]; card: ActionCardData; expires_at: number; allowed: boolean;
+};
+export type ActionResult = { ok: boolean; lines: string[]; summary: string };
 export type Alert = { id: number; org_id: string; site_id: string; site_name: string; kind: string; key: string; opened_at: number; closed_at: number | null; acked_by: string | null; detail: Record<string, unknown> };
 export type Member = { id: string; email: string; role: string; totp_enabled: boolean; last_login_at: number | null; sites: string[] };
 export type AuditRow = { id: number; ts: number; user_email: string | null; site_id: string | null; action: string; method: string | null; path: string | null; status: number | null; ip: string | null };
@@ -45,7 +54,10 @@ export const api = {
   totpEnable: (code: string) => req("/auth/totp/enable", json("POST", { code })),
   totpDisable: () => req("/auth/totp/disable", { method: "POST" }),
   password: (current: string, next: string) => req("/auth/password", json("POST", { current, new: next })),
-  fleet: (org?: string) => req<Fleet>(`/api/fleet?${qs({ org })}`),
+  fleet: (org?: string, include_retired?: boolean) => req<Fleet>(`/api/fleet?${qs({ org, include_retired: include_retired || undefined })}`),
+  retireSite: (id: string, retired: boolean) => req<Site>(`/api/sites/${id}/retire`, json("POST", { retired })),
+  actionPlan: (org: string, text: string) => req<ActionPlan>(`/api/orgs/${org}/actions/plan`, json("POST", { text })),
+  actionExecute: (org: string, plan_id: string) => req<ActionResult>(`/api/orgs/${org}/actions/execute`, json("POST", { plan_id })),
   orgs: () => req<Org[]>("/api/orgs"),
   createOrg: (name: string, slug: string) => req<Org>("/api/orgs", json("POST", { name, slug })),
   members: (org: string) => req<Member[]>(`/api/orgs/${org}/members`),

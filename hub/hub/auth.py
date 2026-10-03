@@ -153,9 +153,13 @@ def require_role(u: dict, org_id: str, needed: str) -> str:
     return role
 
 
-def visible_sites(u: dict, org_id: str) -> list[dict]:
-    """Sites of the org this user may see: all, or only the granted ones when grants exist."""
-    all_sites = db.rows(sa.select(db.sites).where(db.sites.c.org_id == org_id).order_by(db.sites.c.name))
+def visible_sites(u: dict, org_id: str, include_retired: bool = False) -> list[dict]:
+    """Sites of the org this user may see: all, or only the granted ones when grants exist. Retired sites
+    (fleet actions) are left out unless asked for; they stay reachable at /s/<site>/ (site_access)."""
+    q = sa.select(db.sites).where(db.sites.c.org_id == org_id).order_by(db.sites.c.name)
+    if not include_retired:
+        q = q.where(db.sites.c.retired_at.is_(None))
+    all_sites = db.rows(q)
     if u.get("is_super"):
         return all_sites
     granted = {g["site_id"] for g in db.rows(sa.select(db.site_grants).where(db.site_grants.c.user_id == u["id"]))}
