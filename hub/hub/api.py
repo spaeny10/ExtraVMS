@@ -430,7 +430,10 @@ async def audit(org: str, site: str | None = None, since: float | None = None, l
         q = q.where(db.audit_log.c.site_id == site)
     if since:
         q = q.where(db.audit_log.c.ts >= since)
-    return db.rows(q)
+    rows = db.rows(q)
+    for r in rows:
+        r["undo_until"] = fleet_actions.undo_until(r)   # fleet actions: Undo is offered on the row for 24 h
+    return rows
 
 
 def _audit(u: dict, org_id: str | None, site_id: str | None, action: str) -> None:
@@ -464,21 +467,28 @@ class ActionPlanIn(BaseModel):
 
 class ActionExecIn(BaseModel):
     plan_id: str | None = Field(None, max_length=40)
-    plan: dict | None = None    # or the fields themselves: {action, source_site, target_site, cameras, days, new_name}
+    plan: dict | None = None    # or the fields themselves: {action, source_site, target_site, cameras, days, new_name, ...}
+    confirm_name: str | None = Field(None, max_length=200)   # migrate / retire: the source site's name, typed on the card
+    options: dict | None = None  # the card's ticks: {copy_history, skip_stream_check}
+    camera: dict | None = None   # add_camera: password, username, paths, ports. Forwarded to the site, never stored or logged
+
+
+def _verb_role(action: str) -> str:
+    return fleet_actions.VERBS.get(action, {}).get("role", "admin")
 
 
 @app.post("/api/orgs/{org_id}/actions/plan")
 async def action_plan(org_id: str, body: ActionPlanIn, u: dict = Depends(user)):
     """Is this Ask text a fleet instruction? {"action": "none"} if not; else the plan and its confirmation card.
-    No side effects. Anyone in the org may see a card; only admins can confirm it."""
+    No side effects. Anyone in the org may see a card; only admins (operators for lock_footage) can confirm it."""
     role = auth.require_role(u, org_id, "viewer")
     out = await fleet_actions.plan_for(u, org_id, body.text)
-    return out | {"allowed": auth.allows(role, "admin")} if out["action"] != "none" else out
+    return out | {"allowed": auth.allows(role, _verb_role(out["action"]))} if out["action"] != "none" else out
 
 
 @app.post("/api/orgs/{org_id}/actions/execute")
 async def action_execute(org_id: str, body: ActionExecIn, u: dict = Depends(user)):
-    auth.require_role(u, org_id, "admin")
+    role = auth.require_role(u, org_id, "operator")
     if body.plan_id:
         p = fleet_actions.get(body.plan_id, org_id)
         if p is None:
@@ -490,10 +500,36 @@ async def action_execute(org_id: str, body: ActionExecIn, u: dict = Depends(user
             raise HTTPException(422, str(e))
     else:
         raise HTTPException(422, "plan_id or plan required")
+    if not auth.allows(role, _verb_role(p["action"])):
+        raise HTTPException(403, f"needs {_verb_role(p['action'])} in this organisation")
+    want = (p["card"] or {}).get("confirm_name")
+    if want and " ".join(str(body.confirm_name or "").split()).casefold() != " ".join(want.split()).casefold():
+        raise HTTPException(400, f'type the site name "{want}" to confirm')
     try:
-        return await fleet_actions.execute(p, u)
+        return await fleet_actions.execute(p, u, {"options": body.options or {}, "camera": body.camera})
     except fleet_actions.ActionError as e:
         raise HTTPException(409, str(e))
+    finally:
+        body.camera = None
+
+
+@app.post("/api/orgs/{org_id}/actions/undo/{audit_id}")
+async def action_undo(org_id: str, audit_id: int, u: dict = Depends(user)):
+    """Run the reverse plan stored with a fleet action's audit row (within 24 h, once)."""
+    auth.require_role(u, org_id, "admin")
+    try:
+        return await fleet_actions.undo(u, org_id, audit_id)
+    except LookupError:
+        raise HTTPException(404, "no such fleet action")
+    except fleet_actions.ActionError as e:
+        raise HTTPException(409, str(e))
+
+
+@app.get("/api/orgs/{org_id}/actions/reference")
+async def action_reference(org_id: str, u: dict = Depends(user)):
+    """Every instruction the hub understands (from fleet_actions.VERBS), the safety rules, and the last 50 actions (admins)."""
+    role = auth.require_role(u, org_id, "viewer")
+    return fleet_actions.reference(u, org_id, auth.allows(role, "admin"))
 
 
 @app.get("/api/orgs/{org_id}/digests")

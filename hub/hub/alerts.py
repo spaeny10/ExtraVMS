@@ -68,7 +68,18 @@ def on_event(site: dict, msg: dict) -> None:
                            "synopsis": (e.get("synopsis") or "")[:160]})
 
 
+def muted(site: dict) -> bool:
+    """Fleet action "quiet alerts": event alerts for this site are muted until kv alerts_mute:<org>.until."""
+    row = db.one(sa.select(db.kv.c.value).where(db.kv.c.key == f"alerts_mute:{site.get('org_id')}"))
+    v = row["value"] if row else None
+    if not isinstance(v, dict) or float(v.get("until") or 0) <= time.time():
+        return False
+    return not v.get("sites") or site.get("id") in v["sites"]
+
+
 def _from_event(site: dict, e: dict) -> None:
+    if muted(site):
+        return
     key = str(e.get("id"))
     detail = {k: e.get(k) for k in ("id", "camera_id", "label", "start_ts", "priority", "synopsis")}
     if e.get("policy"):
