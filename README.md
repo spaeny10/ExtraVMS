@@ -134,34 +134,74 @@ from the Model Zoo release that matches it.
 
 ## Fleet actions
 
-The hub's Find page Ask box also takes instructions. "Migrate Ironsight to Hailo T1", "Move the front door camera from
-Ironsight to Qwenbot", "Retire Ironsight", "Set Qwenbot to 7 days of recording" and "Rename cam3 on Hailo T1 to Loading
-Dock" show a confirmation card instead of asking the sites. Nothing happens until an org admin clicks Confirm.
+The hub's Find page Ask box also takes instructions. Type one instead of a question and a confirmation card appears;
+nothing happens until Confirm. **Organisation → Fleet actions** (`/org/actions`, also linked from the Ask box as "What
+can I ask the hub to do?") lists every instruction with examples, what moves and what stays, the safety rules and the
+last 50 actions with Undo. That page, the planner's prompt and JSON schema, and the card's options are all generated
+from one registry, `VERBS` in `hub/hub/fleet_actions.py` (served at `GET /api/orgs/{org}/actions/reference`), so they
+cannot drift; a test parses every example on the page.
 
-- **Reading the text** (`hub/hub/fleet_actions.py`): questions ("how many people today?", "did anyone move the
-  ladder?") are never actions and go to the sites as before. An instruction goes to the shared AI with a strict JSON
-  schema and the org's real site and camera names, or to a rule parser for the five verbs when the shared AI is not
-  configured. Names are matched on the hub (case, spacing, part of a name, camera ids such as `cam3`). A name that
-  doesn't match, an unclear reading, or a site that is offline puts a question or blocker on the card and leaves
-  Confirm disabled.
-- **The card** lists what moves (each camera with its address, bitrate, zones, places and site rules; links between
-  the moved cameras; named people and vehicles), what stays (recordings and event clips stay where they were
-  recorded; the destination's own settings, layouts and other cameras are untouched), and warnings: the destination
-  already has a camera at that address, it would pull more than 60 Mbps, or it runs detection on the CPU and would
-  have more than 4 cameras.
-- **Moving cameras**: the source hands the cameras over with their passwords (`GET /api/config/handoff`, which the
-  site only serves down its hub tunnel with `x-hub-internal: handoff`; the LAN and the hub's `/s/<site>/api` proxy
-  get 403/404). The hub passes them straight to the destination's `POST /api/config/merge` (adds cameras, never
-  replaces settings; a camera at an address the site already has is updated in place, a clashing id gets a new
-  one). Once the destination lists them, the source disables them (`DELETE /api/cameras/{id}?moved_to=...`). It
-  disables rather than deletes, because events reference the camera. Passwords are never stored, logged or audited.
-- **Migrate** moves every enabled camera, then **retires** the source: the site is hidden from Fleet, Home,
-  Find, Ask, the digest and alerts. Fleet → "Show retired" lists it, its page still opens, and Organisation →
-  Sites → Restore brings it back. The tunnel stays connected.
-- Every executed action writes one Audit row ("fleet action: ...") with what was done and the outcome.
+| Verb | Example | Who |
+| --- | --- | --- |
+| move_cameras | "Move the front door camera from Ironsight to Qwenbot" | admin |
+| migrate_site | "Migrate Ironsight to Hailo T1" (type the site name) | admin |
+| retire_site | "Retire Ironsight" (type the site name) | admin |
+| set_retention | "Set Qwenbot to 7 days of recording" | admin |
+| rename_camera | "Rename cam3 on Hailo T1 to Loading Dock" | admin |
+| add_camera | "Add 192.168.105.19 to Hailo T1 as Front Door" | admin |
+| set_synopsis_labels | "Stop describing vehicles on cam2" | admin |
+| lock_footage | "Lock Side Yard footage 3-4 pm today" | operator |
+| quiet_alerts | "Quiet alerts tonight", "Mute alerts at Hailo T1 for 2 hours" | admin |
+
+- **Reading the text**: questions ("how many people today?") are never actions and go to the sites as before. An
+  instruction goes to the shared AI with a strict JSON schema and the org's real site and camera names, or to a rule
+  parser for every verb when the shared AI is not configured. Names are matched on the hub. A name that doesn't
+  match, an unclear reading, or a site that is offline puts a question or blocker on the card and leaves Confirm
+  disabled. Times ("3-4 pm today", "until 7am") are read in the site's time zone (`tz_offset_s` in `/api/system`).
+- **The card** lists what moves, what stays, **capacity after** (the destination's total Mbps; about how many days of
+  continuous footage fit: free disk plus its continuous footage, minus the free-space floor, at that rate, against
+  its retention policy; detection device, current YOLO ms per frame and camera count) and warnings (over 60 Mbps, CPU
+  detection with more than 4 cameras, fewer days than the policy, a camera already at that address, a camera offline
+  at the source). Ticks: **Copy event history** (on for migrate, off for move) and **Skip the stream check**. Migrate
+  and retire need the source site's name typed (`confirm_name`; a mismatch is a 400). add_camera has a password field
+  (plus optional user, paths, ports): the password is sent only in the Confirm call, forwarded to the site's
+  `PUT /api/cameras/{id}` and never stored, logged or audited.
+- **Moving cameras**: the source hands the cameras over with their passwords and what it learned about them
+  (`GET /api/config/handoff`, served only down its tunnel with `x-hub-internal: handoff`): the "what's normal"
+  baseline per label and hour, parked-spot memory (`parked:<cam>`) and operator synopsis corrections. Named people
+  and vehicles travel with their re-ID / vehicle fingerprints. The destination's `POST /api/config/merge` adds the
+  cameras and seeds that state without replacing its own (its baseline wins once it has more days; parked spots and
+  corrections are added, kept in settings `baseline_seeds` and `correction_seed:<cam>`). The hub then polls the
+  destination's `/api/cameras` until MediaMTX has every stream (up to 60 s). If one never comes up, the merged cameras
+  are removed again (`DELETE /api/cameras/{id}?purge=true`), the source is untouched, and the card says e.g. "Hailo T1
+  could not reach 192.168.105.19 within 60 s: check VLAN/firewall". Only then does the source disable them (never
+  delete: events reference the camera).
+- **Event history** (when ticked): 200 events at a time through the tunnel (`GET/POST /api/config/history`, tunnel
+  only), with new ids, the camera id remapped and an `events.migrated_from` marker; snapshots and crops follow
+  (`POST /api/config/history/files`); clips never do. The destination indexes them for Find in the background. The
+  history also stays at the source.
+- **References follow the camera**: hub dashboard widgets and event-feed camera lists, camera groups, open event
+  alerts (when their event was copied; camera-down alerts are closed since the stream is proven), and the source's
+  saved Find views for that camera (added to the destination's views). The result lines say what was updated.
+- **Migrate** moves every enabled camera, then **retires** the source: hidden from Fleet, Home, Find, Ask, the digest
+  and alerts. Fleet → "Show retired" lists it, its page still opens, Organisation → Sites → Restore brings it back.
+- **Undo**: every executed action writes one Audit row ("fleet action: ...") with its outcome and a reverse plan
+  (`detail.reverse`). For 24 hours the result lines, the Audit page and the Fleet actions page offer **Undo**
+  (`POST /api/orgs/{org}/actions/undo/{audit_id}`): move the cameras back, restore the site, the previous retention,
+  name or labels, remove the added camera or the lock, turn alerts back on. Copied history stays where it was copied.
+- **Quiet alerts** keeps event alerts (high priority, broken rules, watched people) and their push notifications
+  from opening until the given time (hub `kv` entry `alerts_mute:<org>`); health alerts still open.
 - API: `POST /api/orgs/{org}/actions/plan {"text"}` returns `{"action":"none"}` or a plan with its card (no side
-  effects; plans last 10 minutes). `POST /api/orgs/{org}/actions/execute {"plan_id"}` needs admin. Instead of a
-  `plan_id` you can send `{"plan": {"action", "source_site", "target_site", "cameras", "days", "new_name"}}`.
+  effects; plans last 10 minutes). `POST /api/orgs/{org}/actions/execute {"plan_id", "confirm_name"?, "options"?,
+  "camera"?}`. Instead of a `plan_id` you can send `{"plan": {"action", "source_site", "target_site", "cameras", "days",
+  "new_name", "host", "labels", "label_mode", "time_from", "time_to", "day", "until", "copy_history"}}`.
+- Camera stream settings (fps, bitrate) are not pushed to cameras: there is no ONVIF endpoint for that yet.
+
+**On one site**: the site's own Find → Ask takes rename_camera, set_retention, set_synopsis_labels and lock_footage
+("Rename cam3 to Loading Dock", "Set retention to 7 days", "Stop describing vehicles on cam2", "Lock Side Yard footage
+3-4 pm today") with the same card (`frontend/src/ActionCard.tsx`, which the hub UI imports as `@site/ActionCard`),
+through `POST /api/assistant/plan` and `/api/assistant/execute` (`backend/nvr/site_actions.py`, rules only). Through
+the hub, lock_footage needs operator and the others admin, as the matching site endpoints do.
 
 ## Camera notes (Milesight MS-C5367-X23PE, firmware 61.8.0.5-r6)
 
