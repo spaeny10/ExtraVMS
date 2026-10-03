@@ -9,6 +9,9 @@ import logging
 import mimetypes
 import re
 import shutil
+import tempfile
+import threading
+import subprocess
 import urllib.parse
 import time
 from pathlib import Path
@@ -1498,19 +1501,46 @@ async def _needs_audio_transcode(camera_id: str) -> bool:
 
 async def _playback_transcoded(camera_id: str, params: dict) -> StreamingResponse:
     """The same MediaMTX chunk, with the audio track converted to AAC (video copied, not re-encoded) so the
-    browser can play it. G.711 at 8 kHz costs almost nothing to convert, even on a CPU-only site."""
-    exe = shutil.which("ffmpeg") or r"C:\ffmpeg\bin\ffmpeg.exe"
+    browser can play it. G.711 at 8 kHz costs almost nothing to convert, even on a CPU-only site.
+
+    ffmpeg is spawned and read from worker threads, not through asyncio's subprocess support: under uvloop on
+    Python 3.14 (Qwenbot) `create_subprocess_exec` blocked the whole event loop and the site went silent."""
+    exe = shutil.which("ffmpeg") or r"C:fmpeginfmpeg.exe"
     src = f"{settings.mediamtx_playback}/get?" + urllib.parse.urlencode({**params, "format": "fmp4"})
-    proc = await asyncio.create_subprocess_exec(
-        exe, "-v", "error", "-nostdin", "-i", src, "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "copy", "-c:a", "aac", "-b:a", "48k",
-        "-f", "mp4", "-movflags", "frag_keyframe+empty_moov+default_base_moof", "-frag_duration", "500000", "pipe:1",
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    first = await proc.stdout.read(64 * 1024)
-    if not first:
-        err = (await proc.stderr.read()).decode(errors="replace")[-300:]
+    cmd = [exe, "-v", "error", "-nostdin", "-i", src, "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "copy", "-c:a", "aac", "-b:a", "48k",
+           "-f", "mp4", "-movflags", "frag_keyframe+empty_moov+default_base_moof", "-frag_duration", "500000", "pipe:1"]
+    errf = tempfile.TemporaryFile()   # stderr spools here so a chatty ffmpeg can never block on a full pipe
+    try:
+        proc = await asyncio.to_thread(subprocess.Popen, cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=errf)
+    except OSError as e:
+        errf.close()
+        log.warning("playback transcode %s: cannot start ffmpeg: %s", camera_id, e)
+        raise HTTPException(502, "ffmpeg is not available on this site")
+    out = proc.stdout
+    assert out is not None
+
+    def finish() -> None:
+        """Kill ffmpeg now (a plain syscall, safe inside a cancelled scope) and reap it from a detached thread.
+        Nothing here is awaited: when the browser drops the connection, Starlette cancels the response inside a
+        cancel scope where any further await is cancelled too, so an awaited cleanup could be skipped and ffmpeg
+        would sit blocked on a full pipe forever (seen on Hailo T1)."""
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
-        if "404" in err or "Server returned 404" in err:
+
+        def reap() -> None:
+            proc.wait()
+            out.close()
+            errf.close()
+
+        threading.Thread(target=reap, name="ffmpeg-reap", daemon=True).start()
+
+    first = await asyncio.to_thread(out.read1, 64 * 1024)
+    if not first:
+        await asyncio.to_thread(proc.wait)
+        errf.seek(0)
+        err = errf.read().decode(errors="replace")[-300:]
+        finish()
+        if "404" in err:
             raise HTTPException(404, "no recording for that range")
         log.warning("playback transcode %s failed: %s", camera_id, err.strip())
         raise HTTPException(502, "could not read that recording")
@@ -1518,12 +1548,10 @@ async def _playback_transcoded(camera_id: str, params: dict) -> StreamingRespons
     async def body():
         try:
             yield first
-            while chunk := await proc.stdout.read(64 * 1024):
+            while chunk := await asyncio.to_thread(out.read1, 64 * 1024):
                 yield chunk
         finally:
-            with contextlib.suppress(ProcessLookupError):
-                proc.kill()
-            await proc.wait()
+            finish()
 
     return StreamingResponse(body(), media_type="video/mp4")
 
