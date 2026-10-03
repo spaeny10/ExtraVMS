@@ -109,6 +109,125 @@ def test_mark_moved():
     assert db.get_setting("moved_cameras")["cam1"]["to"] == "Hailo T1"
 
 
+def _post(path, client_marker, body, headers=None):
+    async def go():
+        transport = httpx.ASGITransport(app=app, client=client_marker)
+        async with httpx.AsyncClient(transport=transport, base_url="http://site") as c:
+            return await c.post(path, json=body, headers=headers or {})
+    return asyncio.run(go())
+
+
+def test_learned_state_moves_with_the_camera():
+    from nvr import baseline, parked
+    from nvr.pipeline import Pipeline
+    db.upsert_camera({**CAM, "id": "learn", "name": "Learner", "host": "10.4.0.1", "policies": []})
+    entry = {"first_ts": time.time() - 20 * 86400, "days": 20.0, "daytype_days": [14, 6],
+             "labels": {"person": {"events": 40, "slot_days": {"0-9": {"2026-09-01": 2}}, "grid": [[0.0] * 16] * 9, "durations": [5.0, 9.0]}}}
+    base = baseline.current()
+    base.setdefault("cameras", {})["learn"] = entry
+    db.set_setting("baseline", base)
+    baseline._cache = base
+    parked.save("learn", [{"box": [0.1, 0.2, 0.3, 0.4], "cls": "vehicle", "first_seen": 1.0, "last_seen": 2.0, "count": 3}])
+    eid = db.create_event(camera_id="learn", track_id="c", camera_class="vehicle", camera_conf=0.9, start_ts=time.time(), end_ts=time.time() + 2,
+                          path=[], status="verified", synopsis="A tow truck", synopsis_json={"summary": "A car parked", "threat_level": "low"},
+                          synopsis_original={"summary": "A truck towing equipment", "threat_level": "high"}, corrected_at=time.time())
+    assert eid
+    data = json.loads(json.dumps(siteconfig.handoff(["learn"])))
+    got = data["learned"]["learn"]
+    assert got["baseline"]["days"] == 20.0 and got["parked"][0]["count"] == 3
+    assert got["corrections"] == [{"original": "A truck towing equipment [threat: high]", "corrected": "A car parked [threat: low]",
+                                   "label": "vehicle", "at": got["corrections"][0]["at"]}]
+    # the destination: the id is taken by another camera there, so it arrives as learn_2
+    db.execute("DELETE FROM events WHERE camera_id='learn'")
+    db.execute("DELETE FROM cameras WHERE id='learn'")
+    db.execute("DELETE FROM settings WHERE key='parked:learn'")
+    db.upsert_camera({**CAM, "id": "learn", "name": "Theirs", "host": "10.4.9.9", "policies": [], "zones": []})
+    data["source"] = "Ironsight"
+    counts = siteconfig.merge_cameras(data)
+    new = counts["ids"]["learn"]
+    assert new == "learn_2" and counts["learned"] == {"baseline": 1, "parked": 1, "corrections": 1}
+    assert baseline.current()["cameras"][new]["days"] == 20.0 and baseline.current()["cameras"][new]["seeded_from"] == "Ironsight"
+    assert parked.load(new)[0]["box"] == [0.1, 0.2, 0.3, 0.4]
+    assert Pipeline.correction_examples(new, n=3, label="vehicle") == [{"original": "A truck towing equipment [threat: high]",
+                                                                        "corrected": "A car parked [threat: low]"}]
+    # a rebuild keeps the seed while this site has less history of its own; a thinner seed never replaces
+    baseline.rebuild()
+    assert baseline.current()["cameras"][new]["days"] == 20.0
+    assert baseline.seed(new, {"days": 1, "labels": {}}) is False
+    # merging again adds nothing twice
+    again = siteconfig.merge_cameras(data)
+    assert again["learned"] == {"baseline": 0, "parked": 0, "corrections": 0} and len(parked.load(new)) == 1
+
+
+def test_history_copy_remaps_ids():
+    import base64
+    from nvr.config import settings
+    db.upsert_camera({**CAM, "id": "hsrc", "name": "History", "host": "10.5.0.1", "policies": []})
+    t0 = time.time() - 3600
+    e1 = db.create_event(camera_id="hsrc", track_id="a", camera_class="person", camera_conf=0.8, start_ts=t0, end_ts=t0 + 5, path=[[t0, 0, 0, 1, 1, 0.9]],
+                         status="verified", synopsis="A person at the door", synopsis_json={"summary": "A person at the door", "tags": ["door"]},
+                         priority="high", areas=[{"name": "Door", "from": t0, "to": t0 + 2}])
+    db.update_event(e1, snapshot=f"events/{e1}/snapshot.jpg", clip=f"events/{e1}/clip.mp4")
+    e2 = db.create_event(camera_id="hsrc", track_id="b", camera_class="vehicle", camera_conf=0.7, start_ts=t0 + 60, end_ts=t0 + 70, path=[], status="rejected")
+    db.create_event(camera_id="hsrc", track_id="c", camera_class="person", camera_conf=0.7, start_ts=t0 + 90, path=[], status="open")   # still running: not copied
+    d = settings.data_dir / "events" / str(e1)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "snapshot.jpg").write_bytes(b"\xff\xd8snap")
+    (d / "crop_0.jpg").write_bytes(b"\xff\xd8crop")
+    (d / "clip.mp4").write_bytes(b"mp4")
+    v = np.random.default_rng(3).normal(size=512).astype(np.float32)
+    v /= np.linalg.norm(v)
+    db.set_vec("reid_vec", e1, v)
+
+    page = json.loads(json.dumps(siteconfig.export_history(["hsrc"])))
+    assert page["total"] == 2 and page["next_after_id"] is None and [e["src_id"] for e in page["events"]] == [e1, e2]
+    ev = page["events"][0]
+    assert ev["files"] == ["crop_0.jpg", "snapshot.jpg"] and ev["reid"] and "clip" not in ev and "id" not in ev
+    p1 = siteconfig.export_history(["hsrc"], limit=1)   # paging
+    assert len(p1["events"]) == 1 and p1["next_after_id"] == e1 and siteconfig.export_history(["hsrc"], after_id=e1)["events"][0]["src_id"] == e2
+
+    db.upsert_camera({**CAM, "id": "hdst", "name": "History here", "host": "10.5.0.2", "policies": []})
+    body = {"source": {"site": "Ironsight", "site_id": "s_iron"}, "cameras": {"hsrc": "hdst"}, "events": page["events"]}
+    res = siteconfig.import_history(body)
+    assert res["added"] == 2 and set(res["ids"]) == {str(e1), str(e2)}
+    n1 = res["ids"][str(e1)]
+    assert n1 not in (e1, e2)
+    copied = db.event(n1)
+    assert copied["camera_id"] == "hdst" and copied["synopsis"] == "A person at the door" and copied["clip"] is None
+    assert copied["migrated_from"] == {"site": "Ironsight", "site_id": "s_iron", "event_id": e1, "camera_id": "hsrc"}
+    assert copied["snapshot"] == f"events/{n1}/snapshot.jpg" and copied["priority"] == "high" and copied["areas"][0]["name"] == "Door"
+    assert copied["synopsis_json"]["tags"] == ["door"]
+    assert np.allclose(db.get_vec("reid_vec", n1), v)
+    again = siteconfig.import_history(body)   # retried: nothing copied twice
+    assert again["added"] == 0 and again["ids"] == res["ids"]
+    files = [{"event_id": n1, "name": "snapshot.jpg", "data": base64.b64encode(b"\xff\xd8snap").decode()},
+             {"event_id": n1, "name": "clip.mp4", "data": base64.b64encode(b"mp4").decode()},
+             {"event_id": e1, "name": "crop_9.jpg", "data": base64.b64encode(b"x").decode()}]
+    assert siteconfig.import_history_files(files) == 1   # only jpg, only for copied events
+    assert (settings.data_dir / "events" / str(n1) / "snapshot.jpg").read_bytes() == b"\xff\xd8snap"
+    assert not (settings.data_dir / "events" / str(e1) / "crop_9.jpg").exists()
+
+
+def test_history_endpoints_are_tunnel_only():
+    lan = ("192.168.1.9", 5000)
+    assert get("/api/config/history?cameras=hsrc", lan, {"x-hub-internal": "handoff"}).status_code == 403
+    assert get("/api/config/history?cameras=hsrc", hub_agent.IN_PROCESS_CLIENT).status_code == 403
+    r = get("/api/config/history?cameras=hsrc", hub_agent.IN_PROCESS_CLIENT, {"x-hub-internal": "handoff"})
+    assert r.status_code == 200 and r.json()["total"] == 2
+    assert _post("/api/config/history", lan, {"source": {}, "cameras": {}, "events": []}, {"x-hub-internal": "handoff"}).status_code == 403
+    assert _post("/api/config/history/files", lan, {"files": []}).status_code == 403
+
+
+def test_remove_camera_purges_only_unused():
+    db.upsert_camera({**CAM, "id": "fresh", "name": "Fresh", "host": "10.6.0.1", "policies": []})
+    db.set_setting("parked:fresh", [{"box": [0, 0, 1, 1]}])
+    assert siteconfig.remove_camera("fresh") == "deleted"
+    assert not db.one("SELECT 1 FROM cameras WHERE id='fresh'") and db.get_setting("parked:fresh") is None
+    assert siteconfig.remove_camera("hdst") == "disabled"          # has (copied) events: only disabled
+    assert db.one("SELECT enabled FROM cameras WHERE id='hdst'")["enabled"] == 0
+    assert siteconfig.remove_camera("nope") == "missing"
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

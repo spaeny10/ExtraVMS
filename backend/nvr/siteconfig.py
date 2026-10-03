@@ -5,7 +5,10 @@ retention and briefing settings. The fleet hub pulls this nightly; restoring a d
 
 Fleet actions (hub/hub/fleet_actions.py) move cameras between sites with `handoff` (a partial export of some
 cameras WITH their passwords, served only down the hub tunnel; see api.config_handoff) and `merge_cameras`
-(adds those cameras to this site without touching its own settings, layouts, dashboards or other cameras)."""
+(adds those cameras to this site without touching its own settings, layouts, dashboards or other cameras). The
+handoff also carries what the site learned about each camera (`learned_state`: baseline, parked spots, operator
+corrections) and the merge seeds it (`adopt_learned`); `export_history` / `import_history` copy the cameras'
+event history (metadata, images, fingerprints; never clips) when the operator asks for it."""
 from __future__ import annotations
 
 import base64
@@ -115,7 +118,7 @@ def handoff(camera_ids: list[str] | None = None) -> dict:
     ids = {c["id"] for c in cams}
     links = [l for l in db.all("SELECT cam_a, cam_b, min_s, max_s, one_way FROM camera_links") if l["cam_a"] in ids and l["cam_b"] in ids]
     return {"format": 1, "partial": True, "exported_at": time.time(), "site_version": __version__, "cameras": cams,
-            "camera_links": links, "identities": _export_identities()}
+            "camera_links": links, "identities": _export_identities(), "learned": {c["id"]: learned_state(c["id"]) for c in cams}}
 
 
 def _address(c: dict) -> tuple:
@@ -177,6 +180,14 @@ def merge_cameras(data: dict) -> dict:
             counts["camera_links"] += 1
         counts["identities"] = _merge_identities(data.get("identities", []), time.time())
         db.conn.commit()
+    learned = {"baseline": 0, "parked": 0, "corrections": 0}
+    for src_id, state in (data.get("learned") or {}).items():
+        if str(src_id) in ids:
+            got = adopt_learned(ids[str(src_id)], state, str(data.get("source") or ""))
+            learned["baseline"] += int(bool(got["baseline"]))
+            learned["parked"] += got["parked"]
+            learned["corrections"] += got["corrections"]
+    counts["learned"] = learned
     return counts
 
 
@@ -185,3 +196,199 @@ def mark_moved(camera_id: str, to: str) -> None:
     moved = db.get_setting("moved_cameras") or {}
     moved[camera_id] = {"to": to[:120], "at": time.time()}
     db.set_setting("moved_cameras", moved)
+
+
+# ---------------------------------------------------------------- fleet actions: what a moved camera has learned
+
+CORRECTIONS_CARRIED = 30
+
+
+def _fmt_synopsis(j: dict) -> str:
+    return f"{j.get('summary', '')} [threat: {j.get('threat_level', '?')}]"   # as Pipeline.correction_examples shows them
+
+
+def learned_state(camera_id: str) -> dict:
+    """What this site has learned about one camera, so it moves with the camera: the "what's normal" baseline
+    (baseline.py, per label and hour), parked-spot memory (parked.py) and the operator's synopsis corrections
+    (the few-shot pairs Pipeline.correction_examples feeds Qwen)."""
+    from . import baseline, parked
+    out: dict = {"baseline": None, "parked": parked.load(camera_id), "corrections": []}
+    try:
+        out["baseline"] = baseline.entry(camera_id)
+    except Exception:
+        out["baseline"] = None
+    rows = db.all("SELECT camera_class, corrected_at, synopsis_original, synopsis_json FROM events WHERE camera_id=? AND corrected_at IS NOT NULL "
+                  "AND synopsis_original IS NOT NULL AND status != 'masked' ORDER BY corrected_at DESC LIMIT ?", [camera_id, CORRECTIONS_CARRIED])
+    seen = set()
+    for r in rows:
+        try:
+            orig, corr = _fmt_synopsis(json.loads(r["synopsis_original"])), _fmt_synopsis(json.loads(r["synopsis_json"]))
+        except (ValueError, TypeError, AttributeError):
+            continue
+        if orig != corr and (orig, corr) not in seen:
+            seen.add((orig, corr))
+            out["corrections"].append({"original": orig, "corrected": corr, "label": r["camera_class"], "at": r["corrected_at"]})
+    for s in db.get_setting(f"correction_seed:{camera_id}") or []:   # it may have moved here from elsewhere before
+        if (s.get("original"), s.get("corrected")) not in seen and len(out["corrections"]) < CORRECTIONS_CARRIED:
+            seen.add((s.get("original"), s.get("corrected")))
+            out["corrections"].append(s)
+    return out
+
+
+def adopt_learned(camera_id: str, learned: dict, source: str = "") -> dict:
+    """Seed a camera that just arrived with what its old site learned. Non-destructive: this site's own baseline
+    wins when it has more history; parked spots and corrections are added to (never replace) what is here."""
+    from . import baseline, parked
+    out = {"baseline": False, "parked": 0, "corrections": 0}
+    if not isinstance(learned, dict):
+        return out
+    if learned.get("baseline"):
+        out["baseline"] = baseline.seed(camera_id, learned["baseline"], source)
+    spots = [p for p in learned.get("parked") or [] if isinstance(p, dict) and isinstance(p.get("box"), list)]
+    if spots:
+        mine = parked.load(camera_id)
+        have = {json.dumps(p.get("box")) for p in mine}
+        new = [p for p in spots if json.dumps(p["box"]) not in have]
+        if new:
+            parked.save(camera_id, mine + new)
+            out["parked"] = len(new)
+    corr = [c for c in learned.get("corrections") or [] if isinstance(c, dict) and c.get("original") and c.get("corrected")]
+    if corr:
+        key = f"correction_seed:{camera_id}"
+        mine = db.get_setting(key) or []
+        have = {(c.get("original"), c.get("corrected")) for c in mine}
+        new = [{k: c.get(k) for k in ("original", "corrected", "label", "at")} for c in corr if (c["original"], c["corrected"]) not in have]
+        if new:
+            db.set_setting(key, (mine + new)[-CORRECTIONS_CARRIED * 2:])
+            out["corrections"] = len(new)
+    return out
+
+
+def remove_camera(camera_id: str) -> str:
+    """Undo of a camera that was just added here (a fleet move rolled back, an add undone): delete it when no event
+    references it, otherwise only disable it. Returns "deleted", "disabled" or "missing"."""
+    if not db.one("SELECT 1 FROM cameras WHERE id=?", [camera_id]):
+        return "missing"
+    if db.one("SELECT 1 FROM events WHERE camera_id=? LIMIT 1", [camera_id]):
+        db.execute("UPDATE cameras SET enabled=0 WHERE id=?", [camera_id])
+        return "disabled"
+    with db.lock:
+        db.conn.execute("DELETE FROM camera_links WHERE cam_a=? OR cam_b=?", [camera_id, camera_id])
+        db.conn.execute("DELETE FROM rule_events WHERE camera_id=?", [camera_id])
+        db.conn.execute("DELETE FROM settings WHERE key IN (?, ?)", [f"parked:{camera_id}", f"correction_seed:{camera_id}"])
+        db.conn.execute("DELETE FROM cameras WHERE id=?", [camera_id])
+        db.conn.commit()
+    seeds = db.get_setting("baseline_seeds") or {}
+    if seeds.pop(camera_id, None) is not None:
+        db.set_setting("baseline_seeds", seeds)
+    return "deleted"
+
+
+# ---------------------------------------------------------------- fleet actions: copying event history
+
+HISTORY_PAGE = 200
+HISTORY_SKIP = {"id", "clip", "clip_start", "journey_id", "migrated_from"}   # clips stay; journeys are per site
+HISTORY_STATUSES = ("verified", "rejected", "masked", "error")                  # not still being processed
+FILE_RX = re.compile(r"[a-z_0-9]+\.jpg")
+MAX_FILE_BYTES = 8 * 1024 * 1024
+
+
+def _event_cols() -> list[str]:
+    return [r["name"] for r in db.all("PRAGMA table_info(events)")]
+
+
+def _vec_b64(table: str, event_id: int) -> str | None:
+    row = db.one(f"SELECT embedding FROM {table} WHERE rowid=?", [event_id])
+    return base64.b64encode(row["embedding"]).decode() if row else None
+
+
+def _basename(p: str) -> str:
+    return str(p).replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def export_history(camera_ids: list[str], after_id: int = 0, limit: int = HISTORY_PAGE) -> dict:
+    """One page of these cameras' event metadata for a fleet move: every column except the clip (and its
+    journey), the names of the event's images (snapshot and crops; fetched one by one through
+    /api/events/{id}/media/{name}) and its re-ID / vehicle fingerprints. Tunnel-only (api.config_history)."""
+    from .config import settings
+    if not camera_ids:
+        return {"events": [], "next_after_id": None, "total": 0}
+    marks = ",".join("?" * len(camera_ids))
+    status = ",".join("?" * len(HISTORY_STATUSES))
+    limit = max(1, min(HISTORY_PAGE, int(limit)))
+    rows = db.all(f"SELECT * FROM events WHERE camera_id IN ({marks}) AND status IN ({status}) AND id > ? ORDER BY id LIMIT ?",
+                  [*camera_ids, *HISTORY_STATUSES, int(after_id), limit])
+    out = []
+    for r in rows:
+        d = settings.data_dir / "events" / str(r["id"])
+        files = sorted(f.name for f in d.iterdir() if f.is_file() and FILE_RX.fullmatch(f.name)) if d.is_dir() else []
+        ev = {k: v for k, v in r.items() if k not in HISTORY_SKIP}
+        ev.update(src_id=r["id"], files=files, reid=_vec_b64("reid_vec", r["id"]), vehicle=_vec_b64("vehicle_vec", r["id"]))
+        out.append(ev)
+    total = None
+    if not after_id:
+        total = db.one(f"SELECT COUNT(*) n FROM events WHERE camera_id IN ({marks}) AND status IN ({status})", [*camera_ids, *HISTORY_STATUSES])["n"]
+    return {"events": out, "next_after_id": rows[-1]["id"] if len(rows) == limit else None, "total": total}
+
+
+def import_history(data: dict) -> dict:
+    """Add another site's events for cameras that moved here: new event ids, camera ids remapped, a
+    `migrated_from` marker, images arriving separately (import_history_files). Idempotent: an event already
+    copied (same source site and event id) is not copied twice. Returns {"ids": {source event id: id here}}."""
+    src = data.get("source") or {}
+    site, site_id = str(src.get("site") or "")[:120], str(src.get("site_id") or "")[:40]
+    cam_map = {str(k): str(v) for k, v in (data.get("cameras") or {}).items()}
+    here = {c["id"] for c in db.cameras()}
+    cols = set(_event_cols()) - HISTORY_SKIP
+    ids: dict[str, int] = {}
+    added = skipped = 0
+    for e in data.get("events") or []:
+        cam = cam_map.get(str(e.get("camera_id")))
+        src_id = int(e["src_id"])
+        if not cam or cam not in here:
+            skipped += 1
+            continue
+        old = db.one("SELECT id FROM events WHERE json_extract(migrated_from, '$.site_id')=? AND json_extract(migrated_from, '$.event_id')=?",
+                     [site_id, src_id])
+        if old:
+            ids[str(src_id)] = old["id"]
+            continue
+        fields = {k: v for k, v in e.items() if k in cols}
+        fields.update(camera_id=cam, migrated_from=json.dumps({"site": site, "site_id": site_id, "event_id": src_id, "camera_id": e.get("camera_id")}))
+        snap = fields.pop("snapshot", None)
+        fields.setdefault("track_id", f"moved-{src_id}")
+        fields.setdefault("camera_class", "person")
+        fields.setdefault("start_ts", time.time())
+        fields.setdefault("created_at", time.time())
+        names = list(fields)
+        new_id = db.execute_insert(f"INSERT INTO events ({','.join(names)}) VALUES ({','.join('?' * len(names))})", [fields[k] for k in names])
+        if snap:
+            db.execute("UPDATE events SET snapshot=? WHERE id=?", [f"events/{new_id}/{_basename(snap)}", new_id])
+        for table, key in (("reid_vec", "reid"), ("vehicle_vec", "vehicle")):
+            if e.get(key):
+                try:
+                    with db.lock:
+                        db.conn.execute(f"INSERT INTO {table}(rowid, embedding) VALUES (?,?)", (new_id, base64.b64decode(e[key])))
+                except Exception:   # a fingerprint of another width (older site): the backfill makes a new one
+                    pass
+        ids[str(src_id)] = new_id
+        added += 1
+    return {"ids": ids, "added": added, "skipped": skipped}
+
+
+def import_history_files(files: list[dict]) -> int:
+    """Images of copied events: [{event_id (here), name, data (base64)}]. Only jpg, only events copied here."""
+    from .config import settings
+    n = 0
+    for f in files or []:
+        name, eid = str(f.get("name") or ""), int(f.get("event_id") or 0)
+        if not FILE_RX.fullmatch(name) or not db.one("SELECT 1 FROM events WHERE id=? AND migrated_from IS NOT NULL", [eid]):
+            continue
+        raw = base64.b64decode(f.get("data") or "")
+        if not raw or len(raw) > MAX_FILE_BYTES:
+            continue
+        d = settings.data_dir / "events" / str(eid)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / name).write_bytes(raw)
+        n += 1
+    return n

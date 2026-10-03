@@ -393,6 +393,16 @@ class Pipeline:
             fmt = lambda j: f"{j.get('summary', '')} [threat: {j.get('threat_level', '?')}]"
             if fmt(orig) != fmt(corr):
                 out.append({"original": fmt(orig), "corrected": fmt(corr)})
+        if len(out) < n:  # a camera moved here from another site brings that site's corrections (siteconfig.merge_cameras)
+            seeds = db.get_setting(f"correction_seed:{camera_id}") or []
+            seeds = sorted(seeds, key=lambda s: (s.get("label") != (label or ""), -(s.get("at") or 0)))
+            seen = {(o["original"], o["corrected"]) for o in out}
+            for s in seeds:
+                if len(out) >= n:
+                    break
+                if (s.get("original"), s.get("corrected")) not in seen and s.get("original") and s.get("corrected"):
+                    out.append({"original": s["original"], "corrected": s["corrected"]})
+                    seen.add((s["original"], s["corrected"]))
         return out
 
     async def reindex(self, event_id: int) -> None:

@@ -7,6 +7,10 @@ The baseline is built from the last HISTORY_DAYS of verified events (false alarm
   fraction of events that touched each cell;
 - dwell: the sorted visit durations.
 
+Moved cameras (fleet actions) bring their baseline with them: `seed()` stores the source site's entry under the
+camera's new id (setting `baseline_seeds`) and every rebuild keeps the seed for that camera until this site's own
+history for it covers as many days, so a moved camera is not "learning" again for a week.
+
 score(event) -> {score, parts, reasons, learning}. Each part is 0..1 (1 = never seen like this) and only
 counts once there is enough history. priority() combines the unusualness with Qwen's threat level; an
 operator's correction to threat "none" (or a false-alarm verdict) always wins.
@@ -98,6 +102,14 @@ def rebuild(now: float | None = None) -> dict:
         cams.setdefault(cam, {"first_ts": since, "days": 0, "daytype_days": [0, 0], "labels": {}})
         cams[cam]["labels"][cls] = {"events": len(evs), "slot_days": {k: dict(v) for k, v in slot_days.items()},
                                     "grid": grid.tolist(), "durations": sorted(durations)}
+    seeds = db.get_setting("baseline_seeds") or {}
+    for cam, sd in list(seeds.items()):
+        if now - float(sd.get("seeded_at") or 0) > HISTORY_DAYS * 86400:
+            seeds.pop(cam)   # by now this site has a full window of its own
+            continue
+        if cam not in cams or cams[cam]["days"] < float(sd["entry"].get("days") or 0):
+            cams[cam] = {**sd["entry"], "seeded_from": sd.get("source")}
+    db.set_setting("baseline_seeds", seeds)
     _cache = {"built_at": now, "since": since, "cameras": cams}
     db.set_setting("baseline", _cache)
     log.info("baseline rebuilt: %s", {c: {l: v["events"] for l, v in d["labels"].items()} for c, d in cams.items()})
@@ -109,6 +121,30 @@ def current() -> dict:
     if _cache is None:
         _cache = db.get_setting("baseline") or rebuild()
     return _cache
+
+
+def entry(camera_id: str) -> dict | None:
+    """This camera's learned "what's normal" (for handing it to another site with the camera)."""
+    return (current().get("cameras") or {}).get(camera_id)
+
+
+def seed(camera_id: str, learned: dict, source: str = "") -> bool:
+    """Adopt another site's baseline for a camera moved here, unless this site already knows it better
+    (more days of its own history). Non-destructive: the site's own entries are never replaced by a thinner one."""
+    global _cache
+    if not isinstance(learned, dict) or not isinstance(learned.get("labels"), dict):
+        return False
+    base = current()
+    own = (base.get("cameras") or {}).get(camera_id)
+    if own and float(own.get("days") or 0) >= float(learned.get("days") or 0):
+        return False
+    seeds = db.get_setting("baseline_seeds") or {}
+    seeds[camera_id] = {"entry": learned, "seeded_at": time.time(), "source": source[:120]}
+    db.set_setting("baseline_seeds", seeds)
+    base.setdefault("cameras", {})[camera_id] = {**learned, "seeded_from": source[:120]}
+    _cache = base
+    db.set_setting("baseline", base)
+    return True
 
 
 def _hour_label(h: int) -> str:

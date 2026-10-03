@@ -264,8 +264,9 @@ MIGRATIONS = [
     ("identities", "watch_note", "TEXT NOT NULL DEFAULT ''"),
     ("events", "watched", "TEXT"),              # name of the watched identity this sighting matched
     ("events", "areas", "TEXT"),                # JSON [{name, from, to}]: named areas the object walked into             # none|low|medium|high: max(threat, unusualness), operator wins
+    ("events", "migrated_from", "TEXT"),        # JSON {site, site_id, event_id, camera_id}: copied here by a fleet move (siteconfig.import_history)
 ]
-JSON_FIELDS = ("path", "rules", "detections", "synopsis_json", "synopsis_original", "feedback", "anomaly_json", "areas", "policy")
+JSON_FIELDS = ("path", "rules", "detections", "synopsis_json", "synopsis_original", "feedback", "anomaly_json", "areas", "policy", "migrated_from")
 
 # ---- event filters shared by browse (/api/events), search and the Find summary strip
 UNUSUAL_MIN = 0.75   # anomaly at/above this is "unusual" (frontend UNUSUAL_MIN)

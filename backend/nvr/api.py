@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 
 from . import assistant, backup, baseline, footage, frames, health, identities, journeys, keep, mediamtx, policy, ptz, retention, zones
 from . import synopsis as vlm
-from . import advisor, ai_serve, hub_agent, siteconfig
+from . import advisor, ai_serve, hub_agent, site_actions, siteconfig
 from . import vlmroute
 from .config import ROOT, settings
 from .db import JOURNEY_CAMS_SQL, LOCKED_SQL, PRIORITY_RANK_SQL, db, event_filters
@@ -247,6 +247,58 @@ async def config_merge(body: ConfigMergeIn):
     return counts
 
 
+def _tunnel_only(request: Request) -> None:
+    if request.scope.get("client") != hub_agent.IN_PROCESS_CLIENT or request.headers.get("x-hub-internal") != "handoff":
+        raise HTTPException(403, "event history is only exchanged with the fleet hub")
+
+
+@app.get("/api/config/history")
+async def config_history(request: Request, cameras: str = "", after_id: int = 0, limit: int = Query(siteconfig.HISTORY_PAGE, ge=1, le=siteconfig.HISTORY_PAGE)):
+    """Fleet actions: one page (200) of these cameras' events for copying to the site they moved to: metadata,
+    image names and re-ID / vehicle fingerprints, no clips. Tunnel-only, like the handoff."""
+    _tunnel_only(request)
+    return await asyncio.to_thread(siteconfig.export_history, [c for c in cameras.split(",") if c], after_id, limit)
+
+
+class HistoryIn(BaseModel):
+    source: dict
+    cameras: dict
+    events: list[dict] = Field(max_length=siteconfig.HISTORY_PAGE)
+
+
+@app.post("/api/config/history")
+async def config_history_import(body: HistoryIn, request: Request):
+    """Events copied from the site these cameras moved from (new ids, camera ids remapped, `migrated_from` kept).
+    They are indexed for search in the background."""
+    _tunnel_only(request)
+    try:
+        res = await asyncio.to_thread(siteconfig.import_history, body.model_dump())
+    except (ValueError, KeyError, TypeError) as e:
+        raise HTTPException(400, f"bad event history: {type(e).__name__}")
+    new = [i for i in res["ids"].values()]
+
+    async def index_them():
+        for eid in new:
+            with contextlib.suppress(Exception):
+                await state.pipeline.reindex(eid)
+    if new and getattr(state, "pipeline", None) is not None:
+        asyncio.get_running_loop().create_task(index_them())
+    return res
+
+
+class HistoryFilesIn(BaseModel):
+    files: list[dict] = Field(max_length=500)
+
+
+@app.post("/api/config/history/files")
+async def config_history_files(body: HistoryFilesIn, request: Request):
+    _tunnel_only(request)
+    try:
+        return {"files": await asyncio.to_thread(siteconfig.import_history_files, body.files)}
+    except (ValueError, TypeError) as e:
+        raise HTTPException(400, f"bad event image: {type(e).__name__}")
+
+
 @app.get("/api/turn")
 async def turn_servers():
     """ICE servers for a browser on the site's own address (through the hub, the hub answers /s/<site>/api/turn)."""
@@ -340,14 +392,21 @@ async def put_camera(camera_id: str, cam: CameraIn):
 
 
 @app.delete("/api/cameras/{camera_id}")
-async def delete_camera(camera_id: str, moved_to: str | None = Query(None, max_length=120)):
+async def delete_camera(camera_id: str, moved_to: str | None = Query(None, max_length=120), purge: bool = False):
     """Stops pulling the camera (disabled, not deleted: its events reference it). `moved_to` notes the site
-    a fleet action moved it to."""
-    db.execute("UPDATE cameras SET enabled=0 WHERE id=?", [camera_id])
+    a fleet action moved it to. `purge` (a fleet move rolled back, an added camera undone) deletes the camera
+    when no event references it, else disables it."""
+    removed = "disabled"
+    if purge:
+        removed = siteconfig.remove_camera(camera_id)
+    else:
+        db.execute("UPDATE cameras SET enabled=0 WHERE id=?", [camera_id])
     if moved_to:
         siteconfig.mark_moved(camera_id, moved_to)
+    if camera_id in state.ingests and removed == "deleted":
+        state.ingests.pop(camera_id).stop()
     sync_cameras()
-    return {"ok": True}
+    return {"ok": True, "removed": removed}
 
 
 # ---------------------------------------------------------------- PTZ / relay / digital input
@@ -1234,6 +1293,46 @@ class AskIn(BaseModel):
     thread_id: int | None = None
 
 
+class SitePlanIn(BaseModel):
+    text: str = Field(min_length=1, max_length=500)
+
+
+class SiteExecIn(BaseModel):
+    plan_id: str = Field(min_length=1, max_length=40)
+
+
+def _hub_role(request: Request) -> str | None:
+    """The hub user's role when the request came down the tunnel (the middleware strips x-hub-* from the LAN)."""
+    return request.headers.get("x-hub-role") if request.scope.get("client") == hub_agent.IN_PROCESS_CLIENT else None
+
+
+@app.post("/api/assistant/plan")
+async def assistant_plan(body: SitePlanIn, request: Request):
+    """Is this Ask text an instruction for this site ("Rename cam3 to Loading Dock", "Lock Side Yard footage 3-4 pm
+    today")? {"action": "none"} if not; else a plan with its confirmation card. No side effects (site_actions.py)."""
+    return site_actions.plan_for(body.text, _hub_role(request))
+
+
+@app.post("/api/assistant/execute")
+async def assistant_execute(body: SiteExecIn, request: Request):
+    try:
+        res = site_actions.execute(body.plan_id, _hub_role(request), request.headers.get("x-hub-user", ""))
+    except LookupError as e:
+        raise HTTPException(404, str(e))
+    except PermissionError as e:
+        raise HTTPException(403, str(e))
+    except site_actions.ActionError as e:
+        raise HTTPException(409, str(e))
+    cid = res.get("camera_id")
+    if res["action"] in ("rename_camera", "set_synopsis_labels") and cid:
+        if getattr(state, "pipeline", None) is not None:
+            sync_cameras()
+            if res["action"] == "set_synopsis_labels":
+                state.pipeline.queue_missing_synopses(cid)
+    log.info("site action by %s: %s", request.headers.get("x-hub-user", "local"), res["summary"])
+    return res
+
+
 @app.get("/api/assistant/threads")
 async def assistant_threads(limit: int = Query(30, le=200)):
     return db.all("SELECT t.*, (SELECT COUNT(*) FROM assistant_messages m WHERE m.thread_id = t.id) AS messages "
@@ -1423,6 +1522,8 @@ async def system():
         "events": counts,
         "webrtc_port": settings.mediamtx_webrtc_port,
         "backup": backup.status(),
+        "tz_offset_s": time.localtime().tm_gmtoff,                  # fleet actions read "3-4 pm today" in site time
+        "synopsis_labels_default": list(settings.synopsis_labels),
     }
 
 
