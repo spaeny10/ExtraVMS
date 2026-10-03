@@ -235,7 +235,7 @@ class AgentRegistry:
         welcome = {"t": "welcome", "site_id": conn.site_id, "org": org["name"] if org else None,
                    "heartbeat_s": settings.heartbeat_s, "now": time.time(), "max_streams": settings.max_streams_per_site,
                    "turn": turn.mint(f"site:{conn.site_id}", settings.turn_site_ttl_s),
-                   "vlm": self.vlm_config(org, conn.token)}
+                   "vlm": self.vlm_config(org, conn.token, conn.site_id)}
         await conn.send(welcome)
         alerts.close(conn.site, "offline")
         log.info("site %s (%s) connected from %s", conn.site_id, conn.site["name"], conn.ip)
@@ -264,9 +264,13 @@ class AgentRegistry:
                 self.broadcast_org(conn.site["org_id"], {"type": "site_offline", "site_id": conn.site_id, "site_name": conn.site["name"]})
 
     @staticmethod
-    def vlm_config(org: dict | None, token: str | None) -> dict | None:
-        """What a site should put in its remote-VLM settings: the hub's /v1 with its own device token as key."""
+    def vlm_config(org: dict | None, token: str | None, site_id: str | None = None) -> dict | None:
+        """What a site should put in its remote-VLM settings: the hub's /v1 with its own device token as key.
+        The site that serves the shared AI (HUB_VLLM_SITE) gets nothing: handing it the hub's URL would relay its
+        own requests straight back to it and /v1 answers 409 — it already runs the model locally."""
         if not (org and org.get("ai_shared") and (settings.vllm_url or settings.vllm_site) and settings.vllm_model and token):
+            return None
+        if settings.vllm_site and site_id == settings.vllm_site:
             return None
         return {"url": settings.public_url.rstrip("/") + "/v1", "model": settings.vllm_model, "key": token}
 
@@ -274,7 +278,7 @@ class AgentRegistry:
         """The org's sharing flag changed: tell its connected sites."""
         for conn in list(self.by_site.values()):
             if conn.site and conn.site["org_id"] == org["id"]:
-                await conn.send({"t": "vlm", "vlm": self.vlm_config(org, conn.token)})
+                await conn.send({"t": "vlm", "vlm": self.vlm_config(org, conn.token, conn.site_id)})
 
     # ---- enrolment from the UI
     async def enrol(self, code: str, site: dict, token: str) -> bool:
