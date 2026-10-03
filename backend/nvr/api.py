@@ -1097,10 +1097,13 @@ async def get_retention_policy():
 
 @app.put("/api/retention/policy")
 async def put_retention_policy(policy: dict):
-    merged = keep._merge(keep.DEFAULT_POLICY, policy)
-    if not 1 <= float(merged["continuous_days"]) <= 365:
+    """Store only what the site set, on top of what it had set before: fields left out keep their defaults, so
+    a disk-relative default (min_free_gb) is not frozen into the stored policy by an unrelated edit."""
+    stored = keep._merge(db.get_setting("retention_policy") or {}, policy)
+    effective = keep._merge(keep.DEFAULT_POLICY, stored)
+    if not 1 <= float(effective["continuous_days"]) <= 365:
         raise HTTPException(400, "continuous_days must be 1-365")
-    db.set_setting("retention_policy", merged)
+    db.set_setting("retention_policy", stored)
     return {"policy": keep.site_policy()}
 
 
