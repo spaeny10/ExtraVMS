@@ -1276,7 +1276,12 @@ async def unlock_event(event_id: int):
 
 @app.get("/api/recordings/{camera_id}")
 async def recordings(camera_id: str, start: float | None = None, end: float | None = None):
-    spans = await mediamtx.recording_spans(camera_id, start, end)
+    try:
+        spans = await mediamtx.recording_spans(camera_id, start, end)
+    except httpx.HTTPError as e:
+        # Keep the lane's events and locks on screen; the recording bar refreshes on the next poll.
+        log.warning("recordings %s: MediaMTX listing failed (%s); returning no spans", camera_id, type(e).__name__)
+        spans = []
     events = db.all("SELECT id, camera_class, yolo_class, yolo_conf, start_ts, end_ts, status, threat, priority, anomaly, journey_id, cells, ptz_preset, "
                     "json_extract(feedback, '$.verdict') AS verdict, synopsis IS NOT NULL AS has_synopsis, "
                     "json_extract(policy, '$.kind') = 'ppe' AS ppe FROM events "   # PPE violation: hatched marker on the Timeline

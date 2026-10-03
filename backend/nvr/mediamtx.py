@@ -148,7 +148,8 @@ async def recording_spans(path: str, start: float | None = None, end: float | No
         params["start"] = rfc3339(start)
     if end:
         params["end"] = rfc3339(end)
-    async with httpx.AsyncClient(timeout=10) as c:
+    # Listing walks the segment files on disk; a week on a busy spinning disk can take well over 10 s.
+    async with httpx.AsyncClient(timeout=httpx.Timeout(90, connect=5)) as c:
         r = await c.get(f"{settings.mediamtx_playback}/list", params=params)
         if r.status_code == 404:
             return []
