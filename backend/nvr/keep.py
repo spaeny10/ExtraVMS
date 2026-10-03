@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import json
+import shutil
 
 from . import zones
 from .config import settings
@@ -46,8 +47,23 @@ def _merge(base: dict, override: dict | None) -> dict:
     return out
 
 
+def default_min_free_gb() -> int:
+    """The free-space floor when the site has not set one: 200 GB on a large disk, 10% of a small one (never
+    under 10 GB). A 250 GB SSD cannot spare 200 GB; with the fixed default it deleted continuous footage from
+    the first day and alerted on every pass."""
+    try:
+        total_gb = shutil.disk_usage(settings.recordings_dir).total / 1e9
+    except OSError:
+        return DEFAULT_POLICY["min_free_gb"]
+    return int(min(DEFAULT_POLICY["min_free_gb"], max(10, total_gb * 0.10)))
+
+
 def site_policy() -> dict:
-    return _merge(DEFAULT_POLICY, db.get_setting("retention_policy"))
+    stored = db.get_setting("retention_policy") or {}
+    p = _merge(DEFAULT_POLICY, stored)
+    if stored.get("min_free_gb") is None:
+        p["min_free_gb"] = default_min_free_gb()
+    return p
 
 
 def policy_for(camera: dict) -> dict:
