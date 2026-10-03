@@ -9,6 +9,7 @@ import logging
 import mimetypes
 import re
 import shutil
+import urllib.parse
 import time
 from pathlib import Path
 from typing import Literal
@@ -1473,11 +1474,67 @@ async def frame(camera_id: str, t: float, w: int = Query(960, ge=320, le=1280), 
     })
 
 
+BROWSER_MUTE_AUDIO = {"G711", "LPCM", "G722"}   # recorded fine, but browsers cannot decode them inside MP4
+_audio_tracks: dict[str, tuple[float, bool]] = {}
+
+
+async def _needs_audio_transcode(camera_id: str) -> bool:
+    """True when this camera records an audio codec browsers cannot play in MP4 (cached 60 s)."""
+    hit = _audio_tracks.get(camera_id)
+    if hit and time.time() - hit[0] < 60:
+        return hit[1]
+    needs = False
+    try:
+        async with httpx.AsyncClient(timeout=3) as c:
+            r = await c.get(f"{settings.mediamtx_api}/v3/paths/get/{camera_id}")
+            if r.status_code == 200:
+                tracks = [t if isinstance(t, str) else t.get("codec", "") for t in r.json().get("tracks", [])]
+                needs = any(t in BROWSER_MUTE_AUDIO for t in tracks)
+    except httpx.HTTPError:
+        pass
+    _audio_tracks[camera_id] = (time.time(), needs)
+    return needs
+
+
+async def _playback_transcoded(camera_id: str, params: dict) -> StreamingResponse:
+    """The same MediaMTX chunk, with the audio track converted to AAC (video copied, not re-encoded) so the
+    browser can play it. G.711 at 8 kHz costs almost nothing to convert, even on a CPU-only site."""
+    exe = shutil.which("ffmpeg") or r"C:\ffmpeg\bin\ffmpeg.exe"
+    src = f"{settings.mediamtx_playback}/get?" + urllib.parse.urlencode({**params, "format": "fmp4"})
+    proc = await asyncio.create_subprocess_exec(
+        exe, "-v", "error", "-nostdin", "-i", src, "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "copy", "-c:a", "aac", "-b:a", "48k",
+        "-f", "mp4", "-movflags", "frag_keyframe+empty_moov+default_base_moof", "-frag_duration", "500000", "pipe:1",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    first = await proc.stdout.read(64 * 1024)
+    if not first:
+        err = (await proc.stderr.read()).decode(errors="replace")[-300:]
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        if "404" in err or "Server returned 404" in err:
+            raise HTTPException(404, "no recording for that range")
+        log.warning("playback transcode %s failed: %s", camera_id, err.strip())
+        raise HTTPException(502, "could not read that recording")
+
+    async def body():
+        try:
+            yield first
+            while chunk := await proc.stdout.read(64 * 1024):
+                yield chunk
+        finally:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            await proc.wait()
+
+    return StreamingResponse(body(), media_type="video/mp4")
+
+
 @app.get("/api/playback/{camera_id}")
 async def playback(camera_id: str, start: float, duration: float = Query(60, le=3600), fmt: str | None = Query(None, pattern="^(mp4|fmp4)$")):
     """Proxy MediaMTX playback so the browser stays same-origin. fMP4 streams as it is read from disk (first
     bytes in ~0.2 s); plain MP4 has to be indexed over the whole range first (seconds, more on a spinning disk)."""
     params = {"path": camera_id, "start": mediamtx.rfc3339(start), "duration": str(duration), "format": fmt or settings.playback_format}
+    if await _needs_audio_transcode(camera_id):
+        return await _playback_transcoded(camera_id, params)
     client = httpx.AsyncClient(timeout=None)
     req = client.build_request("GET", f"{settings.mediamtx_playback}/get", params=params)
     r = await client.send(req, stream=True)

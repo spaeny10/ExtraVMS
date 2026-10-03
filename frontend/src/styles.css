@@ -395,6 +395,8 @@ h3.spaced { margin-top: 18px; }
 .sync-status { font-size: 11px; background: rgb(0 0 0 / .5); padding: 1px 6px; border-radius: 4px; }
 .sync-solo { color: #fff !important; border-color: rgb(255 255 255 / .3) !important; padding: 0 6px !important; opacity: .75; }
 .sync-solo.on, .sync-solo:hover { opacity: 1; background: rgb(59 130 246 / .5) !important; }
+.sync-audio { color: #fff !important; border-color: rgb(255 255 255 / .3) !important; padding: 0 6px !important; opacity: .75; }
+.sync-audio.on, .sync-audio:hover { opacity: 1; background: rgb(34 197 94 / .5) !important; }
 .overlay-hint { pointer-events: none; }
 .tl-player .tl-shuttle { z-index: 3; }
 .tl-layout-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }

@@ -17,12 +17,14 @@ const TICK_MS = 250;
  */
 export function SyncTile({
   cam, name, spans, clockRef, playing, speed, scrubbing, scrubT, previewWidth, active, soloed,
-  onSolo, onSelect, statusRef, dragging, dropTarget, onDragPointerDown, camera,
+  onSolo, onSelect, statusRef, dragging, dropTarget, onDragPointerDown, camera, hasAudio, audioOn, onToggleAudio,
 }: {
   cam: string; name: string; spans: Span[] | undefined; clockRef: React.RefObject<number | null>;
   playing: boolean; speed: number; scrubbing: boolean; scrubT: number | null; previewWidth: number;
   active: boolean; soloed: boolean; onSolo: () => void; onSelect: () => void;
   dragging?: boolean; dropTarget?: boolean;
+  /** the camera records an audio track; one tile at a time may play it (the others stay muted) */
+  hasAudio?: boolean; audioOn?: boolean; onToggleAudio?: () => void;
   /** pointerdown that may become a reorder drag; fromGrip = started on the ⠿ handle (touch-friendly) */
   onDragPointerDown?: (e: React.PointerEvent, fromGrip: boolean) => void;
   /** the camera record, so a painted region can be saved as a named place */
@@ -162,7 +164,7 @@ export function SyncTile({
           key={chunk.key}
           ref={video}
           src={chunk.src}
-          muted
+          muted={!audioOn}
           playsInline
           onLoadedMetadata={(e) => {
             loaded.current = true;
@@ -190,6 +192,10 @@ export function SyncTile({
         {label && <span className={`sync-status ${status}`}>{label}</span>}
         <span className="spacer" />
         {!painting && <RegionBadge cam={cam} onEdit={() => setPainting(true)} />}
+        {hasAudio && onToggleAudio && (
+          <button className={`ghost small sync-audio ${audioOn ? "on" : ""}`} title={audioOn ? "Mute" : "Play this camera's sound (one camera at a time)"}
+            onClick={(e) => { e.stopPropagation(); onToggleAudio(); }}>{audioOn ? "🔊" : "🔇"}</button>
+        )}
         <button className={`ghost small sync-paint ${painting ? "on" : ""}`} title="Paint a region: show only events that passed through it"
           onClick={(e) => { e.stopPropagation(); setPainting((p) => !p); }}>✎</button>
         <button className={`ghost small sync-solo ${soloed ? "on" : ""}`} title={soloed ? "Back to the grid (0)" : "Isolate this camera"}

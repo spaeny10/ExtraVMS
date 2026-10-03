@@ -70,6 +70,11 @@ const gridCols = (n: number) => (n <= 1 ? 1 : n <= 4 ? 2 : n <= 9 ? 3 : 4);
 /** How to lay out n 16:9 tiles in a box of gridW x availH px.
  * 3 tiles: one large (2/3 width, two rows tall) plus two stacked beside it, which tiles the box exactly.
  * Otherwise the fewest columns whose rows still fit the height, so nothing spills under the timeline. */
+/** Does this camera record an audio track MediaMTX reports? (G.711/G.722 are transcoded to AAC on playback.) */
+function hasAudioTrack(cam: Camera | undefined): boolean {
+  return !!cam?.status?.tracks?.some((t) => /G711|LPCM|G722|Opus|MPEG-4 Audio|AAC/i.test(t));
+}
+
 function tileLayout(n: number, gridW: number, availH: number): { cols: number; hero: boolean } {
   if (n <= 1) return { cols: 1, hero: false };
   if (n === 3 && gridW * 3 / 8 <= availH) return { cols: 3, hero: true };
@@ -203,6 +208,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cameras, (config.order ?? []).join(",")]);
   const orderedCams = allIds.map((id) => cameras.find((c) => c.id === id)!).filter(Boolean);
+  const [audioCam, setAudioCam] = useState<string | null>(null); // the one tile whose sound plays
   const [dragId, setDragId] = useState<string | null>(null);
   const [dropId, setDropId] = useState<string | null>(null);
   const [ghost, setGhost] = useState<{ name: string; x: number; y: number } | null>(null);
@@ -883,6 +889,9 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
                 dropTarget={dropId === id && dragId !== id}
                 onDragPointerDown={(e, fromGrip) => startTileDrag(id, camName(id), e, fromGrip)}
                 camera={cameras.find((c) => c.id === id)}
+                hasAudio={hasAudioTrack(cameras.find((c) => c.id === id))}
+                audioOn={audioCam === id}
+                onToggleAudio={() => setAudioCam((a) => (a === id ? null : id))}
               />
             ))}
           </div>
