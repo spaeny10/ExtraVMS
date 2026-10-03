@@ -270,6 +270,14 @@ button.on { background: color-mix(in srgb, var(--accent) 22%, transparent); bord
 .tl-filters { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .chip.on-person { background: color-mix(in srgb, var(--person) 30%, transparent); border-color: var(--person); }
 .chip.on-vehicle { background: color-mix(in srgb, var(--vehicle) 30%, transparent); border-color: var(--vehicle); }
+.chip.on-ppe {
+  border-color: var(--person);
+  background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--person) 45%, transparent) 0 3px, color-mix(in srgb, var(--person) 12%, transparent) 3px 6px);
+}
+/* a legend entry that doubles as a filter shortcut (PPE) */
+.legend-toggle { all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; border-radius: 4px; padding: 0 2px; }
+.legend-toggle:hover { color: var(--text); }
+.legend-toggle.on { outline: 1px solid var(--person); color: var(--text); }
 
 /* live scrub preview */
 .tl-preview { position: absolute; inset: 0; background: #000; z-index: 2; }

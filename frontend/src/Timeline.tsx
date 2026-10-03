@@ -18,13 +18,15 @@ type Filter = {
   hideFalseAlarms: boolean;
   synopsisOnly: boolean;
   minYolo: number;
+  ppe: boolean;   // only events that broke a PPE rule (hatched markers)
 };
-const DEFAULT_FILTER: Filter = { person: true, vehicle: true, status: "verified", minThreat: "any", hideFalseAlarms: true, synopsisOnly: false, minYolo: 0 };
+const DEFAULT_FILTER: Filter = { person: true, vehicle: true, status: "verified", minThreat: "any", hideFalseAlarms: true, synopsisOnly: false, minYolo: 0, ppe: false };
 const LIVE_WINDOW_S = 30;
 const THREAT_RANK: Record<string, number> = { none: 0, low: 1, medium: 2, high: 3 };
 
 function matches(e: Marker, f: Filter): boolean {
   if (e.camera_class === "person" ? !f.person : e.camera_class === "vehicle" ? !f.vehicle : false) return false;
+  if (f.ppe && !e.ppe) return false;
   if (f.status === "verified" && e.status !== "verified") return false;
   if (f.status === "active" && e.status !== "open" && e.status !== "pending") return false;
   if (f.status === "rejected" && e.status !== "rejected") return false;
@@ -974,6 +976,8 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
         <span className="muted small">Show</span>
         <button className={`chip ${filter.person ? "on-person" : ""}`} onClick={() => setFilter({ person: !filter.person })}>People</button>
         <button className={`chip ${filter.vehicle ? "on-vehicle" : ""}`} onClick={() => setFilter({ vehicle: !filter.vehicle })}>Vehicles</button>
+        <button className={`chip ${filter.ppe ? "on-ppe" : ""}`} onClick={() => setFilter({ ppe: !filter.ppe })}
+          title="Only events that broke a PPE rule (the hatched markers)">PPE violations</button>
         <select value={filter.status} onChange={(e) => setFilter({ status: e.target.value as Filter["status"] })} title="Verification status">
           <option value="verified">Verified</option>
           <option value="active">In progress</option>
@@ -1178,7 +1182,8 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
         <span><i className="sw locked" /> locked</span>
         <span><i className="sw person" /> person</span>
         <span><i className="sw vehicle" /> vehicle</span>
-        <span><i className="sw ppe" /> PPE violation</span>
+        <button className={`legend-toggle ${filter.ppe ? "on" : ""}`} onClick={() => setFilter({ ppe: !filter.ppe })}
+          title={filter.ppe ? "Showing PPE violations only · tap to show everything" : "Tap to show PPE violations only"}><i className="sw ppe" /> PPE violation</button>
         <span>👁 show/hide · 🔍 isolate (1–9, 0 = grid) · double-click a tile to isolate · scroll to zoom · drag to pan · drag the playhead to scrub · Space / ← → / + − / [ ] events · Shift+drag a lane to lock</span>
       </div>
       {open !== null && <EventDetail id={open} cameraName={camName} onClose={() => setOpen(null)} />}
