@@ -244,12 +244,12 @@ class EventPuller(threading.Thread):
                 if ev:
                     self.on_event(ev)
 
-    @staticmethod
-    def _sync_clock(onvif: Onvif) -> None:
+    def _sync_clock(self, onvif: Onvif) -> None:
         from .onvif_soap import sync_clock
         offset = sync_clock(onvif)
         if abs(offset.total_seconds()) > 5:
-            log.warning("camera clock is %.0fs off this PC; check NTP", offset.total_seconds())
+            log.warning("[%s] camera clock is %.0fs off this PC (%s); set NTP on the camera",
+                        self.cam["id"], offset.total_seconds(), self.cam.get("host"))
 
     def _parse(self, n: ET.Element) -> RuleEvent | None:
         topic = (text(n, "Topic") or "").split(":", 1)[-1]
