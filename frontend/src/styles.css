@@ -251,6 +251,11 @@ button.on { background: color-mix(in srgb, var(--accent) 22%, transparent); bord
 .tl-marker.vehicle { background: var(--vehicle); }
 .tl-marker.rejected { opacity: .25; }
 .tl-marker.threat { box-shadow: 0 0 0 2px var(--bad); }
+/* PPE violation: diagonal slash marks over the class colour (person or vehicle still shows through) */
+.tl-marker.ppe, .sw.ppe {
+  background-image: repeating-linear-gradient(135deg, rgba(255, 255, 255, .85) 0 2px, transparent 2px 6px);
+}
+.sw.ppe { background-color: var(--person); }
 .tl-marker:hover { opacity: 1; outline: 2px solid var(--text); z-index: 2; }
 .tl-now { position: absolute; top: 0; bottom: 0; width: 0; border-left: 2px dashed var(--ok); pointer-events: none; }
 .tl-hover { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px solid var(--muted); pointer-events: none; }

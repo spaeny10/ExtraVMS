@@ -196,6 +196,7 @@ export type NvrEvent = {
 export type TimelineEvent = Pick<NvrEvent, "id" | "camera_class" | "yolo_class" | "yolo_conf" | "start_ts" | "end_ts" | "status" | "threat" | "priority" | "anomaly" | "journey_id" | "cells"> & {
   verdict: Verdict | null;
   has_synopsis: number;
+  ppe?: number | null;   // 1 when the event broke a PPE rule (hatched marker)
 };
 
 export type RetentionPolicy = {

@@ -1274,7 +1274,8 @@ async def unlock_event(event_id: int):
 async def recordings(camera_id: str, start: float | None = None, end: float | None = None):
     spans = await mediamtx.recording_spans(camera_id, start, end)
     events = db.all("SELECT id, camera_class, yolo_class, yolo_conf, start_ts, end_ts, status, threat, priority, anomaly, journey_id, cells, ptz_preset, "
-                    "json_extract(feedback, '$.verdict') AS verdict, synopsis IS NOT NULL AS has_synopsis FROM events "
+                    "json_extract(feedback, '$.verdict') AS verdict, synopsis IS NOT NULL AS has_synopsis, "
+                    "json_extract(policy, '$.kind') = 'ppe' AS ppe FROM events "   # PPE violation: hatched marker on the Timeline
                     "WHERE camera_id=? AND start_ts>=? AND start_ts<=? ORDER BY start_ts",
                     [camera_id, start or 0, end or time.time()])
     lo, hi = start or 0, end or time.time()

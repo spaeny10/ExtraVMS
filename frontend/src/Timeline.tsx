@@ -1112,9 +1112,9 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
                   return (
                     <div
                       key={e.id}
-                      className={`tl-marker ${e.camera_class} ${e.status} ${(e.priority ?? e.threat) && (e.priority ?? e.threat) !== "none" ? "threat" : ""}`}
-                      style={{ left: x, width: w }}
-                      title={`${e.yolo_class ?? e.camera_class} · ${fmtTime(e.start_ts)} · ${e.status}${e.threat ? ` · threat ${e.threat}` : ""}${e.priority && e.priority !== "none" ? ` · priority ${e.priority}` : ""}${(e.anomaly ?? 0) >= UNUSUAL_MIN ? " · unusual" : ""}${e.verdict ? ` · ${e.verdict.replace("_", " ")}` : ""}`}
+                      className={`tl-marker ${e.camera_class} ${e.status} ${(e.priority ?? e.threat) && (e.priority ?? e.threat) !== "none" ? "threat" : ""} ${e.ppe ? "ppe" : ""}`}
+                      style={{ left: x, width: e.ppe ? Math.max(8, w) : w }}
+                      title={`${e.yolo_class ?? e.camera_class} · ${fmtTime(e.start_ts)} · ${e.status}${e.ppe ? " · PPE violation" : ""}${e.threat ? ` · threat ${e.threat}` : ""}${e.priority && e.priority !== "none" ? ` · priority ${e.priority}` : ""}${(e.anomaly ?? 0) >= UNUSUAL_MIN ? " · unusual" : ""}${e.verdict ? ` · ${e.verdict.replace("_", " ")}` : ""}`}
                       onClick={(ev) => {
                         ev.stopPropagation();
                         setOpen(e.id);
@@ -1169,6 +1169,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
         <span><i className="sw locked" /> locked</span>
         <span><i className="sw person" /> person</span>
         <span><i className="sw vehicle" /> vehicle</span>
+        <span><i className="sw ppe" /> PPE violation</span>
         <span>👁 show/hide · 🔍 isolate (1–9, 0 = grid) · double-click a tile to isolate · scroll to zoom · drag to pan · drag the playhead to scrub · Space / ← → / + − / [ ] events · Shift+drag a lane to lock</span>
       </div>
       {open !== null && <EventDetail id={open} cameraName={camName} onClose={() => setOpen(null)} />}
