@@ -38,8 +38,7 @@
 .card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 12px; }
 @media (max-width: 767px) { .site-grid { grid-template-columns: 1fr; } .hub-top { flex-wrap: wrap; } }
 .site-card.retired { opacity: .6; }
-.action-card .action-lines { margin-top: 8px; }
-.action-card .action-lines ul { margin: 2px 0 0; padding-left: 18px; }
-.action-card .action-lines li { margin: 2px 0; font-size: 13px; }
-.action-card .action-lines.warn li { color: var(--vehicle); }
-.action-card .action-lines.bad li { color: var(--bad); }
+.verb-card h3 { margin: 0 0 4px; }
+.verb-card .examples li { font-style: italic; }
+.verb-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 767px) { .verb-cols { grid-template-columns: 1fr; } }

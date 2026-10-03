@@ -864,3 +864,14 @@ body:has(.drag-ghost) { cursor: grabbing; user-select: none; }
 .find-summary .fs-day.active { outline: 1px solid var(--accent); outline-offset: 1px; }
 .find-summary .fs-day-label { font-size: 10px; color: var(--muted); white-space: nowrap; }
 @media (max-width: 700px) { .find-summary { gap: 10px; } .find-summary .fs-days { flex-basis: 100%; } }
+
+/* ActionCard.tsx: confirmation card for Ask-box instructions (site actions here, fleet actions at the hub) */
+.action-card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; margin: 10px 0; }
+.action-card .action-lines { margin-top: 8px; }
+.action-card .action-lines ul { margin: 2px 0 0; padding-left: 18px; }
+.action-card .action-lines li { margin: 2px 0; font-size: 13px; }
+.action-card .action-lines.warn li { color: var(--vehicle); }
+.action-card .action-lines.bad li { color: var(--bad); }
+.action-card .action-inputs { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; margin-top: 10px; }
+.action-card .action-inputs .field, .action-card .action-confirm { margin: 0; }
+.action-card .action-confirm { margin-top: 10px; max-width: 360px; }

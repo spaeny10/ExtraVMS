@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api, ask, fmtTime, type AskMeta, type AssistantMessage, type AssistantThread, type Camera, type NvrEvent, type ParsedQuery } from "./api";
 import { Answer } from "./Ask";
+import { ActionCard, type ActionPlanCore } from "./ActionCard";
 import { ConfidenceSlider, loadNumber, saveNumber } from "./ConfidenceSlider";
 import { EventCard } from "./Events";
 import { EventDetail } from "./EventDetail";
@@ -35,6 +36,9 @@ const writeUrl = (query: string, push: boolean) => {
 /** One page for events. With an empty box it browses the latest events for the active view (live, older ones
  * as you scroll); typed text searches events by meaning plus footage by looks; Ask has Qwen look things up and
  * answer in words above those same results. Views (presets per role, plus saved ones) set the filters. */
+/** Text that reads as a site action (backend site_actions.py) goes to the planner on plain Enter too. */
+const INSTRUCTION = /^(please\s+)?(rename|set\s+(the\s+)?retention|keep\s+\d+|lock|protect|stop\s+describing|start\s+describing|describe\s+only)\b/i;
+
 export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent | null }) {
   // ---- views and filters (URL > starred default > Attention)
   const initial = useMemo<UrlState & { id: string }>(() => {
@@ -263,9 +267,15 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { if (submitted) search(submitted); }, [searchKey]);
 
+  const [action, setAction] = useState<ActionPlanCore | null>(null);
   const askNvr = async (text = q) => {
     const question = text.trim();
     if (!question || pending) return;
+    // an instruction ("Rename cam3 to Loading Dock", "Lock Side Yard footage 3-4 pm today") gets a confirmation
+    // card instead of an answer; if the planner fails, the question is simply asked as before
+    const planned = await api.assistantPlan(question).catch(() => null);
+    if (planned && planned.action !== "none") { setAction(planned as ActionPlanCore); setQ(""); return; }
+    setAction(null);
     setQ("");
     search(question);
     setPending({ question, answer: "" });
@@ -297,8 +307,8 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
     if (e.key === "Escape") { e.currentTarget.blur(); return; }
     if (e.key !== "Enter") return;
     e.preventDefault();
-    // a question (ends with "?") or Shift+Enter asks Qwen; plain Enter searches instantly
-    if (e.shiftKey || q.trim().endsWith("?")) askNvr(); else search();
+    // a question (ends with "?"), an instruction ("Rename cam3 to …") or Shift+Enter asks; plain Enter searches instantly
+    if (e.shiftKey || q.trim().endsWith("?") || INSTRUCTION.test(q.trim())) askNvr(); else search();
   };
 
   // ---- keyboard: "/" focuses search, j/k (or ←/→) move between cards, Enter opens (Esc closes the detail)
@@ -450,6 +460,11 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
       {showSummary && (
         <FindSummary filters={filters} cameraName={name} zone={ppeZone} refresh={live?.policy ? live.id : undefined}
           onCamera={(c) => setF({ camera: c })} onDay={(d) => setF({ day: d })} onZone={setPpeZone} />
+      )}
+
+      {action && (
+        <ActionCard key={action.id} plan={action} kind="site action" onClose={() => setAction(null)}
+          onExecute={() => api.assistantExecute(action.id)} />
       )}
 
       {hasConversation && (

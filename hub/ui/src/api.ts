@@ -1,5 +1,6 @@
 /** Hub API client. Same shape as the site's api.ts: relative URLs, cookie session, errors as `${status} ${text}`. */
 import type { NvrEvent } from "@site/api";
+import type { ActionCardData, ActionExtras, ActionPlanCore, ActionResult } from "@site/ActionCard";
 import type { CameraGroup, Dashboard, DashboardConfig, DashboardList, FleetEvent, FleetEvents } from "@site/dashboard/types";
 export type { CameraGroup, Dashboard, DashboardConfig, DashboardList, FleetEvent, FleetEvents, Widget, WidgetProps, DashboardWidgetType } from "@site/dashboard/types";
 export type FleetMessage = { type: "event"; event: NvrEvent; site_id: string; site_name: string } | { type: "event_removed"; id: number; site_id: string; site_name: string } | { type: "site_online" | "site_offline"; site_id: string; site_name: string };
@@ -14,18 +15,20 @@ export type SiteSummary = {
 };
 export type Site = { id: string; org_id: string; name: string; location: string; online: boolean; last_seen_at: number | null; version: string | null; hostname: string | null; clock_skew_s: number | null; summary: SiteSummary; open_alerts: number; retired_at?: number | null };
 export type Fleet = { orgs: { org: Org; sites: Site[]; open_alerts: number; retired?: number }[]; now: number; offline_after_s: number };
-/** Fleet actions (hub/hub/fleet_actions.py): an Ask-box instruction turned into a plan with a confirmation card. */
+/** Fleet actions (hub/hub/fleet_actions.py): an Ask-box instruction turned into a plan with a confirmation card (@site/ActionCard). */
+export type { ActionCardData, ActionExtras, ActionResult };
 export type ActionSiteRef = { id: string; name: string; online: boolean };
-export type ActionCardData = { title: string; moves: string[]; stays: string[]; warnings: string[]; blockers: string[]; needs: string[]; can_execute: boolean };
-export type ActionPlan = { action: "none" } | {
-  action: "move_cameras" | "migrate_site" | "retire_site" | "set_retention" | "rename_camera"; id: string; summary: string; parser: string; confidence: string;
+export type ActionPlan = { action: "none" } | (ActionPlanCore & {
+  summary: string; parser: string; confidence: string;
   source: ActionSiteRef | null; target: ActionSiteRef | null; site: ActionSiteRef | null; cameras: { id: string; name: string; host?: string | null }[];
-  days: number | null; new_name: string | null; needs: string[]; card: ActionCardData; expires_at: number; allowed: boolean;
-};
-export type ActionResult = { ok: boolean; lines: string[]; summary: string };
+  days: number | null; new_name: string | null; needs: string[]; expires_at: number; options: Record<string, boolean>;
+});
+export type ActionVerb = { action: string; title: string; role: string; confirm_name: boolean; examples: string[]; moves: string[]; stays: string[]; undo: string; options: string[]; inputs: string[] };
+export type ActionRecent = { id: number; ts: number; user_email: string | null; action: string; status: number | null; lines: string[]; undo_until: number | null };
+export type ActionReference = { verbs: ActionVerb[]; safety: string[]; capacity: string[]; recent: ActionRecent[]; undo_hours: number };
 export type Alert = { id: number; org_id: string; site_id: string; site_name: string; kind: string; key: string; opened_at: number; closed_at: number | null; acked_by: string | null; detail: Record<string, unknown> };
 export type Member = { id: string; email: string; role: string; totp_enabled: boolean; last_login_at: number | null; sites: string[] };
-export type AuditRow = { id: number; ts: number; user_email: string | null; site_id: string | null; action: string; method: string | null; path: string | null; status: number | null; ip: string | null };
+export type AuditRow = { id: number; ts: number; user_email: string | null; site_id: string | null; action: string; method: string | null; path: string | null; status: number | null; ip: string | null; undo_until?: number | null };
 export type Usage = { ai_shared: boolean; configured: boolean; model: string; provider: { kind: "site" | "url" | "none"; site_id?: string; site_name?: string | null; online: boolean }; turn: boolean; days: number; sites: { site_id: string; site_name: string; requests: number; prompt_tokens: number; completion_tokens: number; latency_ms: number; errors: number }[] };
 export type FleetSearch = {
   q: string; sites: { site_id: string; site_name: string; error: string | null; events: number; footage: number }[]; offline: string[];
@@ -57,7 +60,11 @@ export const api = {
   fleet: (org?: string, include_retired?: boolean) => req<Fleet>(`/api/fleet?${qs({ org, include_retired: include_retired || undefined })}`),
   retireSite: (id: string, retired: boolean) => req<Site>(`/api/sites/${id}/retire`, json("POST", { retired })),
   actionPlan: (org: string, text: string) => req<ActionPlan>(`/api/orgs/${org}/actions/plan`, json("POST", { text })),
-  actionExecute: (org: string, plan_id: string) => req<ActionResult>(`/api/orgs/${org}/actions/execute`, json("POST", { plan_id })),
+  /** extras.inputs carries a new camera's password: sent in this one call, never stored. */
+  actionExecute: (org: string, plan_id: string, x?: ActionExtras) =>
+    req<ActionResult>(`/api/orgs/${org}/actions/execute`, json("POST", { plan_id, confirm_name: x?.confirm_name || undefined, options: x?.options, camera: x && Object.keys(x.inputs).length ? x.inputs : undefined })),
+  actionUndo: (org: string, audit_id: number) => req<ActionResult>(`/api/orgs/${org}/actions/undo/${audit_id}`, { method: "POST" }),
+  actionReference: (org: string) => req<ActionReference>(`/api/orgs/${org}/actions/reference`),
   orgs: () => req<Org[]>("/api/orgs"),
   createOrg: (name: string, slug: string) => req<Org>("/api/orgs", json("POST", { name, slug })),
   members: (org: string) => req<Member[]>(`/api/orgs/${org}/members`),

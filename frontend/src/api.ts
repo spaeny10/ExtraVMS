@@ -1,5 +1,6 @@
 import { connection } from "./ui";
 import type { DashboardConfig } from "./dashboard/types";
+import type { ActionPlanCore, ActionResult } from "./ActionCard";
 /** include = detect only here; exclude = mask out; area = just a name for a place (never filters);
  * ppe = people who stay in it must wear the required items (backend/nvr/ppe.py; never filters) */
 export type ZoneType = "include" | "exclude" | "area" | "ppe";
@@ -538,6 +539,9 @@ export function makeApi(base: string) {
   assistantThreads: () => req<AssistantThread[]>("/api/assistant/threads"),
   assistantThread: (id: number) => req<AssistantThread & { messages: AssistantMessage[] }>(`/api/assistant/threads/${id}`),
   deleteThread: (id: number) => req(`/api/assistant/threads/${id}`, { method: "DELETE" }),
+  /** Site actions (backend site_actions.py): is this Ask text an instruction ("Lock Side Yard footage 3-4 pm today")? */
+  assistantPlan: (text: string) => req<{ action: "none" } | (ActionPlanCore & { summary: string })>("/api/assistant/plan", json("POST", { text })),
+  assistantExecute: (plan_id: string) => req<ActionResult>("/api/assistant/execute", json("POST", { plan_id })),
   briefings: (limit = 10) => req<{ briefings: Briefing[]; settings: BriefingSettings }>(`/api/briefings?${qs({ limit })}`),
   generateBriefing: () => req<Briefing>("/api/briefings/generate", { method: "POST" }),
   saveBriefingSettings: (s: BriefingSettings) => req<BriefingSettings>("/api/briefings/settings", json("PUT", s)),

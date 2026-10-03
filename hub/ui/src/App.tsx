@@ -1,15 +1,15 @@
 /**
  * Hub pages: Home (dashboard), Fleet (site cards), Find, Alerts, Audit, Organisation (members, sites,
- * groups, enrolment), Account. Path routing without a router library (nav.ts).
+ * groups, enrolment; Organisation → Fleet actions at /org/actions: what the Ask box can be told to do), Account. Path routing without a router library (nav.ts).
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Dialogs, Icon, OfflineBanner, Toaster, confirmDialog, promptDialog, toast } from "@site/ui";
 import { ThemeToggle } from "@site/ThemeToggle";
-import { ActionCard } from "./ActionCard";
+import { ActionCard } from "@site/ActionCard";
 import { GroupsBox } from "./Groups";
 import { HomePage } from "./HomePage";
 import { navigate, usePath } from "./nav";
-import { type ActionPlan, type Alert, type AuditRow, type Backup, type ClaimPreview, type Digest, type Fleet, type FleetSearch, type Me, type Member, type Org, type PushInfo, type Site, type Usage, ago, api, fleetAsk, fmtTime } from "./api";
+import { type ActionPlan, type ActionReference, type Alert, type AuditRow, type Backup, type ClaimPreview, type Digest, type Fleet, type FleetSearch, type Me, type Member, type Org, type PushInfo, type Site, type Usage, ago, api, fleetAsk, fmtTime } from "./api";
 
 const PAGES = [["/", "Home"], ["/fleet", "Fleet"], ["/find", "Find"], ["/alerts", "Alerts"], ["/org", "Organisation"], ["/audit", "Audit"], ["/account", "Account"]] as const;
 const ROLES = ["viewer", "operator", "admin", "owner"];
@@ -25,7 +25,7 @@ export default function App() {
   if (!me) return <><Login onDone={reload} /><Toaster /><Dialogs /></>;
   const orgs = me.orgs;
   const current = orgs.find((o) => o.id === org) ?? orgs[0];
-  const page = path.startsWith("/alerts") ? "alerts" : path.startsWith("/find") ? "find" : path.startsWith("/org") ? "org" : path.startsWith("/audit") ? "audit" : path.startsWith("/account") ? "account" : path.startsWith("/fleet") ? "fleet" : "home";
+  const page = path.startsWith("/alerts") ? "alerts" : path.startsWith("/find") ? "find" : path.startsWith("/org/actions") ? "actions" : path.startsWith("/org") ? "org" : path.startsWith("/audit") ? "audit" : path.startsWith("/account") ? "account" : path.startsWith("/fleet") ? "fleet" : "home";
   return (
     <>
       <OfflineBanner />
@@ -44,6 +44,7 @@ export default function App() {
         {page === "alerts" && current && <AlertsPage org={current} />}
         {page === "find" && current && <FindPage org={current} />}
         {page === "org" && current && <OrgPage org={current} me={me} onChanged={reload} />}
+        {page === "actions" && current && <FleetActionsPage org={current} />}
         {page === "audit" && current && <AuditPage org={current} />}
         {page === "account" && <AccountPage me={me} onChanged={reload} />}
         {!current && page !== "account" && <p className="muted">You're not a member of any organisation yet. {me.user.is_super ? "Create one under Organisation." : "Ask an owner to add you."}</p>}
@@ -181,7 +182,7 @@ function FindPage({ org }: { org: Org }) {
     // an instruction ("Migrate Ironsight to Hailo T1") gets a confirmation card instead of going to the sites;
     // if the planner fails the question is simply asked as before
     const plan = await api.actionPlan(org.id, q.trim()).catch(() => null);
-    if (plan && plan.action !== "none") { setAction(plan); setAsking(false); return; }
+    if (plan && plan.action !== "none") { setAction(plan as Exclude<ActionPlan, { action: "none" }>); setAsking(false); return; }
     try {
       await fleetAsk(org.id, q.trim(), (c) => {
         const site = c.site as string | undefined;
@@ -205,7 +206,12 @@ function FindPage({ org }: { org: Org }) {
         <button type="submit" disabled={busy || !q.trim()}>Search</button>
         <button type="button" className="ghost" disabled={asking || !q.trim()} onClick={ask} title="Every site's assistant answers from its own footage. Instructions such as &quot;Migrate Ironsight to Hailo T1&quot; show a confirmation card instead">✦ Ask all sites</button>
       </form>
-      {action && <ActionCard key={action.id} org={org.id} plan={action} onClose={() => setAction(null)} />}
+      <p className="small" style={{ margin: "4px 0 0" }}><a href="/org/actions" onClick={(e) => { e.preventDefault(); navigate("/org/actions"); }}>What can I ask the hub to do?</a></p>
+      {action && (
+        <ActionCard key={action.id} plan={action} helpHref="/org/actions" onClose={() => setAction(null)}
+          onExecute={(x) => api.actionExecute(org.id, action.id, x)}
+          onUndo={(r) => api.actionUndo(org.id, r.audit_id!)} />
+      )}
       {res && (
         <>
           <p className="muted small">{res.sites.map((s) => `${s.site_name}: ${s.events} events, ${s.footage} moments${s.error ? ` (${s.error})` : ""}`).join(" · ")}{res.offline.length ? ` · offline: ${res.offline.join(", ")}` : ""}</p>
@@ -303,6 +309,7 @@ function OrgPage({ org, me, onChanged }: { org: Org; me: Me; onChanged: () => vo
   return (
     <>
       <h2>{org.name} <span className="muted small">your role: {org.role}</span></h2>
+      <p className="small"><a href="/org/actions" onClick={(e) => { e.preventDefault(); navigate("/org/actions"); }}>Fleet actions →</a> <span className="muted">what the Ask box can be told to do (move, migrate, retire, add cameras, lock footage, quiet alerts…), the safety rules, and the last 50 actions with Undo</span></p>
       {admin && <ClaimBox org={org} onDone={load} />}
       <div className="card">
         <h3>Sites</h3>
@@ -535,15 +542,90 @@ function PushCard() {
 
 function AuditPage({ org }: { org: Org }) {
   const [rows, setRows] = useState<AuditRow[]>([]);
-  useEffect(() => { api.audit(org.id).then(setRows).catch((e) => toast.error(e)); }, [org.id]);
+  const load = useCallback(() => api.audit(org.id).then(setRows).catch((e) => toast.error(e)), [org.id]);
+  useEffect(() => { load(); }, [load]);
   return (
     <>
       <h2>Audit <span className="muted small">{org.name} · who did what through the hub</span></h2>
       <table className="hub-table">
         <thead><tr><th>When</th><th>Who</th><th>Site</th><th>Action</th><th>Result</th><th>From</th></tr></thead>
-        <tbody>{rows.map((r) => <tr key={r.id}><td>{fmtTime(r.ts)}</td><td>{r.user_email ?? "—"}</td><td className="muted small">{r.site_id ?? ""}</td><td>{r.action}</td><td>{r.status ?? ""}</td><td className="muted small">{r.ip ?? ""}</td></tr>)}</tbody>
+        <tbody>{rows.map((r) => <tr key={r.id}><td>{fmtTime(r.ts)}</td><td>{r.user_email ?? "—"}</td><td className="muted small">{r.site_id ?? ""}</td>
+          <td>{r.action}{r.undo_until ? <> <UndoButton org={org} id={r.id} label={r.action} onDone={load} /></> : null}</td>
+          <td>{r.status ?? ""}</td><td className="muted small">{r.ip ?? ""}</td></tr>)}</tbody>
       </table>
       {rows.length === 0 && <p className="muted">Nothing yet.</p>}
+    </>
+  );
+}
+
+/** Undo a fleet action from its audit row (offered for 24 h; the server runs the stored reverse plan). */
+function UndoButton({ org, id, label, onDone }: { org: Org; id: number; label: string; onDone: () => void }) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <button className="ghost small" disabled={busy} onClick={async () => {
+      if (!(await confirmDialog("Undo this fleet action?", { message: label.replace(/^fleet action: /, ""), confirmLabel: "Undo" }))) return;
+      setBusy(true);
+      try {
+        const r = await api.actionUndo(org.id, id);
+        if (r.ok) toast.success(r.lines.join(" · ") || "Undone"); else toast.error(r.lines.join(" · "));
+        onDone();
+      } catch (e) { toast.error(e); } finally { setBusy(false); }
+    }}>{busy ? "Undoing…" : "Undo"}</button>
+  );
+}
+
+// ---------------------------------------------------------------- fleet actions reference (Organisation → Fleet actions)
+
+function FleetActionsPage({ org }: { org: Org }) {
+  const [ref, setRef] = useState<ActionReference | null>(null);
+  const load = useCallback(() => api.actionReference(org.id).then(setRef).catch((e) => toast.error(e)), [org.id]);
+  useEffect(() => { load(); }, [load]);
+  if (!ref) return null;
+  const admin = ["admin", "owner"].includes(org.role);
+  return (
+    <>
+      <h2>Fleet actions <span className="muted small">{org.name} · what the hub's Ask box (Find → ✦ Ask all sites) can be told to do</span></h2>
+      <p className="muted small">Type an instruction instead of a question and a confirmation card appears. Nothing happens until Confirm. This page is
+        generated from the same list the planner reads, so every example below works as written (with your own site and camera names).</p>
+      <div className="card">
+        <h3>Safety</h3>
+        <ul>{ref.safety.map((s, i) => <li key={i} className="small">{s}</li>)}</ul>
+        <h3>Capacity on the card</h3>
+        <ul>{ref.capacity.map((s, i) => <li key={i} className="small">{s}</li>)}</ul>
+      </div>
+      {ref.verbs.map((v) => (
+        <div key={v.action} className="card verb-card">
+          <h3>{v.title} <span className="muted small">{v.action} · {v.role}{v.confirm_name ? " · type the site name to confirm" : ""}</span></h3>
+          <ul className="examples">{v.examples.map((x) => <li key={x}>"{x}"</li>)}</ul>
+          <div className="verb-cols">
+            <div><div className="muted small">What moves / changes</div><ul>{v.moves.map((x, i) => <li key={i} className="small">{x}</li>)}</ul></div>
+            <div><div className="muted small">What stays</div><ul>{v.stays.map((x, i) => <li key={i} className="small">{x}</li>)}</ul></div>
+          </div>
+          <p className="small" style={{ margin: "4px 0 0" }}>
+            <span className="muted">Undo ({ref.undo_hours} h): </span>{v.undo}
+            {v.options.length > 0 && <><span className="muted"> · Options on the card: </span>{v.options.join(", ")}</>}
+            {v.inputs.length > 0 && <><span className="muted"> · Fields on the card: </span>{v.inputs.join(", ")}</>}
+          </p>
+        </div>
+      ))}
+      <div className="card">
+        <h3>Last 50 fleet actions</h3>
+        {!admin && <p className="muted small">Only admins see the action log.</p>}
+        {admin && ref.recent.length === 0 && <p className="muted small">None yet.</p>}
+        {admin && ref.recent.length > 0 && (
+          <table className="hub-table">
+            <thead><tr><th>When</th><th>Who</th><th>Action</th><th>Status</th><th /></tr></thead>
+            <tbody>{ref.recent.map((r) => (
+              <tr key={r.id}>
+                <td>{fmtTime(r.ts)}</td><td>{r.user_email ?? "—"}</td>
+                <td title={r.lines.join(" · ")}>{r.action.replace(/^fleet action: /, "")}</td>
+                <td>{r.status === 200 ? "done" : "failed"}</td>
+                <td>{r.undo_until ? <UndoButton org={org} id={r.id} label={r.action} onDone={load} /> : null}</td>
+              </tr>
+            ))}</tbody>
+          </table>
+        )}
+      </div>
     </>
   );
 }
