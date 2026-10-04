@@ -55,6 +55,19 @@ def create_user(email: str, password: str, is_super: bool = False) -> dict:
     return u
 
 
+def set_password(email: str, password: str) -> dict:
+    """Replace a user's password and end all of their sessions (used by `python -m hub setpassword`)."""
+    u = user_by_email(email)
+    if not u:
+        raise ValueError("no such user")
+    if len(password) < 10:
+        raise ValueError("password must be at least 10 characters")
+    with db.engine().begin() as c:
+        c.execute(sa.update(db.users).where(db.users.c.id == u["id"]).values(password_hash=hash_password(password)))
+        c.execute(sa.delete(db.sessions).where(db.sessions.c.user_id == u["id"]))
+    return u
+
+
 def user_by_email(email: str) -> dict | None:
     return db.one(sa.select(db.users).where(db.users.c.email == email.strip().lower()))
 

@@ -1,5 +1,6 @@
 """python -m hub            serve the hub
    python -m hub createsuper EMAIL [--password PW]   create a hub administrator (or read HUB_ADMIN_PASSWORD)
+   python -m hub setpassword EMAIL                   change a user's password (prompts twice; ends their sessions)
    python -m hub createorg NAME SLUG                 create an organisation
 """
 from __future__ import annotations
@@ -19,6 +20,8 @@ def main() -> None:
     cs = sub.add_parser("createsuper")
     cs.add_argument("email")
     cs.add_argument("--password")
+    sp = sub.add_parser("setpassword", help="set a user's password (prompts; signs them out everywhere)")
+    sp.add_argument("email")
     co = sub.add_parser("createorg")
     co.add_argument("name")
     co.add_argument("slug")
@@ -34,6 +37,18 @@ def main() -> None:
             sys.exit("password must be at least 10 characters")
         u = auth.create_user(args.email, pw, is_super=True)
         print("created hub administrator", u["email"])
+        return
+    if args.cmd == "setpassword":
+        from . import auth, db
+        db.engine()
+        pw = getpass.getpass("New password: ")
+        if pw != getpass.getpass("Again: "):
+            sys.exit("passwords differ")
+        try:
+            u = auth.set_password(args.email, pw)
+        except ValueError as e:
+            sys.exit(str(e))
+        print("password set for", u["email"], "- existing sessions ended")
         return
     if args.cmd == "createorg":
         import time
