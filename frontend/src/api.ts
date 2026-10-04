@@ -291,7 +291,8 @@ export type FootageStatus = {
 };
 
 /** How Find reads a query (backend assistant.parse_query). */
-export type ParsedQuery = { since: number | null; until: number | null; time_label: string | null; text: string; footage_text: string | null; question: boolean };
+export type ParsedQuery = { since: number | null; until: number | null; time_label: string | null; text: string; footage_text: string | null; question: boolean;
+  /** nothing to search by meaning ("what happened overnight?"): list the period's events instead */ listing?: boolean };
 
 /* ---- Home */
 export type HomeCamera = { id: string; name: string; stream_ready: boolean; metadata: boolean; metadata_last: number | null; onvif_events: boolean; today: Record<string, number>; health: StreamHealth };

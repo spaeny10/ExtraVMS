@@ -316,7 +316,9 @@ def parse_query(text: str, now: float | None = None) -> dict:
     if is_question and (GENERIC_SUBJECT.search(q) or len(obj) < 3 or not content_words(obj)):
         obj = None
     return {"since": win.get("since"), "until": win.get("until"), "time_label": win.get("label"), "text": cleaned,
-            "footage_text": obj, "question": is_question}
+            "footage_text": obj, "question": is_question,
+            # nothing to search by meaning ("what happened overnight?"): the page should list the period's events instead
+            "listing": not content_words(cleaned)}
 
 
 LAST_N = re.compile(r"\b(?:last|past|previous)\s+(\d+(?:\.\d+)?|one|two|three|four|five|six|seven|twelve|a|an)?\s*(minute|hour|day|week)s?\b")

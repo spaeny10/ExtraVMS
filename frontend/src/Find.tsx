@@ -238,13 +238,16 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
     const s = p?.time_label ? p.since ?? undefined : ws;
     const u = p?.time_label ? p.until ?? undefined : wu;
     try {
-      const r = await api.search(p?.text || t, { ...searchQuery(f), since: s, until: u, limit: SEARCH_PAGE });
+      // "what happened overnight?" has nothing to search by meaning: list that period's events, newest first
+      const r = p?.listing
+        ? await api.events({ ...searchQuery(f), since: s, until: u, limit: SEARCH_PAGE })
+        : await api.search(p?.text || t, { ...searchQuery(f), since: s, until: u, limit: SEARCH_PAGE });
       setEvents(r); setMore(r.length === SEARCH_PAGE);
     } catch { setEvents([]); }
     setBusy(false);
     // a time chip is hiding older matches? count them so the page can say so instead of looking empty
     setOlder(0);
-    if (s && !p?.time_label && !f.day) {
+    if (s && !p?.time_label && !f.day && !p?.listing) {
       api.search(p?.text || t, { ...searchQuery(f), since: undefined, until: undefined, limit: 200 })
         .then((all) => setOlder(all.filter((e) => e.start_ts < s).length)).catch(() => {});
     }
@@ -256,7 +259,9 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
     const u = parsed?.time_label ? parsed.until ?? undefined : wu;
     setBusy(true);
     try {
-      const r = await api.search(parsed?.text || submitted, { ...searchQuery(filters), since: s, until: u, limit: SEARCH_PAGE, offset: events.length });
+      const r = parsed?.listing
+        ? await api.events({ ...searchQuery(filters), since: s, until: u, limit: SEARCH_PAGE, before_id: events[events.length - 1].id })
+        : await api.search(parsed?.text || submitted, { ...searchQuery(filters), since: s, until: u, limit: SEARCH_PAGE, offset: events.length });
       setEvents((p) => [...(p ?? []), ...r]); setMore(r.length === SEARCH_PAGE);
     } catch { setMore(false); }
     setBusy(false);
@@ -509,9 +514,9 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
       ) : (
         <>
           <section>
-            <h3>Events <span className="muted small">matching "{parsed?.text || submitted}"{parsed?.time_label ? ` · ${parsed.time_label}` : timeLabel ? ` · ${timeLabel}` : ""}{filterLabel ? ` · ${filterLabel}` : ""}{events ? ` · ${events.length}${more ? "+" : ""}` : ""}</span></h3>
+            <h3>Events <span className="muted small">{parsed?.listing ? "" : `matching "${parsed?.text || submitted}"`}{parsed?.time_label ? ` · ${parsed.time_label}` : timeLabel ? ` · ${timeLabel}` : ""}{filterLabel ? ` · ${filterLabel}` : ""}{events ? ` · ${events.length}${more ? "+" : ""}` : ""}</span></h3>
             {busy && !events && <SkeletonGrid n={3} />}
-            {events && events.length === 0 && <div className="empty">No matching events {parsed?.time_label ? parsed.time_label : hours || day ? "in this period" : ""}.</div>}
+            {events && events.length === 0 && <div className="empty">No {parsed?.listing ? "" : "matching "}events {parsed?.time_label ? parsed.time_label : hours || day ? "in this period" : ""}.</div>}
             <div className="event-grid">{events?.map(card)}</div>
             {more && events && events.length > 0 && <div className="center"><button className="ghost" disabled={busy} onClick={searchMore}>{busy ? "Loading…" : `Show more matches`}</button></div>}
             {events && older > 0 && hours > 0 && !day && !parsed?.time_label && (
@@ -529,7 +534,7 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
             </section>
           )}
           {parsed && parsed.footage_text === null && (
-            <p className="muted small">Footage search is for things you can picture ("white van", "open gate"); questions about people are answered from events above.</p>
+            <p className="muted small">Footage search is for things you can picture ("white van", "open gate"); {parsed.listing ? "this question is answered from the events above and by Ask" : "questions about people are answered from events above"}.</p>
           )}
         </>
       )}
