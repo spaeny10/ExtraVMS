@@ -23,6 +23,7 @@ import string
 import time
 from typing import Any, Callable
 
+import certifi
 import websockets
 
 from tunnelproto import CHUNK, HEARTBEAT_S, PING_S, PROTO, WINDOW, Stream, chunk, decode, encode, split
@@ -127,10 +128,13 @@ class HubAgent:
     async def _session(self) -> None:
         url = self.hub_url()
         kw: dict = {}
-        if url.startswith("wss://") and settings.hub_insecure:  # dev hub with a self-signed certificate
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
+        if url.startswith("wss://"):
+            # Verify against certifi's bundle, not the OS store: on Windows, Python + OpenSSL 3.0 picked an expired
+            # cross-signed Let's Encrypt root out of the system store and rejected the hub's valid chain.
+            ctx = ssl.create_default_context(cafile=certifi.where())
+            if settings.hub_insecure:  # dev hub with a self-signed certificate
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
             kw["ssl"] = ctx
         # compression=None: the client library enables permessage-deflate by default, and zlib-compressing
         # incompressible H.265 playback ate a whole CPU core (88% of the process in deflate; ~20 MB/s cap).
