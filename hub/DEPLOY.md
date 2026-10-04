@@ -4,13 +4,15 @@ One small VPS runs Caddy (HTTPS), the hub, Postgres and coturn. Sites dial out t
 anywhere. The shared AI runs on a site's GPU and is reached through that site's tunnel, so the VPS needs no GPU.
 
 ## 1. Server
-- Hetzner Cloud → CX23 or CPX21 (2 vCPU, 4 GB, 40 GB), Ubuntu 24.04, your SSH key only. Ashburn is closest to US sites.
+- Hetzner Cloud → CX23/CPX21 (2 vCPU, 4 GB) is enough; a CCX23 (4 dedicated vCPU, 16 GB) is what runs hub.axiomvision.ai. Ubuntu 24.04 or newer, your SSH key only. Ashburn is closest to US sites.
 - Hetzner Firewall on the server: inbound 22/tcp (your IP), 80/tcp, 443/tcp, 3478/tcp, 3478/udp, 49152-49252/udp.
 - Turn on Backups (20 % of the server price) so the volume with Postgres is snapshotted.
 
 ## 2. DNS
-At the registrar for axiomvision.ai: `A hub → <server IPv4>`, `AAAA hub → <server IPv6>`. Wait until
-`dig +short hub.axiomvision.ai` answers before starting Caddy (Let's Encrypt validates over port 80).
+At the registrar for axiomvision.ai (Namecheap → Advanced DNS, Host = `hub`): `A hub → <server IPv4>`, `AAAA hub → <server IPv6>`.
+The IPv6 value is the server's address inside its /64, normally `<prefix>::1`, not the `<prefix>::` block the console lists.
+Wait until the name resolves before starting Caddy (Let's Encrypt validates over port 80): `dig +short hub.axiomvision.ai`
+on Linux, `Resolve-DnsName hub.axiomvision.ai -Type A` on Windows.
 
 ## 3. Install
 ```bash
@@ -21,7 +23,7 @@ cp hub/.env.example hub/.env
 ```
 Edit `hub/.env`: `HUB_DOMAIN=hub.axiomvision.ai`, `HUB_PUBLIC_URL=https://hub.axiomvision.ai`,
 `HUB_SECRET=$(openssl rand -hex 32)`, `POSTGRES_PASSWORD=$(openssl rand -hex 24)`, `HUB_TURN_SECRET=$(openssl rand -hex 24)`,
-`HUB_VLLM_SITE=<site id of the GPU site>` (the hub UI shows site ids under Organisation → Sites), `HUB_VLLM_MODEL=qwen2.5vl:7b`.
+`HUB_VLLM_SITE=<site id of the GPU site>` (the hub UI shows site ids under Organisation → Sites), `HUB_VLLM_MODEL=qwen3.5:9b`.
 ```bash
 docker compose -f hub/docker-compose.yml up -d --build      # first build takes a few minutes (two UI bundles)
 docker compose -f hub/docker-compose.yml logs -f caddy hub    # wait for "certificate obtained" and "hub ... up"
@@ -37,14 +39,17 @@ docker compose -f hub/docker-compose.yml restart hub
 rm hub/hub.db
 ```
 Users, org, sites (with their device tokens), dashboards and usage history come across; sites reconnect
-without a new claim. New hub instead: `docker compose -f hub/docker-compose.yml exec hub python -m hub createsuper you@example.com`.
+without a new claim. Passwords come across too, so change any dev password right away:
+`docker compose -f hub/docker-compose.yml exec hub python -m hub setpassword you@example.com` (prompts; ends old sessions).
+New hub instead: `docker compose -f hub/docker-compose.yml exec hub python -m hub createsuper you@example.com`.
 
 ## 5. Point the sites at the new hub
 On each site's own LAN (the hub proxy refuses this endpoint on purpose):
 ```bash
 curl -X PUT http://<site>:8080/api/hub -H 'content-type: application/json' -d '{"hub_url":"wss://hub.axiomvision.ai/agent"}'
 ```
-Do the GPU site first (it serves the shared AI). `GET /api/hub` shows `connected: true` within a few seconds;
+Do the GPU site first (it serves the shared AI). `GET /api/hub` shows `connected: true` within a few seconds
+(sites verify the hub's certificate against certifi's bundle, so a Windows site works too);
 the hub's Fleet page shows the site online. Also set `NVR_HUB_URL=wss://hub.axiomvision.ai/agent` in each site's
 `.env` (the database setting wins, but a fresh install reads `.env`). New sites: `tools/deploy_site.sh` already
 writes that URL; claim them from Organisation → Add site.
@@ -53,7 +58,7 @@ writes that URL; claim them from Organisation → Add site.
 - Remove any router port-forward that pointed at the old hub, and stop the old `python -m hub`.
 - Phones: open https://hub.axiomvision.ai, sign in, Add to Home Screen; allow notifications (push works over HTTPS).
 - Update: `cd /opt/axiom && git pull && docker compose -f hub/docker-compose.yml up -d --build`.
-- Database dump (add to root's crontab): `0 4 * * * docker compose -f /opt/axiom/hub/docker-compose.yml exec -T postgres pg_dump -U hub hub | gzip > /srv/backups/hub-$(date +\%F).sql.gz`
+- Database dump (root's crontab, installed on hub.axiomvision.ai, 14 days kept): `0 4 * * * docker compose -f /opt/axiom/hub/docker-compose.yml exec -T postgres pg_dump -U hub hub | gzip > /srv/backups/hub-$(date +\%F).sql.gz`
 
 ## Checks
 | What | How |
