@@ -211,6 +211,27 @@ def test_recording_gaps_no_recordings():
     assert lines == ["Side Yard: no recordings found"], lines
 
 
+
+def test_period_questions_are_grounded_in_events():
+    """'What happened overnight?' lists and counts that period's events; the briefing is background, not a finding."""
+    p = assistant.parse_query("What happened overnight?", NOW)
+    assert p["footage_text"] is None and p["time_label"] == "overnight"        # nothing to picture: no footage search
+    assert assistant.parse_query("Did anything happen today?", NOW)["footage_text"] is None
+    assert assistant.parse_query("Was a boat on any camera last night?", NOW)["footage_text"] == "a boat"
+    plan = assistant.check_plan({"calls": [{"tool": "get_briefing", "since": "2020-01-01 18:00"}]}, "What happened overnight?", NOW)
+    tools = [c["tool"] for c in plan]
+    assert tools[:2] == ["search_events", "count_events"] and "get_briefing" in tools, tools
+    assert plan[0]["args"]["text"] == "" and dt.datetime.fromtimestamp(plan[0]["args"]["since"]).hour == 18
+    # only a briefing came back: that counts as nothing found, so the fallback lists events (no text to search by)
+    fb = assistant.fallback_call([{"tool": "get_briefing", "args": {"since": at(18, days_ago=1), "until": at(7)}, "count": 0}],
+                                 "What happened overnight?")
+    assert fb and fb["tool"] == "search_events" and fb["args"]["text"] == "" and fb["args"]["since"] == at(18, days_ago=1), fb
+    note = assistant._period_note("What happened overnight?", NOW)
+    assert note.startswith("Period asked about (overnight):") and " 18:00 to " in note and "07:00." in note, note
+    lines, n, _ = run("get_briefing", since=at(18, days_ago=1))
+    assert n == 0 and lines[0].startswith("No briefing")                       # none written in the scratch DB
+
+
 if __name__ == "__main__":
     setup_module()
     for name, fn in list(globals().items()):

@@ -312,7 +312,8 @@ def parse_query(text: str, now: float | None = None) -> dict:
     is_question = q.endswith("?") or bool(re.match(r"(did|was|were|is|are|has|have|how|when|what|who|where|which|why|any)\b", q))
     obj = footage_text(cleaned) if is_question else cleaned
     # questions about people in general ("did anyone use the bathroom") are answered by events, not by what frames look like
-    if is_question and (GENERIC_SUBJECT.search(q) or len(obj) < 3):
+    # ... and so are questions with nothing to picture ("what happened overnight?"): the image index needs a visual noun
+    if is_question and (GENERIC_SUBJECT.search(q) or len(obj) < 3 or not content_words(obj)):
         obj = None
     return {"since": win.get("since"), "until": win.get("until"), "time_label": win.get("label"), "text": cleaned,
             "footage_text": obj, "question": is_question}
@@ -340,6 +341,23 @@ FILLER = re.compile(r"\b(on|in|at) (any|the|a|our|my) (camera|cameras|footage|vi
                     r"last night|this (morning|afternoon|evening|week)|overnight|recently|ever|there|any)\b|[?.!,]")
 
 
+NON_VISUAL = re.compile(r"\b(what|who|when|where|why|how|happened|happen|happening|happens|going on|went on|anything|something|"
+                        r"everything|nothing|there|did|do|does|was|were|is|are|be|been|the|a|an|it|that|this|these|those|new|else|"
+                        r"up|about|around|tell me|show me|give me|report|summary|summarize|status|update|events?|activity|alerts?|"
+                        r"anyone|anybody|someone|somebody|all|any|of|on|in|at|to|for|with|and|or|from|since|while|i|we|you|me|us|"
+                        r"please|can|could|would|should|see|saw|seen|notice|noticed|observe|observed|record|recorded|camera|cameras|"
+                        r"last|past|night|overnight|today|yesterday|morning|afternoon|evening|week|hour|hours|day|days)\b")
+
+
+def content_words(text: str) -> str:
+    """What is left of a phrase once question words and filler are removed: empty for 'what happened overnight'."""
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", " ", NON_VISUAL.sub(" ", text.lower()))).strip()
+
+
+WHAT_HAPPENED = re.compile(r"\b(what happened|what('s| is| was| has been) (going on|happening|new|up)|anything (happen|going on|new)|"
+                           r"any activity|how was|quiet|busy|summary|briefing|report)\b")
+
+
 def footage_text(question: str) -> str:
     """'Was a boat on any camera today?' -> 'a boat': the thing to look for, for the image-text index."""
     q = LOOK_FOR.sub("", question.lower().strip())
@@ -365,7 +383,17 @@ def augment(calls: list[dict], question: str) -> list[dict]:
                     "min_priority": None, "group_by": None}
             calls.append({"tool": tool, "args": args})
             have.add(tool)
-    return calls[:MAX_CALLS + 2]
+    # A question about a period ("what happened overnight?", "was it quiet today?") is answered from that period's
+    # events: list the latest ones and count them. A briefing alone spans a different period and reads as hearsay.
+    win = time_window(question)
+    if win and (WHAT_HAPPENED.search(q) or not content_words(win["text"])):
+        common = {"camera": base.get("camera"), "since": win["since"], "until": win["until"], "label": base.get("label"),
+                  "min_priority": None}
+        if not any(c["tool"] == "search_events" and not c["args"].get("text") for c in calls):
+            calls.insert(0, {"tool": "search_events", "args": {"text": "", "group_by": None, **common}})
+        if "count_events" not in have:
+            calls.insert(1, {"tool": "count_events", "args": {"text": "", "group_by": "camera", **common}})
+    return calls[:MAX_CALLS + 3]
 
 
 def describe_call(c: dict) -> str:
@@ -617,7 +645,11 @@ async def t_get_briefing(a: dict, refs: Refs) -> tuple[list[str], int]:
     stats = json.loads(b["stats"] or "{}")
     for eid, r in (stats.get("refs", {}).get("events") or {}).items():
         refs.events[int(eid)] = r
-    return [f"Briefing for {_when(b['period_start'])} – {_when(b['period_end'])}: {b['headline']}", b["text"]], 1
+    # Count 0: a briefing is background. It spans its own period (often a whole day), so its times and sightings
+    # must not be presented as the answer for the period asked about; the event lookups are.
+    return [f"BACKGROUND ONLY: a briefing written for {_when(b['period_start'])} to {_when(b['period_end'])}, a different span "
+            f"than the question may ask about. Do not report its times or sightings as events of the asked period. {b['headline']}",
+            b["text"]], 0
 
 
 TOOL_FUNCS = {"search_events": t_search_events, "count_events": t_count_events, "list_unusual": t_list_unusual,
@@ -632,6 +664,8 @@ def fallback_call(calls: list[dict], question: str) -> dict | None:
     if any(c["count"] for c in calls):
         return None
     text = (time_window(question) or {}).get("text", question)[:200]
+    if not content_words(text):
+        text = ""  # "what happened overnight": nothing to search by meaning; list the latest events instead
     since = min((c["args"].get("since") for c in calls if c["args"].get("since") is not None), default=None)
     args = {"text": text, "camera": None, "since": since, "until": None, "label": query_label(question),
             "min_priority": None, "group_by": None}
@@ -675,8 +709,21 @@ ANSWER_SYSTEM = (
     "question, say so plainly and say what was checked. Never invent events, times or counts. Footage matches only "
     "count if they say CHECKED: yes. If the only matches are marked EARLIER, say nothing matched in the period asked "
     "about and mention the most recent earlier one with its date. Counts are sightings, not different people. Cite only the few sightings that "
-    "support your answer (at most 5). Don't guess identities. Write plain sentences; don't repeat these instructions."
+    "support your answer (at most 5). Don't guess identities. Write plain sentences; don't repeat these instructions. "
+    "When a 'Period asked about' is given, open with that period and how many events the lookups found in it "
+    "(for example 'Oct 2 18:00 to Oct 3 07:00: no events.'). A result marked BACKGROUND ONLY is a briefing that "
+    "covers a different span: never present its times, people or activity as happening in the period asked about, "
+    "and never take a 'most recent sighting' from it; only event lines and EARLIER lines are sightings."
 )
+
+
+def _period_note(question: str, now: float) -> str:
+    win = time_window(question, now)
+    if not win:
+        return ""
+    until = win["until"] if win["until"] is not None else now
+    f = lambda t: dt.datetime.fromtimestamp(t).strftime("%a %b %d %H:%M")
+    return f"Period asked about ({win['label']}): {f(win['since'])} to {f(until)}.\n"
 
 
 def _handles_note(refs: "Refs") -> str:
@@ -710,7 +757,7 @@ async def ask(thread_id: int | None, question: str) -> AsyncIterator[dict]:
         yield {"type": "calls", **calls_meta}
         messages = [{"role": "system", "content": ANSWER_SYSTEM + " " + _handles_note(refs)},
                     *({"role": m["role"], "content": m["content"][:600]} for m in history),
-                    {"role": "user", "content": f"Lookup results:\n{results}\n\nQuestion: {question}"}]
+                    {"role": "user", "content": f"{_period_note(question, now)}Lookup results:\n{results}\n\nQuestion: {question}"}]
         fallback = None
         async for kind, data in vlmroute.router.stream("assistant", messages, 500, 0.2, "chat"):
             if kind == "model":
