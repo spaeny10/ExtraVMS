@@ -7,11 +7,47 @@ export const FIRST_FAR_CHUNK = 20; // the first chunk after a far-back seek: sma
 export const PREFETCH_LEAD_S = 15; // start fetching the next chunk this long before the current one ends
 export const FAR_S = 1800;
 export const isFar = (t: number): boolean => nowS() - t >= FAR_S;
-/** How long a playback chunk starting at `t` should be. */
-export const chunkLen = (t: number): number => (isFar(t) ? FAR_CHUNK : CHUNK);
-/** ...and for the first chunk after a seek: a short one far back, so the tile shows video quickly while the
- *  full-length continuation downloads behind it. */
-export const firstChunkLen = (t: number): number => (isFar(t) ? FIRST_FAR_CHUNK : CHUNK);
+export const REMOTE_FIRST_CHUNK = 20; // through the hub: the site uplink is slow, so start with a chunk that arrives in a few seconds
+export const REMOTE_CHUNK = 60; // ...and continue in 60 s chunks (near live too): a 600 s HEVC chunk can't arrive faster than real time
+/** How long a playback chunk starting at `t` should be (`remote`: the camera is reached through the hub). */
+export const chunkLen = (t: number, remote = false): number => (remote ? REMOTE_CHUNK : isFar(t) ? FAR_CHUNK : CHUNK);
+/** ...and for the first chunk after a seek: a short one far back (or remote), so the tile shows video quickly while
+ *  the full-length continuation downloads behind it. */
+export const firstChunkLen = (t: number, remote = false): number => (remote ? REMOTE_FIRST_CHUNK : isFar(t) ? FIRST_FAR_CHUNK : CHUNK);
+
+export const STALL_S = 8; // remote: a download whose buffer hasn't grown (and video hasn't moved) for this long is dead
+export const AHEAD_SLACK_S = 4; // the clock may run this far past the buffered end before the tile considers reloading
+/** Minimum seconds between drift-triggered reloads of one tile, so a slow link can't turn into a request storm. */
+export const DRIFT_RELOAD_MIN_S = { local: 5, remote: 15 } as const;
+/** Longest the shared clock holds for a buffering tile: remote links need longer, but one dead camera must not freeze the rest. */
+export const HOLD_MAX_MS = { local: 3000, remote: 20000 } as const;
+
+/**
+ * Should a tile whose shared clock is past its buffered video drop the chunk and fetch a new one at the clock?
+ * Local: yes once more than AHEAD_SLACK_S past (today's behaviour). Remote: only when waiting is pointless — the
+ * user seeked (`jumped`), the clock is more than 2 chunk lengths past, or nothing has progressed for STALL_S;
+ * otherwise the download is still arriving and a reload would only abort it and start over.
+ * `pastChunkEnd`: the clock is already beyond this chunk, so any gap counts (the slack doesn't apply).
+ * Times are seconds; `clockRel`/`bufferedEnd` are relative to the chunk start, `now`/`lastProgressAt` any one clock.
+ */
+export function shouldReload(o: {
+  clockRel: number; bufferedEnd: number; lastProgressAt: number; now: number; remote: boolean;
+  len?: number; jumped?: boolean; pastChunkEnd?: boolean;
+}): boolean {
+  const gap = o.clockRel - o.bufferedEnd;
+  if (!o.pastChunkEnd && gap <= AHEAD_SLACK_S) return false;
+  if (!o.remote || o.jumped) return true;
+  if (o.len != null && gap > 2 * o.len) return true;
+  return o.now - o.lastProgressAt >= STALL_S;
+}
+/** May a tile reload because of drift now? (`lastAt` = its previous drift reload, seconds, or null.) */
+export const driftReloadAllowed = (lastAt: number | null, now: number, remote: boolean): boolean =>
+  lastAt == null || now - lastAt >= (remote ? DRIFT_RELOAD_MIN_S.remote : DRIFT_RELOAD_MIN_S.local);
+
+export const RETRY_BACKOFF_MS = [2000, 5000, 10000]; // recordings retry after a failure: quick at first...
+export const RETRY_STEADY_MS = 30000; // ...then every 30 s until the server answers
+/** Delay before retry number `attempt` (0-based) of a failed recordings load. */
+export const retryDelayMs = (attempt: number): number => RETRY_BACKOFF_MS[attempt] ?? RETRY_STEADY_MS;
 
 export type Prefetched = { start: number; len: number; url: string | null; ctrl: AbortController; done: boolean };
 

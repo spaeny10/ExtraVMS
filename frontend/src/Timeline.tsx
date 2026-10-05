@@ -4,7 +4,7 @@ import { api, fmtTime, localApi, type ApiResolver, type Camera, type KeptSpan, t
 import { ConfidenceSlider, loadNumber, saveNumber } from "./ConfidenceSlider";
 import { EventDetail } from "./EventDetail";
 import { NavContext, useNav, type TimelineFocus, type TimelineTarget } from "./nav";
-import { LIVE_LAG, camKey, fmtClock, nowS, spanAt, splitKey, useLatestFrame, type Span } from "./playback";
+import { HOLD_MAX_MS, LIVE_LAG, camKey, fmtClock, nowS, retryDelayMs, spanAt, splitKey, useLatestFrame, type Span } from "./playback";
 import { SyncTile, type TileStatus } from "./SyncPlayer";
 import { encodeCells, regionPass, regions, useRegions } from "./region";
 import { timelineHash } from "./nav";
@@ -46,7 +46,8 @@ function loadFilter(key: string): Filter {
     return DEFAULT_FILTER;
   }
 }
-type Lane = { spans: Span[]; events: Marker[]; kept: KeptSpan[]; locks: Lock[] };
+/** `error`: the last recordings request for this lane failed (the data shown, if any, is from an earlier answer) */
+type Lane = { spans: Span[]; events: Marker[]; kept: KeptSpan[]; locks: Lock[]; error?: boolean };
 
 /** A Timeline lane. The site UI passes plain cameras (lane key = camera id); the hub's combined Timeline sets
  *  `key` (server/camera, see camKey), the camera's `server` and `serverName`, and its clock skew. */
@@ -89,7 +90,6 @@ const STEPS = [1, 5, 10, 30, 60, 300, 600, 900, 1800, 3600, 10800, 21600, 43200,
 const SPEEDS = [0.5, 1, 2, 4, 8, 16];
 const PRESETS: [string, number][] = [["5m", 300], ["1h", 3600], ["6h", 21600], ["24h", 86400], ["7d", 604800]];
 const HEAVY_TILES = 6;
-const HOLD_MAX_MS = 3000; // longest the clock waits for a buffering tile
 
 const tzShift = (t: number) => -new Date(t * 1000).getTimezoneOffset() * 60;
 const pad = (n: number) => String(n).padStart(2, "0");
@@ -160,7 +160,7 @@ function loadConfig(key: string): LayoutConfig {
   }
 }
 
-export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = localApi, layoutStore = apiLayoutStore, storageKey = "" }: {
+export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = localApi, layoutStore = apiLayoutStore, storageKey = "", remote }: {
   cameras: TimelineCamera[]; focus?: TimelineFocus | null; onClearFocus?: () => void;
   /** API client per server (default: every camera is on this server); must be stable */
   apiFor?: ApiResolver;
@@ -168,7 +168,11 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
   layoutStore?: LayoutStore;
   /** prefix for this Timeline's localStorage keys ("" = today's key names, so saved state carries over) */
   storageKey?: string;
+  /** cameras are reached over a slow remote link (the hub): short playback chunks, patient buffering;
+   *  default: true whenever `apiFor` isn't this server's own API */
+  remote?: boolean;
 }) {
+  const isRemote = remote ?? apiFor !== localApi;
   const sk = (name: string) => storageKey + name;
   // lane key -> camera; a lane's server, its id on that server and its clock offset (0 unless beyond SKEW_MIN_S)
   const camByKey = useMemo(() => new Map(cameras.map((c) => [laneKey(c), c])), [cameras]);
@@ -433,7 +437,10 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
   }, []);
 
   // Load spans + events for the visible window (plus margin), debounced while zooming/panning.
+  // Failed recordings loads are retried with backoff (retryDelayMs) until the server answers again.
+  const retry = useRef<{ attempt: number; timer: number | null }>({ attempt: 0, timer: null });
   const load = useCallback(async (v: View) => {
+    if (retry.current.timer != null) { window.clearTimeout(retry.current.timer); retry.current.timer = null; }
     const margin = (v.end - v.start) * 0.5;
     const entries = await Promise.all(
       cameras.map(async (c) => {
@@ -443,25 +450,38 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
           const r = await apiFor(serverOf(k)).recordings(c.id, v.start - margin + off, v.end + margin + off);
           return [k, shiftLane({ spans: mergeSpans(r.spans), events: r.events, kept: r.kept ?? [], locks: r.locks ?? [] }, -off)] as const;
         } catch {
-          return [k, { spans: [], events: [], kept: [], locks: [] }] as const;
+          return [k, null] as const;
         }
       }),
     );
-    setLanes(Object.fromEntries(entries));
+    // A failed lane keeps what it showed before (a dropped tunnel shouldn't blank the Timeline), flagged `error`.
+    setLanes((prev) => Object.fromEntries(entries.map(([k, l]) =>
+      [k, l ?? { ...(prev[k] ?? { spans: [], events: [], kept: [], locks: [] }), error: true }])));
     loadedFor.current = { start: v.start - margin, end: v.end + margin };
+    if (entries.some(([, l]) => l == null)) {
+      const delay = retryDelayMs(retry.current.attempt++);
+      retry.current.timer = window.setTimeout(() => { retry.current.timer = null; loadRef.current(viewRef.current); }, delay);
+    } else retry.current.attempt = 0;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cameras, apiFor]);
+  const loadRef = useRef(load); // the retry timer calls the current load (cameras may have changed meanwhile)
+  loadRef.current = load;
+  useEffect(() => () => {
+    if (retry.current.timer != null) window.clearTimeout(retry.current.timer);
+    retry.current.timer = null;
+  }, [load]);
   useEffect(() => {
     const t = setTimeout(() => load(view), 200);
     return () => clearTimeout(t);
   }, [view, load]);
-  // Keep the live edge fresh
+  // Keep the live edge fresh (unless a backed-off retry is already pending: don't hammer a server that isn't answering)
   useEffect(() => {
     const t = setInterval(() => {
-      if (viewRef.current.end > nowS() - 60) load(viewRef.current);
+      if (viewRef.current.end > nowS() - 60 && retry.current.timer == null) load(viewRef.current);
     }, 10000);
     return () => clearInterval(t);
   }, [load]);
+  const laneError = useMemo(() => Object.values(lanes).some((l) => l.error), [lanes]);
 
   // Mouse wheel: zoom around the cursor; shift+wheel or horizontal swipe pans. Non-passive so the page doesn't scroll.
   useEffect(() => {
@@ -494,8 +514,8 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
   const [scrubbing, setScrubbing] = useState(false);
   const [scrubT, setScrubT] = useState<number | null>(null);
   const [scrubDir, setScrubDir] = useState<1 | -1>(1);
-  const loopState = useRef({ playing, speed, scrubbing, tileIds, lanes });
-  loopState.current = { playing, speed, scrubbing, tileIds, lanes };
+  const loopState = useRef({ playing, speed, scrubbing, tileIds, lanes, isRemote });
+  loopState.current = { playing, speed, scrubbing, tileIds, lanes, isRemote };
 
   const setClock = (t: number) => {
     clockRef.current = t;
@@ -546,12 +566,12 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
       let t = clockRef.current;
       if (t != null && st.playing && !st.scrubbing) {
         // Hold while any tile with footage is buffering, so tiles start and stay together,
-        // but for at most HOLD_MAX_MS so one slow camera can't stall the others forever.
+        // but for at most HOLD_MAX_MS (longer over a remote link) so one slow camera can't stall the others forever.
         const statuses = st.tileIds.map((id) => statusRef.current[id]).filter(Boolean);
         const anyBuffering = statuses.some((s) => s === "buffering");
         if (anyBuffering) holdSince = holdSince ?? now;
         else holdSince = null;
-        const hold = anyBuffering && now - (holdSince ?? now) < HOLD_MAX_MS;
+        const hold = anyBuffering && now - (holdSince ?? now) < (st.isRemote ? HOLD_MAX_MS.remote : HOLD_MAX_MS.local);
         if (!hold) {
           t = Math.min(t + dt * st.speed, nowS() - LIVE_LAG);
           if (st.tileIds.length && !st.tileIds.some((id) => spanAt(st.lanes[id]?.spans, t!))) {
@@ -602,7 +622,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
     }
     const f = pendingFocus.current;
     const lf = loadedFor.current;
-    if (!f || !lf || f.start < lf.start || f.end > lf.end || !lanes[f.cam]) return;
+    if (!f || !lf || f.start < lf.start || f.end > lf.end || !lanes[f.cam] || lanes[f.cam].error) return; // failed lane: wait for the retry
     pendingFocus.current = null;
     const first = f.members?.length ? f.members[0] : { cam: f.cam, start: f.start, end: f.end };
     seekTo(first.start - FOCUS_PREROLL_S, first.cam, true, { noSkip: true, until: first.end });
@@ -982,6 +1002,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
                 site={apiFor(serverOf(id))}
                 camId={idOf(id)}
                 timeOffsetS={offOf(id)}
+                remote={isRemote}
                 audioOn={audioCam === id}
                 onToggleAudio={() => setAudioCam((a) => (a === id ? null : id))}
               />
@@ -1132,6 +1153,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
           <button className="ghost" onClick={() => setOpenLock(null)}>Close</button>
         </div>
       )}
+      {laneError && <div className="muted small tl-retry-note" style={{ margin: "4px 0" }}>Server not answering · retrying</div>}
       <div className="tl-wrap">
       {hover && !drag.current && hoverFrames.shot && hoverFrames.shot.cam === hover.cam && (
         <div className="tl-thumb" style={{ left: Math.min(Math.max(hover.x + 150 - 160, 0), width + 150 - 320) }}>

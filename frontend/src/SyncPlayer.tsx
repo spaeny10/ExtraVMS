@@ -1,13 +1,16 @@
 import { RegionBadge, RegionOverlay } from "./RegionPaint";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type Camera, type SiteApi } from "./api";
-import { PREFETCH_LEAD_S, chunkLen, dropPrefetch, firstChunkLen, isBuffered, prefetchChunk, spanAt, useLatestFrame, type Prefetched, type Span } from "./playback";
+import { PREFETCH_LEAD_S, chunkLen, driftReloadAllowed, dropPrefetch, firstChunkLen, isBuffered, prefetchChunk, shouldReload, spanAt, useLatestFrame, type Prefetched, type Span } from "./playback";
 
 export type TileStatus = "idle" | "paused" | "playing" | "buffering" | "gap";
 const DRIFT_S = 0.5;      // paused: re-seek a tile further than this from the shared clock
 const TRIM_DRIFT_S = 0.15; // playing: nudge the rate when further than this
 const SEEK_DRIFT_S = 6;    // playing: seek/reload when further than this
 const TICK_MS = 250;
+const JUMP_S = 2;          // the clock moving this much more than playback explains is a seek (or a skipped gap), not drift
+const monoS = () => performance.now() / 1000;
+const bufEnd = (v: HTMLVideoElement) => (v.buffered.length ? v.buffered.end(v.buffered.length - 1) : 0);
 
 /**
  * One camera in the synced Timeline grid. It follows a shared clock (clockRef.current = epoch seconds):
@@ -17,7 +20,7 @@ const TICK_MS = 250;
 export function SyncTile({
   cam, name, spans, clockRef, playing, speed, scrubbing, scrubT, previewWidth, active, soloed,
   onSolo, onSelect, statusRef, dragging, dropTarget, onDragPointerDown, camera, hasAudio, audioOn, onToggleAudio,
-  site = api, camId, timeOffsetS = 0,
+  site = api, camId, timeOffsetS = 0, remote = false,
 }: {
   cam: string; name: string; spans: Span[] | undefined; clockRef: React.RefObject<number | null>;
   playing: boolean; speed: number; scrubbing: boolean; scrubT: number | null; previewWidth: number;
@@ -34,6 +37,8 @@ export function SyncTile({
   site?: SiteApi; camId?: string;
   /** how far this server's clock is ahead of the shared clock (server time = shared + offset; 0 = none) */
   timeOffsetS?: number;
+  /** the camera is reached through the hub (slow site uplink): short chunks, and wait for a download that is still arriving */
+  remote?: boolean;
 }) {
   const id = camId ?? cam;
   const off = timeOffsetS;
@@ -45,8 +50,15 @@ export function SyncTile({
   const blobInUse = useRef<string | null>(null);      // the current chunk's blob URL, revoked when it is replaced
   const [status, setStatus] = useState<TileStatus>("idle");
   const frames = useLatestFrame(previewWidth, frameUrlFor);
-  const props = useRef({ playing, speed, spans, scrubbing });
-  props.current = { playing, speed, spans, scrubbing };
+  const props = useRef({ playing, speed, spans, scrubbing, remote });
+  props.current = { playing, speed, spans, scrubbing, remote };
+  // download/playback progress of the current chunk, so a slow but live download is waited for rather than restarted
+  const lastBufferedEnd = useRef(0);
+  const lastCurTime = useRef(-1);
+  const lastProgressAt = useRef(monoS());
+  const lastDriftReloadAt = useRef<number | null>(null); // rate-limits drift reloads (DRIFT_RELOAD_MIN_S)
+  const lastClock = useRef<{ t: number; at: number } | null>(null);
+  const seekPending = useRef(false);                      // the clock jumped: reload now, no waiting, no rate limit
   const chunkRef = useRef(chunk);
   chunkRef.current = chunk;
 
@@ -58,9 +70,14 @@ export function SyncTile({
    *  second; a continuation (`cont` true) uses the full length and the prefetched download when it has one. */
   const load = (t: number, cont = false) => {
     loaded.current = false;
+    seekPending.current = false;
+    lastBufferedEnd.current = 0;
+    lastCurTime.current = -1;
+    lastProgressAt.current = monoS(); // a new download gets a full STALL_S before it can be called dead
     if (blobInUse.current) URL.revokeObjectURL(blobInUse.current);
     blobInUse.current = null;
-    let len = cont ? chunkLen(t) : firstChunkLen(t);
+    const remote = props.current.remote;
+    let len = cont ? chunkLen(t, remote) : firstChunkLen(t, remote);
     let src = site.playbackUrl(id, t + off, len);
     const p = prefetch.current;
     if (p && Math.abs(p.start - t) < 1 && p.url) {
@@ -78,24 +95,48 @@ export function SyncTile({
   const prefetchNext = (c: { start: number; len: number }) => {
     const next = c.start + c.len + 0.1;
     if (prefetch.current || !spanAt(props.current.spans, next)) return;
-    const len = chunkLen(next);
+    const len = chunkLen(next, props.current.remote);
     prefetch.current = prefetchChunk(site.playbackUrl(id, next + off, len), next, len);
+  };
+
+  /** Note whether the chunk's buffer grew or its video moved since last time. */
+  const noteProgress = (v: HTMLVideoElement) => {
+    const end = bufEnd(v);
+    const ct = v.currentTime;
+    if (end > lastBufferedEnd.current + 0.05 || Math.abs(ct - lastCurTime.current) > 0.05) lastProgressAt.current = monoS();
+    lastBufferedEnd.current = Math.max(lastBufferedEnd.current, end);
+    lastCurTime.current = ct;
   };
 
   // Follow the shared clock.
   useEffect(() => {
     const tick = () => {
-      const { playing, speed, spans, scrubbing } = props.current;
+      const { playing, speed, spans, scrubbing, remote } = props.current;
       const t = clockRef.current;
       const v = video.current;
       const c = chunkRef.current;
-      if (t == null) return report("idle");
+      const now = monoS();
+      if (t == null) { lastClock.current = null; return report("idle"); }
+      // A clock move that playback at `speed` can't explain (backwards, or well ahead) is a seek or a skipped gap.
+      const lc = lastClock.current;
+      if (lc && (t < lc.t - 1 || t - lc.t > speed * (now - lc.at) + JUMP_S)) seekPending.current = true;
+      lastClock.current = { t, at: now };
       if (!spanAt(spans, t)) {
         if (v && !v.paused) v.pause();
         return report("gap");
       }
       if (scrubbing) return report("paused"); // the preview frames are showing; don't fight the drag
-      if (!c || t < c.start - DRIFT_S || t > c.start + c.len - 1) {
+      if (v && loaded.current) noteProgress(v);
+      const pastEnd = !!c && t > c.start + c.len - 1;
+      if (!c || t < c.start - DRIFT_S || pastEnd) {
+        // Remote: the clock outran a chunk that is still arriving/playing. Let it play out (onEnded continues with
+        // the prefetched next chunk) instead of aborting it for a new download that would be just as slow.
+        if (c && pastEnd && remote && playing && v && loaded.current && !v.ended && !seekPending.current &&
+          !shouldReload({ clockRel: t - c.start, bufferedEnd: bufEnd(v), lastProgressAt: lastProgressAt.current, now, remote, len: c.len, pastChunkEnd: true })) {
+          if (v.paused) v.play().catch(() => {});
+          prefetchNext(c);
+          return report("buffering");
+        }
         load(t);
         return report(playing ? "buffering" : "paused");
       }
@@ -103,15 +144,21 @@ export function SyncTile({
       const rel = t - c.start;
       const drift = v.currentTime - rel; // > 0: this tile is ahead of the clock
       let rate = speed;
+      let behind = false; // the clock is past what has arrived: report buffering so the Timeline holds
       if (Math.abs(drift) > SEEK_DRIFT_S || (!playing && Math.abs(drift) > DRIFT_S)) {
         // Large gap (or paused: nothing to catch up with): jump.
         if (isBuffered(v, rel, 0.1)) v.currentTime = rel;
         else {
-          const end = v.buffered.length ? v.buffered.end(v.buffered.length - 1) : 0;
-          if (rel > end + 4 || rel < (v.buffered.length ? v.buffered.start(0) : 0)) {
-            load(t); // far outside what this chunk has: fetch a new one at the clock time
+          const jumped = seekPending.current;
+          const end = bufEnd(v);
+          const before = rel < (v.buffered.length ? v.buffered.start(0) : 0);
+          const want = before || shouldReload({ clockRel: rel, bufferedEnd: end, lastProgressAt: lastProgressAt.current, now, remote, len: c.len, jumped });
+          if (want && (jumped || driftReloadAllowed(lastDriftReloadAt.current, now, remote))) {
+            if (!jumped) lastDriftReloadAt.current = now;
+            load(t); // far outside what this chunk has (or its download died): fetch a new one at the clock time
             return report(playing ? "buffering" : "paused");
           }
+          behind = remote ? rel > end : want; // local: only while a wanted reload is rate-limited (otherwise as before)
         }
       } else if (Math.abs(drift) > TRIM_DRIFT_S) {
         // Small gap: nudge the playback rate. The browser only buffers a few seconds ahead,
@@ -119,11 +166,12 @@ export function SyncTile({
         const nudge = Math.min(0.3, Math.abs(drift) * 0.25);
         rate = speed * (drift < 0 ? 1 + nudge : 1 - nudge);
       }
+      seekPending.current = false; // handled: the jump landed inside this chunk
       if (Math.abs(v.playbackRate - rate) > 0.01) v.playbackRate = rate;
       if (playing && v.paused) v.play().catch(() => {});
       if (!playing && !v.paused) v.pause();
       if (playing && c.start + c.len - t < PREFETCH_LEAD_S * Math.max(1, speed)) prefetchNext(c);
-      report(!playing ? "paused" : v.readyState >= 3 && !v.paused ? "playing" : "buffering");
+      report(!playing ? "paused" : !behind && v.readyState >= 3 && !v.paused ? "playing" : "buffering");
     };
     tick();
     const id = window.setInterval(tick, TICK_MS);
@@ -177,6 +225,7 @@ export function SyncTile({
             loaded.current = true;
             e.currentTarget.currentTime = Math.max(0, (clockRef.current ?? chunk.start) - chunk.start);
           }}
+          onProgress={(e) => { if (loaded.current) noteProgress(e.currentTarget); }}
           onSeeked={onCaughtUp}
           onPlaying={onCaughtUp}
           onEnded={(e) => {

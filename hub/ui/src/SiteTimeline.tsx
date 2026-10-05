@@ -143,7 +143,7 @@ export function SiteTimeline({ site, query, syncUrl = true }: { org: Org; site: 
   return (
     <NavContext.Provider value={nav}>
       {missing.length > 0 && <p className="muted small site-timeline-note">Not shown: {missing.map((s) => s.name).join(", ")} ({why}).</p>}
-      <TimelineView key={site.id} cameras={cameras} focus={focus} onClearFocus={clearFocus} apiFor={siteApi} layoutStore={layoutStore} storageKey={storageKey} />
+      <TimelineView key={site.id} cameras={cameras} focus={focus} onClearFocus={clearFocus} apiFor={siteApi} remote layoutStore={layoutStore} storageKey={storageKey} />
     </NavContext.Provider>
   );
 }

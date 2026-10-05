@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CHUNK, FAR_CHUNK, FIRST_FAR_CHUNK, camKey, chunkLen, dropPrefetch, firstChunkLen, nowS, prefetchChunk, splitKey } from "./playback";
+import {
+  CHUNK, DRIFT_RELOAD_MIN_S, FAR_CHUNK, FIRST_FAR_CHUNK, HOLD_MAX_MS, REMOTE_CHUNK, REMOTE_FIRST_CHUNK, RETRY_STEADY_MS, STALL_S,
+  camKey, chunkLen, driftReloadAllowed, dropPrefetch, firstChunkLen, nowS, prefetchChunk, retryDelayMs, shouldReload, splitKey,
+} from "./playback";
 
 describe("chunk lengths", () => {
   it("near live: long chunks; far back: a short first chunk then full ones", () => {
@@ -10,6 +13,71 @@ describe("chunk lengths", () => {
     expect(firstChunkLen(far)).toBe(FIRST_FAR_CHUNK);
     expect(chunkLen(far)).toBe(FAR_CHUNK);
     expect(FIRST_FAR_CHUNK).toBeLessThan(FAR_CHUNK);
+  });
+});
+
+describe("chunk lengths through the hub (remote)", () => {
+  it("short first chunk and 60 s continuations, near live and far back alike", () => {
+    for (const t of [nowS() - 60, nowS() - 3 * 86400]) {
+      expect(firstChunkLen(t, true)).toBe(REMOTE_FIRST_CHUNK);
+      expect(chunkLen(t, true)).toBe(REMOTE_CHUNK);
+    }
+    expect(REMOTE_FIRST_CHUNK).toBe(20);
+    expect(REMOTE_CHUNK).toBe(60);
+  });
+  it("local values are unchanged when remote is false or omitted", () => {
+    const recent = nowS() - 60;
+    expect(chunkLen(recent, false)).toBe(CHUNK);
+    expect(firstChunkLen(recent, false)).toBe(CHUNK);
+    expect(chunkLen(nowS() - 3 * 86400, false)).toBe(FAR_CHUNK);
+  });
+});
+
+describe("stall decision (shouldReload)", () => {
+  const base = { clockRel: 30, bufferedEnd: 20, lastProgressAt: 100, now: 102, remote: true, len: 60 };
+  it("never reloads while the clock is within the slack of the buffered end", () => {
+    expect(shouldReload({ ...base, clockRel: 23, remote: false })).toBe(false);
+    expect(shouldReload({ ...base, clockRel: 23, now: 1000 })).toBe(false);
+  });
+  it("local: reloads as soon as the clock is well past the buffer (as before)", () => {
+    expect(shouldReload({ ...base, remote: false })).toBe(true);
+  });
+  it("remote: waits while the download is progressing", () => {
+    expect(shouldReload(base)).toBe(false);
+    expect(shouldReload({ ...base, now: base.lastProgressAt + STALL_S - 0.1 })).toBe(false);
+  });
+  it("remote: reloads once nothing has progressed for STALL_S", () => {
+    expect(shouldReload({ ...base, now: base.lastProgressAt + STALL_S })).toBe(true);
+  });
+  it("remote: reloads at once after a seek, or when the clock is more than two chunks past", () => {
+    expect(shouldReload({ ...base, jumped: true })).toBe(true);
+    expect(shouldReload({ ...base, clockRel: 20 + 2 * 60 + 1 })).toBe(true);
+    expect(shouldReload({ ...base, clockRel: 20 + 2 * 60 - 1 })).toBe(false);
+  });
+  it("past the chunk end the slack doesn't apply, but a live download is still waited for", () => {
+    expect(shouldReload({ ...base, clockRel: 61, bufferedEnd: 60, pastChunkEnd: true, remote: false })).toBe(true);
+    expect(shouldReload({ ...base, clockRel: 61, bufferedEnd: 60, pastChunkEnd: true })).toBe(false);
+    expect(shouldReload({ ...base, clockRel: 61, bufferedEnd: 60, pastChunkEnd: true, now: 100 + STALL_S })).toBe(true);
+  });
+});
+
+describe("drift reload rate limit and clock hold", () => {
+  it("allows one drift reload per DRIFT_RELOAD_MIN_S", () => {
+    expect(driftReloadAllowed(null, 50, true)).toBe(true);
+    expect(driftReloadAllowed(50, 50 + DRIFT_RELOAD_MIN_S.remote - 1, true)).toBe(false);
+    expect(driftReloadAllowed(50, 50 + DRIFT_RELOAD_MIN_S.remote, true)).toBe(true);
+    expect(driftReloadAllowed(50, 50 + DRIFT_RELOAD_MIN_S.local, false)).toBe(true);
+    expect(DRIFT_RELOAD_MIN_S).toEqual({ local: 5, remote: 15 });
+  });
+  it("holds 3 s locally, 20 s remote", () => {
+    expect(HOLD_MAX_MS).toEqual({ local: 3000, remote: 20000 });
+  });
+});
+
+describe("recordings retry backoff", () => {
+  it("2 s, 5 s, 10 s, then every 30 s", () => {
+    expect([0, 1, 2, 3, 4, 50].map(retryDelayMs)).toEqual([2000, 5000, 10000, 30000, 30000, 30000]);
+    expect(RETRY_STEADY_MS).toBe(30000);
   });
 });
 
