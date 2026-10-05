@@ -19,13 +19,17 @@ import { SitePage } from "./SitePage";
 import { SitesPage } from "./SitesPage";
 import { type AuditRow, type HubAdmin, type Me, type Org, type PushInfo, ago, api, fmtTime } from "./api";
 import { ALL_CUSTOMERS } from "./hubAdmin";
+import { isSocUser, socLanding } from "./access";
+import { SocHeader } from "./soc/SocHeader";
+import { SocRouter } from "./soc/SocRouter";
 
-/** Header nav: path, label, icon (phone tab bar), and the pages that light it up. */
-const NAV: { path: string; label: string; icon: string; pages: Page[] }[] = [
+/** Header nav: path, label, icon (phone tab bar), the pages that light it up, and (soc) shown to SOC staff only. */
+const NAV: { path: string; label: string; icon: string; pages: Page[]; soc?: boolean }[] = [
   { path: "/", label: "Home", icon: "home", pages: ["home"] },
   { path: "/sites", label: "Sites", icon: "grid", pages: ["sites", "site", "server"] },
   { path: "/find", label: "Find", icon: "find", pages: ["find"] },
   { path: "/alerts", label: "Alerts", icon: "alert", pages: ["alerts"] },
+  { path: "/soc", label: "SOC", icon: "lock", pages: ["soc"], soc: true },
   { path: "/customer", label: "Customer", icon: "settings", pages: ["customer"] },
   { path: "/audit", label: "Audit", icon: "events", pages: ["audit"] },
   { path: "/account", label: "Account", icon: "user", pages: ["account"] },
@@ -50,6 +54,10 @@ export default function App() {
   useEffect(() => { if (route.redirect) navigate(route.redirect + location.search + location.hash, true); }, [route.redirect]);
   // inside a Site you're in exactly one customer (SitePage's onOrg switches to it if needed), so "all" ends there
   useEffect(() => { if (allMode && (route.page === "site" || route.page === "server")) setAll(false); }, [allMode, route.page, setAll]);
+  // SOC staff with no customer of their own have nothing on Home: `/` opens their console (only the bare `/`, so a
+  // stray path that falls back to Home doesn't bounce them)
+  const landing = me ? socLanding(me) : null;
+  useEffect(() => { if (landing && path === "/") navigate(landing, true); }, [landing, path]);
   if (me === undefined) return null;
   // the invite page is public: it shows who invited you before any sign-in, and joins a signed-in account in one click
   if (route.page === "invite" && route.code) {
@@ -65,6 +73,7 @@ export default function App() {
   const orgs = me.orgs;
   const current = orgs.find((o) => o.id === org) ?? orgs[0];
   const page = route.page;
+  const soc = isSocUser(me);
   const all = allMode && me.user.is_super;   // a stored "all" from a hub admin since demoted is ignored
   // a Site belongs to one customer: switching customer while inside one goes back to the Sites list
   const pickOrg = (id: string) => {
@@ -77,13 +86,15 @@ export default function App() {
       <OfflineBanner />
       <header className="hub-top">
         <span className="brand"><img className="logo" src="/axiom.webp" alt="Axiom Vision" /></span>
-        <nav>{NAV.map((n) => (
+        <nav>{NAV.filter((n) => !n.soc || soc).map((n) => (
           <a key={n.path} href={n.path} className={n.pages.includes(page) ? "active" : ""} onClick={go(n.path)}>
             <span className="tab-icon"><Icon name={n.icon} size={20} /></span>{n.label}
           </a>
         ))}</nav>
         <span className="spacer" />
-        {(orgs.length > 1 || (me.user.is_super && orgs.length > 0)) && (
+        {/* the SOC works across customers: its pages swap the picker for presence and the alarm sound */}
+        {page === "soc" && soc && <SocHeader me={me} />}
+        {page !== "soc" && (orgs.length > 1 || (me.user.is_super && orgs.length > 0)) && (
           <label className="customer-pick"><span className="muted small">Customer</span>
             {/* "All customers" is a Sites-list view: other pages work in one customer, so the picker names that one there */}
             <select value={all && page === "sites" ? ALL_CUSTOMERS : current?.id ?? ""} onChange={(e) => pickOrg(e.target.value)}>
@@ -101,14 +112,15 @@ export default function App() {
         {page === "sites" && all && <AllSitesPage onOpenCustomer={openCustomer} />}
         {page === "sites" && !all && current && <SitesPage org={current} me={me} />}
         {(page === "site" || page === "server") && current && route.siteId && (
-          <SitePage key={route.siteId} org={current} me={me} siteId={route.siteId} tab={route.tab ?? "live"} serverId={route.serverId} onOrg={openCustomer} />
+          <SitePage key={route.siteId} org={current} me={me} siteId={route.siteId} tab={route.tab ?? "live"} section={route.section} serverId={route.serverId} onOrg={openCustomer} />
         )}
         {page === "alerts" && current && <AlertsPage org={current} />}
         {page === "find" && current && <FindPage org={current} />}
         {page === "customer" && current && <CustomerPage org={current} me={me} tab={(route.tab ?? "sites") as CustomerTab} onChanged={reload} />}
         {page === "audit" && current && <AuditPage org={current} />}
         {page === "account" && <AccountPage me={me} onChanged={reload} />}
-        {!current && page !== "account" && <p className="muted">You're not a member of any customer yet. {me.user.is_super ? "Create one under Customer." : "Ask an owner to add you."}</p>}
+        {page === "soc" && (soc ? <SocRouter me={me} route={route} /> : <p className="muted">You're not in the SOC. Ask a hub administrator.</p>)}
+        {!current && page !== "account" && page !== "soc" && !landing && <p className="muted">You're not a member of any customer yet. {me.user.is_super ? "Create one under Customer." : "Ask an owner to add you."}</p>}
       </main>
       <Toaster />
       <Dialogs />

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { consoleHref, consoleTimelineHref, matchRoute, serverHref, siteHref } from "./nav";
+import { consoleHref, consoleTimelineHref, incidentHref, matchRoute, reportHref, serverHref, settingsHref, siteHref, socHref } from "./nav";
 
 describe("invite route", () => {
   it("is public and carries the code", () => {
@@ -34,8 +34,26 @@ describe("matchRoute", () => {
   });
 
   it("site tabs", () => {
-    for (const tab of ["live", "timeline", "find", "alerts", "servers", "settings"])
+    for (const tab of ["live", "timeline", "find", "alerts", "servers"])
       expect(matchRoute(`/sites/l_abc/${tab}`)).toEqual({ page: "site", siteId: "l_abc", tab });
+  });
+
+  it("settings sections; bare /settings is General", () => {
+    expect(matchRoute("/sites/l_abc/settings")).toEqual({ page: "site", siteId: "l_abc", tab: "settings", section: "general" });
+    for (const section of ["general", "monitoring", "contacts", "procedures"])
+      expect(matchRoute(`/sites/l_abc/settings/${section}`)).toEqual({ page: "site", siteId: "l_abc", tab: "settings", section });
+    expect(matchRoute("/sites/l_abc/settings/bogus")).toEqual({ page: "site", siteId: "l_abc", tab: "settings", section: "general", redirect: "/sites/l_abc/settings" });
+  });
+
+  it("SOC pages", () => {
+    expect(matchRoute("/soc")).toEqual({ page: "soc", socTab: "queue" });
+    expect(matchRoute("/soc/incidents/42")).toEqual({ page: "soc", socTab: "incident", incidentId: "42" });
+    expect(matchRoute("/soc/incidents")).toEqual({ page: "soc", socTab: "queue", redirect: "/soc" });
+    expect(matchRoute("/soc/supervisor")).toEqual({ page: "soc", socTab: "supervisor" });
+    expect(matchRoute("/soc/reports")).toEqual({ page: "soc", socTab: "reports", report: "operators" });
+    expect(matchRoute("/soc/reports/false-alarms")).toEqual({ page: "soc", socTab: "reports", report: "false-alarms" });
+    expect(matchRoute("/soc/reports/nope")).toEqual({ page: "soc", socTab: "reports", report: "operators", redirect: "/soc/reports" });
+    expect(matchRoute("/soc/whatever")).toEqual({ page: "soc", socTab: "queue", redirect: "/soc" });
   });
 
   it("a server inside a site", () => {
@@ -68,6 +86,17 @@ describe("hrefs", () => {
   it("round-trip through matchRoute", () => {
     expect(matchRoute(siteHref("l_1", "servers"))).toEqual({ page: "site", siteId: "l_1", tab: "servers" });
     expect(matchRoute(serverHref("l_1", "s_2"))).toMatchObject({ page: "server", siteId: "l_1", serverId: "s_2" });
+  });
+  it("settings and SOC round-trip through matchRoute", () => {
+    expect(settingsHref("l 1")).toBe("/sites/l%201/settings");
+    expect(matchRoute(settingsHref("l_1", "contacts"))).toEqual({ page: "site", siteId: "l_1", tab: "settings", section: "contacts" });
+    expect(matchRoute(settingsHref("l_1", "general")).section).toBe("general");
+    expect(socHref()).toBe("/soc");
+    expect(matchRoute(socHref("supervisor")).socTab).toBe("supervisor");
+    expect(matchRoute(socHref("reports"))).toMatchObject({ socTab: "reports", report: "operators" });
+    expect(matchRoute(incidentHref(7))).toEqual({ page: "soc", socTab: "incident", incidentId: "7" });
+    expect(reportHref()).toBe("/soc/reports");
+    expect(matchRoute(reportHref("shifts"))).toMatchObject({ socTab: "reports", report: "shifts" });
   });
   it("server console", () => {
     expect(consoleHref("s_2")).toBe("/s/s_2/");

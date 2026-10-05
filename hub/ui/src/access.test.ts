@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { accessLabel, digestPartsFor, lastEventBySite, ofTotal, toggleAccess } from "./access";
+import { accessLabel, canEditMonitoring, digestPartsFor, isSocSupervisor, isSocUser, lastEventBySite, ofTotal, socLanding, socRole, toggleAccess } from "./access";
+import type { Me, Org } from "./api";
 
 describe("toggleAccess", () => {
   const a = { all_sites: false, location_ids: ["l_1"] };
@@ -53,5 +54,37 @@ describe("digestPartsFor", () => {
   it("null for a digest without per-server data", () => {
     expect(digestPartsFor({}, { id: "l_1", servers: [] })).toBeNull();
     expect(digestPartsFor(null, { id: "l_1", servers: [] })).toBeNull();
+  });
+});
+
+describe("SOC roles", () => {
+  const me = (u: Partial<Me["user"]>, orgs: Partial<Org>[] = []): Me => ({
+    user: { id: "u", email: "a@b.c", totp_enabled: false, is_super: false, ...u },
+    orgs: orgs.map((o, i) => ({ id: `o${i}`, name: "C", slug: "c", role: "viewer", ...o })), active_org: null,
+  });
+  it("hub administrators count as supervisors", () => {
+    expect(socRole(me({ is_super: true }))).toBe("supervisor");
+    expect(socRole(me({ soc_role: "operator" }))).toBe("operator");
+    expect(socRole(me({}))).toBeNull();
+    expect(socRole(me({ soc_role: null }))).toBeNull();
+    expect(isSocUser(me({ soc_role: "operator" }))).toBe(true);
+    expect(isSocSupervisor(me({ soc_role: "operator" }))).toBe(false);
+    expect(isSocSupervisor(me({ is_super: true }))).toBe(true);
+  });
+  it("monitoring is edited by customer admins and SOC supervisors", () => {
+    const org = (role: string): Org => ({ id: "o", name: "C", slug: "c", role });
+    expect(canEditMonitoring(org("admin"), me({}))).toBe(true);
+    expect(canEditMonitoring(org("owner"), me({}))).toBe(true);
+    expect(canEditMonitoring(org("operator"), me({}))).toBe(false);
+    expect(canEditMonitoring(org("operator"), me({ soc_role: "operator" }))).toBe(false);
+    expect(canEditMonitoring(org("operator"), me({ soc_role: "supervisor" }))).toBe(true);
+    expect(canEditMonitoring(undefined, me({ is_super: true }))).toBe(true);
+  });
+  it("pure SOC staff land on their console; members and hub admins keep Home", () => {
+    expect(socLanding(me({ soc_role: "operator" }))).toBe("/soc");
+    expect(socLanding(me({ soc_role: "supervisor" }, [{ soc: true }]))).toBe("/soc/supervisor");
+    expect(socLanding(me({ soc_role: "operator" }, [{ soc: true }, {}]))).toBeNull();
+    expect(socLanding(me({ is_super: true }))).toBeNull();
+    expect(socLanding(me({}, []))).toBeNull();
   });
 });

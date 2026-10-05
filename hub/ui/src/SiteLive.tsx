@@ -18,7 +18,8 @@ import type { Widget } from "@site/dashboard/types";
 import { Icon, swipeHandlers, useIsPhone } from "@site/ui";
 import { type Camera as RegistryCam, type Fleet, type Org, type Server, type Site, api } from "./api";
 import { makeHubSource, siteApi } from "./hubSource";
-import { type LayoutAction, type LiveLayout, type Quality, arrange, gridCols, isVisible, layoutReducer, loadLayout, saveLayout, tileLabel, wrapIndex } from "./liveLayout";
+import { EMPTY_LAYOUT, type LayoutAction, type LiveFocus, type LiveLayout, type Quality, applyFocus, arrange, gridCols, isVisible, layoutReducer, loadLayout, saveLayout, tileLabel,
+  wrapIndex } from "./liveLayout";
 
 /** live: full camera record from the server · loading: server online, cameras not fetched yet · unreachable: the
  *  server is online at the hub but its camera list failed (busy tunnel, restarting) · offline: the server is offline */
@@ -31,7 +32,16 @@ function siteFleet(org: Org, site: Site): Fleet {
   return { orgs: [{ org, sites: site.servers.filter((s) => !s.retired_at), open_alerts: site.open_alerts }], now: Date.now() / 1000, offline_after_s: 0 };
 }
 
-export function SiteLive({ org, site }: { org: Org; site: Site }) {
+/**
+ * Embedding props (the SOC incident view; the Site's Live tab uses none of them):
+ * `focus` puts the given tile keys (camKey) first or shows only them, and keeps them visible even if hidden in the
+ * layout; `persist={false}` starts from the default layout and never writes this browser's stored one (an operator's
+ * per-incident reshuffles shouldn't rearrange the customer's Live tab); `compact` drops the stream toolbar and the
+ * camera chips; `hideActivity` drops the "Latest activity" column (the incident view has its own event list).
+ */
+export type SiteLiveProps = { org: Org; site: Site; focus?: LiveFocus | null; persist?: boolean; compact?: boolean; hideActivity?: boolean };
+
+export function SiteLive({ org, site, focus: want = null, persist = true, compact = false, hideActivity = false }: SiteLiveProps) {
   const servers = useMemo(() => site.servers.filter((s) => !s.retired_at), [site.servers]);
   const multi = servers.length > 1;
   // the Site object is replaced on every 15 s poll; a source rebuilt each time would make EventsWidget refetch and
@@ -74,16 +84,17 @@ export function SiteLive({ org, site }: { org: Org; site: Site }) {
     return known.map((c) => ({ key: camKey(s.id, c.id), server: s, id: c.id, name: c.name, state, cam: null, streamReady: false }));
   }), [servers, full, registry]);
 
-  const [layout, dispatch] = useReducer(layoutReducer, site.id, loadLayout);
-  useEffect(() => { saveLayout(site.id, layout); }, [site.id, layout]);
+  const [layout, dispatch] = useReducer(layoutReducer, site.id, (id) => (persist ? loadLayout(id) : EMPTY_LAYOUT));
+  useEffect(() => { if (persist) saveLayout(site.id, layout); }, [persist, site.id, layout]);
   const allKeys = tiles.map((t) => t.key);
   const byKey = new Map(tiles.map((t) => [t.key, t]));
-  const ordered = arrange(allKeys, layout).map((k) => byKey.get(k)!);
-  const shown = ordered.filter((t) => isVisible(layout, t.key));
+  const ordered = applyFocus(arrange(allKeys, layout), want).map((k) => byKey.get(k)!);
+  const pinned = new Set(want?.keys ?? []);
+  const shown = ordered.filter((t) => pinned.has(t.key) || isVisible(layout, t.key));
 
   const [hdUnsupported, setHdUnsupported] = useState(false);
   const q = (key: string): Quality => (hdUnsupported ? "sd" : layout.quality[key] ?? "sd");
-  const [focus, setFocus] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<string | null>(null);
   const isPhone = useIsPhone();
 
   if (servers.length === 0) return <p className="muted">This site has no servers yet.</p>;
@@ -91,31 +102,31 @@ export function SiteLive({ org, site }: { org: Org; site: Site }) {
 
   const tileProps = { source, multi, q, dispatch, hdUnsupported, onUnsupported: () => setHdUnsupported(true) };
   const events: Widget<"events"> = { id: `site-live-${site.id}`, type: "events", x: 0, y: 0, w: 1, h: 1, props: { sites: servers.map((s) => s.id), limit: 12 } };
-  const activity = <aside className="live-feed"><h3>Latest activity</h3><EventsWidget widget={events} source={source} /></aside>;
+  const activity = hideActivity ? null : <aside className="live-feed"><h3>Latest activity</h3><EventsWidget widget={events} source={source} /></aside>;
   if (isPhone) return <PhoneLive tiles={shown.length ? shown : ordered} activity={activity} {...tileProps} />;
 
-  const focused = focus ? shown.find((t) => t.key === focus) : undefined;
+  const focused = expanded ? shown.find((t) => t.key === expanded) : undefined;
   const grid = focused ? [focused] : shown;
   const liveKeys = shown.filter((t) => t.state === "live").map((t) => t.key);
   const allHd = liveKeys.length > 0 && liveKeys.every((k) => q(k) === "hd");
   const allSd = liveKeys.every((k) => q(k) === "sd");
   return (
     <LiveBudgetProvider>
-      <div className="live-layout">
+      <div className={`live-layout ${hideActivity ? "site-live-solo" : ""} ${compact ? "site-live-compact" : ""}`}>
         <div className="live-main">
-          <div className="toolbar live-toolbar">
+          {!compact && <div className="toolbar live-toolbar">
             <span className="muted small">Stream</span>
             <div className="segmented">
               <button className={allSd ? "active" : ""} onClick={() => dispatch({ type: "allQuality", keys: liveKeys, quality: "sd" })} title="H.264 sub stream: low bandwidth, plays in any browser">All SD</button>
               <button className={allHd ? "active" : ""} disabled={hdUnsupported} onClick={() => dispatch({ type: "allQuality", keys: liveKeys, quality: "hd" })} title="Full-resolution H.265 main stream">All HD</button>
             </div>
             {hdUnsupported && <span className="muted small">This browser can't play the H.265 main stream, so live view is using SD.</span>}
-          </div>
-          <CameraChips tiles={ordered} layout={layout} multi={multi} dispatch={dispatch} />
+          </div>}
+          {!compact && <CameraChips tiles={ordered} layout={layout} multi={multi} dispatch={dispatch} />}
           <div className="live-grid" style={{ gridTemplateColumns: `repeat(${focused ? 1 : gridCols(grid.length)}, minmax(0, 1fr))` }}>
             {grid.map((t) => (
               <SiteTile key={t.key} t={t} {...tileProps}
-                extra={<button className="ghost small" onClick={() => setFocus(focused ? null : t.key)}>{focused ? "Grid" : "Expand"}</button>} />
+                extra={<button className="ghost small" onClick={() => setExpanded(focused ? null : t.key)}>{focused ? "Grid" : "Expand"}</button>} />
             ))}
             {grid.length === 0 && <div className="empty">Every camera is hidden. Show some with the chips above, or Reset.</div>}
           </div>

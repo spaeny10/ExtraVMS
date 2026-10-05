@@ -1,7 +1,30 @@
 /** Small pure helpers shared by the Sites pages and Customer admin (kept apart from components so they are unit-tested). */
-import type { Access, Me, Org, Server, Site } from "./api";
+import type { Access, Me, Org, Server, Site, SocRole } from "./api";
 
 export const isAdmin = (org: Org | undefined, me: Me) => me.user.is_super || org?.role === "admin" || org?.role === "owner";
+
+/** The user's SOC role. Hub administrators count as supervisors (the hub's soc_level does the same). */
+export const socRole = (me: Me): SocRole | null => (me.user.is_super ? "supervisor" : me.user.soc_role ?? null);
+export const isSocUser = (me: Me) => socRole(me) !== null;
+export const isSocSupervisor = (me: Me) => socRole(me) === "supervisor";
+
+/**
+ * Who configures a Site's monitoring, contacts and procedures: the customer's admins (it is their Site and their call
+ * list) and SOC supervisors (they set Sites up during onboarding). SOC operators and customer operators may only arm
+ * or disarm now.
+ */
+export const canEditMonitoring = (org: Org | undefined, me: Me) => isAdmin(org, me) || isSocSupervisor(me);
+
+/**
+ * Where `/` sends someone: SOC staff with no real customer membership (every customer they see is there only through
+ * the SOC) go to their console, supervisors to the supervisor view. Hub administrators and customer members keep Home.
+ */
+export function socLanding(me: Me): string | null {
+  const role = socRole(me);
+  if (!role || me.user.is_super) return null;
+  if (me.orgs.some((o) => !o.soc)) return null;
+  return role === "supervisor" ? "/soc/supervisor" : "/soc";
+}
 
 /**
  * One checkbox in a member's Site list changed. Ticking "All sites" keeps the list (so unticking it later restores the

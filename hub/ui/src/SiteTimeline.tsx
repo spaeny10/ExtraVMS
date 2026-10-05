@@ -21,7 +21,12 @@ import "./siteTimeline.css";
 const CAMERA_REFRESH_MS = 60000;
 const dropHashLink = (hash: string) => (hash.startsWith("#timeline") ? "" : hash);
 
-export function SiteTimeline({ site, query }: { org: Org; site: Site; query: string | URLSearchParams }) {
+/**
+ * `syncUrl` (default true): focusing an event or clearing focus rewrites the page URL into a shareable Timeline link.
+ * An embedding page whose URL means something else (the SOC's /soc/incidents/:id) passes false and deep-links
+ * through `query` instead (same parameters as the link: ?server=&cam=&event=).
+ */
+export function SiteTimeline({ site, query, syncUrl = true }: { org: Org; site: Site; query: string | URLSearchParams; syncUrl?: boolean }) {
   const servers = useMemo(() => site.servers.filter((s) => !s.retired_at), [site.servers]);
   const online = useMemo(() => servers.filter((s) => s.online), [servers]);
   const onlineKey = online.map((s) => s.id).sort().join(",");
@@ -84,10 +89,11 @@ export function SiteTimeline({ site, query }: { org: Org; site: Site; query: str
   const focusOn = useCallback((server: string, e: TimelineTarget) => {
     setFocus(focusFor(server, e, offsetOf(server)));
     const journey = !!e.members?.length;
+    if (!syncUrl) return;
     const href = siteTimelineHref(site.id, server, journey ? e.members![0].cam : e.camera_id, e.id || null, e.id ? null : e.start_ts, journey);
     history.replaceState(history.state, "", href + dropHashLink(location.hash));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [site.id]);
+  }, [site.id, syncUrl]);
 
   const search = typeof query === "string" ? query : `?${query.toString()}`;
   useEffect(() => {
@@ -112,8 +118,8 @@ export function SiteTimeline({ site, query }: { org: Org; site: Site; query: str
 
   const clearFocus = useCallback(() => {
     setFocus(null);
-    history.replaceState(history.state, "", location.pathname + withoutTimelineParams(location.search) + dropHashLink(location.hash));
-  }, []);
+    if (syncUrl) history.replaceState(history.state, "", location.pathname + withoutTimelineParams(location.search) + dropHashLink(location.hash));
+  }, [syncUrl]);
 
   // An event viewer's "Open in Timeline": TimelineView passes lane keys (camKey(server, camera)), which carry the server
   const openInTimeline = useCallback((e: TimelineTarget) => {

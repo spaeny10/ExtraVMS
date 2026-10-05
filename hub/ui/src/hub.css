@@ -106,3 +106,44 @@
 .customer-group { margin-bottom: 20px; }
 .customer-group h3 a { color: inherit; text-decoration: none; }
 .customer-group h3 a:hover { color: var(--accent); }
+/* Site → Live embedded (SOC incident view): no activity column; compact drops the toolbar and chips */
+.live-layout.site-live-solo { grid-template-columns: minmax(0, 1fr); }
+.live-layout.site-live-compact .live-main { gap: 4px; }
+
+/* ---------- Site → Settings sub-tabs and the SOC boxes (Monitoring, Contacts, Procedures) ---------- */
+.settings-tabs { margin-bottom: 12px; max-width: 100%; overflow-x: auto; }
+.soc-settings { display: flex; flex-direction: column; gap: 0; max-width: 960px; }
+.soc-settings h4 { margin: 14px 0 6px; }
+.monitor-toggle { gap: 8px; }
+.monitor-editor { border: 0; padding: 0; margin: 0; min-width: 0; }
+.monitor-editor:disabled { opacity: .6; }
+.arm-card.armed { border-color: var(--ok, #2e9d5b); }
+.arm-week { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+.arm-day { display: grid; grid-template-columns: 44px 1fr; gap: 8px; align-items: center; padding: 3px 0; border-bottom: 1px solid var(--border); }
+.arm-day-name { font-weight: 600; font-size: 13px; }
+.arm-spans { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; }
+.arm-span { display: inline-flex; align-items: center; gap: 4px; }
+.holiday-row { gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
+.contact-list { list-style: none; padding: 0; margin: 0 0 10px; display: flex; flex-direction: column; gap: 6px; }
+.contact-row { display: grid; grid-template-columns: 18px 22px 1fr auto; gap: 8px; align-items: start; padding: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); }
+.contact-row.dragging { opacity: .5; }
+.drag-handle { cursor: grab; color: var(--muted); user-select: none; padding-top: 6px; }
+.contact-n { font-weight: 700; padding-top: 6px; }
+.contact-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 6px; min-width: 0; }
+.contact-fields .contact-notes { grid-column: 1 / -1; }
+.row-actions { display: flex; gap: 2px; }
+.contact-add { gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
+.procedure-head { gap: 8px; flex-wrap: wrap; }
+.procedure-title { flex: 1 1 260px; min-width: 0; font-weight: 600; }
+.step-list { margin: 10px 0 0; padding-left: 22px; display: flex; flex-direction: column; gap: 4px; }
+.step-row { gap: 6px; flex-wrap: nowrap; }
+.step-text { flex: 1; min-width: 0; }
+.checklist-preview { margin-top: 10px; padding: 8px 10px; border: 1px dashed var(--border); border-radius: 8px; }
+.checklist-preview ul { list-style: none; padding: 0; margin: 6px 0 0; display: flex; flex-direction: column; gap: 4px; }
+.checklist-preview label { gap: 6px; }
+@media (max-width: 700px) {
+  .contact-row { grid-template-columns: 22px 1fr; }
+  .contact-row .drag-handle { display: none; }
+  .contact-row .row-actions { grid-column: 1 / -1; justify-content: flex-end; }
+  .step-row { flex-wrap: wrap; }
+}

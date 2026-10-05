@@ -1,0 +1,9 @@
+/* SOC pages (/soc…), on top of the site toolkit's tokens (styles.css) and hub.css. */
+.soc-header { display: flex; align-items: center; gap: 8px; }
+.soc-presence { display: flex; align-items: center; gap: 6px; }
+.soc-tabs, .soc-report-tabs { margin-bottom: 12px; max-width: 100%; overflow-x: auto; }
+/* the tabs are links (middle-click opens a second console), styled like .segmented buttons */
+.soc-tabs a, .soc-report-tabs a { padding: 6px 12px; color: var(--muted); text-decoration: none; white-space: nowrap; }
+.soc-tabs a.active, .soc-report-tabs a.active { background: var(--panel-2); color: var(--text); }
+.soc-placeholder h2 { margin-top: 0; }
+@media (max-width: 700px) { .soc-presence > span { display: none; } }

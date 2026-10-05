@@ -7,8 +7,11 @@ export type { CameraGroup, Dashboard, DashboardConfig, DashboardList, FleetEvent
 type LocationTag = { location_id?: string | null; location_name?: string | null };
 export type FleetMessage = ({ type: "event"; event: NvrEvent; site_id: string; site_name: string } | { type: "event_removed"; id: number; site_id: string; site_name: string } | { type: "site_online" | "site_offline"; site_id: string; site_name: string }) & LocationTag;
 
-export type Me = { user: { id: string; email: string; totp_enabled: boolean; is_super: boolean }; orgs: Org[]; active_org: string | null };
-export type Org = { id: string; name: string; slug: string; role: string };
+/** `soc_role`: the hub-level SOC role (like is_super, not per customer); null/absent = not SOC staff. */
+export type SocRole = "operator" | "supervisor";
+export type Me = { user: { id: string; email: string; totp_enabled: boolean; is_super: boolean; soc_role?: SocRole | null }; orgs: Org[]; active_org: string | null };
+/** `soc`: the customer is listed only because it has a SOC-monitored Site (no real membership). */
+export type Org = { id: string; name: string; slug: string; role: string; soc?: boolean };
 /**
  * Hierarchy: Customer (wire: org) › Site (wire: location, /api/locations) › Server (wire: site, /api/sites) › Camera.
  * `Server` is what the hub's tables call a "site": one NVR box, one token, one tunnel at /s/<id>/.
@@ -30,6 +33,8 @@ export type Site = {
   id: string; org_id: string; name: string; address: string; timezone: string | null; notes: string | null; created_at: number; updated_at: number;
   servers_total: number; servers_online: number; cameras_total: number; cameras_online: number; open_alerts: number; retired_servers: number;
   servers: Server[];
+  /** SOC monitoring opted in (newer hubs only; absent = ask /monitoring). */
+  monitored?: boolean;
 };
 /** A row of the hub's cameras registry (synced from server heartbeats). Vanished cameras are kept, with missing_since. */
 export type Camera = {
@@ -99,13 +104,40 @@ export type HubSitesOrg = { org: { id: string; name: string }; locations: Site[]
 export type PushInfo = { public_key: string; subscriptions: { endpoint: string; kinds: string[]; ua: string }[]; kinds: string[] };
 export type ClaimPreview = { code: string; hint: { hostname?: string; cameras?: { id: string; name: string }[]; version?: string }; agent_ip: string | null; waiting: boolean };
 
-async function req<T>(url: string, init?: RequestInit): Promise<T> {
+// ---- SOC monitoring of a Site (hub/hub/soc_api.py). Times are "HH:MM" in the Site's timezone.
+/** One weekly window: `dow` 0 = Monday … 6 = Sunday; `to <= from` runs overnight into the next day. */
+export type ArmWindow = { dow: number[]; from: string; to: string };
+/** A date that replaces the weekly schedule: armed all day, disarmed all day, or armed only from–to. */
+export type ArmHoliday = { date: string; name: string; armed: boolean; from?: string; to?: string };
+/** A manual arm/disarm until `until` (the hub stores mode "arm" | "disarm"; an override past `until` no longer counts). */
+export type ArmOverride = { mode: "arm" | "disarm"; until: number; by: string | null; by_id?: string | null; reason: string; at: number };
+/** What the Settings editor PUTs back. */
+export type MonitoringConfig = { monitored: boolean; arm_schedule: ArmWindow[]; arm_holidays: ArmHoliday[]; soc_group_minutes: number | null };
+/** Why the hub says armed or not (soc.compute_armed). */
+export type ArmReason = "unmonitored" | "override" | "holiday" | "schedule" | "disarmed_schedule" | "always";
+/**
+ * GET adds the override and the hub's verdict for right now: `next_change` = when it next flips (null = never within
+ * the horizon), `can_configure` / `can_arm` = what this user may do here.
+ */
+export type Monitoring = MonitoringConfig & {
+  arm_override: ArmOverride | null; override_active?: boolean; armed: boolean; reason: ArmReason | string; next_change: { at: number; armed: boolean } | null;
+  timezone?: string | null; now?: number; can_configure?: boolean; can_arm?: boolean;
+};
+/** Blank optional fields travel as null (the hub stores NULL); the editor works on "" and normalises on load. */
+export type SiteContact = { id?: number; order: number; name: string; role: string | null; phone: string | null; email: string | null; notify_on_open: boolean; notes: string | null };
+/** Step ids are kept by the hub (SOP ticks in incident logs refer to them); a step sent without one gets "s<n>". */
+export type ProcedureStep = { id?: string; text: string; required: boolean };
+/** `category` null = any incident; `priority` = applies from this priority up, null = every priority. */
+export type Procedure = { id?: number; order: number; title: string; category: string | null; steps: ProcedureStep[]; priority: "low" | "medium" | "high" | null };
+
+/** Exported for the SOC client (soc/socApi.ts): same error shape everywhere. */
+export async function req<T>(url: string, init?: RequestInit): Promise<T> {
   const r = await fetch(url, init);
   if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
   return r.json();
 }
-const json = (method: string, body: unknown): RequestInit => ({ method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-const qs = (p: Record<string, string | number | boolean | undefined | null>) =>
+export const json = (method: string, body: unknown): RequestInit => ({ method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+export const qs = (p: Record<string, string | number | boolean | undefined | null>) =>
   new URLSearchParams(Object.entries(p).filter(([, v]) => v !== undefined && v !== null && v !== "").map(([k, v]) => [k, String(v)])).toString();
 
 export const api = {
@@ -190,6 +222,16 @@ export const api = {
   hubAudit: (limit = 20) => req<AuditRow[]>(`/api/hub/audit?${qs({ limit })}`),
   hubSites: (include_retired?: boolean) => req<HubSitesOrg[]>(`/api/hub/sites?${qs({ include_retired: include_retired || undefined })}`),
   patchOrg: (org: string, b: { name?: string; ai_shared?: boolean }) => req<Org>(`/api/orgs/${org}`, json("PATCH", b)),
+  // SOC monitoring per Site: config for customer admins and SOC supervisors, arm/disarm now for operators of either side
+  monitoring: (loc: string) => req<Monitoring>(`/api/locations/${loc}/monitoring`),
+  setMonitoring: (loc: string, b: MonitoringConfig) => req<Monitoring>(`/api/locations/${loc}/monitoring`, json("PUT", b)),
+  /** `until` epoch seconds, at most 24 h ahead (the hub refuses more); a reason is required. */
+  arm: (loc: string, b: { mode: "arm" | "disarm"; until: number; reason: string }) => req<Monitoring>(`/api/locations/${loc}/arm`, json("POST", b)),
+  clearArm: (loc: string) => req<Monitoring>(`/api/locations/${loc}/arm`, { method: "DELETE" }),
+  contacts: (loc: string) => req<SiteContact[]>(`/api/locations/${loc}/contacts`),
+  setContacts: (loc: string, rows: SiteContact[]) => req<SiteContact[]>(`/api/locations/${loc}/contacts`, json("PUT", { contacts: rows })),
+  procedures: (loc: string) => req<Procedure[]>(`/api/locations/${loc}/procedures`),
+  setProcedures: (loc: string, rows: Procedure[]) => req<Procedure[]>(`/api/locations/${loc}/procedures`, json("PUT", { procedures: rows })),
 };
 
 /** Live events from every site of the org (and site online/offline); reconnects with backoff. */

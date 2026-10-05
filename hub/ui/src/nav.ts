@@ -25,12 +25,23 @@ export type SiteTab = (typeof SITE_TABS)[number];
 export const CUSTOMER_TABS = ["sites", "servers", "members", "invites", "ai", "actions"] as const;
 export type CustomerTab = (typeof CUSTOMER_TABS)[number];
 
-export type Page = "home" | "sites" | "site" | "server" | "find" | "alerts" | "customer" | "audit" | "account" | "invite";
+/** Site → Settings sub-tabs. General is the Site's own form; the others configure SOC monitoring of the Site. */
+export const SETTINGS_SECTIONS = ["general", "monitoring", "contacts", "procedures"] as const;
+export type SettingsSection = (typeof SETTINGS_SECTIONS)[number];
+/** The SOC area: the operator queue (and one incident, for pop-outs and phones), the supervisor view, reports. */
+export type SocTab = "queue" | "incident" | "supervisor" | "reports";
+export const SOC_REPORTS = ["operators", "false-alarms", "shifts", "customers"] as const;
+export type SocReport = (typeof SOC_REPORTS)[number];
+
+export type Page = "home" | "sites" | "site" | "server" | "find" | "alerts" | "customer" | "audit" | "account" | "invite" | "soc";
 /**
  * Where a path points. `redirect` is the canonical path when the one asked for is an alias or incomplete
  * (/sites/:id → /sites/:id/live, /org/… → /customer/…); the app replaces the URL with it so links and Back stay clean.
  */
-export type Route = { page: Page; siteId?: string; tab?: string; serverId?: string; code?: string; redirect?: string };
+export type Route = {
+  page: Page; siteId?: string; tab?: string; serverId?: string; code?: string; redirect?: string;
+  section?: SettingsSection; socTab?: SocTab; incidentId?: string; report?: SocReport;
+};
 
 const isOneOf = <T extends string>(list: readonly T[], v: string | undefined): v is T => !!v && (list as readonly string[]).includes(v);
 
@@ -42,6 +53,12 @@ export function matchRoute(path: string): Route {
     case "sites": {
       if (!a) return { page: "sites" };
       if (b === "servers" && c) return { page: "server", siteId: a, serverId: c, tab: "servers" };
+      // bare /settings is General (the form that was the whole tab before the SOC sub-tabs, so old links still land there)
+      if (b === "settings") {
+        if (!c) return { page: "site", siteId: a, tab: "settings", section: "general" };
+        if (isOneOf(SETTINGS_SECTIONS, c)) return { page: "site", siteId: a, tab: "settings", section: c };
+        return { page: "site", siteId: a, tab: "settings", section: "general", redirect: settingsHref(a, "general") };
+      }
       if (isOneOf(SITE_TABS, b)) return { page: "site", siteId: a, tab: b };
       return { page: "site", siteId: a, tab: "live", redirect: `/sites/${encodeURIComponent(a)}/live` };
     }
@@ -54,6 +71,18 @@ export function matchRoute(path: string): Route {
     }
     // the old flat server list: Sites replaced it (the server cards live on under Customer → Servers)
     case "fleet": return { page: "sites", redirect: "/sites" };
+    case "soc": {
+      if (!a) return { page: "soc", socTab: "queue" };
+      if (a === "incidents" && b) return { page: "soc", socTab: "incident", incidentId: b };
+      if (a === "supervisor") return { page: "soc", socTab: "supervisor" };
+      if (a === "reports") {
+        if (!b) return { page: "soc", socTab: "reports", report: "operators" };
+        if (isOneOf(SOC_REPORTS, b)) return { page: "soc", socTab: "reports", report: b };
+        return { page: "soc", socTab: "reports", report: "operators", redirect: reportHref() };
+      }
+      // /soc/incidents without an id, or anything unknown: the queue
+      return { page: "soc", socTab: "queue", redirect: socHref() };
+    }
     case "find": return { page: "find" };
     case "alerts": return { page: "alerts" };
     case "audit": return { page: "audit" };
@@ -66,6 +95,13 @@ export function matchRoute(path: string): Route {
 
 export const siteHref = (siteId: string, tab: SiteTab = "live") => `/sites/${encodeURIComponent(siteId)}/${tab}`;
 export const serverHref = (siteId: string, serverId: string) => `/sites/${encodeURIComponent(siteId)}/servers/${encodeURIComponent(serverId)}`;
+/** Site → Settings → section; General is the bare /settings path. */
+export const settingsHref = (siteId: string, section: SettingsSection = "general") =>
+  `/sites/${encodeURIComponent(siteId)}/settings${section === "general" ? "" : `/${section}`}`;
+/** SOC pages. The queue is /soc; one incident has its own path so it can be popped out or opened from a push. */
+export const socHref = (tab: "queue" | "supervisor" | "reports" = "queue") => (tab === "queue" ? "/soc" : `/soc/${tab}`);
+export const incidentHref = (id: number | string) => `/soc/incidents/${encodeURIComponent(String(id))}`;
+export const reportHref = (report: SocReport = "operators") => (report === "operators" ? "/soc/reports" : `/soc/reports/${report}`);
 /** The server's own UI through its tunnel (hash = its tab). */
 export const consoleHref = (serverId: string, hash = "") => `/s/${serverId}/${hash ? `#${hash}` : ""}`;
 

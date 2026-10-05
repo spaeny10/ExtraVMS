@@ -6,9 +6,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { Icon, confirmDialog, promptDialog, toast } from "@site/ui";
 import { type Camera, type Me, type Org, type Server, type Site, ago, api, fmtTime } from "./api";
-import { isAdmin, ofTotal } from "./access";
+import { canEditMonitoring, isAdmin, isSocUser, ofTotal } from "./access";
 import { Breadcrumbs } from "./Breadcrumbs";
-import { SITE_TABS, type SiteTab, consoleHref, go, navigate, serverHref, siteHref } from "./nav";
+import { SETTINGS_SECTIONS, SITE_TABS, type SettingsSection, type SiteTab, consoleHref, go, navigate, serverHref, settingsHref, siteHref } from "./nav";
+import { ContactsBox } from "./site/ContactsBox";
+import { MonitoringBox } from "./site/MonitoringBox";
+import { ProceduresBox } from "./site/ProceduresBox";
+import { SiteIncidents } from "./site/SiteIncidents";
 import { ServerActions, ServerCard } from "./servers";
 import { SiteLive } from "./SiteLive";
 import { SiteTimeline } from "./SiteTimeline";
@@ -29,7 +33,9 @@ export function useSite(siteId: string) {
   return { site, error, reload };
 }
 
-export function SitePage({ org, me, siteId, tab, serverId, onOrg }: { org: Org; me: Me; siteId: string; tab: string; serverId?: string; onOrg: (id: string) => void }) {
+export function SitePage({ org, me, siteId, tab, section = "general", serverId, onOrg }: {
+  org: Org; me: Me; siteId: string; tab: string; section?: SettingsSection; serverId?: string; onOrg: (id: string) => void;
+}) {
   const { site, error, reload } = useSite(siteId);
   // a link into another customer's Site switches the header's Customer picker to it
   useEffect(() => { if (site && site.org_id !== org.id && me.orgs.some((o) => o.id === site.org_id)) onOrg(site.org_id); }, [site, org.id, me.orgs, onOrg]);
@@ -54,9 +60,9 @@ export function SitePage({ org, me, siteId, tab, serverId, onOrg }: { org: Org; 
         : tab === "live" ? <SiteLive org={siteOrg} site={site} />
         : tab === "timeline" ? <SiteTimeline org={siteOrg} site={site} query={location.search} />
         : tab === "find" ? <FindPage org={siteOrg} site={site} />
-        : tab === "alerts" ? <SiteAlerts org={siteOrg} site={site} />
+        : tab === "alerts" ? <><SiteIncidents site={site} /><SiteAlerts org={siteOrg} site={site} /></>
         : tab === "servers" ? <ServersTab site={site} admin={admin} onChanged={reload} />
-        : <SettingsTab site={site} admin={admin} onChanged={reload} />}
+        : <SettingsSections site={site} org={siteOrg} me={me} section={section} admin={admin} onChanged={reload} />}
     </>
   );
 }
@@ -109,6 +115,33 @@ function ServersTab({ site, admin, onChanged }: { site: Site; admin: boolean; on
         </ServerCard>
       ))}
     </div>
+  );
+}
+
+const SECTION_LABEL: Record<SettingsSection, string> = { general: "General", monitoring: "Monitoring", contacts: "Contacts", procedures: "Procedures" };
+
+/**
+ * Settings sub-tabs. Monitoring is shown to everyone (read-only: is the SOC watching now, and until when); its
+ * editor, Contacts and Procedures are for customer admins and SOC supervisors (canEditMonitoring). Arm/disarm now is
+ * for customer operators and up, and SOC staff. A section someone may not open falls back to General.
+ */
+function SettingsSections({ site, org, me, section, admin, onChanged }: { site: Site; org: Org; me: Me; section: SettingsSection; admin: boolean; onChanged: () => void }) {
+  const editor = canEditMonitoring(org, me);
+  const canArm = editor || isSocUser(me) || org.role === "operator";
+  const allowed = SETTINGS_SECTIONS.filter((s) => editor || s === "general" || s === "monitoring");
+  const cur = allowed.includes(section) ? section : "general";
+  return (
+    <>
+      <div className="segmented settings-tabs" role="tablist">
+        {allowed.map((s) => (
+          <button key={s} role="tab" aria-selected={cur === s} className={cur === s ? "active" : ""} onClick={() => navigate(settingsHref(site.id, s))}>{SECTION_LABEL[s]}</button>
+        ))}
+      </div>
+      {cur === "general" ? <SettingsTab site={site} admin={admin} onChanged={onChanged} />
+        : cur === "monitoring" ? <MonitoringBox key={site.id} site={site} canEdit={editor} canArm={canArm} />
+        : cur === "contacts" ? <ContactsBox key={site.id} site={site} />
+        : <ProceduresBox key={site.id} site={site} />}
+    </>
   );
 }
 

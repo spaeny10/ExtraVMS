@@ -96,3 +96,24 @@ export function saveLayout(siteId: string, layout: LiveLayout) {
     else localStorage.setItem(layoutStorageKey(siteId), JSON.stringify(layout));
   } catch { /* private mode: the layout just isn't remembered */ }
 }
+
+/**
+ * Cameras an embedding page wants in front (the SOC incident view: the cameras that saw the incident).
+ * "first" puts them ahead of the rest, "only" shows just them.
+ */
+export type LiveFocus = { keys: string[]; mode: "first" | "only" };
+
+/**
+ * `ordered` with `focus` applied: focused keys in the focus's order (unknown ones dropped), then for "first" the rest.
+ * A focus that names none of the Site's cameras (ids not loaded yet, a camera removed since) leaves the grid as it
+ * was: an operator is better served by every camera than by an empty grid.
+ */
+export function applyFocus(ordered: string[], focus: LiveFocus | null | undefined): string[] {
+  if (!focus?.keys.length) return ordered;
+  const known = new Set(ordered);
+  const head = [...new Set(focus.keys)].filter((k) => known.has(k));
+  if (!head.length) return ordered;
+  if (focus.mode === "only") return head;
+  const seen = new Set(head);
+  return [...head, ...ordered.filter((k) => !seen.has(k))];
+}

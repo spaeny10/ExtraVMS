@@ -12,8 +12,14 @@ const REASONS = ["Wrong object", "Missed detail", "Made something up", "Threat t
 const VERDICTS: [Verdict, string][] = [["correct", "Correct detection"], ["false_alarm", "False alarm"], ["wrong_class", "Wrong class"]];
 const THREATS: Threat[] = ["none", "low", "medium", "high"];
 
-/** `site` = the API of the server the event lives on (the hub passes one per server; default: this server). */
-export function EventDetail({ id: initialId, cameraName, onClose, site = api }: { id: number; cameraName: (id: string) => string; onClose: () => void; site?: SiteApi }) {
+/**
+ * `site` = the API of the server the event lives on (the hub passes one per server; default: this server).
+ * `variant` "drawer" docks the viewer to the right edge at full height (the hub's SOC workstation opens it beside the
+ * incident it is working on, so the queue stays visible); the default "modal" is the centred dialog every page uses.
+ */
+export function EventDetail({ id: initialId, cameraName, onClose, site = api, variant = "modal" }: {
+  id: number; cameraName: (id: string) => string; onClose: () => void; site?: SiteApi; variant?: "modal" | "drawer";
+}) {
   const [id, setId] = useState(initialId); // the viewer can step to another camera's sighting of the same person
   useEffect(() => setId(initialId), [initialId]);
   const [e, setE] = useState<NvrEvent | null>(null);
@@ -52,8 +58,8 @@ export function EventDetail({ id: initialId, cameraName, onClose, site = api }: 
   };
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={(ev) => ev.stopPropagation()}>
+    <div className={`modal-backdrop ${variant === "drawer" ? "drawer" : ""}`} onClick={onClose}>
+      <div className={`modal ${variant === "drawer" ? "drawer" : ""}`} onClick={(ev) => ev.stopPropagation()}>
         <header className="modal-head">
           <div>
             <h2>{cameraName(e.camera_id)} · {e.yolo_class ?? e.camera_class}</h2>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EMPTY_LAYOUT, arrange, gridCols, isVisible, layoutReducer, layoutStorageKey, parseLayout, tileLabel, wrapIndex } from "./liveLayout";
+import { EMPTY_LAYOUT, applyFocus, arrange, gridCols, isVisible, layoutReducer, layoutStorageKey, parseLayout, tileLabel, wrapIndex } from "./liveLayout";
 
 describe("gridCols", () => {
   it("is square-ish and at most 4 wide, like the server's LiveView", () => {
@@ -68,5 +68,23 @@ describe("parseLayout", () => {
   });
   it("storage key per site", () => {
     expect(layoutStorageKey("l_1")).toBe("siteLive.l_1");
+  });
+});
+
+describe("applyFocus", () => {
+  it("first: focused cameras lead in focus order, the rest follow", () => {
+    expect(applyFocus(all, { keys: ["b/2", "a/2"], mode: "first" })).toEqual(["b/2", "a/2", "a/1", "b/1"]);
+  });
+  it("only: just the focused cameras", () => {
+    expect(applyFocus(all, { keys: ["b/1", "a/1"], mode: "only" })).toEqual(["b/1", "a/1"]);
+  });
+  it("drops unknown and duplicate keys", () => {
+    expect(applyFocus(all, { keys: ["x/9", "a/2", "a/2"], mode: "only" })).toEqual(["a/2"]);
+  });
+  it("no focus, or none of it known, leaves the order alone", () => {
+    expect(applyFocus(all, null)).toBe(all);
+    expect(applyFocus(all, undefined)).toBe(all);
+    expect(applyFocus(all, { keys: [], mode: "only" })).toBe(all);
+    expect(applyFocus(all, { keys: ["x/9"], mode: "only" })).toBe(all);
   });
 });
