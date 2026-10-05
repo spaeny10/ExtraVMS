@@ -75,6 +75,16 @@ def _send_one(sub: dict, payload: dict) -> bool:
         return True
 
 
+def title_name(site: dict) -> str:
+    """How a notification names the server: "Site · Server" when the server sits in a Site with another name (a
+    multi-server Site, or one renamed), else just the server's name, so one-server Sites read as they always did."""
+    loc = db.one(sa.select(db.locations.c.name).where(db.locations.c.id == site["location_id"])) if site.get("location_id") else None
+    lname = (loc or {}).get("name") or ""
+    if lname and lname.strip().casefold() != (site.get("name") or "").strip().casefold():
+        return f"{lname} · {site['name']}"
+    return site["name"]
+
+
 async def notify_alert(org_id: str, site: dict, kind: str, detail: dict) -> int:
     """Push an opened alert to every member of the org who may see this server and chose this kind. Returns pushes sent."""
     members = db.rows(sa.select(db.memberships.c.user_id).where(db.memberships.c.org_id == org_id))
@@ -83,12 +93,14 @@ async def notify_alert(org_id: str, site: dict, kind: str, detail: dict) -> int:
     if not uids:
         return 0
     subs = db.rows(sa.select(db.push_subscriptions).where(db.push_subscriptions.c.user_id.in_(list(uids))))
-    title = {"offline": f"{site['name']} is offline", "camera_down": f"{site['name']}: camera down", "disk": f"{site['name']}: disk low",
-             "clock": f"{site['name']}: clock skew", "event_high": f"{site['name']}: high-priority event",
-             "event_policy": f"{site['name']}: site rule broken", "event_watched": f"{site['name']}: watched person seen"}.get(kind, f"{site['name']}: {kind}")
+    name = title_name(site)
+    title = {"offline": f"{name} is offline", "camera_down": f"{name}: camera down", "disk": f"{name}: disk low",
+             "clock": f"{name}: clock skew", "event_high": f"{name}: high-priority event",
+             "event_policy": f"{name}: site rule broken", "event_watched": f"{name}: watched person seen"}.get(kind, f"{name}: {kind}")
     body = detail.get("text") or detail.get("synopsis") or detail.get("name") or ", ".join(detail.get("problems") or []) or ""
     url = f"/s/{site['id']}/#timeline?cam={detail.get('camera_id')}&event={detail.get('id')}" if detail.get("id") and detail.get("camera_id") else f"/s/{site['id']}/"
-    payload = {"title": title, "body": body[:180], "url": url, "kind": kind, "site_id": site["id"]}
+    payload = {"title": title, "body": body[:180], "url": url, "kind": kind, "site_id": site["id"],
+               "location_id": site.get("location_id")}
     sent = 0
     for s in subs:
         if kind not in (s["kinds"] or DEFAULT_KINDS):

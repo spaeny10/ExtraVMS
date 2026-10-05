@@ -3,6 +3,8 @@
 Find fans `GET /api/search` and `/api/footage/search` out through the tunnels and merges the results with a
 site tag. Ask streams every site's own assistant answer (each site uses its own model and its own data) as
 one NDJSON stream with a `site` field on every chunk, so the page can show them side by side.
+Both can be narrowed to a set of server ids (a Site's servers). Every result carries the old `site_id`/`site_name`
+(= the server, what the current UI reads) plus `server_id`, `server_name`, `location_id` and `location_name`.
 """
 from __future__ import annotations
 
@@ -12,20 +14,34 @@ import logging
 import time
 from urllib.parse import urlencode
 
-from . import auth
+import sqlalchemy as sa
+
+from . import auth, db
 from .agents import AgentConn, registry
 
 log = logging.getLogger("hub.fleet")
 FANOUT_TIMEOUT_S = 12.0
 
 
-def online_sites(u: dict, org_id: str) -> list[tuple[dict, AgentConn]]:
+def _in_scope(u: dict, org_id: str, server_ids: set[str] | None) -> list[dict]:
+    """Visible servers, narrowed to `server_ids` when given (an empty set means none, never "all")."""
+    return [s for s in auth.visible_sites(u, org_id) if server_ids is None or s["id"] in server_ids]
+
+
+def online_sites(u: dict, org_id: str, server_ids: set[str] | None = None) -> list[tuple[dict, AgentConn]]:
     out = []
-    for s in auth.visible_sites(u, org_id):
+    for s in _in_scope(u, org_id, server_ids):
         conn = registry.get(s["id"])
         if conn is not None:
             out.append((s, conn))
     return out
+
+
+def server_tags(org_id: str, servers: list[dict]) -> dict[str, dict]:
+    """server id -> the keys every fan-out result carries: the legacy site_* pair plus server_* and location_*."""
+    names = {r["id"]: r["name"] for r in db.rows(sa.select(db.locations.c.id, db.locations.c.name).where(db.locations.c.org_id == org_id))}
+    return {s["id"]: {"site_id": s["id"], "site_name": s["name"], "server_id": s["id"], "server_name": s["name"],
+                      "location_id": s.get("location_id"), "location_name": names.get(s.get("location_id"))} for s in servers}
 
 
 async def _get_json(conn: AgentConn, path: str, params: dict, headers: dict) -> tuple[int, object]:
@@ -36,9 +52,12 @@ async def _get_json(conn: AgentConn, path: str, params: dict, headers: dict) -> 
         return status, None
 
 
-async def search(u: dict, org_id: str, q: str, since: float | None, until: float | None, limit: int = 30) -> dict:
+async def search(u: dict, org_id: str, q: str, since: float | None, until: float | None, limit: int = 30,
+                 server_ids: set[str] | None = None) -> dict:
     headers = {"x-hub-user": u["email"], "x-hub-role": "viewer"}
-    sites = online_sites(u, org_id)
+    scope = _in_scope(u, org_id, server_ids)
+    tags = server_tags(org_id, scope)
+    sites = [(s, registry.get(s["id"])) for s in scope if registry.get(s["id"]) is not None]
 
     async def one(site, conn):
         ev, fo = await asyncio.gather(
@@ -50,26 +69,30 @@ async def search(u: dict, org_id: str, q: str, since: float | None, until: float
         err = None
         if isinstance(ev, Exception) or (isinstance(ev, tuple) and ev[0] != 200):
             err = str(ev) if isinstance(ev, Exception) else f"HTTP {ev[0]}"
-        return {"site_id": site["id"], "site_name": site["name"], "events": events, "footage": footage, "error": err}
+        return {**tags[site["id"]], "events": events, "footage": footage, "error": err}
 
     results = await asyncio.gather(*(one(s, c) for s, c in sites))
-    events = sorted((dict(e, site_id=r["site_id"], site_name=r["site_name"]) for r in results for e in r["events"]),
+    tag_keys = ("site_id", "site_name", "server_id", "server_name", "location_id", "location_name")
+    events = sorted(({**e, **{k: r[k] for k in tag_keys}} for r in results for e in r["events"]),
                     key=lambda e: -(e.get("score") or 0) if "score" in e else -(e.get("start_ts") or 0))
-    footage = sorted((dict(m, site_id=r["site_id"], site_name=r["site_name"]) for r in results for m in r["footage"]),
+    footage = sorted(({**m, **{k: r[k] for k in tag_keys}} for r in results for m in r["footage"]),
                      key=lambda m: -(m.get("score") or 0))
-    return {"q": q, "sites": [{k: r[k] for k in ("site_id", "site_name", "error")} | {"events": len(r["events"]), "footage": len(r["footage"])} for r in results],
-            "offline": [s["name"] for s in auth.visible_sites(u, org_id) if registry.get(s["id"]) is None],
+    return {"q": q, "sites": [{k: r[k] for k in (*tag_keys, "error")} | {"events": len(r["events"]), "footage": len(r["footage"])} for r in results],
+            "offline": [s["name"] for s in scope if registry.get(s["id"]) is None],
             "events": events[:limit * 2], "footage": footage[:30]}
 
 
-async def ask(u: dict, org_id: str, message: str):
-    """Yield NDJSON lines: {"site": id, "site_name": name, ...chunk} from every site's assistant, interleaved."""
+async def ask(u: dict, org_id: str, message: str, server_ids: set[str] | None = None):
+    """Yield NDJSON lines: {"site": id, "site_name": name, server_*/location_* tags, ...chunk} from every site's
+    assistant, interleaved."""
     headers = {"x-hub-user": u["email"], "x-hub-role": "viewer", "content-type": "application/json"}
-    sites = online_sites(u, org_id)
+    scope = _in_scope(u, org_id, server_ids)
+    tags = {sid: {"site": t["site_id"], **{k: v for k, v in t.items() if k != "site_id"}} for sid, t in server_tags(org_id, scope).items()}
+    sites = [(s, registry.get(s["id"])) for s in scope if registry.get(s["id"]) is not None]
     queue: asyncio.Queue = asyncio.Queue()
 
     async def one(site, conn):
-        tag = {"site": site["id"], "site_name": site["name"]}
+        tag = tags[site["id"]]
         try:
             s = await conn.request("POST", "/api/assistant/ask", "", headers, json.dumps({"message": message}).encode())
             try:
@@ -100,8 +123,8 @@ async def ask(u: dict, org_id: str, message: str):
             await queue.put({**tag, "type": "site_done"})
 
     tasks = [asyncio.create_task(one(s, c)) for s, c in sites]
-    yield json.dumps({"type": "sites", "sites": [{"site": s["id"], "site_name": s["name"]} for s, _ in sites],
-                      "offline": [s["name"] for s in auth.visible_sites(u, org_id) if registry.get(s["id"]) is None]}) + "\n"
+    yield json.dumps({"type": "sites", "sites": [tags[s["id"]] for s, _ in sites],
+                      "offline": [s["name"] for s in scope if registry.get(s["id"]) is None]}) + "\n"
     done = 0
     while done < len(tasks):
         item = await queue.get()

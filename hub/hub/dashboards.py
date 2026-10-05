@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from . import auth, db
 from .agents import registry
-from .fleet import FANOUT_TIMEOUT_S, _get_json
+from .fleet import FANOUT_TIMEOUT_S, _get_json, server_tags
 from .roles import allows
 
 log = logging.getLogger("hub.dashboards")
@@ -254,9 +254,11 @@ def resolve_group(org_id: str, group_id: str) -> list[tuple[str, str]] | None:
 
 # ---------------------------------------------------------------- fleet events
 async def fleet_events(u: dict, org_id: str, sites: list[str] | None, cameras: list[tuple[str, str]] | None, group: str | None,
-                       classes: list[str] | None, limit: int, since: float | None) -> dict:
-    """Latest events across the sites the user may see, newest first, each tagged with its site."""
-    visible = {s["id"]: s for s in auth.visible_sites(u, org_id)}
+                       classes: list[str] | None, limit: int, since: float | None, within: set[str] | None = None) -> dict:
+    """Latest events across the sites the user may see, newest first, each tagged with its site (server) and Site
+    (location). `within` (a Site's server ids) caps every other selection: sites, cameras and groups that name a
+    server outside it are ignored, so a Site page can never show another Site's events."""
+    visible = {s["id"]: s for s in auth.visible_sites(u, org_id) if within is None or s["id"] in within}
     wanted: dict[str, set[str] | None] = {}          # site -> camera ids (None = all)
     members = resolve_group(org_id, group) if group else None
     if group and members is None:
@@ -277,6 +279,7 @@ async def fleet_events(u: dict, org_id: str, sites: list[str] | None, cameras: l
         wanted = {sid: None for sid in visible}
     wanted = {sid: cams for sid, cams in wanted.items() if sid in visible}
     headers = {"x-hub-user": u["email"], "x-hub-role": "viewer"}
+    tags = server_tags(org_id, [visible[sid] for sid in wanted])
     offline, errors, events = [], [], []
 
     async def one(site_id: str, cams: set[str] | None):
@@ -297,13 +300,13 @@ async def fleet_events(u: dict, org_id: str, sites: list[str] | None, cameras: l
         if status != 200 or not isinstance(body, list):
             errors.append({"site_id": site_id, "error": f"HTTP {status}"})
             return
-        name = visible[site_id]["name"]
+        tag = {k: v for k, v in tags[site_id].items() if k in ("site_id", "site_name", "location_id", "location_name")}
         for e in body:
             if cams and e.get("camera_id") not in cams:
                 continue
             if classes and e.get("camera_class") not in classes:
                 continue
-            events.append({**e, "site_id": site_id, "site_name": name})
+            events.append({**e, **tag})
 
     await asyncio.gather(*(one(sid, cams) for sid, cams in wanted.items()))
     events.sort(key=lambda e: -(e.get("start_ts") or 0))

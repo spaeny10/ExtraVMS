@@ -21,7 +21,7 @@ from . import fleet as fleet_mod
 from fastapi.responses import StreamingResponse
 from .agents import registry
 from .config import settings
-from .roles import ROLES
+from .roles import RANK, ROLES
 
 log = logging.getLogger("hub")
 
@@ -206,11 +206,26 @@ async def org_usage(org_id: str, days: int = Query(30, ge=1, le=365), u: dict = 
     auth.require_role(u, org_id, "viewer")
     org = db.one(sa.select(db.orgs).where(db.orgs.c.id == org_id))
     names = {s["id"]: s["name"] for s in db.rows(sa.select(db.sites.c.id, db.sites.c.name).where(db.sites.c.org_id == org_id))}
+    tags = _location_tags(org_id)
     rows = vlm_proxy.usage_report(org_id, days)
+    m = auth.membership(u, org_id)
+    if not m["all_sites"]:
+        # a Site-restricted member sees the usage of the servers they can see; everyone else keeps the whole report
+        # (including servers since removed, whose rows have no Site)
+        seen = {s["id"] for s in auth.visible_sites(u, org_id, include_retired=True)}
+        rows = [r for r in rows if r["site_id"] in seen]
+    per_loc: dict[str, dict] = {}
     for r in rows:
         r["site_name"] = names.get(r["site_id"], r["site_id"])
+        r |= tags.get(r["site_id"], {"location_id": None, "location_name": None})
+        if r["location_id"]:
+            t = per_loc.setdefault(r["location_id"], {"location_id": r["location_id"], "name": r["location_name"], "requests": 0,
+                                                      "prompt_tokens": 0, "completion_tokens": 0, "errors": 0})
+            for k in ("requests", "prompt_tokens", "completion_tokens", "errors"):
+                t[k] += int(r.get(k) or 0)
     return {"ai_shared": bool(org and org.get("ai_shared")), "configured": vlm_proxy.configured(), "model": settings.vllm_model,
-            "provider": vlm_proxy.status(), "turn": turn.configured(), "days": days, "sites": rows}
+            "provider": vlm_proxy.status(), "turn": turn.configured(), "days": days, "sites": rows,
+            "locations": sorted(per_loc.values(), key=lambda t: (t["name"] or "").casefold())}
 
 
 class MemberIn(BaseModel):
@@ -306,6 +321,196 @@ async def remove_member(org_id: str, uid: str, u: dict = Depends(user)):
         auth.drop_access(org_id, uid, c)
     _audit(u, org_id, None, f"member {uid} removed")
     return {"ok": True}
+
+
+# Invites: an admin makes a link (nothing is emailed; they send it however they like). The code is the secret, so
+# the public preview/accept routes are rate-limited per IP like sign-in, and an invite made for an email address
+# can only be accepted by that address. Accepting never narrows an existing member: the higher role and the
+# wider Site access win.
+
+class InviteIn(BaseModel):
+    email: str = Field("", max_length=200)   # optional: "" = anyone holding the link
+    role: Literal["viewer", "operator", "admin", "owner"] = "viewer"
+    all_sites: bool = True
+    location_ids: list[str] = []
+    label: str | None = Field(None, max_length=120)
+    expires_days: int = Field(7, ge=1, le=90)
+
+
+class AcceptIn(BaseModel):
+    email: EmailStr | None = None   # ignored when the browser is already signed in
+    password: str | None = Field(None, max_length=200)
+    totp: str | None = Field(None, max_length=12)
+
+
+def _mask_email(email: str) -> str:
+    if not email or "@" not in email:
+        return ""
+    local, domain = email.split("@", 1)
+    return f"{local[:1]}***@{domain}"
+
+
+def _invite_ip(request: Request) -> str:
+    return f"invite|{request.client.host if request.client else ''}"
+
+
+def _live_invite(code: str) -> dict | None:
+    inv = db.one(sa.select(db.invites).where(db.invites.c.code == code))
+    if not inv or inv["accepted_at"] or inv["expires_at"] < time.time():
+        return None
+    return inv
+
+
+def _invite_locations(org_id: str, inv: dict) -> list[dict]:
+    """The invite's Sites that still exist, by name (a Site deleted since the invite was made just drops out)."""
+    ids = list(inv.get("location_ids") or [])
+    if not ids:
+        return []
+    return db.rows(sa.select(db.locations.c.id, db.locations.c.name)
+                   .where(db.locations.c.org_id == org_id, db.locations.c.id.in_(ids)).order_by(db.locations.c.name))
+
+
+def _invite_out(inv: dict) -> dict:
+    return {"code": inv["code"], "url": f"{settings.public_url.rstrip('/')}/invite/{inv['code']}", "email": inv["email"],
+            "role": inv["role"], "all_sites": bool(inv["all_sites"]), "location_ids": list(inv.get("location_ids") or []),
+            "label": inv.get("label"), "expires_at": inv["expires_at"], "created_at": inv.get("created_at"), "created_by": inv.get("created_by")}
+
+
+@app.post("/api/orgs/{org_id}/invites")
+async def create_invite(org_id: str, body: InviteIn, u: dict = Depends(user)):
+    role = auth.require_role(u, org_id, "admin")
+    if body.role == "owner" and role != "owner":
+        raise HTTPException(403, "only an owner can invite an owner")
+    email = body.email.strip().lower()
+    if email and ("@" not in email or " " in email):
+        raise HTTPException(422, "that doesn't look like an email address")
+    org_locs = {r["id"] for r in db.rows(sa.select(db.locations.c.id).where(db.locations.c.org_id == org_id))}
+    wanted = list(dict.fromkeys(body.location_ids))
+    bad = [lid for lid in wanted if lid not in org_locs]
+    if bad:
+        raise HTTPException(422, f"unknown site {bad[0]}")
+    t = time.time()
+    inv = {"code": db.new_token(), "org_id": org_id, "email": email, "role": body.role, "expires_at": t + body.expires_days * 86400,
+           "accepted_at": None, "all_sites": body.all_sites, "location_ids": [] if body.all_sites else wanted, "created_by": u["id"],
+           "created_at": t, "accepted_user_id": None, "label": (body.label or "").strip() or None}
+    db.insert(db.invites, inv)
+    _audit(u, org_id, None, f"invite created: {email or inv['label'] or 'link'} -> {body.role}",
+           {"all_sites": body.all_sites, "location_ids": inv["location_ids"], "label": inv["label"]})   # never the code
+    return _invite_out(inv)
+
+
+@app.get("/api/orgs/{org_id}/invites")
+async def list_invites(org_id: str, u: dict = Depends(user)):
+    """Pending invites (not accepted, not expired), newest first."""
+    auth.require_role(u, org_id, "admin")
+    rows = db.rows(sa.select(db.invites).where(db.invites.c.org_id == org_id, db.invites.c.accepted_at.is_(None),
+                                               db.invites.c.expires_at >= time.time()).order_by(db.invites.c.expires_at.desc()))
+    emails = {r["id"]: r["email"] for r in db.rows(sa.select(db.users.c.id, db.users.c.email).where(
+        db.users.c.id.in_([r["created_by"] for r in rows if r.get("created_by")] or [""])))}
+    return [_invite_out(r) | {"locations": _invite_locations(org_id, r), "created_by_email": emails.get(r.get("created_by"))} for r in rows]
+
+
+@app.delete("/api/orgs/{org_id}/invites/{code}")
+async def revoke_invite(org_id: str, code: str, u: dict = Depends(user)):
+    auth.require_role(u, org_id, "admin")
+    inv = db.one(sa.select(db.invites).where(db.invites.c.code == code, db.invites.c.org_id == org_id))
+    if not inv:
+        raise HTTPException(404, "no such invite")
+    db.run(sa.delete(db.invites).where(db.invites.c.code == code))
+    _audit(u, org_id, None, f"invite revoked: {inv['email'] or inv.get('label') or 'link'}")
+    return {"ok": True}
+
+
+@app.get("/api/invites/{code}")
+async def invite_preview(code: str, request: Request):
+    """Public: what accepting this invite gives (shown on the /invite/<code> page before signing in)."""
+    key = _invite_ip(request)
+    if auth.too_many_failures(key):
+        raise HTTPException(429, "too many attempts; try again in 15 minutes")
+    inv = _live_invite(code)
+    if not inv:
+        auth.record_failure(key)
+        raise HTTPException(404, "this invite is unknown, used or expired")
+    org = db.one(sa.select(db.orgs.c.name).where(db.orgs.c.id == inv["org_id"]))
+    return {"org_name": org["name"] if org else "", "role": inv["role"], "all_sites": bool(inv["all_sites"]),
+            "locations": [] if inv["all_sites"] else _invite_locations(inv["org_id"], inv),
+            "email_hint": _mask_email(inv["email"]), "expires_at": inv["expires_at"], "label": inv.get("label")}
+
+
+@app.post("/api/invites/{code}/accept")
+async def invite_accept(code: str, body: AcceptIn, request: Request, response: Response):
+    """Public. Signed in: the invite joins that account (body ignored). Otherwise an existing account proves itself
+    with its password (and TOTP code), or a new account is made with the email and password given."""
+    key = _invite_ip(request)
+    if auth.too_many_failures(key):
+        raise HTTPException(429, "too many attempts; try again in 15 minutes")
+    inv = _live_invite(code)
+    if not inv:
+        auth.record_failure(key)
+        raise HTTPException(404, "this invite is unknown, used or expired")
+    target = auth.current_user(request)
+    attached, created = target is not None, False
+    if not attached:
+        if not body.email or not body.password:
+            raise HTTPException(422, "email and password required")
+        login_key = f"{body.email.lower()}|{request.client.host if request.client else ''}"   # shares sign-in's lockout
+        if auth.too_many_failures(login_key):
+            raise HTTPException(429, "too many attempts; try again in 15 minutes")
+        target = auth.user_by_email(body.email)
+        if target:
+            if not auth.verify_password(body.password, target["password_hash"]):
+                auth.record_failure(key)
+                auth.record_failure(login_key)
+                raise HTTPException(401, "wrong email or password")
+            if target["totp_enabled"] and not body.totp:
+                return {"totp_required": True}
+            if not auth.totp_ok(target, body.totp):
+                auth.record_failure(key)
+                auth.record_failure(login_key)
+                raise HTTPException(401, "wrong code")
+        elif inv["email"] and body.email.lower() != inv["email"]:
+            raise HTTPException(403, f"this invite is for {_mask_email(inv['email'])}")   # before creating anyone
+        else:
+            if len(body.password) < 10:
+                raise HTTPException(422, "password must be at least 10 characters")
+            target, created = auth.create_user(body.email, body.password), True
+    if inv["email"] and target["email"] != inv["email"]:
+        raise HTTPException(403, f"this invite is for {_mask_email(inv['email'])}; sign in as that account")
+    org_id = inv["org_id"]
+    now = time.time()
+    with db.engine().begin() as c:
+        # consume first, conditionally, so two concurrent accepts can't both use one invite
+        res = c.execute(sa.update(db.invites).where(db.invites.c.code == code, db.invites.c.accepted_at.is_(None),
+                                                    db.invites.c.expires_at >= now)
+                        .values(accepted_at=now, accepted_user_id=target["id"]))
+        if not res.rowcount:
+            raise HTTPException(404, "this invite is unknown, used or expired")
+        m = c.execute(sa.select(db.memberships).where(db.memberships.c.user_id == target["id"],
+                                                      db.memberships.c.org_id == org_id)).mappings().first()
+        if m:
+            role = m["role"] if RANK.get(m["role"], -1) >= RANK[inv["role"]] else inv["role"]
+            c.execute(sa.update(db.memberships).where(db.memberships.c.user_id == target["id"], db.memberships.c.org_id == org_id)
+                      .values(role=role))
+        else:
+            role = inv["role"]
+            c.execute(db.memberships.insert().values(user_id=target["id"], org_id=org_id, role=role, all_sites=bool(inv["all_sites"])))
+    org_locs = {r["id"] for r in db.rows(sa.select(db.locations.c.id).where(db.locations.c.org_id == org_id))}
+    locs = [lid for lid in (inv.get("location_ids") or []) if lid in org_locs]
+    all_sites = bool(inv["all_sites"])
+    if m:   # an existing member keeps whatever wider access they already had
+        all_sites = all_sites or m.get("all_sites") is not False
+        locs = list(dict.fromkeys(sorted(auth.granted_location_ids(target["id"], org_id)) + locs))
+    access = auth.set_access(org_id, target["id"], all_sites, locs)
+    if attached:
+        sid = target["session"]["id"]
+    else:
+        sid = auth.new_session(target, request)
+        auth.set_cookie(response, sid)
+    db.run(sa.update(db.sessions).where(db.sessions.c.id == sid).values(org_id=org_id))   # land in the customer just joined
+    _audit(target, org_id, None, f"invite accepted: {target['email']} -> {role}",
+           {"label": inv.get("label"), "invited_by": inv.get("created_by"), "new_user": created,
+            "all_sites": access["all_sites"], "location_ids": access["location_ids"]})
+    return {"user": auth.public_user(target), "orgs": auth.user_orgs(target["id"]), "org_id": org_id, "role": role, **access}
 
 
 # ---------------------------------------------------------------- sites and enrolment
@@ -627,10 +832,23 @@ async def location_cameras(location_id: str, u: dict = Depends(user)):
     return out
 
 
-@app.get("/api/alerts")
-async def list_alerts(org: str, open: bool = True, limit: int = Query(200, le=1000), u: dict = Depends(user)):
-    auth.require_role(u, org, "viewer")
-    site_ids = [s["id"] for s in auth.visible_sites(u, org)]
+def _location_scope(u: dict, org_id: str, location_id: str | None) -> set[str] | None:
+    """?location= on an org-wide route: that Site's servers the user may see (None = no filter). A Site of another
+    customer is a 404, an ungranted one a 403 (auth.location_access)."""
+    if not location_id:
+        return None
+    loc, _ = auth.location_access(u, location_id)
+    if loc["org_id"] != org_id:
+        raise HTTPException(404, "unknown site")
+    return _servers_of(u, loc)
+
+
+def _servers_of(u: dict, loc: dict) -> set[str]:
+    return {s["id"] for s in auth.visible_sites(u, loc["org_id"]) if s.get("location_id") == loc["id"]}
+
+
+def _alert_rows(u: dict, org: str, open: bool, limit: int, within: set[str] | None = None) -> list[dict]:
+    site_ids = [s["id"] for s in auth.visible_sites(u, org) if within is None or s["id"] in within]
     if open:
         rows = alerts.open_for_org(org, site_ids, limit)
     else:
@@ -641,6 +859,45 @@ async def list_alerts(org: str, open: bool = True, limit: int = Query(200, le=10
         r["site_name"] = names.get(r["site_id"], r["site_id"])
         r |= tags.get(r["site_id"], {"location_id": None, "location_name": None})
     return rows
+
+
+@app.get("/api/alerts")
+async def list_alerts(org: str, open: bool = True, limit: int = Query(200, le=1000), location: str | None = None, u: dict = Depends(user)):
+    auth.require_role(u, org, "viewer")
+    return _alert_rows(u, org, open, limit, _location_scope(u, org, location))
+
+
+@app.get("/api/locations/{location_id}/alerts")
+async def location_alerts(location_id: str, open: bool = True, limit: int = Query(200, le=1000), u: dict = Depends(user)):
+    loc, _ = auth.location_access(u, location_id)
+    return _alert_rows(u, loc["org_id"], open, limit, _servers_of(u, loc))
+
+
+@app.get("/api/locations/{location_id}/events")
+async def location_events(location_id: str, cameras: str | None = None, classes: str | None = None,
+                          limit: int = Query(20, ge=1, le=100), since: float | None = None, u: dict = Depends(user)):
+    """The latest events across this Site's servers (same shape and params as /api/fleet/events)."""
+    loc, _ = auth.location_access(u, location_id)
+    return await dashboards.fleet_events(u, loc["org_id"], None, _cam_refs(cameras), None,
+                                         [c for c in (classes or "").split(",") if c] or None, limit, since, within=_servers_of(u, loc))
+
+
+@app.get("/api/locations/{location_id}/search")
+async def location_search(location_id: str, q: str = Query(min_length=1, max_length=200), since: float | None = None,
+                          until: float | None = None, u: dict = Depends(user)):
+    loc, _ = auth.location_access(u, location_id)
+    return await fleet_mod.search(u, loc["org_id"], q, since, until, server_ids=_servers_of(u, loc))
+
+
+@app.get("/api/locations/{location_id}/backups")
+async def location_backups(location_id: str, u: dict = Depends(user)):
+    """The newest config backup of each of this Site's servers (admins, like the per-server list)."""
+    loc, _ = auth.location_access(u, location_id)
+    auth.require_role(u, loc["org_id"], "admin")
+    servers = [s for s in auth.visible_sites(u, loc["org_id"]) if s.get("location_id") == location_id]
+    latest = backups.latest_for([s["id"] for s in servers])
+    return [{"server_id": s["id"], "server_name": s["name"], "online": bool(s["online"]) and s["id"] in registry.by_site,
+             "latest": latest.get(s["id"], {}).get("latest"), "count": latest.get(s["id"], {}).get("count", 0)} for s in servers]
 
 
 @app.post("/api/alerts/{alert_id}/ack")
@@ -679,20 +936,22 @@ def _audit(u: dict, org_id: str | None, site_id: str | None, action: str, detail
 
 @app.get("/api/fleet/search")
 async def fleet_search(org: str, q: str = Query(min_length=1, max_length=200), since: float | None = None, until: float | None = None,
-                       u: dict = Depends(user)):
+                       location: str | None = None, u: dict = Depends(user)):
     auth.require_role(u, org, "viewer")
-    return await fleet_mod.search(u, org, q, since, until)
+    return await fleet_mod.search(u, org, q, since, until, server_ids=_location_scope(u, org, location))
 
 
 class FleetAskIn(BaseModel):
     org: str
     message: str = Field(min_length=1, max_length=2000)
+    location: str | None = Field(None, max_length=24)   # ask only this Site's servers
 
 
 @app.post("/api/fleet/ask")
 async def fleet_ask(body: FleetAskIn, u: dict = Depends(user)):
     auth.require_role(u, body.org, "viewer")
-    return StreamingResponse(fleet_mod.ask(u, body.org, body.message), media_type="application/x-ndjson")
+    scope = _location_scope(u, body.org, body.location)
+    return StreamingResponse(fleet_mod.ask(u, body.org, body.message, server_ids=scope), media_type="application/x-ndjson")
 
 
 class ActionPlanIn(BaseModel):
@@ -1013,10 +1272,11 @@ def _cam_refs(cameras: str | None) -> list[tuple[str, str]] | None:
 @app.get("/api/fleet/events")
 async def fleet_events(org: str, sites: str | None = None, cameras: str | None = None, group: str | None = None,
                        classes: str | None = None, limit: int = Query(20, ge=1, le=100), since: float | None = None,
-                       u: dict = Depends(user)):
+                       location: str | None = None, u: dict = Depends(user)):
     auth.require_role(u, org, "viewer")
     return await dashboards.fleet_events(u, org, [s for s in (sites or "").split(",") if s] or None, _cam_refs(cameras), group,
-                                         [c for c in (classes or "").split(",") if c] or None, limit, since)
+                                         [c for c in (classes or "").split(",") if c] or None, limit, since,
+                                         within=_location_scope(u, org, location))
 
 
 @app.websocket("/api/fleet/ws")

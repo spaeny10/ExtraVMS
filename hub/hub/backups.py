@@ -42,6 +42,23 @@ def list_for(site_id: str) -> list[dict]:
     return rows
 
 
+def latest_for(server_ids: list[str]) -> dict[str, dict]:
+    """server id -> {latest: the newest backup's list_for row, count}; servers without backups are absent.
+    One query for a whole Site (KEEP caps the rows per server, so this stays small)."""
+    if not server_ids:
+        return {}
+    t = db.config_backups
+    out: dict[str, dict] = {}
+    for r in db.rows(sa.select(t.c.id, t.c.site_id, t.c.created_at, t.c.bytes, t.c.cameras, t.c.identities, t.c.site_version)
+                     .where(t.c.site_id.in_(server_ids)).order_by(t.c.id.desc())):
+        sid = r.pop("site_id")
+        if sid in out:
+            out[sid]["count"] += 1
+        else:
+            out[sid] = {"latest": r, "count": 1}
+    return out
+
+
 async def restore(site: dict, backup_id: int, user_email: str, replace_identities: bool = False) -> dict:
     b = db.one(sa.select(db.config_backups).where(db.config_backups.c.id == backup_id, db.config_backups.c.site_id == site["id"]))
     if not b:
