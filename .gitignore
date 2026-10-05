@@ -21,3 +21,7 @@ hub/hub.db-journal
 hub/ui/node_modules/
 hub/ui/dist/
 hub/.env
+
+# auto-generated local TLS material (backend serves https on the LAN with it)
+backend/auto.crt
+backend/auto.key
