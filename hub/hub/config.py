@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     turn_user_ttl_s: int = 3600
     turn_site_ttl_s: int = 30 * 86400
 
+    # Direct-on-LAN: lifetime of the media token a browser presents straight to a server on its LAN (hub/direct.py)
+    direct_token_ttl_s: int = 900
+
     # Shared AI: an OpenAI-compatible vLLM the hub fronts for every site whose organisation has ai_shared
     vllm_url: str = ""                        # e.g. http://vllm:8000/v1 (a vLLM/Ollama the hub can reach directly)
     vllm_site: str = ""                       # or: the site id whose local Qwen serves the fleet, reached down its tunnel

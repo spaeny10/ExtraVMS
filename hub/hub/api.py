@@ -16,7 +16,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, W
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, EmailStr, Field
 
-from . import __version__, alerts, auth, backups, cameras, dashboards, db, digest, fleet_actions, proxy, push, soc_api, turn, vlm_proxy
+from . import __version__, alerts, auth, backups, cameras, dashboards, db, digest, direct, fleet_actions, proxy, push, soc_api, turn, vlm_proxy
 from . import fleet as fleet_mod
 from . import soc, soc_reports
 from fastapi.responses import StreamingResponse
@@ -608,6 +608,21 @@ async def rotate_token(site_id: str, u: dict = Depends(user)):
     return {"ok": True, "pushed": pushed}
 
 
+@app.post("/api/sites/{site_id}/direct-token")
+@app.post("/api/servers/{site_id}/direct-token")
+async def direct_token(site_id: str, u: dict = Depends(user)):
+    """Direct-on-LAN: a short-lived token the browser presents straight to this server (on its LAN) for media,
+    plus the URLs and certificate fingerprint the server last reported. Anyone who may view the server through
+    the hub's proxy may have one, with the same role the proxy would send as x-hub-role. Not audited: it is
+    read-only media access, exactly what the proxy already allows. `available: false` (no URLs reported yet)
+    still returns a token; the UI simply keeps using the proxy. The token itself is never logged."""
+    site, role = auth.site_access(u, site_id)
+    if direct.rate_limited(u["id"], site_id):
+        raise HTTPException(429, "too many direct-access tokens; try again shortly")
+    token = direct.mint(site, u, role)
+    return {"token": token, "exp": direct.payload_of(token)["exp"], "role": role, **direct.info(site.get("summary"))}
+
+
 class RetireIn(BaseModel):
     retired: bool = True
 
@@ -652,7 +667,8 @@ def _site_card(s: dict, ctx: dict | None = None) -> dict:
             "last_seen_at": s["last_seen_at"], "version": s["version"], "hostname": s["hostname"], "clock_skew_s": s["clock_skew_s"],
             "summary": summ, "open_alerts": ctx["alerts"].get(s["id"], 0), "retired_at": s.get("retired_at"),
             "location_id": s.get("location_id"), "location_name": ctx["locations"].get(s.get("location_id")),
-            "cameras_total": cams_total, "cameras_online": cams_online}
+            "cameras_total": cams_total, "cameras_online": cams_online,
+            "direct": direct.info(summ)}   # Direct-on-LAN: lets the UI know whether to ask for a token at all
 
 
 def _card_ctx(servers: list[dict]) -> dict:
