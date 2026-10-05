@@ -6,13 +6,15 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api, makeApi, type SiteApi } from "./api";
 import { CHUNK, LIVE_LAG, nowS } from "./playback";
-import { WhepPlayer } from "./WhepPlayer";
+import { WhepPlayer, type WhepState } from "./WhepPlayer";
 
 const FALLBACK_LAG = LIVE_LAG + 6;   // a chunk must exist on disk before it can be fetched
 
-export function LivePlayer({ path, port, className, onUnsupported, showSize, iceServers, videoRef, children, base, site, muted, onAudio }: {
+export function LivePlayer({ path, port, className, onUnsupported, showSize, iceServers, videoRef, children, base, site, muted, onAudio, onState }: {
   path: string; port: number; className?: string; onUnsupported?: () => void; showSize?: boolean;
   iceServers?: RTCIceServer[]; videoRef?: React.MutableRefObject<HTMLVideoElement | null>; children?: ReactNode;
+  /** connection state of the WebRTC player (the recording fallback counts as "playing") */
+  onState?: (s: WhepState) => void;
   /** URL prefix of the camera's site ("/s/<site>" on the hub dashboard); default: this page's site */
   base?: string;
   /** the camera's server client; wins over `base` (the hub's direct client carries a token a bare base can't) */
@@ -23,9 +25,9 @@ export function LivePlayer({ path, port, className, onUnsupported, showSize, ice
   useEffect(() => { setFallback(false); }, [path]);
   if (!fallback) {
     return <WhepPlayer path={path} port={port} className={className} onUnsupported={onUnsupported} showSize={showSize} base={base} site={site}
-      iceServers={iceServers} videoRef={videoRef} muted={muted} onAudio={onAudio} onFallback={() => setFallback(true)}>{children}</WhepPlayer>;
+      iceServers={iceServers} videoRef={videoRef} muted={muted} onAudio={onAudio} onState={onState} onFallback={() => { onState?.("playing"); setFallback(true); }}>{children}</WhepPlayer>;
   }
-  return <RecordingFollow camera={path.replace(/_sub$/, "")} className={className} videoRef={videoRef} base={base} site={site} onGiveUp={() => setFallback(false)}>{children}</RecordingFollow>;
+  return <RecordingFollow camera={path.replace(/_sub$/, "")} className={className} videoRef={videoRef} base={base} site={site} onGiveUp={() => { onState?.("connecting"); setFallback(false); }}>{children}</RecordingFollow>;
 }
 
 /** Plays the recording from a few seconds ago and keeps loading the next chunk: live-ish without WebRTC. */

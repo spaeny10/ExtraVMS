@@ -6,8 +6,12 @@ import { api, makeApi, type SiteApi } from "./api";
  * onUnsupported fires when the browser can't decode the stream's codec (e.g. H.265 main streams),
  * so the caller can fall back to the H.264 sub stream.
  */
-export function WhepPlayer({ path, port, className, onUnsupported, showSize = false, videoRef, children, iceServers, onFallback, base, site: given, muted = true, onAudio }: {
+export type WhepState = "connecting" | "playing" | "error";
+
+export function WhepPlayer({ path, port, className, onUnsupported, showSize = false, videoRef, children, iceServers, onFallback, base, site: given, muted = true, onAudio, onState }: {
   path: string; port: number; className?: string; onUnsupported?: () => void; showSize?: boolean;
+  /** told whenever the connection state changes (the Timeline's live tiles report it as their status) */
+  onState?: (s: WhepState) => void;
   /** sound off (default); unmuting must follow a click, browsers block autoplaying audio */
   muted?: boolean;
   /** told whether the stream carries an audio track the browser can play */
@@ -27,7 +31,10 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
 }) {
   const video = useRef<HTMLVideoElement | null>(null);
   const setVideo = (el: HTMLVideoElement | null) => { video.current = el; if (videoRef) videoRef.current = el; };
-  const [state, setState] = useState<"connecting" | "playing" | "error">("connecting");
+  const [state, setStateRaw] = useState<WhepState>("connecting");
+  const stateCb = useRef(onState);
+  stateCb.current = onState;
+  const setState = (s: WhepState) => { setStateRaw(s); stateCb.current?.(s); };
   const [size, setSize] = useState<string>("");
   const unsupported = useRef(onUnsupported);
   unsupported.current = onUnsupported;

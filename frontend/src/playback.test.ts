@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CHUNK, DRIFT_RELOAD_MIN_S, FAR_CHUNK, FIRST_FAR_CHUNK, HOLD_MAX_MS, REMOTE_CHUNK, REMOTE_FIRST_CHUNK, RETRY_STEADY_MS, STALL_S,
-  camKey, chunkLen, driftReloadAllowed, dropPrefetch, firstChunkLen, nowS, prefetchChunk, retryDelayMs, shouldReload, splitKey,
+  camKey, chunkLen, driftReloadAllowed, dropPrefetch, firstChunkLen, nowS, prefetchChunk, retryDelayMs, shouldReload, splitKey, LIVE_LAG, reachesLiveEdge,
 } from "./playback";
 
 describe("chunk lengths", () => {
@@ -118,5 +118,18 @@ describe("camera keys", () => {
     expect(camKey("srv_a", "cam1")).toBe("srv_a/cam1");
     expect(splitKey("srv_a/cam1")).toEqual({ server: "srv_a", id: "cam1" });
     expect(splitKey(camKey("s", "c_sub"))).toEqual({ server: "s", id: "c_sub" });
+  });
+});
+
+describe("live edge (reachesLiveEdge)", () => {
+  const now = 1_000_000;
+  it("switches to live when a 1x clock would pass now - LIVE_LAG this frame", () => {
+    expect(reachesLiveEdge(now - LIVE_LAG - 0.01, 0.016, 1, now)).toBe(true);
+    expect(reachesLiveEdge(now - LIVE_LAG - 10, 0.016, 1, now)).toBe(false);
+  });
+  it("fast forward reaches it sooner; rewind and slow motion never do", () => {
+    expect(reachesLiveEdge(now - LIVE_LAG - 0.05, 0.016, 4, now)).toBe(true);
+    expect(reachesLiveEdge(now - LIVE_LAG, 0.016, -1, now)).toBe(false);
+    expect(reachesLiveEdge(now - LIVE_LAG, 0.016, 0.5, now)).toBe(false);
   });
 });

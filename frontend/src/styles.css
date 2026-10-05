@@ -397,6 +397,9 @@ h3.spaced { margin-top: 18px; }
 .sync-grid:has(> .sync-tile:only-child) .sync-tile { max-height: 62vh; width: 100%; }
 .sync-tile video, .sync-preview img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
 .sync-preview { position: absolute; inset: 0; background: #000; }
+.sync-tile .player { position: absolute; inset: 0; aspect-ratio: auto; }   /* the live stream fills the tile like a recording chunk */
+.sync-tile .player-size { top: auto; bottom: 8px; }
+.sync-status.playing { background: rgb(220 38 38 / .75); }
 .sync-gap { position: absolute; inset: 0; display: grid; place-items: center; color: #9aa4b1; font-size: 13px; background: #0b0e12; }
 .sync-bar { position: absolute; left: 0; right: 0; top: 0; display: flex; align-items: center; gap: 6px; padding: 4px 6px; background: linear-gradient(rgb(0 0 0 / .6), transparent); color: #fff; font-size: 12px; }
 .sync-name { font-weight: 600; text-shadow: 0 1px 2px #000; }

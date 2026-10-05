@@ -4,7 +4,7 @@ import { api, fmtTime, localApi, type ApiResolver, type Camera, type KeptSpan, t
 import { ConfidenceSlider, loadNumber, saveNumber } from "./ConfidenceSlider";
 import { EventDetail } from "./EventDetail";
 import { NavContext, useNav, type TimelineFocus, type TimelineTarget } from "./nav";
-import { HOLD_MAX_MS, LIVE_LAG, camKey, fmtClock, nowS, retryDelayMs, spanAt, splitKey, useLatestFrame, type Span } from "./playback";
+import { HOLD_MAX_MS, LIVE_LAG, camKey, fmtClock, nowS, reachesLiveEdge, retryDelayMs, spanAt, splitKey, useLatestFrame, type Span } from "./playback";
 import { SyncTile, type TileStatus } from "./SyncPlayer";
 import { encodeCells, regionPass, regions, useRegions } from "./region";
 import { timelineHash } from "./nav";
@@ -21,7 +21,7 @@ type Filter = {
   ppe: boolean;   // only events that broke a PPE rule (hatched markers)
 };
 const DEFAULT_FILTER: Filter = { person: true, vehicle: true, status: "verified", minThreat: "any", hideFalseAlarms: true, synopsisOnly: false, minYolo: 0, ppe: false };
-const LIVE_WINDOW_S = 30;
+const PAUSE_LIVE_BACK_S = 5; // pausing a live tile rewinds this far, so the frame comes from a recording that exists
 const THREAT_RANK: Record<string, number> = { none: 0, low: 1, medium: 2, high: 3 };
 
 function matches(e: Marker, f: Filter): boolean {
@@ -164,8 +164,10 @@ function loadConfig(key: string): LayoutConfig {
 export type QualityToggle = { value: PlaybackQuality; set: (q: PlaybackQuality) => void; title?: string };
 
 export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = localApi, layoutStore = apiLayoutStore, storageKey = "", remote,
-  mediaFor, qualityFor, qualityToggle, soloHint, onQualityUnavailable }: {
+  mediaFor, qualityFor, qualityToggle, soloHint, onQualityUnavailable, iceFor }: {
   cameras: TimelineCamera[]; focus?: TimelineFocus | null; onClearFocus?: () => void;
+  /** STUN/TURN servers per server for the live tiles at the live edge (the hub's relay for remote servers); default none */
+  iceFor?: (server: string) => RTCIceServer[] | undefined;
   /** API client per server (default: every camera is on this server); must be stable */
   apiFor?: ApiResolver;
   /** where named layouts are listed/saved (default: this server) */
@@ -220,6 +222,9 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
   const [playhead, setPlayhead] = useState<number | null>(null);
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState(1);
+  // At the live edge the tiles show the cameras' live streams: a recording chunk ends at the moment it is requested,
+  // so playing "live" from recordings runs dry and reloads every few seconds. Any seek, pause or scrub leaves live.
+  const [live, setLive] = useState(false);
   const [hover, setHover] = useState<{ x: number; t: number; cam: string } | null>(null);
   const [message, setMessage] = useState("");
   const [open, setOpen] = useState<{ id: number; key: string } | null>(null);   // key = the lane (server) the event is on
@@ -534,8 +539,8 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
   const [scrubbing, setScrubbing] = useState(false);
   const [scrubT, setScrubT] = useState<number | null>(null);
   const [scrubDir, setScrubDir] = useState<1 | -1>(1);
-  const loopState = useRef({ playing, speed, scrubbing, tileIds, lanes, isRemote });
-  loopState.current = { playing, speed, scrubbing, tileIds, lanes, isRemote };
+  const loopState = useRef({ playing, speed, scrubbing, tileIds, lanes, isRemote, live });
+  loopState.current = { playing, speed, scrubbing, tileIds, lanes, isRemote, live };
 
   const setClock = (t: number) => {
     clockRef.current = t;
@@ -544,6 +549,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
 
   const seekTo = (t: number, camId: string | null = null, autoplay = true, opts: { noSkip?: boolean; until?: number } = {}) => {
     t = Math.min(t, nowS() - LIVE_LAG);
+    setLive(false);
     setMessage("");
     if (opts.noSkip && camId) {
       // Jumping to an event: accept a recording that starts inside the event, but never skip past it.
@@ -584,7 +590,11 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
       last = now;
       const st = loopState.current;
       let t = clockRef.current;
-      if (t != null && st.playing && !st.scrubbing) {
+      if (t != null && st.playing && !st.scrubbing && st.live) {
+        // Live: the clock is real time (the streams pace themselves); nothing to hold for.
+        holdSince = null;
+        clockRef.current = nowS() - LIVE_LAG;
+      } else if (t != null && st.playing && !st.scrubbing) {
         // Hold while any tile with footage is buffering, so tiles start and stay together,
         // but for at most HOLD_MAX_MS (longer over a remote link) so one slow camera can't stall the others forever.
         const statuses = st.tileIds.map((id) => statusRef.current[id]).filter(Boolean);
@@ -592,7 +602,11 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
         if (anyBuffering) holdSince = holdSince ?? now;
         else holdSince = null;
         const hold = anyBuffering && now - (holdSince ?? now) < (st.isRemote ? HOLD_MAX_MS.remote : HOLD_MAX_MS.local);
-        if (!hold) {
+        if (!hold && reachesLiveEdge(t, dt, st.speed, nowS())) {
+          // Caught up with the recorder: switch the tiles to their live streams instead of chasing the edge.
+          setLive(true);
+          clockRef.current = nowS() - LIVE_LAG;
+        } else if (!hold) {
           t = Math.min(t + dt * st.speed, nowS() - LIVE_LAG);
           if (st.tileIds.length && !st.tileIds.some((id) => spanAt(st.lanes[id]?.spans, t!))) {
             const next = nextRecording(st.lanes, st.tileIds, t);
@@ -783,6 +797,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
     if (grab) {
       // Scrub: grab the playhead from the ruler, the handle, or anywhere within GRAB_PX of the line.
       drag.current = { mode: "scrub", pointer: ev.pointerId };
+      setLive(false);
       setScrubbing(true);
       scrubTo(onRuler ? toT(x) : playhead ?? toT(x));
     } else {
@@ -925,13 +940,20 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
   const goLive = () => {
     const r = Math.min(range, 3600);
     setView(clampView(nowS() - r * 0.85, nowS() + r * 0.15));
-    seekTo(nowS() - 15);
+    setMessage("");
+    setClock(nowS() - LIVE_LAG);
+    setPlaying(true);
+    setLive(true);
   };
-  // "Live" = playing and within LIVE_WINDOW_S of now (playback trails the recorder by a few seconds)
-  const isLive = playing && playhead != null && nowS() - playhead < LIVE_WINDOW_S;
+  const isLive = playing && live;
   const togglePlay = () => {
     if (clockRef.current == null) seekTo(playhead ?? nowS() - 60);
-    else setPlaying(!playing);
+    else if (live) {
+      // Pausing live: hold the picture a few seconds back, where the recording is already on disk.
+      setLive(false);
+      setClock(nowS() - LIVE_LAG - PAUSE_LIVE_BACK_S);
+      setPlaying(false);
+    } else setPlaying(!playing);
   };
 
   // Keyboard: space play/pause, arrows step, +/- zoom, [ ] events, 1-9 solo camera N, 0 back to the grid
@@ -1027,6 +1049,8 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
                 onSdUnavailable={onQualityUnavailable ? () => onQualityUnavailable(serverOf(id)) : undefined}
                 audioOn={audioCam === id}
                 onToggleAudio={() => setAudioCam((a) => (a === id ? null : id))}
+                live={live && playing}
+                iceServers={iceFor?.(serverOf(id))}
               />
             ))}
           </div>
@@ -1084,12 +1108,13 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
             setView(clampView(t - r / 2, t + r / 2));
             // the recordings for that window load next; seek once they are in (below), not against the old window
             pendingSeek.current = t;
+            setLive(false);
             setPlaying(false);
             setClock(t);
           }}
         />
         <button className={isLive ? "live-btn on" : "ghost live-btn"} onClick={goLive}
-          title={isLive ? "Playing live (recordings reach the Timeline a few seconds behind real time)" : "Jump to live"}>● Live</button>
+          title={isLive ? "Playing the live streams; seek, pause or scrub to go back to the recordings" : "Jump to live"}>● Live</button>
       </div>
 
       <button className="ghost small tl-more-toggle" onClick={() => setMoreOpen(!moreOpen)} aria-expanded={moreOpen}>

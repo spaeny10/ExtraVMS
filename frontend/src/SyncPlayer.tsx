@@ -2,6 +2,8 @@ import { RegionBadge, RegionOverlay } from "./RegionPaint";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type Camera, type PlaybackQuality, type SiteApi } from "./api";
 import { PREFETCH_LEAD_S, chunkLen, driftReloadAllowed, dropPrefetch, firstChunkLen, isBuffered, prefetchChunk, shouldReload, spanAt, useLatestFrame, type Prefetched, type Span } from "./playback";
+import { LivePlayer } from "./LivePlayer";
+import type { WhepState } from "./WhepPlayer";
 
 export type TileStatus = "idle" | "paused" | "playing" | "buffering" | "gap";
 const DRIFT_S = 0.5;      // paused: re-seek a tile further than this from the shared clock
@@ -20,8 +22,13 @@ const bufEnd = (v: HTMLVideoElement) => (v.buffered.length ? v.buffered.end(v.bu
 export function SyncTile({
   cam, name, spans, clockRef, playing, speed, scrubbing, scrubT, previewWidth, active, soloed,
   onSolo, onSelect, statusRef, dragging, dropTarget, onDragPointerDown, camera, hasAudio, audioOn, onToggleAudio,
-  site = api, camId, timeOffsetS = 0, remote = false, quality, onSdUnavailable,
+  site = api, camId, timeOffsetS = 0, remote = false, quality, onSdUnavailable, live = false, iceServers,
 }: {
+  /** the Timeline is at the live edge: show the camera's live stream (WebRTC) instead of recording chunks, which
+   *  end at the moment they are requested and would run dry every few seconds */
+  live?: boolean;
+  /** STUN/TURN servers for the live stream (a hub relay when the server is reached remotely) */
+  iceServers?: RTCIceServer[];
   cam: string; name: string; spans: Span[] | undefined; clockRef: React.RefObject<number | null>;
   playing: boolean; speed: number; scrubbing: boolean; scrubT: number | null; previewWidth: number;
   active: boolean; soloed: boolean; onSolo: () => void; onSelect: () => void;
@@ -48,15 +55,29 @@ export function SyncTile({
   const id = camId ?? cam;
   const off = timeOffsetS;
   const frameUrlFor = useCallback((_k: string, t: number, w?: number, exact?: boolean) => site.frameUrl(id, t + off, w, exact), [site, id, off]);
-  const video = useRef<HTMLVideoElement>(null);
+  const video = useRef<HTMLVideoElement | null>(null);
   const [chunk, setChunk] = useState<{ start: number; key: number; len: number; src: string } | null>(null);
   const loaded = useRef(false);
   const prefetch = useRef<Prefetched | null>(null);   // the chunk after the current one, downloading ahead of need
   const blobInUse = useRef<string | null>(null);      // the current chunk's blob URL, revoked when it is replaced
   const [status, setStatus] = useState<TileStatus>("idle");
   const frames = useLatestFrame(previewWidth, frameUrlFor);
-  const props = useRef({ playing, speed, spans, scrubbing, remote });
-  props.current = { playing, speed, spans, scrubbing, remote };
+  const liveState = useRef<WhepState>("connecting"); // the live stream's connection state while `live`
+  const [liveAudio, setLiveAudio] = useState(false);  // the live stream carries sound this browser can play
+  const liveOff = camera?.enabled === false;          // a disabled camera has no live stream (its recordings may remain)
+  const props = useRef({ playing, speed, spans, scrubbing, remote, live });
+  props.current = { playing, speed, spans, scrubbing, remote, live };
+  // Entering live: drop the recording chunk and anything prefetched; the live player takes the frame.
+  useEffect(() => {
+    if (!live) return;
+    liveState.current = "connecting";
+    loaded.current = false;
+    dropPrefetch(prefetch.current);
+    prefetch.current = null;
+    if (blobInUse.current) URL.revokeObjectURL(blobInUse.current);
+    blobInUse.current = null;
+    setChunk(null);
+  }, [live]);
   // download/playback progress of the current chunk, so a slow but live download is waited for rather than restarted
   const lastBufferedEnd = useRef(0);
   const lastCurTime = useRef(-1);
@@ -116,12 +137,19 @@ export function SyncTile({
   // Follow the shared clock.
   useEffect(() => {
     const tick = () => {
-      const { playing, speed, spans, scrubbing, remote } = props.current;
+      const { playing, speed, spans, scrubbing, remote, live } = props.current;
       const t = clockRef.current;
       const v = video.current;
       const c = chunkRef.current;
       const now = monoS();
       if (t == null) { lastClock.current = null; return report("idle"); }
+      if (live) {
+        // The live stream has its own pacing; the shared clock only follows real time. Leaving live mode
+        // continues from the clock, which the usual path below reloads as a seek.
+        lastClock.current = { t, at: now };
+        seekPending.current = true;
+        return report(liveOff ? "gap" : liveState.current === "playing" ? "playing" : "buffering");
+      }
       // A clock move that playback at `speed` can't explain (backwards, or well ahead) is a seek or a skipped gap.
       const lc = lastClock.current;
       if (lc && (t < lc.t - 1 || t - lc.t > speed * (now - lc.at) + JUMP_S)) seekPending.current = true;
@@ -212,14 +240,19 @@ export function SyncTile({
     if (!props.current.scrubbing && frames.shot) frames.clear();
   };
 
-  const label = { idle: "", paused: "", playing: "", buffering: "Buffering…", gap: "No recording" }[status];
+  const label = { idle: "", paused: "", playing: live ? "Live" : "", buffering: live ? "Connecting…" : "Buffering…", gap: live ? "No live stream" : "No recording" }[status];
   const [painting, setPainting] = useState(false);
 
   return (
     <div className={`sync-tile ${active ? "active" : ""} ${dragging ? "dragging" : ""} ${dropTarget ? "drop-target" : ""} ${painting ? "painting" : ""}`}
       data-cam={cam} onClick={onSelect} onDoubleClick={onSolo} title="Drag to reorder · double-click to isolate"
       onPointerDown={(e) => onDragPointerDown?.(e, false)}>
-      {chunk && (
+      {live && !liveOff && (
+        <LivePlayer key="live" path={`${id}_sub`} port={0} site={site} iceServers={iceServers} videoRef={video} muted={!audioOn}
+          onAudio={setLiveAudio} onState={(s) => { liveState.current = s; }} />
+      )}
+      {live && liveOff && <div className="sync-gap">Camera disabled: no live stream</div>}
+      {!live && chunk && (
         <video
           key={chunk.key}
           ref={video}
@@ -253,7 +286,7 @@ export function SyncTile({
           {frames.shot.url ? <img src={frames.shot.url} alt="" /> : <div className="sync-gap">No recording here</div>}
         </div>
       )}
-      {status === "gap" && !frames.shot && <div className="sync-gap">No recording at this time</div>}
+      {status === "gap" && !frames.shot && !live && <div className="sync-gap">No recording at this time</div>}
       <RegionOverlay cam={cam} videoRef={video} editing={painting} onDone={() => setPainting(false)} camera={camera} site={site} />
       <div className="sync-bar">
         {onDragPointerDown && <span className="sync-grip" title="Drag to reorder" onPointerDown={(e) => { e.stopPropagation(); onDragPointerDown(e, true); }}>⠿</span>}
@@ -261,7 +294,7 @@ export function SyncTile({
         {label && <span className={`sync-status ${status}`}>{label}</span>}
         <span className="spacer" />
         {!painting && <RegionBadge cam={cam} onEdit={() => setPainting(true)} />}
-        {hasAudio && onToggleAudio && (
+        {(live ? liveAudio : hasAudio) && onToggleAudio && (
           <button className={`ghost small sync-audio ${audioOn ? "on" : ""}`} title={audioOn ? "Mute" : "Play this camera's sound (one camera at a time)"}
             onClick={(e) => { e.stopPropagation(); onToggleAudio(); }}>{audioOn ? "🔊" : "🔇"}</button>
         )}

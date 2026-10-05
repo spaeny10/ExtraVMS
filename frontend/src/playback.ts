@@ -68,6 +68,10 @@ export function dropPrefetch(p: Prefetched | null): void {
   if (p.url) URL.revokeObjectURL(p.url);
 }
 export const LIVE_LAG = 3; // MediaMTX flushes fMP4 parts every second; stay a little behind "now"
+/** Will the clock at `t`, advancing by `dt` seconds at `speed`, reach the recording's live edge (now - LIVE_LAG)?
+ *  Then the Timeline switches to the live streams rather than reloading chunks that run dry. Rewinding or slow
+ *  motion never gets there. */
+export const reachesLiveEdge = (t: number, dt: number, speed: number, now: number): boolean => speed >= 1 && t + dt * speed >= now - LIVE_LAG;
 
 export type Span = { start: number; end: number };
 

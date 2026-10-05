@@ -45,6 +45,17 @@ const canSd = (server: string): Promise<boolean> => {
 };
 const dropHashLink = (hash: string) => (hash.startsWith("#timeline") ? "" : hash);
 
+/** ICE servers (the hub's TURN relay) per server for the live tiles at the live edge; asked once per server per page load. */
+const iceCache = new Map<string, Promise<RTCIceServer[]>>();
+const iceFor = (server: string): Promise<RTCIceServer[]> => {
+  let p = iceCache.get(server);
+  if (!p) {
+    p = siteApi(server).turn().then((t) => t.iceServers ?? []).catch(() => [] as RTCIceServer[]);
+    iceCache.set(server, p);
+  }
+  return p;
+};
+
 /**
  * `syncUrl` (default true): focusing an event or clearing focus rewrites the page URL into a shareable Timeline link.
  * An embedding page whose URL means something else (the SOC's /soc/incidents/:id) passes false and deep-links
@@ -108,11 +119,16 @@ export function SiteTimeline({ site, query, syncUrl = true }: { org: Org; site: 
     try { localStorage.setItem(qualityKey, q); } catch { /* private mode: this visit only */ }
   }, [qualityKey]);
   const [sd, setSd] = useState<Record<string, boolean>>({});
+  const [ice, setIce] = useState<Record<string, RTCIceServer[]>>({});
   useEffect(() => {
     let alive = true;
-    (onlineKey ? onlineKey.split(",") : []).forEach((id) => canSd(id).then((ok) => { if (alive) setSd((m) => (m[id] === ok ? m : { ...m, [id]: ok })); }));
+    (onlineKey ? onlineKey.split(",") : []).forEach((id) => {
+      canSd(id).then((ok) => { if (alive) setSd((m) => (m[id] === ok ? m : { ...m, [id]: ok })); });
+      iceFor(id).then((v) => { if (alive) setIce((m) => (m[id] ? m : { ...m, [id]: v })); });
+    });
     return () => { alive = false; };
   }, [onlineKey]);
+  const iceServersFor = useCallback((server: string) => ice[server], [ice]);
   // servers that answered 503 to an SD chunk (transcode slots full): HD for the rest of this visit, not persisted
   const [sdBusy, setSdBusy] = useState<Record<string, boolean>>({});
   const busyRef = useRef<Set<string>>(new Set());   // several tiles of one server can hit it at once: toast once
@@ -216,7 +232,7 @@ export function SiteTimeline({ site, query, syncUrl = true }: { org: Org; site: 
     <NavContext.Provider value={nav}>
       {missing.length > 0 && <p className="muted small site-timeline-note">Not shown: {missing.map((s) => s.name).join(", ")} ({why}).</p>}
       <TimelineView key={site.id} cameras={cameras} focus={focus} onClearFocus={clearFocus} apiFor={siteApi} mediaFor={mediaApi} remote={viaHub}
-        qualityFor={qualityFor} onQualityUnavailable={onSdBusy} layoutStore={layoutStore} storageKey={storageKey}
+        qualityFor={qualityFor} onQualityUnavailable={onSdBusy} layoutStore={layoutStore} storageKey={storageKey} iceFor={iceServersFor}
         qualityToggle={hubSd ? { value: quality, set: setQuality, title: "Playback quality for cameras reached through the hub: SD is a 720p low-bitrate copy that starts faster on a slow uplink" } : undefined}
         soloHint={hubSolo && anyHub ? HUB_SOLO_HINT : undefined} />
     </NavContext.Provider>
