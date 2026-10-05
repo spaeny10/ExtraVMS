@@ -56,6 +56,8 @@ class HubAgent:
         self.enrolled = bool(db.get_setting("hub_token"))
         self.site_id: str | None = db.get_setting("hub_site_id")
         self.org: str | None = None
+        self.location: str | None = None      # the hub Site this server belongs to (welcome; None from older hubs)
+        self.location_id: str | None = None
         self.last_error: str | None = None
         self.last_heartbeat: float | None = None
         self.streams: dict[int, Stream] = {}
@@ -80,7 +82,8 @@ class HubAgent:
     def status(self) -> dict:
         c = self.claim()
         return {"enabled": settings.hub_enabled and bool(self.hub_url()), "hub_url": self.hub_url(), "connected": self.connected,
-                "enrolled": self.enrolled, "site_id": self.site_id, "org": self.org, "claim_code": c["code"] if c else None,
+                "enrolled": self.enrolled, "site_id": self.site_id, "org": self.org,
+                "location": self.location, "location_id": self.location_id, "claim_code": c["code"] if c else None,
                 "claim_expires": c["expires"] if c else None, "last_error": self.last_error, "last_heartbeat": self.last_heartbeat,
                 "vlm_managed": bool(db.get_setting("hub_vlm"))}
 
@@ -91,6 +94,7 @@ class HubAgent:
             for k in ("hub_token", "hub_site_id", "hub_vlm", "hub_turn"):
                 db.set_setting(k, None)
             self.enrolled, self.site_id, self.org = False, None, None
+            self.location = self.location_id = None
             self._apply_vlm(None)
         await self.reconnect()
 
@@ -180,6 +184,7 @@ class HubAgent:
         if t == "welcome":
             self.connected, self.last_error = True, None
             self.site_id, self.org = m.get("site_id", self.site_id), m.get("org")
+            self.location, self.location_id = m.get("location"), m.get("location_id")
             if self.site_id:
                 db.set_setting("hub_site_id", self.site_id)
             hb = float(m.get("heartbeat_s") or HEARTBEAT_S)

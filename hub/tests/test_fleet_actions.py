@@ -656,3 +656,49 @@ def test_reference_lists_every_verb(fleet):
     assert 0 < len(recent) <= 50 and all(x["action"].startswith("fleet action:") for x in recent)
     assert any(x["undo_until"] for x in recent) and any(x["undo_until"] is None for x in recent)
     assert fleet.viewer.get(f"/api/orgs/{fleet.org['id']}/actions/reference").json()["recent"] == []
+
+
+def test_sites_with_several_servers(fleet, monkeypatch):
+    """Tenancy v2: a Site groups servers. A two-server Site quiets all its servers, asks which server for a
+    server-level verb, and finds a camera's owner among its servers; a one-server Site's name means its server."""
+    from hub import alerts
+    org, delta, echo, qwen = fleet.org["id"], fleet.sites["Delta"], fleet.sites["Echo"], fleet.sites["Qwenbot"]
+    t = time.time()
+    hq, main = db.new_id("l_"), db.new_id("l_")
+    for lid, name in ((hq, "Austin HQ"), (main, "Main Street")):
+        db.insert(db.locations, {"id": lid, "org_id": org, "name": name, "address": "", "timezone": None, "notes": None,
+                                 "created_at": t, "updated_at": t})
+    db.run(sa.update(db.sites).where(db.sites.c.id.in_([delta, echo])).values(location_id=hq))
+    db.run(sa.update(db.sites).where(db.sites.c.id == qwen).values(location_id=main))
+    try:
+        p = plan(fleet, "Quiet alerts at Austin HQ tonight")
+        assert p["action"] == "quiet_alerts" and p["site"] is None and p["location"]["name"] == "Austin HQ" and p["card"]["can_execute"], p
+        assert p["summary"] == "Quiet alerts at Austin HQ (2 servers) tonight"
+        r = execute(fleet, p["id"])
+        assert r.status_code == 200 and r.json()["ok"], r.text
+        mute = fleet_actions.current_mute(org)
+        assert sorted(mute["sites"]) == sorted([delta, echo]) and mute["location"] == {"id": hq, "name": "Austin HQ"}
+        assert alerts.muted(_site_row(fleet, "Delta")) and alerts.muted(_site_row(fleet, "Echo")) and not alerts.muted(_site_row(fleet, "Qwenbot"))
+        assert fleet.owner.post(f"/api/orgs/{org}/actions/undo/{r.json()['audit_id']}").json()["ok"]
+        assert fleet_actions.current_mute(org) is None
+
+        p = plan(fleet, "Retire Austin HQ")
+        assert not p["card"]["can_execute"] and "Austin HQ has 2 servers (Delta, Echo): which one?" in p["needs"], p["needs"]
+        p = plan(fleet, "Set Main Street to 12 days of recording")
+        assert p["site"]["id"] == qwen and p["card"]["can_execute"], p
+        p = plan(fleet, "Rename Lobby on Austin HQ to Front Lobby")
+        assert p["site"]["id"] == echo and [c["id"] for c in p["cameras"]] == ["d1"] and p["card"]["can_execute"], p
+
+        seen = {}
+
+        async def fake_complete(messages, max_tokens=500, temperature=0.2, schema=None):
+            seen["prompt"] = messages[0]["content"]
+            return json.dumps({**fleet_actions.EMPTY, "action": "none"})
+        monkeypatch.setattr(fleet_actions.vlm_proxy, "configured", lambda: True)
+        monkeypatch.setattr(fleet_actions.vlm_proxy, "complete", fake_complete)
+        plan(fleet, "Retire Austin HQ")
+        assert "- Site Austin HQ: server Delta (online): " in seen["prompt"] and "; server Echo (online): Lobby [d1]" in seen["prompt"]
+        assert "- Site Main Street: server Qwenbot (online): Yard [cam1]" in seen["prompt"]
+    finally:
+        db.run(sa.update(db.sites).where(db.sites.c.id.in_([delta, echo, qwen])).values(location_id=None))
+        db.run(sa.delete(db.locations).where(db.locations.c.id.in_([hq, main])))

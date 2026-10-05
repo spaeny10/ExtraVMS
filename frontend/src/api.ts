@@ -318,6 +318,7 @@ export type IdentitiesResult = { kind: string; since: number; until: number; clu
 export type HubStatus = {
   enabled: boolean; hub_url: string; connected: boolean; enrolled: boolean; site_id: string | null; org: string | null;
   claim_code: string | null; claim_expires: number | null; last_error: string | null; last_heartbeat: number | null; vlm_managed: boolean;
+  location?: string | null; location_id?: string | null;   // the hub Site this server belongs to (newer hubs)
 };
 
 export type SystemInfo = {

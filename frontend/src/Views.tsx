@@ -450,7 +450,8 @@ function HubPanel() {
   const load = () => api.hub().then(setH).catch(() => {});
   useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, []);
   if (!h) return null;
-  const state = !h.enabled ? "Off" : h.connected ? `Connected as ${h.site_id}${h.org ? ` · ${h.org}` : ""}`
+  const where = h.location ? ` · Site: ${h.location}` : "";   // newer hubs say which Site this server is in
+  const state = !h.enabled ? "Off" : h.connected ? `Connected as ${h.site_id}${where}${h.org ? ` · ${h.org}` : ""}`
     : h.enrolled ? "Enrolled · reconnecting…" : "Not enrolled";
   return (
     <Row label="Cloud hub" hint="One webpage for all your sites. The site dials out to the hub; no port forwarding. Enter the claim code at the hub under Add site."

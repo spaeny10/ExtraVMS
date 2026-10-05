@@ -263,6 +263,7 @@ class AgentRegistry:
         org = db.one(sa.select(db.orgs).where(db.orgs.c.id == conn.site["org_id"]))
         welcome = {"t": "welcome", "site_id": conn.site_id, "org": org["name"] if org else None,
                    "location": (conn.location or {}).get("name"),   # the Site's name (additive; old agents ignore it)
+                   "location_id": (conn.location or {}).get("id"),  # for the server UI's link back to /sites/<id>/servers
                    "heartbeat_s": settings.heartbeat_s, "now": time.time(), "max_streams": settings.max_streams_per_site,
                    "turn": turn.mint(f"site:{conn.site_id}", settings.turn_site_ttl_s),
                    "vlm": self.vlm_config(org, conn.token, conn.site_id)}

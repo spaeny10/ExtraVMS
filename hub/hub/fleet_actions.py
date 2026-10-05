@@ -84,8 +84,8 @@ _MOVE_STAYS = ["Recordings and event clips stay on the source; the destination r
 
 VERBS: dict[str, dict] = {
     "move_cameras": {
-        "title": "Move cameras to another site", "role": "admin", "confirm_name": False,
-        "prompt": "move the named cameras from source_site to target_site.",
+        "title": "Move cameras to another server", "role": "admin", "confirm_name": False,
+        "prompt": "move the named cameras from server source_site to server target_site.",
         "examples": ["Move the front door camera from Ironsight to Qwenbot", "Move gate and dock cameras to Qwenbot",
                      "Transfer Back Lot from Ironsight to Hailo T1 with history"],
         "moves": _MOVE_MOVES, "stays": _MOVE_STAYS,
@@ -93,29 +93,29 @@ VERBS: dict[str, dict] = {
         "undo": "Moves the cameras back to where they were (copied history stays on the destination)",
     },
     "migrate_site": {
-        "title": "Migrate a whole site", "role": "admin", "confirm_name": True,
-        "prompt": "move every camera of source_site to target_site, then retire source_site.",
-        "examples": ["Migrate Ironsight to Hailo T1", "Migrate the site Qwenbot onto Hailo T1", "Migrate Ironsight to Hailo T1 without history"],
+        "title": "Migrate a whole server", "role": "admin", "confirm_name": True,
+        "prompt": "move every camera of server source_site to server target_site, then retire source_site.",
+        "examples": ["Migrate Ironsight to Hailo T1", "Migrate the server Qwenbot onto Hailo T1", "Migrate Ironsight to Hailo T1 without history"],
         "moves": ["Every enabled camera, as for Move cameras", *_MOVE_MOVES[1:]],
         "stays": [*_MOVE_STAYS, "Disabled cameras are not moved",
                   "The source is then retired: hidden from Fleet, Home, Find, Ask and alerts; its tunnel stays connected and its page still opens"],
         "options": [{**_COPY_HISTORY, "default": True}, _SKIP_STREAM],
-        "undo": "Restores the source site and moves its cameras back",
+        "undo": "Restores the source server and moves its cameras back",
     },
     "retire_site": {
-        "title": "Retire a site", "role": "admin", "confirm_name": True,
-        "prompt": "retire source_site (hide it; no cameras move).",
-        "examples": ["Retire Ironsight", "Decommission the site Old Barn"],
-        "moves": ["The site is hidden from Fleet, Home, Find, Ask, the digest and alerts (Fleet → Show retired lists it)"],
-        "stays": ["Its recordings, events and settings stay on the site", "Its tunnel stays connected and /s/<site>/ still opens",
-                  "Its cameras keep recording at the site"],
-        "options": [], "undo": "Restores the site",
+        "title": "Retire a server", "role": "admin", "confirm_name": True,
+        "prompt": "retire server source_site (hide it; no cameras move).",
+        "examples": ["Retire Ironsight", "Decommission the server Old Barn"],
+        "moves": ["The server is hidden from Fleet, Home, Find, Ask, the digest and alerts (Fleet → Show retired lists it)"],
+        "stays": ["Its recordings, events and settings stay on the server", "Its tunnel stays connected and /s/<server>/ still opens",
+                  "Its cameras keep recording on the server"],
+        "options": [], "undo": "Restores the server",
     },
     "set_retention": {
         "title": "Set continuous recording retention", "role": "admin", "confirm_name": False,
-        "prompt": "keep `days` days of continuous recording at source_site.",
+        "prompt": "keep `days` days of continuous recording at server source_site.",
         "examples": ["Set Qwenbot to 7 days of recording", "Keep 10 days at Hailo T1", "Set the retention on Ironsight to 21 days"],
-        "moves": ["The site's continuous_days (1-365)"],
+        "moves": ["The server's continuous_days (1-365)"],
         "stays": ["Event clips, locked footage and per-camera overrides follow their own rules", "The free-space floor still wins"],
         "options": [], "undo": "Sets the previous number of days again",
     },
@@ -127,11 +127,11 @@ VERBS: dict[str, dict] = {
         "options": [], "undo": "Gives it its old name back",
     },
     "add_camera": {
-        "title": "Add a camera to a site", "role": "admin", "confirm_name": False,
-        "prompt": "add a new camera at address `host` to target_site, named new_name.",
+        "title": "Add a camera to a server", "role": "admin", "confirm_name": False,
+        "prompt": "add a new camera at address `host` to server target_site, named new_name.",
         "examples": ["Add 192.168.105.19 to Hailo T1 as Front Door", "Add camera 10.2.0.9 to Qwenbot called Loading Dock"],
-        "moves": ["A new camera on the site (RTSP main/sub paths, ONVIF port); the site starts recording it"],
-        "stays": ["The password you type goes to the site in the Confirm call only: the hub never stores, logs or audits it",
+        "moves": ["A new camera on the server (RTSP main/sub paths, ONVIF port); the server starts recording it"],
+        "stays": ["The password you type goes to the server in the Confirm call only: the hub never stores, logs or audits it",
                   "Other cameras and settings"],
         "options": [], "undo": "Removes the camera again (disabled instead if it already has events)",
         "inputs": [{"key": "password", "label": "Camera password", "type": "password"},
@@ -169,7 +169,7 @@ VERBS: dict[str, dict] = {
         "options": [], "undo": "Turns alerts back on (or restores the previous quiet period)",
     },
     # internal: only the reverse plans of Undo use these; never parsed from text
-    "restore_site": {"title": "Restore a retired site", "role": "admin", "internal": True},
+    "restore_site": {"title": "Restore a retired server", "role": "admin", "internal": True},
     "remove_camera": {"title": "Remove a camera that was just added", "role": "admin", "internal": True},
     "unlock_footage": {"title": "Remove a lock", "role": "operator", "internal": True},
     "unquiet_alerts": {"title": "Turn alerts back on", "role": "admin", "internal": True},
@@ -181,10 +181,11 @@ MOVES = ("move_cameras", "migrate_site")
 SAFETY = [
     "Nothing happens until Confirm on the card. Plans expire after 10 minutes and run once.",
     "Only an admin of the organisation can confirm (lock_footage: operator). Anyone in the org may see a card.",
-    "Migrate and Retire also need the source site's name typed into the card.",
+    "Migrate and Retire also need the source server's name typed into the card.",
     "Questions (\"how many people today?\") are never actions: they go to the sites' assistants as before.",
-    "Names are matched against the org's real sites and cameras; anything unclear becomes a question on the card.",
-    "Camera passwords go site to site through the hub in one call; they are never stored, logged or audited. "
+    "Names are matched against the org's real Sites, servers and cameras; a Site with several servers is asked about "
+    "for server-level actions; anything unclear becomes a question on the card.",
+    "Camera passwords go server to server through the hub in one call; they are never stored, logged or audited. "
     "A new camera's password is typed into the card and sent only with Confirm.",
     "A move first proves the destination can pull each stream (up to 60 s); if not, it is rolled back and the source is untouched.",
     "Every executed action writes one Audit row with its outcome. Undo is offered for 24 hours on the result and on the Audit row.",
@@ -224,14 +225,15 @@ SCHEMA = {
 EMPTY = {"action": "none", "source_site": "", "target_site": "", "cameras": [], "days": 0, "new_name": "", "host": "", "labels": [],
          "label_mode": "", "time_from": "", "time_to": "", "day": "", "until": "", "copy_history": "", "confidence": "high"}
 
-SYSTEM = ("You turn one operator instruction for a fleet of video-surveillance sites into a single action, as JSON.\nActions:\n"
+SYSTEM = ("You turn one operator instruction for a fleet of video-surveillance servers into a single action, as JSON.\nActions:\n"
           + "".join(f"- {k}: {v['prompt']}\n" for k, v in VERBS.items() if not v.get("internal"))
           + """- none: anything else. Questions, searches and requests about footage, events, people or counts are ALWAYS none,
   even when they mention cameras or sites. Never guess an action from a question.
-Use site and camera names exactly as listed below when the operator means one of them; otherwise copy the operator's
-words. Leave fields that don't apply as "" / [] / 0. copy_history: "yes" / "no" only when the operator says so.
-confidence is high only when the instruction is explicit.
-Sites and their cameras ([id]):
+A Site is a physical place with one or more servers; source_site / target_site name a server (or the Site the
+operator said, when it is unclear which server). Use Site, server and camera names exactly as listed below when the
+operator means one of them; otherwise copy the operator's words. Leave fields that don't apply as "" / [] / 0.
+copy_history: "yes" / "no" only when the operator says so. confidence is high only when the instruction is explicit.
+Sites, their servers and cameras ([id]):
 """)
 
 _plans: dict[str, dict] = {}
@@ -319,8 +321,10 @@ def _forget(*site_ids: str) -> None:
 
 
 async def _index(u: dict, org_id: str) -> list[dict]:
-    """Every visible, non-retired site with its cameras (live list, or the last heartbeat's names when offline)."""
+    """Every visible, non-retired server with its cameras (live list, or the last heartbeat's names when offline) and
+    its Site ({id, name}; None for a server the backfill has not given one yet). _locations() groups it by Site."""
     sites = auth.visible_sites(u, org_id)
+    locs = {loc["id"]: loc for loc in auth.visible_locations(u, org_id)}
     lists = await asyncio.gather(*(site_cameras(s, u) for s in sites))
     out = []
     for s, cams in zip(sites, lists):
@@ -328,8 +332,23 @@ async def _index(u: dict, org_id: str) -> list[dict]:
         if cams is None:
             cams = [{"id": c.get("id"), "name": c.get("name"), "enabled": 1, "bitrate_mbps": c.get("bitrate_mbps")}
                     for c in ((s.get("summary") or {}).get("cameras") or []) if c.get("id")]
-        out.append({"site": s, "online": registry.get(s["id"]) is not None, "live": live, "cameras": cams})
+        loc = locs.get(s.get("location_id"))
+        out.append({"site": s, "online": registry.get(s["id"]) is not None, "live": live, "cameras": cams,
+                    "location": {"id": loc["id"], "name": loc["name"]} if loc else None})
     return out
+
+
+def _locations(index: list[dict]) -> list[dict]:
+    """The index by Site: [{id, name, servers: [index entries]}] in index order. Only visible, non-retired servers
+    count, so a Site whose second server was retired resolves like a one-server Site. A server without a Site
+    (id None) stands alone under its own name, as the fleet looked before Sites."""
+    out: dict[str, dict] = {}
+    for e in index:
+        loc = e.get("location")
+        key = loc["id"] if loc else "server:" + e["site"]["id"]
+        g = out.setdefault(key, {"id": loc["id"] if loc else None, "name": loc["name"] if loc else e["site"]["name"], "servers": []})
+        g["servers"].append(e)
+    return list(out.values())
 
 
 # ---------------------------------------------------------------- times: "3-4 pm today", "tonight", "for 2 hours"
@@ -460,10 +479,10 @@ CAM_SITE = r"(?P<cam>.+?)(?:\s+(?:at|on|in)\s+(?P<site>.+))?"
 RULES: list[tuple[str, re.Pattern]] = [(a, re.compile(rx, re.I)) for a, rx in [
     ("rename_camera", r"^rename\s+(?:the\s+)?(?P<cam>.+?)\s+(?:camera\s+)?(?:on|at|in)\s+(?P<site>.+?)\s+(?:to|as)\s+(?P<name>.+)$"),
     ("rename_camera", r"^rename\s+(?:the\s+)?(?P<cam>.+?)\s+(?:to|as)\s+(?P<name>.+)$"),
-    ("migrate_site", r"^migrate\s+(?:the\s+)?(?:site\s+)?(?P<src>.+?)\s+(?:to|into|onto|over\s+to)\s+(?P<dst>.+)$"),
+    ("migrate_site", r"^migrate\s+(?:the\s+)?(?:site\s+|server\s+)?(?P<src>.+?)\s+(?:to|into|onto|over\s+to)\s+(?P<dst>.+)$"),
     ("move_cameras", r"^(?:move|transfer|relocate)\s+(?:the\s+)?(?P<cams>.+?)\s+from\s+(?P<src>.+?)\s+(?:to|into|onto|over\s+to)\s+(?P<dst>.+)$"),
     ("move_cameras", r"^(?:move|transfer|relocate)\s+(?:the\s+)?(?P<cams>.+?)\s+(?:to|into|onto|over\s+to)\s+(?P<dst>.+)$"),
-    ("retire_site", r"^(?:retire|decommission)\s+(?:the\s+)?(?:site\s+)?(?P<src>.+)$"),
+    ("retire_site", r"^(?:retire|decommission)\s+(?:the\s+)?(?:site\s+|server\s+)?(?P<src>.+)$"),
     ("set_retention", r"^set\s+(?:the\s+)?(?:retention\s+(?:on|at|for|of)\s+)?(?P<site>.+?)\s+(?:retention\s+)?to\s+(?P<days>\d+)\s*(?:days?|d)\b"),
     ("set_retention", r"^(?:keep|retain)\s+(?P<days>\d+)\s*(?:days?|d)\b.*?\b(?:at|on|for)\s+(?P<site>.+)$"),
     ("add_camera", r"^add\s+(?:a\s+|the\s+)?(?:new\s+)?(?:camera\s+)?(?:at\s+)?(?P<host>\d{1,3}(?:\.\d{1,3}){3}|[a-z0-9][a-z0-9\-]*(?:\.[a-z0-9\-]+)+)"
@@ -557,9 +576,12 @@ async def parse_ai(text: str, index: list[dict]) -> dict | None:
     if not vlm_proxy.configured():
         return None
     lines = []
-    for e in index:
-        cams = ", ".join(f"{c['name']} [{c['id']}]" for c in e["cameras"]) or "no cameras"
-        lines.append(f"- {e['site']['name']}{'' if e['online'] else ' (offline)'}: {cams}")
+    for g in _locations(index):
+        servers = []
+        for e in g["servers"]:
+            cams = ", ".join(f"{c['name']} [{c['id']}]" for c in e["cameras"]) or "no cameras"
+            servers.append(f"server {e['site']['name']} ({'online' if e['online'] else 'offline'}): {cams}")
+        lines.append(f"- Site {g['name']}: {'; '.join(servers)}")
     try:
         raw = await vlm_proxy.complete([{"role": "system", "content": SYSTEM + "\n".join(lines)}, {"role": "user", "content": text}],
                                        max_tokens=300, temperature=0, schema=SCHEMA)
@@ -612,19 +634,56 @@ def _resolve(parsed: dict, index: list[dict], org_id: str) -> dict:
     """Turn the parsed names into sites and cameras of this org; questions for whatever doesn't resolve."""
     a = parsed["action"]
     needs: list[str] = []
-    out: dict = {"action": a, "source": None, "target": None, "site": None, "cameras": [], "days": parsed.get("days") or None,
-                 "new_name": parsed.get("new_name") or None}
-    site_keys = lambda e: [e["site"]["name"], e["site"]["id"]]   # noqa: E731
+    out: dict = {"action": a, "source": None, "target": None, "site": None, "location": None, "cameras": [],
+                 "days": parsed.get("days") or None, "new_name": parsed.get("new_name") or None}
     cam_keys = lambda c: [c["name"], c["id"]]                   # noqa: E731
+    # Names the operator may use for a server: its name, its id, and its Site's name when that Site has only this
+    # server (backfilled one-server Sites share the server's name, which must still give one hit). A Site with
+    # several servers is a separate candidate ({"group": ...}) so the caller can ask which server, or find the
+    # camera's owner among them.
+    groups = [g for g in _locations(index) if g["id"]]
+    only = {g["servers"][0]["site"]["id"]: g["name"] for g in groups if len(g["servers"]) == 1}
+    places = [*index, *({"group": g} for g in groups if len(g["servers"]) > 1)]
+
+    def place_keys(x: dict) -> list:
+        if "group" in x:
+            return [x["group"]["name"], x["group"]["id"]]
+        return [x["site"]["name"], x["site"]["id"], only.get(x["site"]["id"])]
+
+    def place(words: str) -> dict | None:
+        """An index entry, {"group": Site} for a several-server Site, or None (question appended)."""
+        exact = [e for e in index if _norm(words) in (_norm(e["site"]["name"]), _norm(e["site"]["id"]))]
+        if len(exact) == 1:   # a server's own name wins over a Site named like it
+            return exact[0]
+        x, q = _pick(words, places, place_keys, "site", "site|server")
+        if q:
+            needs.append(q)
+        return x
+
+    def which_server(g: dict) -> None:
+        names = ", ".join(e["site"]["name"] for e in g["servers"])
+        needs.append(f"{g['name']} has {len(g['servers'])} servers ({names}): which one?")
 
     def site(words: str, role: str):
+        """A server for a server-level verb: a several-server Site becomes a question."""
         if not words.strip():
             needs.append(f"Which site should be the {role}?")
             return None
-        e, q = _pick(words, index, site_keys, "site", "site")
-        if q:
-            needs.append(q)
-        return e
+        x = place(words)
+        if x is not None and "group" in x:
+            which_server(x["group"])
+            return None
+        return x
+
+    def owner_in(g: dict, words: list[str]) -> dict | None:
+        """The one server of Site g that has (any of) these cameras; otherwise a question."""
+        owners = [e for e in g["servers"] if any(_pick(w, e["cameras"], cam_keys, "camera", "cameras?|cams?")[0] for w in words)]
+        if len(owners) == 1:
+            return owners[0]
+        names = ", ".join(words)
+        needs.append(f'Which server at {g["name"]} is "{names}" on: {", ".join(e["site"]["name"] for e in owners)}?' if owners
+                     else f'No server at {g["name"]} has a camera called "{names}".')
+        return None
 
     def cameras_on(e: dict, words: list[str]) -> list[dict]:
         found = []
@@ -637,9 +696,13 @@ def _resolve(parsed: dict, index: list[dict], org_id: str) -> dict:
         return found
 
     def one_camera(what: str) -> None:
-        """rename / labels / lock / remove: one camera, its site named or found from the camera's name."""
-        e = site(parsed["source_site"] or parsed["target_site"], "site") if (parsed["source_site"] or parsed["target_site"]) else None
+        """rename / labels / lock / remove: one camera, its server named (or its Site: the owner among the Site's
+        servers) or found from the camera's name."""
+        named = parsed["source_site"] or parsed["target_site"]
         words = parsed.get("cameras") or []
+        e = place(named) if named else None
+        if e is not None and "group" in e:
+            e = owner_in(e["group"], words[:1]) if words else None
         if not words:
             needs.append(f"Which camera should {what}?")
         elif e is None and not (parsed["source_site"] or parsed["target_site"]):
@@ -653,7 +716,14 @@ def _resolve(parsed: dict, index: list[dict], org_id: str) -> dict:
         out["site"] = _site_ref(e) if e else None
 
     if a in MOVES:
-        src = site(parsed["source_site"], "source") if (parsed["source_site"] or a == "migrate_site") else None
+        src_words = parsed["source_site"]
+        if a == "move_cameras" and src_words.strip() and parsed.get("cameras"):
+            # "Move Lobby from Austin HQ to …": the cameras pick the server inside a several-server Site
+            src = place(src_words)
+            if src is not None and "group" in src:
+                src = owner_in(src["group"], parsed["cameras"])
+        else:
+            src = site(src_words, "source") if (src_words or a == "migrate_site") else None
         dst = site(parsed["target_site"], "destination")
         if a == "move_cameras":
             words = parsed.get("cameras") or []
@@ -691,8 +761,17 @@ def _resolve(parsed: dict, index: list[dict], org_id: str) -> dict:
         words = parsed["source_site"] or parsed["target_site"]
         rows = db.rows(sa.select(db.sites).where(db.sites.c.org_id == org_id))
         row = next((r for r in rows if r["id"] == words), None) or next((r for r in rows if _norm(r["name"]) == _norm(words)), None)
+        if row is None:   # a Site's name: fine when it has one server, a question when it has several
+            loc = next((r for r in db.rows(sa.select(db.locations).where(db.locations.c.org_id == org_id))
+                        if _norm(r["name"]) == _norm(words)), None)
+            members = [r for r in rows if loc and r.get("location_id") == loc["id"]]
+            if len(members) == 1:
+                row = members[0]
+            elif members:
+                needs.append(f"{loc['name']} has {len(members)} servers ({', '.join(r['name'] for r in members)}): which one?")
         if row is None:
-            needs.append(f'There is no site called "{words}".')
+            if not needs:
+                needs.append(f'There is no site called "{words}".')
         else:
             out["site"] = {"id": row["id"], "name": row["name"], "online": registry.get(row["id"]) is not None}
     elif a == "rename_camera":
@@ -728,7 +807,11 @@ def _resolve(parsed: dict, index: list[dict], org_id: str) -> dict:
         out.update(site=_site_ref(e) if e else None, host=host or None, new_name=out["new_name"] or host or None)
     elif a in ("quiet_alerts", "unquiet_alerts"):
         words = parsed["source_site"] or parsed["target_site"]
-        e = site(words, "site") if words else None
+        e = place(words) if words else None
+        if e is not None and "group" in e:   # a several-server Site: quiet every one of its servers
+            g = e["group"]
+            out["location"] = {"id": g["id"], "name": g["name"], "servers": [_site_ref(x) for x in g["servers"]]}
+            e = None
         out["site"] = _site_ref(e) if e else None
         out["until"] = parsed.get("until") or ""
         out["previous"] = parsed.get("previous")
@@ -739,6 +822,14 @@ def _resolve(parsed: dict, index: list[dict], org_id: str) -> dict:
                       "skip_stream_check": bool(parsed.get("skip_stream_check"))}
     out["needs"] = needs
     return out
+
+
+def _quiet_where(p: dict) -> str:
+    loc = p.get("location")
+    if loc:
+        n = len(loc.get("servers") or [])
+        return f"at {loc['name']} ({n} server{'' if n == 1 else 's'})"
+    return f"at {p['site']['name']}" if p.get("site") else "at every site"
 
 
 def summary(p: dict) -> str:
@@ -771,7 +862,7 @@ def summary(p: dict) -> str:
     if a == "unlock_footage":
         return f"Remove lock {p.get('lock_id')} at {name(p['site'])}"
     if a == "quiet_alerts":
-        return f"Quiet alerts {'at ' + name(p['site']) if p.get('site') else 'at every site'} {p.get('until') or ''}".strip()
+        return f"Quiet alerts {_quiet_where(p)} {p.get('until') or ''}".strip()
     if a == "unquiet_alerts":
         return "Turn alerts back on"
     return "Nothing to do"
@@ -949,7 +1040,7 @@ async def preview(p: dict, u: dict) -> dict:
             stays.append(f"Its recordings, events and settings stay on {s['name']}; its tunnel stays connected and its page still opens")
             e_cams = [c for c in (await site_cameras(_row(s["id"]), u) or []) if c.get("enabled", 1)]
             if e_cams:
-                warnings.append(f"{s['name']} still has {_plural(len(e_cams), 'enabled camera')}: they keep recording at the site but nobody sees "
+                warnings.append(f"{s['name']} still has {_plural(len(e_cams), 'enabled camera')}: they keep recording on the server but nobody sees "
                                 f"them at the hub. To keep watching them, migrate instead (\"Migrate {s['name']} to …\").")
         else:
             moves.append(f"{s['name']} shows in Fleet, Home, Find, Ask and alerts again")
@@ -1035,7 +1126,10 @@ async def preview(p: dict, u: dict) -> dict:
     elif a == "unlock_footage" and p["site"]:
         moves.append(f"Lock {p.get('lock_id')} at {p['site']['name']} is removed; that footage follows the retention policy again")
     elif a == "quiet_alerts":
-        ref = p.get("site")
+        loc = p.get("location")
+        # a Site's servers share one place, so the first one's clock reads "tonight" for all of them
+        ref = p.get("site") or ((loc.get("servers") or [None])[0] if loc else None)
+        label = loc["name"] if loc else ref["name"] if ref else None
         info = await _site_info(ref, u) if ref else {}
         off = float(info.get("tz_offset_s") if info.get("tz_offset_s") is not None else _hub_off())
         until = until_ts(p.get("until") or "", time.time(), off)
@@ -1043,8 +1137,9 @@ async def preview(p: dict, u: dict) -> dict:
             if until - time.time() > MAX_QUIET_S:
                 blockers.append("Alerts can be quieted for at most 7 days.")
             p["mute_until"] = until
-            moves.append(f"No new event alerts (high priority, broken site rules, watched people) {'at ' + ref['name'] if ref else 'at any site'} "
-                         f"until {_fmt_local(until, off)}{' (' + ref['name'] + ' time)' if ref else ''}, and no push notifications for them")
+            servers = f" ({', '.join(s['name'] for s in loc['servers'])})" if loc else ""
+            moves.append(f"No new event alerts (high priority, broken site rules, watched people) {'at ' + label + servers if label else 'at any site'} "
+                         f"until {_fmt_local(until, off)}{' (' + label + ' time)' if label else ''}, and no push notifications for them")
         stays.append("Health alerts (site offline, camera down, disk, clock) still open; events are still recorded and described")
         prev = current_mute(p.get("org_id") or "")
         if prev:
@@ -1070,7 +1165,8 @@ def _sweep() -> None:
 def public(p: dict) -> dict:
     cam = lambda c: {"id": c["id"], "name": c["name"], "host": c.get("host")}   # noqa: E731
     return {"id": p["id"], "action": p["action"], "summary": summary(p), "parser": p["parser"], "confidence": p["confidence"],
-            "source": p["source"], "target": p["target"], "site": p["site"], "cameras": [cam(c) for c in p["cameras"]],
+            "source": p["source"], "target": p["target"], "site": p["site"], "location": p.get("location"),
+            "cameras": [cam(c) for c in p["cameras"]],
             "days": p["days"], "new_name": p["new_name"], "needs": p["needs"], "card": p["card"], "expires_at": p["expires_at"],
             "options": p["options"]}
 
@@ -1082,7 +1178,7 @@ async def build(u: dict, org_id: str, parsed: dict, text: str, parser: str, inde
              confidence=parsed.get("confidence") or "low", created_at=time.time(), expires_at=time.time() + PLAN_TTL_S)
     if p["confidence"] != "high" and not p["needs"]:
         p["needs"].append(f'I read this as "{summary(p)}" but I am not sure. Say it plainly to confirm, '
-                          'e.g. "Move <camera> from <site> to <site>".')
+                          'e.g. "Move <camera> from <server> to <server>".')
     p["card"] = await preview(p, u)
     _sweep()
     _plans[p["id"]] = p
@@ -1572,10 +1668,15 @@ async def _run(p: dict, u: dict, lines: list[str], detail: dict, extras: dict) -
         until = p.get("mute_until")
         if not until:
             raise ActionError("no end time")
-        _set_mute(p["org_id"], {"until": until, "sites": [p["site"]["id"]] if p.get("site") else None, "by": u["email"], "at": time.time()})
-        lines.append(f"Event alerts are quiet {'at ' + p['site']['name'] if p.get('site') else 'at every site'} until "
-                     f"{time.strftime('%a %H:%M', time.localtime(until))} (hub time)")
-        detail.update(until=until, site=(p.get("site") or {}).get("name"))
+        loc = p.get("location")
+        # alerts.muted() reads only `sites` (server ids); `location` is for people reading the kv row / audit
+        mute = {"until": until, "sites": [s["id"] for s in loc["servers"]] if loc else [p["site"]["id"]] if p.get("site") else None,
+                "by": u["email"], "at": time.time()}
+        if loc:
+            mute["location"] = {"id": loc["id"], "name": loc["name"]}
+        _set_mute(p["org_id"], mute)
+        lines.append(f"Event alerts are quiet {_quiet_where(p)} until {time.strftime('%a %H:%M', time.localtime(until))} (hub time)")
+        detail.update(until=until, site=loc["name"] if loc else (p.get("site") or {}).get("name"))
         detail["reverse"] = [{"action": "unquiet_alerts", "previous": prev}]
     elif a == "unquiet_alerts":
         prev = p.get("previous")

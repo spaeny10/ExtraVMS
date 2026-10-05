@@ -59,6 +59,9 @@ async def site_summary(state, since: float | None = None, version: str = "") -> 
         "queues": {"verify": p.verify_q.qsize(), "synopsis": p.synopsis_q.qsize()},
         "yolo_ready": p.verifier is not None, "vlm_ready": p.vlm_ready, "vlm_model": settings.vlm_model,
         "cameras": cams, "today": today, "attention": attention,
+        # disabled cameras, separately: `cameras` stays "enabled only" for older hubs, newer ones mark these
+        # off in their cameras registry instead of "missing"
+        "disabled": [{"id": c["id"], "name": c["name"]} for c in db.cameras() if not c.get("enabled", 1)],
         "backup_last": (backup.status().get("last") or {}).get("at"),
         "bitrate_mbps": round(sum(c["bitrate_mbps"] or 0 for c in cams), 2),
     }
