@@ -127,3 +127,55 @@ def test_site_grants_dropped_only_after_migration(tmp_path):
     with fresh.connect() as c:
         assert "site_grants" not in sa.inspect(c).get_table_names()
         assert c.execute(sa.select(db.kv.c.value).where(db.kv.c.key == db.TENANCY_V2_DROP_SITE_GRANTS)).scalar()["existed"] is False
+
+
+# a 0.2.0 database: users and locations as they shipped there, before the SOC columns
+V020_SCHEMA = [
+    "CREATE TABLE users (id VARCHAR(24) PRIMARY KEY, email VARCHAR(200) NOT NULL UNIQUE, password_hash TEXT NOT NULL, totp_secret VARCHAR(64),"
+    " totp_enabled BOOLEAN NOT NULL, is_super BOOLEAN NOT NULL, created_at FLOAT NOT NULL, last_login_at FLOAT)",
+    "CREATE TABLE locations (id VARCHAR(24) PRIMARY KEY, org_id VARCHAR(24) NOT NULL, name VARCHAR(120) NOT NULL, address VARCHAR(200) NOT NULL,"
+    " timezone VARCHAR(64), notes TEXT, created_at FLOAT NOT NULL, updated_at FLOAT NOT NULL)",
+    "CREATE INDEX ix_locations_org_id ON locations (org_id)",
+    "INSERT INTO users VALUES ('u_1', 'a@x.example', 'h', NULL, 0, 1, 1, NULL)",
+    "INSERT INTO locations VALUES ('l_1', 'o_1', 'HQ', '', 'America/Chicago', NULL, 1, 1)",
+]
+SOC_TABLES = {"location_contacts", "location_procedures", "incidents", "incident_events", "incident_log", "soc_presence", "soc_reports"}
+
+
+def test_soc_schema_is_additive(tmp_path):
+    """The SOC columns arrive through ADDED_COLUMNS (existing Sites unmonitored, existing users no SOC role) and the
+    SOC tables through create_all; older code's inserts (without the new columns) still work."""
+    eng = sa.create_engine(f"sqlite:///{(tmp_path / 'v020.db').as_posix()}", future=True)
+    with eng.begin() as c:
+        for ddl in V020_SCHEMA:
+            c.execute(sa.text(ddl))
+    for _ in range(2):   # every start runs these
+        db.metadata.create_all(eng)
+        db.upgrade(eng)
+        db.backfill(eng)
+    insp = sa.inspect(eng)
+    assert SOC_TABLES <= set(insp.get_table_names())
+    assert {"monitored", "arm_schedule", "arm_holidays", "arm_override", "soc_group_minutes"} <= {c["name"] for c in insp.get_columns("locations")}
+    assert "soc_role" in {c["name"] for c in insp.get_columns("users")}
+    with eng.begin() as c:
+        loc = c.execute(sa.select(db.locations).where(db.locations.c.id == "l_1")).mappings().one()
+        assert loc["monitored"] in (0, False) and loc["arm_schedule"] is None and loc["arm_override"] is None
+        assert c.execute(sa.select(db.users.c.soc_role).where(db.users.c.id == "u_1")).scalar() is None
+        # 0.2.0's insert (no monitored) gets the database default
+        c.execute(sa.text("INSERT INTO locations (id, org_id, name, address, created_at, updated_at) VALUES ('l_2', 'o_1', 'Depot', '', 1, 1)"))
+        assert c.execute(sa.text("SELECT monitored FROM locations WHERE id = 'l_2'")).scalar() in (0, False)
+    # re-publishing the same site event can't add a second incident_events row
+    row = {"incident_id": 1, "server_id": "s_1", "event_id": "42"}
+    with eng.begin() as c:
+        c.execute(db.incident_events.insert().values(**row))
+    try:
+        with eng.begin() as c:
+            c.execute(db.incident_events.insert().values(**row, camera_id="cam2"))
+        raise AssertionError("expected a unique violation")
+    except sa.exc.IntegrityError:
+        pass
+    # the old-database path gets the column too
+    old = _old_db(tmp_path / "old-soc.db")
+    db.metadata.create_all(old)
+    db.upgrade(old)
+    assert "soc_role" in {c["name"] for c in sa.inspect(old).get_columns("users")}

@@ -10,9 +10,9 @@ from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 from fastapi import HTTPException, Request, Response
 
-from . import db
+from . import db, soc
 from .config import settings
-from .roles import allows
+from .roles import RANK, allows
 
 COOKIE = "hub_session"
 _ph = PasswordHasher()
@@ -77,7 +77,9 @@ def user_by_id(uid: str) -> dict | None:
 
 
 def public_user(u: dict) -> dict:
-    return {"id": u["id"], "email": u["email"], "totp_enabled": bool(u["totp_enabled"]), "is_super": bool(u["is_super"])}
+    # soc_role is the stored role; the UI treats is_super as supervisor too (soc_level below)
+    return {"id": u["id"], "email": u["email"], "totp_enabled": bool(u["totp_enabled"]), "is_super": bool(u["is_super"]),
+            "soc_role": u.get("soc_role") if u.get("soc_role") in SOC_ROLES else None}
 
 
 # ---------------------------------------------------------------- hub administrators
@@ -122,6 +124,67 @@ def set_super(email: str, on: bool, actor: dict | None = None) -> tuple[dict, bo
 def require_super(u: dict) -> None:
     if not u.get("is_super"):
         raise HTTPException(403, "hub administrators only")
+
+
+# ---------------------------------------------------------------- SOC staff
+# users.soc_role = operator | supervisor: hub-level like is_super (read from the users row on every request, audited
+# with org_id NULL), but scoped: membership() widens a SOC user's access only in customers that have at least one
+# monitored Site (soc.org_monitored), to operator (SOC operators) or admin (supervisors), every Site. A hub
+# administrator counts as a supervisor. Customers without a monitored Site never see SOC staff.
+
+SOC_ROLES = soc.SOC_ROLES
+
+
+def soc_level(u: dict | None) -> str | None:
+    """None | "operator" | "supervisor" (hub administrators are supervisors)."""
+    if not u:
+        return None
+    if u.get("is_super"):
+        return "supervisor"
+    r = u.get("soc_role")
+    return r if r in SOC_ROLES else None
+
+
+def require_soc(u: dict, level: str = "operator") -> str:
+    lvl = soc_level(u)
+    if not lvl or soc.SOC_RANK[lvl] < soc.SOC_RANK[level]:
+        raise HTTPException(403, "SOC supervisors only" if level == "supervisor" else "SOC staff only")
+    return lvl
+
+
+def soc_members() -> list[dict]:
+    """Users holding a SOC role, by email (hub administrators are supervisors without being listed)."""
+    q = sa.select(db.users.c.id, db.users.c.email, db.users.c.soc_role, db.users.c.totp_enabled, db.users.c.last_login_at) \
+        .where(db.users.c.soc_role.in_(list(SOC_ROLES))).order_by(db.users.c.email)
+    return [{**r, "totp_enabled": bool(r["totp_enabled"])} for r in db.rows(q)]
+
+
+def set_soc_role(email: str, role: str | None, actor: dict | None = None) -> tuple[dict, bool]:
+    """Grant operator / supervisor, or revoke (None), for an existing user. Returns (user, changed); an unchanged role
+    writes no audit row. LookupError: no such user; ValueError: unknown role. `actor` None = the command line."""
+    if role is not None and role not in SOC_ROLES:
+        raise ValueError(f"role must be one of {', '.join(SOC_ROLES)} (or none)")
+    u = user_by_email(email)
+    if not u:
+        raise LookupError("no such user")
+    if (u.get("soc_role") or None) == role:
+        return u, False
+    action = f"soc {role} granted: {u['email']}" if role else f"soc role revoked: {u['email']}"
+    with db.engine().begin() as c:
+        c.execute(sa.update(db.users).where(db.users.c.id == u["id"]).values(soc_role=role))
+        c.execute(db.audit_log.insert().values(
+            ts=time.time(), user_id=actor["id"] if actor else None, user_email=actor["email"] if actor else "(command line)",
+            org_id=None, site_id=None, action=action, method=None, path=None, status=None, ip=None,
+            detail={"target_user_id": u["id"], "from": u.get("soc_role"), "to": role}))
+    u["soc_role"] = role
+    return u, True
+
+
+def _soc_membership(u: dict, org_id: str) -> dict | None:
+    lvl = soc_level(u)
+    if not lvl or not soc.org_monitored(org_id):
+        return None
+    return {"role": "admin" if lvl == "supervisor" else "operator", "all_sites": True, "soc": True}
 
 
 def totp_ok(u: dict, code: str | None) -> bool:
@@ -201,17 +264,39 @@ def orgs_for(u: dict) -> list[dict]:
     so they get all of them, by name, whether or not they hold a membership row."""
     if u.get("is_super"):
         return [{**o, "role": "owner"} for o in db.rows(sa.select(db.orgs).order_by(db.orgs.c.name))]
-    return user_orgs(u["id"])
+    out = user_orgs(u["id"])
+    if soc_level(u):
+        # SOC staff also act in every customer with a monitored Site, at the wider of the two roles
+        mine = {o["id"]: o for o in out}
+        for oid in soc.monitored_org_ids():
+            sm = _soc_membership(u, oid)
+            if sm is None:
+                continue
+            if oid in mine:
+                if RANK.get(sm["role"], -1) > RANK.get(mine[oid]["role"], -1):
+                    mine[oid]["role"] = sm["role"]
+                mine[oid]["soc"] = True
+        extra = [oid for oid in soc.monitored_org_ids() if oid not in mine]
+        if extra:
+            for o in db.rows(sa.select(db.orgs).where(db.orgs.c.id.in_(extra)).order_by(db.orgs.c.name)):
+                out.append({**o, "role": _soc_membership(u, o["id"])["role"], "soc": True})
+    return out
 
 
 def membership(u: dict, org_id: str) -> dict | None:
-    """{"role", "all_sites"} for this user in this customer, or None. Hub administrators are owners of everything."""
+    """{"role", "all_sites"} for this user in this customer, or None. Hub administrators are owners of everything.
+    SOC staff in a customer with a monitored Site get the wider of their real membership and the SOC one
+    ({"role": operator | admin, "all_sites": True, "soc": True})."""
     if u.get("is_super"):
         return {"role": "owner", "all_sites": True}
-    m = db.one(sa.select(db.memberships).where(db.memberships.c.user_id == u["id"], db.memberships.c.org_id == org_id))
-    if not m:
-        return None
-    return {"role": m["role"], "all_sites": m.get("all_sites") is not False}
+    row = db.one(sa.select(db.memberships).where(db.memberships.c.user_id == u["id"], db.memberships.c.org_id == org_id))
+    m = {"role": row["role"], "all_sites": row.get("all_sites") is not False} if row else None
+    sm = _soc_membership(u, org_id)
+    if sm is None:
+        return m
+    if m is None:
+        return sm
+    return {"role": m["role"] if RANK.get(m["role"], -1) >= RANK[sm["role"]] else sm["role"], "all_sites": True, "soc": True}
 
 
 def role_in(u: dict, org_id: str) -> str | None:

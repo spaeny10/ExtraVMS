@@ -8,12 +8,14 @@ Glossary (code name -> what the UI calls it):
                   every `site_id` in tables, the agent protocol (welcome.site_id, x-hub-site), dashboards and camera
                   group JSON means a server id.
   cameras         Camera: the hub's registry of (server_id, camera_id), synced from hello/heartbeats (cameras.py).
+  incidents       SOC incident: one or more events at a monitored Site that the SOC handles (soc.py);
+                  location_contacts and location_procedures are a Site's call list and SOP checklists.
 Access: a membership's role plus `all_sites` (sees every Site of the customer) or, when false, only the Sites in
 `location_grants` (no grants = nothing). The legacy `site_grants` table (per-server grants, "no grants = all") is
 not in this metadata any more: backfill() reads it once (when an older database first meets this code) and then
 drops it.
 Servers authenticate with a device token (hashed at rest). Alerts and the audit log are per org (audit rows with
-org_id NULL are hub-level: hub administrators granted/revoked, read by /api/hub/audit). Small,
+org_id NULL are hub-level: hub administrators and SOC staff granted/revoked, read by /api/hub/audit). Small,
 synchronous calls: a fleet of dozens of servers is a few writes a second.
 """
 from __future__ import annotations
@@ -40,7 +42,10 @@ users = Table("users", metadata,
               Column("id", String(24), primary_key=True), Column("email", String(200), unique=True, nullable=False),
               Column("password_hash", Text, nullable=False), Column("totp_secret", String(64), nullable=True),
               Column("totp_enabled", Boolean, nullable=False, default=False), Column("is_super", Boolean, nullable=False, default=False),
-              Column("created_at", Float, nullable=False), Column("last_login_at", Float, nullable=True))
+              Column("created_at", Float, nullable=False), Column("last_login_at", Float, nullable=True),
+              # SOC staff (None | operator | supervisor): hub-level like is_super, scoped to customers with a monitored
+              # Site (auth.membership). One internal SOC, so a column; a soc_members table only if several SOCs exist.
+              Column("soc_role", String(16), nullable=True))
 memberships = Table("memberships", metadata,
                     Column("user_id", String(24), primary_key=True), Column("org_id", String(24), primary_key=True),
                     Column("role", String(16), nullable=False),
@@ -61,7 +66,13 @@ locations = Table("locations", metadata,
                   Column("id", String(24), primary_key=True), Column("org_id", String(24), nullable=False, index=True),
                   Column("name", String(120), nullable=False), Column("address", String(200), nullable=False, default=""),
                   Column("timezone", String(64), nullable=True), Column("notes", Text, nullable=True),
-                  Column("created_at", Float, nullable=False), Column("updated_at", Float, nullable=False))
+                  Column("created_at", Float, nullable=False), Column("updated_at", Float, nullable=False),
+                  # SOC monitoring (soc.py). Nothing happens until a customer opts a Site in (monitored = true).
+                  Column("monitored", Boolean, nullable=False, default=False, server_default=sa.text("false")),
+                  Column("arm_schedule", sa.JSON, nullable=True),    # [{dow: [0..6, Monday=0], from: "HH:MM", to: "HH:MM"}]
+                  Column("arm_holidays", sa.JSON, nullable=True),    # [{date: "YYYY-MM-DD", name, armed, from?, to?}]
+                  Column("arm_override", sa.JSON, nullable=True),    # {mode: arm|disarm, until, by, by_id, reason, at}
+                  Column("soc_group_minutes", Integer, nullable=True))   # events within this window join one incident
 location_grants = Table("location_grants", metadata,
                         Column("user_id", String(24), primary_key=True), Column("location_id", String(24), primary_key=True))
 cameras = Table("cameras", metadata,
@@ -137,6 +148,66 @@ audit_log = Table("audit_log", metadata,
                   Column("path", String(400), nullable=True), Column("status", Integer, nullable=True),
                   Column("ip", String(64), nullable=True), Column("detail", sa.JSON, nullable=True))
 
+# ---- SOC (soc.py, soc_api.py). Per-Site contacts and procedures; incidents are the SOC's record of one or more
+# events at a Site, keyed by the same (server, event) as customer alerts. incident_log is append-only.
+location_contacts = Table("location_contacts", metadata,
+                          Column("id", Integer, primary_key=True, autoincrement=True),
+                          Column("location_id", String(24), nullable=False, index=True), Column("org_id", String(24), nullable=False),
+                          Column("order", Integer, nullable=False, default=0), Column("name", String(120), nullable=False),
+                          Column("role", String(80), nullable=True), Column("phone", String(40), nullable=True),
+                          Column("email", String(200), nullable=True),
+                          Column("notify_on_open", Boolean, nullable=False, default=False, server_default=sa.text("false")),
+                          Column("notes", Text, nullable=True),
+                          Column("created_at", Float, nullable=False), Column("updated_at", Float, nullable=False))
+location_procedures = Table("location_procedures", metadata,
+                            Column("id", Integer, primary_key=True, autoincrement=True),
+                            Column("location_id", String(24), nullable=False, index=True), Column("org_id", String(24), nullable=False),
+                            Column("title", String(200), nullable=False), Column("category", String(60), nullable=True),
+                            Column("steps", sa.JSON, nullable=False),          # [{id, text, required}]
+                            Column("priority", String(8), nullable=True),      # lowest incident priority it applies to; NULL = any
+                            Column("order", Integer, nullable=False, default=0),
+                            Column("created_at", Float, nullable=False), Column("updated_at", Float, nullable=False))
+incidents = Table("incidents", metadata,
+                  Column("id", Integer, primary_key=True, autoincrement=True),
+                  Column("org_id", String(24), nullable=False, index=True), Column("location_id", String(24), nullable=False, index=True),
+                  Column("opened_at", Float, nullable=False), Column("last_event_at", Float, nullable=True),
+                  Column("updated_at", Float, nullable=False), Column("closed_at", Float, nullable=True),
+                  Column("state", String(16), nullable=False, index=True),    # soc.STATES
+                  Column("priority", String(8), nullable=False), Column("lane", String(8), nullable=False),   # soc.LANES
+                  Column("claimed_by", String(24), nullable=True), Column("claimed_at", Float, nullable=True),
+                  Column("first_claimed_at", Float, nullable=True), Column("assigned_by", String(24), nullable=True),
+                  Column("sla_due_at", Float, nullable=True), Column("resolve_due_at", Float, nullable=True),
+                  Column("escalation_level", Integer, nullable=False, default=0), Column("next_escalation_at", Float, nullable=True),
+                  Column("disposition", String(32), nullable=True), Column("disposition_notes", Text, nullable=True),
+                  Column("resolved_by", String(24), nullable=True), Column("resolved_at", Float, nullable=True),
+                  Column("four_eyes_by", String(24), nullable=True), Column("four_eyes_at", Float, nullable=True),
+                  Column("event_count", Integer, nullable=False, default=0), Column("title", String(200), nullable=True))
+incident_events = Table("incident_events", metadata,
+                        Column("id", Integer, primary_key=True, autoincrement=True),
+                        Column("incident_id", Integer, nullable=False, index=True),
+                        Column("server_id", String(24), nullable=False), Column("event_id", String(40), nullable=False),
+                        Column("camera_id", String(64), nullable=True), Column("priority", String(8), nullable=True),
+                        Column("kind", String(32), nullable=True), Column("ts", Float, nullable=True),
+                        Column("detail", sa.JSON, nullable=True), Column("feedback_state", String(16), nullable=True),
+                        # a site re-publishes the same event (synopsis, feedback, lock): the second insert fails, not duplicates
+                        sa.UniqueConstraint("server_id", "event_id", name="uq_incident_events_server_event"))
+incident_log = Table("incident_log", metadata,
+                     Column("id", Integer, primary_key=True, autoincrement=True),
+                     Column("incident_id", Integer, nullable=False, index=True), Column("ts", Float, nullable=False),
+                     Column("user_id", String(24), nullable=True), Column("user_email", String(200), nullable=True),
+                     Column("action", String(40), nullable=False), Column("detail", sa.JSON, nullable=True))
+soc_presence = Table("soc_presence", metadata,
+                     Column("user_id", String(24), primary_key=True),
+                     Column("state", String(16), nullable=False),     # on_shift | break | away | off
+                     Column("since", Float, nullable=False), Column("last_seen_at", Float, nullable=False),
+                     Column("incident_id", Integer, nullable=True))
+soc_reports = Table("soc_reports", metadata,
+                    Column("id", Integer, primary_key=True, autoincrement=True), Column("kind", String(24), nullable=False, index=True),
+                    Column("org_id", String(24), nullable=True, index=True),   # NULL = the whole SOC (shift reports)
+                    Column("period_start", Float, nullable=False), Column("period_end", Float, nullable=False),
+                    Column("created_at", Float, nullable=False), Column("created_by", String(24), nullable=True),
+                    Column("text", Text, nullable=True), Column("data", sa.JSON, nullable=True), Column("model", String(120), nullable=True))
+
 _engine: Engine | None = None
 
 
@@ -155,7 +226,9 @@ def engine() -> Engine:
 # columns added after a table first shipped: create_all never alters an existing table
 ADDED_COLUMNS = [("sites", "retired_at"), ("sites", "location_id"), ("memberships", "all_sites"),
                  ("invites", "all_sites"), ("invites", "location_ids"), ("invites", "created_by"), ("invites", "created_at"),
-                 ("invites", "accepted_user_id"), ("invites", "label")]
+                 ("invites", "accepted_user_id"), ("invites", "label"),
+                 ("users", "soc_role"), ("locations", "monitored"), ("locations", "arm_schedule"), ("locations", "arm_holidays"),
+                 ("locations", "arm_override"), ("locations", "soc_group_minutes")]
 
 
 def upgrade(eng: Engine) -> None:

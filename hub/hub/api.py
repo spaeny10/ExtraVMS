@@ -16,8 +16,9 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, W
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, EmailStr, Field
 
-from . import __version__, alerts, auth, backups, cameras, dashboards, db, digest, fleet_actions, proxy, push, turn, vlm_proxy
+from . import __version__, alerts, auth, backups, cameras, dashboards, db, digest, fleet_actions, proxy, push, soc_api, turn, vlm_proxy
 from . import fleet as fleet_mod
+from . import soc
 from fastapi.responses import StreamingResponse
 from .agents import registry
 from .config import settings
@@ -805,9 +806,14 @@ async def delete_location(location_id: str, move_to: str | None = None, u: dict 
             c.execute(sa.update(db.sites).where(db.sites.c.location_id == location_id).values(location_id=target["id"]))
             c.execute(sa.update(db.cameras).where(db.cameras.c.location_id == location_id).values(location_id=target["id"]))
         c.execute(sa.delete(db.location_grants).where(db.location_grants.c.location_id == location_id))
+        # the Site's SOC call list and procedures describe this place only: they go with it, not to move_to
+        c.execute(sa.delete(db.location_contacts).where(db.location_contacts.c.location_id == location_id))
+        c.execute(sa.delete(db.location_procedures).where(db.location_procedures.c.location_id == location_id))
         c.execute(sa.delete(db.locations).where(db.locations.c.id == location_id))
     for srv in servers:
         registry.refresh(srv["id"])
+    if loc.get("monitored"):
+        soc.invalidate()
     _audit(u, loc["org_id"], None, f"site deleted: {loc['name']}" + (f" (servers moved to {target['name']})" if target else ""),
            {"location_id": location_id, "moved_to": target["id"] if target else None})
     return {"ok": True, "moved": len(servers)}
@@ -931,7 +937,8 @@ def _audit(u: dict, org_id: str | None, site_id: str | None, action: str, detail
 
 
 # ---------------------------------------------------------------- hub administrators (users.is_super)
-# Hub-wide, not per customer: every route here is for hub administrators only (403 otherwise). Granting needs an
+# Hub-wide, not per customer: every route here is for hub administrators only (403 otherwise). SOC staff
+# (users.soc_role) are managed the same way at /api/hub/soc/members (soc_api.py). Granting needs an
 # existing account (invite the person to a customer first); the hub never creates a login from this screen.
 
 class HubAdminIn(BaseModel):
@@ -1379,6 +1386,7 @@ async def site_turn(site_id: str, request: Request):
 
 
 app.include_router(vlm_proxy.router)
+app.include_router(soc_api.router)   # SOC: staff, monitoring/arming, contacts, procedures
 app.include_router(proxy.router)
 
 

@@ -2,6 +2,7 @@
    python -m hub createsuper EMAIL [--password PW]   create a hub administrator (or read HUB_ADMIN_PASSWORD)
    python -m hub setpassword EMAIL                   change a user's password (prompts twice; ends their sessions)
    python -m hub setsuper EMAIL [--off]              make an existing user a hub administrator (--off: revoke)
+   python -m hub setsoc EMAIL operator|supervisor|off   give an existing user a SOC role (off: remove it)
    python -m hub createorg NAME SLUG                 create an organisation
 """
 from __future__ import annotations
@@ -26,6 +27,9 @@ def main() -> None:
     ss = sub.add_parser("setsuper", help="grant (or --off: revoke) hub administrator for an existing user")
     ss.add_argument("email")
     ss.add_argument("--off", action="store_true", help="revoke instead of grant")
+    sc = sub.add_parser("setsoc", help="give an existing user a SOC role (operator, supervisor) or take it away (off)")
+    sc.add_argument("email")
+    sc.add_argument("role", choices=["operator", "supervisor", "off"])
     co = sub.add_parser("createorg")
     co.add_argument("name")
     co.add_argument("slug")
@@ -65,6 +69,17 @@ def main() -> None:
             print(f"{u['email']} is {'no longer' if changed else 'already not'} a hub administrator")
         else:
             print(f"{u['email']} is {'now' if changed else 'already'} a hub administrator")
+        return
+    if args.cmd == "setsoc":
+        from . import auth, db
+        db.engine()
+        role = None if args.role == "off" else args.role
+        try:
+            u, changed = auth.set_soc_role(args.email, role)
+        except (LookupError, ValueError) as e:
+            sys.exit(str(e))
+        what = f"SOC {role}" if role else "not SOC staff"
+        print(f"{u['email']} is {'now' if changed else 'already'} {what}")
         return
     if args.cmd == "createorg":
         import time
