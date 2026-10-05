@@ -4,6 +4,7 @@
    python -m hub setsuper EMAIL [--off]              make an existing user a hub administrator (--off: revoke)
    python -m hub setsoc EMAIL operator|supervisor|off   give an existing user a SOC role (off: remove it)
    python -m hub createorg NAME SLUG                 create an organisation
+   python -m hub geocode [--force]                   locate Sites that have an address but no coordinates (1 request/s)
 """
 from __future__ import annotations
 
@@ -30,6 +31,8 @@ def main() -> None:
     sc = sub.add_parser("setsoc", help="give an existing user a SOC role (operator, supervisor) or take it away (off)")
     sc.add_argument("email")
     sc.add_argument("role", choices=["operator", "supervisor", "off"])
+    gc = sub.add_parser("geocode", help="locate Sites that have an address but no coordinates (as the hub does at start)")
+    gc.add_argument("--force", action="store_true", help="also retry addresses that failed in the last 24 h")
     co = sub.add_parser("createorg")
     co.add_argument("name")
     co.add_argument("slug")
@@ -80,6 +83,15 @@ def main() -> None:
             sys.exit(str(e))
         what = f"SOC {role}" if role else "not SOC staff"
         print(f"{u['email']} is {'now' if changed else 'already'} {what}")
+        return
+    if args.cmd == "geocode":
+        import asyncio
+
+        from . import db, geocode
+        db.engine()
+        st = asyncio.run(geocode.backfill(force=args.force))
+        print(f"located {st['located']}, not found or not trustworthy {st['failed']}, skipped {st['skipped']} (failed in the last 24 h; --force retries)"
+              + (f", cleared {st['cleared']} untrustworthy earlier pin(s)" if st.get("cleared") else ""))
         return
     if args.cmd == "createorg":
         import time

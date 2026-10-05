@@ -6,12 +6,16 @@ import { useCallback, useEffect, useState } from "react";
 import { toast } from "@site/ui";
 import { type Digest, type DigestPart, type Fleet, type Me, type Org, type Server, type Site, ago, api } from "./api";
 import { digestPartsFor, isAdmin, lastEventBySite, ofTotal } from "./access";
-import { go, siteHref } from "./nav";
+import { go, navigate, settingsHref, siteHref } from "./nav";
+import { SiteMap } from "./map/LazyMap";
+import { PIN_COLOUR, type PinStatus, cityState, hasPoint, pinColour, pinStatus } from "./place";
 import { ServerCard } from "./servers";
 
 export function SitesPage({ org, me }: { org: Org; me: Me }) {
   const [fleet, setFleet] = useState<Fleet | null>(null);
   const [showRetired, setShowRetired] = useState(false);
+  const [mapView, setMapViewState] = useState(() => { try { return localStorage.getItem("hub.sites.map") === "1"; } catch { return false; } });
+  const setMapView = (v: boolean) => { setMapViewState(v); try { localStorage.setItem("hub.sites.map", v ? "1" : "0"); } catch { /* private mode */ } };
   const [events, setEvents] = useState<{ site_id: string; start_ts: number }[]>([]);
   const load = useCallback(() => api.fleet(org.id, showRetired).then(setFleet).catch((e) => toast.error(e)), [org.id, showRetired]);
   useEffect(() => { load(); const t = setInterval(load, 15000); return () => clearInterval(t); }, [load]);
@@ -34,7 +38,8 @@ export function SitesPage({ org, me }: { org: Org; me: Me }) {
   return (
     <>
       <h2>Sites <span className="muted small">{org.name} · {live.filter((s) => s.online).length} of {live.length} servers online{g.open_alerts ? ` · ${g.open_alerts} open alerts` : ""}</span>
-        {(g.retired ?? 0) > 0 && <label className="small muted" style={{ marginLeft: 12, fontWeight: 400 }}><input type="checkbox" checked={showRetired} onChange={(e) => setShowRetired(e.target.checked)} /> Show retired ({g.retired})</label>}</h2>
+        {(g.retired ?? 0) > 0 && <label className="small muted" style={{ marginLeft: 12, fontWeight: 400 }}><input type="checkbox" checked={showRetired} onChange={(e) => setShowRetired(e.target.checked)} /> Show retired ({g.retired})</label>}
+        {sites.length > 0 && <label className="small muted" style={{ marginLeft: 12, fontWeight: 400 }}><input type="checkbox" checked={mapView} onChange={(e) => setMapView(e.target.checked)} /> Map</label>}</h2>
       {/* customer-wide Find and Alerts, reachable from the hierarchy too: the top nav hides them inside a Site */}
       <div className="row sites-links">
         <a className="link-btn" href="/find" onClick={go("/find")}>Find across all sites</a>
@@ -43,7 +48,8 @@ export function SitesPage({ org, me }: { org: Org; me: Me }) {
       {sites.length === 0 && unassigned.length === 0 && (
         <p className="muted">No sites yet. {isAdmin(org, me) ? <>Create one and enrol a server under <a href="/customer/sites" onClick={go("/customer/sites")}>Customer → Sites</a>.</> : "Ask an admin to add one."}</p>
       )}
-      <div className="site-grid">{sites.map((s) => <SiteCard key={s.id} s={s} lastEvent={lastEvent[s.id]} now={fleet.now} />)}</div>
+      {mapView && sites.length > 0 ? <SitesMap sites={sites} />
+        : <div className="site-grid">{sites.map((s) => <SiteCard key={s.id} s={s} lastEvent={lastEvent[s.id]} now={fleet.now} />)}</div>}
       {unassigned.length > 0 && (
         <>
           <h3>Unassigned servers <span className="muted small">not in any site{isAdmin(org, me) ? " · move them under Customer → Servers" : ""}</span></h3>
@@ -52,6 +58,30 @@ export function SitesPage({ org, me }: { org: Org; me: Me }) {
       )}
       <DigestCard org={org} />
     </>
+  );
+}
+
+const PIN_LABEL: Record<PinStatus, string> = { online: "All online", offline: "Server offline", alerts: "Open alerts", empty: "No servers" };
+
+/** Every Site of the customer as a pin coloured by status; a pin opens the Site's Live page. Unlocated Sites listed below. */
+function SitesMap({ sites }: { sites: Site[] }) {
+  const located = sites.filter((s): s is Site & { lat: number; lon: number } => hasPoint(s));
+  const missing = sites.filter((s) => !hasPoint(s));
+  const pins = located.map((s) => ({ id: s.id, lat: s.lat, lon: s.lon, colour: pinColour(s), title: `${s.name} · ${PIN_LABEL[pinStatus(s)]}` }));
+  return (
+    <div className="card sites-map">
+      {located.length > 0 ? <SiteMap pins={pins} height={420} onPinClick={(p) => navigate(siteHref(p.id, "live"))} label="Map of the sites" />
+        : <p className="muted">None of these sites is on the map yet: set each one's address under its Settings › General.</p>}
+      <div className="row map-legend small">
+        {(Object.keys(PIN_LABEL) as PinStatus[]).map((k) => <span key={k}><span className="map-legend-dot" style={{ background: PIN_COLOUR[k] }} /> {PIN_LABEL[k]}</span>)}
+      </div>
+      {missing.length > 0 && (
+        <div className="small not-located">
+          <span className="muted">Not located yet: </span>
+          {missing.map((s, n) => <span key={s.id}>{n > 0 && ", "}<a href={settingsHref(s.id, "general")} onClick={go(settingsHref(s.id, "general"))}>{s.name}</a></span>)}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -71,7 +101,7 @@ export function SiteCard({ s, lastEvent, now, onOpen, noEvents }: { s: Site; las
         <span className="spacer" />
         <span className="server-dots">{s.servers.map((v) => <ServerDot key={v.id} v={v} now={now} />)}</span>
       </div>
-      {s.address && <div className="loc">{s.address}</div>}
+      {s.address ? <div className="loc">{s.address}</div> : cityState(s.address_parts) && <div className="loc">{cityState(s.address_parts)}</div>}
       <div className="stats">
         <div><span>Servers</span> {ofTotal(s.servers_online, s.servers_total, "online")}</div>
         <div><span>Cameras</span> {ofTotal(s.cameras_online, s.cameras_total, "up")}</div>

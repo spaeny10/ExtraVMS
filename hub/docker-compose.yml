@@ -33,6 +33,13 @@ services:
       HUB_VLLM_URL: ${HUB_VLLM_URL:-}
       HUB_VLLM_KEY: ${HUB_VLLM_KEY:-}
       HUB_VLLM_MODEL: ${HUB_VLLM_MODEL:-}
+      # Site addresses and maps (empty = OpenStreetMap Nominatim and OSM tiles)
+      HUB_GEOCODER_URL: ${HUB_GEOCODER_URL:-}
+      HUB_GEOCODER_KEY: ${HUB_GEOCODER_KEY:-}
+      HUB_CENSUS_URL: ${HUB_CENSUS_URL:-}
+      HUB_GEOCODER_COUNTRY: ${HUB_GEOCODER_COUNTRY:-US}
+      HUB_MAP_TILES: ${HUB_MAP_TILES:-}
+      HUB_MAP_ATTRIBUTION: ${HUB_MAP_ATTRIBUTION:-}
     depends_on:
       postgres: { condition: service_healthy }
     expose: ["8000"]

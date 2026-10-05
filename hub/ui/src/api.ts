@@ -1,6 +1,7 @@
 /** Hub API client. Same shape as the site's api.ts: relative URLs, cookie session, errors as `${status} ${text}`. */
 import type { NvrEvent, SavedFindView } from "@site/api";
 import type { ActionCardData, ActionExtras, ActionPlanCore, ActionResult } from "@site/ActionCard";
+import { type AddressParts, type GeoHit, type GeocodeSource, type MapConfig, setMapConfig } from "./place";
 import type { CameraGroup, Dashboard, DashboardConfig, DashboardList, FleetEvent, FleetEvents } from "@site/dashboard/types";
 export type { CameraGroup, Dashboard, DashboardConfig, DashboardList, FleetEvent, FleetEvents, Widget, WidgetProps, DashboardWidgetType } from "@site/dashboard/types";
 /** /api/fleet/ws. `site_id` on the wire is the server id (the hub kept the name; see the tenancy plan's Naming). */
@@ -12,7 +13,9 @@ export type FleetMessage = ({ type: "event"; event: NvrEvent; site_id: string; s
  * `soc_only` (newer hubs): SOC staff with no real customer membership, i.e. their landing page is the console.
  */
 export type SocRole = "operator" | "supervisor";
-export type Me = { user: { id: string; email: string; totp_enabled: boolean; is_super: boolean; soc_role?: SocRole | null; soc_only?: boolean }; orgs: Org[]; active_org: string | null };
+export type Me = { user: { id: string; email: string; totp_enabled: boolean; is_super: boolean; soc_role?: SocRole | null; soc_only?: boolean }; orgs: Org[]; active_org: string | null;
+  /** the hub's map tiles (HUB_MAP_TILES; newer hubs) */
+  map?: MapConfig };
 /**
  * `soc`: the customer is listed only because it has a SOC-monitored Site (no real membership). Newer hubs may send
  * `member` (true = a real membership) alongside it.
@@ -51,7 +54,11 @@ export type Site = {
   servers: Server[];
   /** SOC monitoring opted in (newer hubs only; absent = ask /monitoring). */
   monitored?: boolean;
+  /** Where the Site is (newer hubs; null = not located yet). `address` stays the one-line address people read. */
+  lat?: number | null; lon?: number | null; address_parts?: AddressParts | null; geocoded_at?: number | null; geocode_source?: GeocodeSource | null;
 };
+/** The place fields a Site create/update may carry (lat and lon together; both null clears the point). */
+export type PlaceBody = { lat?: number | null; lon?: number | null; address_parts?: AddressParts | null; geocode_source?: GeocodeSource };
 /** A row of the hub's cameras registry (synced from server heartbeats). Vanished cameras are kept, with missing_since. */
 export type Camera = {
   server_id: string; server_name: string; camera_id: string; name: string; enabled: boolean; stream_ready: boolean; problems: string[] | null;
@@ -179,7 +186,7 @@ function seen<T>(p: Promise<T>, pick: (x: T) => Server[]): Promise<T> {
 }
 
 export const api = {
-  me: () => req<Me>("/auth/me"),
+  me: () => req<Me>("/auth/me").then((m) => { setMapConfig(m.map); return m; }),
   directToken: (server: string) => req<DirectToken>(`/api/servers/${server}/direct-token`, { method: "POST" }),
   login: (email: string, password: string, totp?: string) => req<{ totp_required?: boolean } & Partial<Me>>("/auth/login", json("POST", { email, password, totp })),
   logout: () => req("/auth/logout", { method: "POST" }),
@@ -214,8 +221,13 @@ export const api = {
   locations: (org: string, include_retired?: boolean) => seen(req<Site[]>(`/api/orgs/${org}/locations?${qs({ include_retired: include_retired || undefined })}`),
     (l) => l.flatMap((s) => s.servers)),
   location: (id: string, include_retired?: boolean) => seen(req<Site>(`/api/locations/${id}?${qs({ include_retired: include_retired || undefined })}`), (s) => s.servers),
-  createLocation: (org: string, b: { name: string; address?: string; timezone?: string }) => req<Site>(`/api/orgs/${org}/locations`, json("POST", b)),
-  updateLocation: (id: string, b: { name?: string; address?: string; timezone?: string | null; notes?: string | null }) => req<Site>(`/api/locations/${id}`, json("PATCH", b)),
+  /** Address suggestions ([] when the geocoder is down); 429 past ~30 a minute. */
+  geocode: (q: string) => req<GeoHit[]>(`/api/geocode?${qs({ q })}`),
+  geocodeReverse: (lat: number, lon: number) => req<GeoHit | null>(`/api/geocode/reverse?${qs({ lat, lon })}`),
+  /** The IANA time zone at a point (offline on the hub). */
+  geocodeTimezone: (lat: number, lon: number) => req<{ timezone: string | null }>(`/api/geocode/timezone?${qs({ lat, lon })}`),
+  createLocation: (org: string, b: { name: string; address?: string; timezone?: string } & PlaceBody) => req<Site>(`/api/orgs/${org}/locations`, json("POST", b)),
+  updateLocation: (id: string, b: { name?: string; address?: string; timezone?: string | null; notes?: string | null } & PlaceBody) => req<Site>(`/api/locations/${id}`, json("PATCH", b)),
   /** 409 while servers remain unless moveTo names another Site of the customer. */
   deleteLocation: (id: string, moveTo?: string) => req<{ ok: boolean; moved: number }>(`/api/locations/${id}?${qs({ move_to: moveTo })}`, { method: "DELETE" }),
   locationCameras: (id: string) => req<Camera[]>(`/api/locations/${id}/cameras`),

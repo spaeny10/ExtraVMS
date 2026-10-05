@@ -58,6 +58,15 @@ class Settings(BaseSettings):
     soc_shift_ends: str = "06:00,14:00,22:00" # hub-local shift boundaries: a shift report is stored at each one
     soc_loops: bool = True                    # run the escalation and report loops (tests drive escalate_once themselves)
 
+    # Site addresses (geocode.py): a Nominatim-compatible geocoder, and the map tiles the hub UI draws Sites on
+    geocoder_url: str = ""                    # empty = https://nominatim.openstreetmap.org (1 request/s, cached 30 days)
+    geocoder_key: str = ""                    # sent as key= for hosted Nominatim-compatible services that want one
+    census_url: str = ""                      # US Census Bureau geocoder; empty = the public one, "off" = never asked
+    geocoder_country: str = "US"              # where the Sites are: US = every street address asks Census first
+    geocode_backfill: bool = True             # at start, locate Sites that have an address but no coordinates
+    map_tiles: str = ""                       # Leaflet URL template; empty = MAP_TILES below (OpenStreetMap)
+    map_attribution: str = ""                 # HTML; empty = OpenStreetMap's (required with its tiles)
+
 
 settings = Settings()
 if not settings.secret:

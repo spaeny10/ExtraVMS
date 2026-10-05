@@ -10,6 +10,7 @@ import { canEditMonitoring, isAdmin, isSocUser, ofTotal } from "./access";
 import { Breadcrumbs } from "./Breadcrumbs";
 import { DirectChips } from "./DirectChip";
 import { SETTINGS_SECTIONS, SITE_TABS, type SettingsSection, type SiteTab, consoleHref, go, navigate, serverHref, settingsHref, siteHref } from "./nav";
+import { AddressBox } from "./site/AddressBox";
 import { ContactsBox } from "./site/ContactsBox";
 import { MonitoringBox } from "./site/MonitoringBox";
 import { ProceduresBox } from "./site/ProceduresBox";
@@ -20,6 +21,7 @@ import { SiteTimeline } from "./SiteTimeline";
 import { SiteFind } from "./SiteFind";
 import { SiteAlerts } from "./AlertsPage";
 import { useTabStrip } from "./tabStrip";
+import { type PlaceForm, cityState, fmtCoord, hasPoint, placePatch } from "./place";
 
 const TAB_LABEL: Record<SiteTab, [string, string]> = {
   live: ["Live", "live"], timeline: ["Timeline", "timeline"], find: ["Find", "find"], alerts: ["Alerts", "alert"], servers: ["Servers", "grid"], settings: ["Settings", "settings"],
@@ -84,6 +86,11 @@ function SiteHeader({ org, site, server, servers, admin, onChanged }: {
     <div className="site-head">
       <Breadcrumbs org={org} site={site} server={server} title={site.address || undefined} />
       {site.address && <span className="muted small site-addr">{site.address}</span>}
+      {/* where it is: the map, coordinates and links are on Settings › General (read-only there for viewers) */}
+      <a className={`chip small place-chip ${hasPoint(site) ? "" : "muted"}`} href={settingsHref(site.id, "general")} onClick={go(settingsHref(site.id, "general"))}
+        title={hasPoint(site) ? `${cityState(site.address_parts) || site.address} · ${fmtCoord(site.lat, site.lon)} · map in Settings` : "Not on the map yet: set the address in Settings"}>
+        📍{hasPoint(site) ? " Map" : " Locate"}
+      </a>
       <div className="site-chips">
         <span className={`chip ${site.servers_online < site.servers_total ? "warn" : ""}`}>Servers {ofTotal(site.servers_online, site.servers_total, "online")}</span>
         <span className={`chip ${site.cameras_online < site.cameras_total ? "warn" : ""}`}>Cameras {ofTotal(site.cameras_online, site.cameras_total, "up")}</span>
@@ -155,14 +162,31 @@ function SettingsSections({ site, org, me, section, admin, onChanged }: { site: 
 
 const ZONES: string[] = typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [];
 
+type SettingsForm = PlaceForm & { name: string; notes: string };
+const formOf = (site: Site): SettingsForm => ({
+  name: site.name, notes: site.notes ?? "", address: site.address ?? "", timezone: site.timezone ?? "",
+  lat: site.lat ?? null, lon: site.lon ?? null, address_parts: site.address_parts ?? null, source: site.geocode_source ?? null, autoTz: null,
+});
+
 function SettingsTab({ site, admin, onChanged }: { site: Site; admin: boolean; onChanged: () => void }) {
-  const [f, setF] = useState({ name: site.name, address: site.address ?? "", timezone: site.timezone ?? "", notes: site.notes ?? "" });
-  useEffect(() => { setF({ name: site.name, address: site.address ?? "", timezone: site.timezone ?? "", notes: site.notes ?? "" }); }, [site.id]); // eslint-disable-line react-hooks/exhaustive-deps
-  const dirty = f.name !== site.name || f.address !== (site.address ?? "") || f.timezone !== (site.timezone ?? "") || f.notes !== (site.notes ?? "");
+  const [f, setF] = useState<SettingsForm>(() => formOf(site));
+  useEffect(() => { setF(formOf(site)); }, [site.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  // a time zone that is exactly the one at the saved point counts as "set by the address": a new pick may replace it
+  useEffect(() => {
+    if (site.lat == null || site.lon == null || !site.timezone) return;
+    api.geocodeTimezone(site.lat, site.lon).then((r) => { if (r.timezone && r.timezone === site.timezone) setF((x) => (x.timezone === r.timezone ? { ...x, autoTz: r.timezone } : x)); }).catch(() => {});
+  }, [site.id, site.lat, site.lon, site.timezone]);
+  const place = placePatch(f, site);
+  const dirty = f.name !== site.name || f.address !== (site.address ?? "") || f.timezone !== (site.timezone ?? "") || f.notes !== (site.notes ?? "") || Object.keys(place).length > 0;
   // the backend counts retired servers too: they still belong to the site until moved or removed
   const remaining = site.servers_total + site.retired_servers;
   const save = async () => {
-    try { await api.updateLocation(site.id, { name: f.name.trim(), address: f.address.trim(), timezone: f.timezone.trim() || null, notes: f.notes.trim() || null }); toast.success("Saved"); onChanged(); }
+    try {
+      const saved = await api.updateLocation(site.id, { name: f.name.trim(), address: f.address.trim(), timezone: f.timezone.trim() || null, notes: f.notes.trim() || null, ...place });
+      setF((x) => ({ ...formOf(saved), autoTz: saved.timezone && saved.timezone === x.autoTz ? x.autoTz : null }));
+      toast.success(saved.lat == null && saved.address ? "Saved. The hub will try to put this address on the map." : "Saved");
+      onChanged();
+    }
     catch (e) { toast.error(e); }
   };
   const del = async () => {
@@ -172,8 +196,8 @@ function SettingsTab({ site, admin, onChanged }: { site: Site; admin: boolean; o
   return (
     <div className="card site-settings">
       <label className="field"><span>Name</span><input value={f.name} disabled={!admin} maxLength={120} onChange={(e) => setF({ ...f, name: e.target.value })} /></label>
-      <label className="field"><span>Address</span><input value={f.address} disabled={!admin} maxLength={200} onChange={(e) => setF({ ...f, address: e.target.value })} /></label>
-      <label className="field"><span>Time zone</span><input value={f.timezone} disabled={!admin} list="tz-list" placeholder="e.g. America/Chicago" onChange={(e) => setF({ ...f, timezone: e.target.value })} /></label>
+      <AddressBox f={f} setF={(p) => setF((x) => ({ ...x, ...p }))} editable={admin} name={f.name || site.name} />
+      <label className="field"><span>Time zone</span><input value={f.timezone} disabled={!admin} list="tz-list" placeholder="e.g. America/Chicago (set from the address)" onChange={(e) => setF({ ...f, timezone: e.target.value })} /></label>
       <datalist id="tz-list">{ZONES.map((z) => <option key={z} value={z} />)}</datalist>
       <label className="field"><span>Notes</span><textarea value={f.notes} disabled={!admin} maxLength={2000} rows={4} onChange={(e) => setF({ ...f, notes: e.target.value })} /></label>
       {admin && (

@@ -6,6 +6,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Me, SiteContact } from "../api";
 import { chordLabel } from "./chords";
+import { Dispatch } from "./Dispatch";
 import { callsByContact, flatSteps, logText, nextUncalled } from "./format";
 import { socApi } from "./socApi";
 import { claimedByMe, useCommand } from "./useIncident";
@@ -53,6 +54,7 @@ export function RespondPane({ me, incident: i, detail, actions, cmd, phone = fal
   return (
     <>
       {!mine && <p className="muted small soc-claim-hint">{i.state === "new" ? "Claim the incident to log calls and steps." : i.state === "claimed" ? `${i.claimed_by_email ?? "Another operator"} has this incident: read-only here.` : "This incident is resolved: read-only."}</p>}
+      {!phone && <Dispatch place={detail.site} siteId={i.location_id} className="compact" />}
       <CallList incident={i} contacts={detail.contacts} log={detail.log} actions={actions} enabled={mine} phone={phone} />
       <section className="soc-sop" aria-label="Procedures">
         <h3>Procedure</h3>

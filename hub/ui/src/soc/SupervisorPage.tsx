@@ -29,6 +29,7 @@ import {
 import { useIncidentActions, useNow } from "./useIncident";
 import { useSoc } from "./useSocStream";
 import type { Incident, Overview, Presence, Priority, SlaPolicy, SocSite } from "./types";
+import { cityState } from "../place";
 
 const POLL_MS = 15000;
 
@@ -351,7 +352,7 @@ function ArmingPanel({ sites, reload, now }: { sites: SocSite[] | null; reload: 
               const o = (s.override && typeof s.override === "object" ? s.override : null) as Override | null;
               return (
                 <tr key={s.id}>
-                  <td>{s.org_name} › {s.name}{!s.timezone && <span className="muted small"> (no time zone)</span>}</td>
+                  <td>{s.org_name} › {s.name}{cityState(s.address_parts) && <span className="muted small"> · {cityState(s.address_parts)}</span>}{!s.timezone && <span className="muted small"> (no time zone)</span>}</td>
                   <td><span className={`dot ${s.armed ? "ok" : "soc-dot-offline"}`} aria-hidden /> {s.armed ? "Armed" : "Disarmed"} <span className="muted small">{REASON_LABEL[s.reason] ?? s.reason}</span></td>
                   <td>{s.next_change ? `${s.next_change.armed ? "arms" : "disarms"} ${when(s, s.next_change.at)}` : <span className="muted">—</span>}</td>
                   <td>{o ? <span className="chip small warn" title={o.reason ? `“${o.reason}”` : undefined}>{o.mode === "arm" ? "Armed" : "Disarmed"} by {o.by ?? "someone"}{o.until ? ` until ${when(s, o.until)}` : ""}</span> : <span className="muted">—</span>}</td>

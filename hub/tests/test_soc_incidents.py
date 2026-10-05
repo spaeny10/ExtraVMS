@@ -269,8 +269,9 @@ def test_queue_detail_calls_and_sop(client, superuser):
     assert s["op"].post(f"{base}/sop", json={"procedure_id": procs[0]["id"], "step_id": "s9"}).status_code == 404
     s["op"].post(f"{base}/note", json={"text": "subject left on foot"})
     d = s["op"].get(base).json()
-    assert set(d) == {"incident", "events", "log", "contacts", "procedures", "calls"}
+    assert set(d) == {"incident", "site", "events", "log", "contacts", "procedures", "calls"}
     assert d["incident"]["id"] == high["id"] and d["contacts"][0]["name"] == "Pat"
+    assert {"address", "lat", "lon", "address_parts", "timezone"} <= set(d["site"])   # the Dispatch block
     assert [p["title"] for p in d["procedures"]] == ["Intruder", "Any alarm", "Never"]   # all apply at high
     assert d["procedures"][0]["done_count"] == 1 and d["procedures"][1]["complete"] is False
     assert d["calls"][0]["detail"] == {"contact_id": cts[0]["id"], "name": "Pat", "phone": "555-0100", "outcome": "no_answer", "notes": "rang out"}

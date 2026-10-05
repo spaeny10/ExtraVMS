@@ -26,6 +26,7 @@ import { SiteLive } from "../SiteLive";
 import { SiteTimeline } from "../SiteTimeline";
 import { siteTimelineHref } from "../timelineLink";
 import { STATE_LABEL, age, eventNum, incidentTitle } from "./format";
+import { Dispatch } from "./Dispatch";
 import { IncidentLog } from "./IncidentLog";
 import { priorityClass, priorityLabel, slaFor } from "./sla";
 import { socApi } from "./socApi";
@@ -83,6 +84,7 @@ export function IncidentView({ me, detail, incident, now, actions, cmd, popout =
   return (
     <div className="soc-incident">
       <IncidentHeader incident={incident} now={now} popout={popout} servers={site?.servers.filter((s) => !s.retired_at)} />
+      <Dispatch place={detail?.site ?? site} siteId={incident.location_id} map />
       <ClaimBar incident={incident} me={me} actions={actions} cmd={cmd} />
       <section className="soc-media" aria-label="Triggering event">
         {sel ? <EventMedia key={evKey(sel)} ev={sel} onDetails={() => setDrawer(sel)} /> : <p className="muted">No events in this incident yet.</p>}

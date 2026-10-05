@@ -19,7 +19,7 @@ from pydantic import BaseModel, EmailStr, Field
 from . import __version__, alerts, auth, backups, cameras, dashboards, db, digest, direct, fleet_actions, proxy, push, soc_api, turn, vlm_proxy
 from . import fleet as fleet_mod
 from . import find as find_mod
-from . import soc, soc_reports
+from . import geocode, soc, soc_reports
 from fastapi.responses import StreamingResponse
 from .agents import registry
 from .config import settings
@@ -38,6 +38,8 @@ async def lifespan(app: FastAPI):
         # SOC: escalation every 10 s and the shift / monthly reports; both idle unless a Site is monitored
         tasks += [asyncio.create_task(soc.escalation_loop(), name="soc-escalation"),
                   asyncio.create_task(soc_reports.shift_loop(), name="soc-reports")]
+    if settings.geocode_backfill:
+        tasks.append(asyncio.create_task(geocode.backfill_once_at_start(), name="geocode-backfill"))   # once per start, 1 request/s
     task = tasks[0]
     log.info("hub %s up on http://%s:%s (%s)", __version__, settings.host, settings.port, settings.public_url)
     yield
@@ -123,7 +125,8 @@ async def me(request: Request):
     if not u:
         raise HTTPException(401, "sign in")
     # a hub administrator gets every customer (they own them all), so the Customer picker can switch into any of them
-    return {"user": auth.me_user(u), "orgs": auth.orgs_for(u), "active_org": u["session"].get("org_id")}
+    return {"user": auth.me_user(u), "orgs": auth.orgs_for(u), "active_org": u["session"].get("org_id"),
+            "map": geocode.map_config()}   # the hub UI's Site maps
 
 
 class PasswordIn(BaseModel):
@@ -726,6 +729,7 @@ def _location_rollups(locs: list[dict], cards: list[dict], include_retired: bool
         mine = [c for c in cards if c["location_id"] == loc["id"]]
         live = [c for c in mine if not c["retired_at"]]
         out.append({**{k: loc[k] for k in ("id", "org_id", "name", "address", "timezone", "notes", "created_at", "updated_at")},
+                    **geocode.place_of(loc),
                     "monitored": bool(loc.get("monitored")),   # watched by the SOC (soc.py)
                     "servers_total": len(live), "servers_online": sum(1 for c in live if c["online"]),
                     "cameras_total": sum(c["cameras_total"] for c in live), "cameras_online": sum(c["cameras_online"] for c in live),
@@ -748,11 +752,18 @@ def _location_tags(org_id: str) -> dict[str, dict]:
 
 # ---------------------------------------------------------------- Sites (locations)
 
+GeocodeSource = Literal["nominatim", "census", "geocoder", "marker", "manual"]
+
+
 class LocationIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     address: str = Field("", max_length=200)
     timezone: str | None = Field(None, max_length=64)
     notes: str | None = Field(None, max_length=2000)
+    lat: float | None = Field(None, ge=-90, le=90)
+    lon: float | None = Field(None, ge=-180, le=180)
+    address_parts: dict | None = None
+    geocode_source: GeocodeSource | None = None
 
 
 class LocationPatch(BaseModel):
@@ -760,6 +771,40 @@ class LocationPatch(BaseModel):
     address: str | None = Field(None, max_length=200)
     timezone: str | None = Field(None, max_length=64)
     notes: str | None = Field(None, max_length=2000)
+    lat: float | None = Field(None, ge=-90, le=90)     # lat and lon go together; both null clears the point
+    lon: float | None = Field(None, ge=-180, le=180)
+    address_parts: dict | None = None
+    geocode_source: GeocodeSource | None = None
+
+
+def _place_vals(vals: dict, current: dict) -> dict:
+    """Turn the place fields of a create/patch into column values. Coordinates come in pairs. A new point stamps
+    geocoded_at/source; a Site that has a point and would be left without a time zone gets the one at the point.
+    A new address text without a new point drops the old point (it described the old address) so the backfill locates
+    the new one; address_parts without a point are ignored."""
+    has_lat, has_lon = "lat" in vals, "lon" in vals
+    if has_lat != has_lon or (has_lat and (vals["lat"] is None) != (vals["lon"] is None)):
+        raise HTTPException(422, "lat and lon go together")
+    src = vals.pop("geocode_source", None)
+    parts = vals.pop("address_parts", None) if "address_parts" in vals else ...
+    if has_lat:
+        if vals["lat"] is None:
+            vals.update(address_parts=None, geocoded_at=None, geocode_source=None)
+        else:
+            vals["lat"], vals["lon"] = round(float(vals["lat"]), 7), round(float(vals["lon"]), 7)
+            vals["geocoded_at"] = time.time()
+            vals["geocode_source"] = src or "manual"
+            if parts is not ...:
+                vals["address_parts"] = geocode.clean_parts(parts)
+    elif "address" in vals and (vals["address"] or "").strip() != (current.get("address") or "").strip() and current.get("lat") is not None:
+        vals.update(lat=None, lon=None, address_parts=None, geocoded_at=None, geocode_source=None)
+    # a located Site never ends up without a time zone: an empty one (kept or sent) comes from the point
+    lat, lon = vals.get("lat", current.get("lat")), vals.get("lon", current.get("lon"))
+    if lat is not None and lon is not None and not (vals.get("timezone", current.get("timezone")) or "").strip():
+        tz = geocode.tz_for(lat, lon)
+        if tz:
+            vals["timezone"] = tz
+    return vals
 
 
 def _name_taken(org_id: str, name: str, exclude: str | None = None) -> bool:
@@ -779,10 +824,14 @@ async def create_location(org_id: str, body: LocationIn, u: dict = Depends(user)
     if _name_taken(org_id, body.name):
         raise HTTPException(409, "a site with that name already exists")
     t = time.time()
+    place = _place_vals(body.model_dump(include={"lat", "lon", "address_parts", "geocode_source"}, exclude_unset=True)
+                        | ({"timezone": body.timezone} if body.timezone else {}), {})
     loc = {"id": db.new_id("l_"), "org_id": org_id, "name": body.name.strip(), "address": body.address, "timezone": body.timezone,
-           "notes": body.notes, "created_at": t, "updated_at": t}
+           "notes": body.notes, "created_at": t, "updated_at": t, **place}
     db.insert(db.locations, loc)
     _audit(u, org_id, None, f"site created: {loc['name']}", {"location_id": loc["id"]})
+    if loc["address"].strip() and loc.get("lat") is None:
+        geocode.locate_soon(loc["id"])
     return _location_rollups([loc], [])[0]
 
 
@@ -797,7 +846,7 @@ async def get_location(location_id: str, include_retired: bool = False, u: dict 
 async def update_location(location_id: str, body: LocationPatch, u: dict = Depends(user)):
     loc, _ = auth.location_access(u, location_id)
     auth.require_role(u, loc["org_id"], "admin")
-    vals = {k: v for k, v in body.model_dump(exclude_unset=True).items() if k != "name" or v}
+    vals = _place_vals({k: v for k, v in body.model_dump(exclude_unset=True).items() if k != "name" or v}, loc)
     if "name" in vals:
         vals["name"] = vals["name"].strip()
         if _name_taken(loc["org_id"], vals["name"], exclude=location_id):
@@ -806,7 +855,38 @@ async def update_location(location_id: str, body: LocationPatch, u: dict = Depen
         db.run(sa.update(db.locations).where(db.locations.c.id == location_id).values(**vals, updated_at=time.time()))
         registry.refresh_location(location_id)   # welcome/proxy/broadcasts carry the Site name
         _audit(u, loc["org_id"], None, f"site updated: {vals.get('name', loc['name'])}", {"location_id": location_id})
+        if "address" in vals and (vals["address"] or "").strip() and vals.get("lat", loc.get("lat")) is None:
+            geocode.locate_soon(location_id)
     return await get_location(location_id, False, u)
+
+
+# ---------------------------------------------------------------- address lookup (geocode.py)
+
+def _geocode_user(u: dict) -> None:
+    if geocode.rate_limited(u["id"]):
+        raise HTTPException(429, "too many address lookups; wait a minute")
+
+
+@app.get("/api/geocode")
+async def geocode_search(q: str = Query(min_length=1, max_length=200), u: dict = Depends(user)):
+    """Address suggestions: [{display, address_parts, lat, lon, timezone}] (best first; [] when the geocoder is down)."""
+    if len(geocode.normalise(q)) < 3:
+        return []
+    _geocode_user(u)
+    return await geocode.search(q)
+
+
+@app.get("/api/geocode/reverse")
+async def geocode_reverse(lat: float = Query(ge=-90, le=90), lon: float = Query(ge=-180, le=180), u: dict = Depends(user)):
+    """The address at a point, or null."""
+    _geocode_user(u)
+    return await geocode.reverse(lat, lon)
+
+
+@app.get("/api/geocode/timezone")
+async def geocode_timezone(lat: float = Query(ge=-90, le=90), lon: float = Query(ge=-180, le=180), u: dict = Depends(user)):
+    """The IANA time zone at a point (offline; a dragged map marker asks this), or {"timezone": null}."""
+    return {"timezone": geocode.tz_for(lat, lon)}
 
 
 @app.delete("/api/locations/{location_id}")

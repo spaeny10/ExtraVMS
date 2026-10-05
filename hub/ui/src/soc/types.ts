@@ -4,6 +4,7 @@
  * priority, swept in bulk.
  */
 import type { Procedure, ProcedureStep, SiteContact, SocRole } from "../api";
+import type { AddressParts, Place } from "../place";
 
 export type Priority = "high" | "medium" | "low";
 export type IncidentState = "new" | "claimed" | "pending_verify" | "closed";
@@ -56,6 +57,8 @@ export type IncidentProcedure = Omit<Procedure, "steps"> & { steps: ProgressStep
 
 export type IncidentDetail = {
   incident: Incident; events: IncidentEvent[]; log: LogRow[];
+  /** where the Site is, for the Dispatch block (newer hubs) */
+  site?: Place & { id: string };
   contacts: SiteContact[]; procedures: IncidentProcedure[];
   /** older shape of the contract: progress apart from the procedures */
   sop_progress?: SopProgress;
@@ -87,6 +90,8 @@ export type SocSite = {
   id: string; name: string; org_id: string; org_name: string | null; timezone: string | null; monitored: boolean; armed: boolean; reason: string;
   next_change: { at: number; armed: boolean } | null; override: unknown | null; open_incidents: number; ringing: number;
   servers_total: number; servers_online: number;
+  /** newer hubs: where the Site is */
+  address?: string; lat?: number | null; lon?: number | null; address_parts?: AddressParts | null;
 };
 
 /** The server's sound policy, on every frame: ring (how often, for which top priority) or stay quiet. */

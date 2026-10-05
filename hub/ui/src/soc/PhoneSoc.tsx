@@ -8,6 +8,7 @@ import { toast } from "@site/ui";
 import type { Me } from "../api";
 import { go, socHref } from "../nav";
 import { age, incidentTitle } from "./format";
+import { Dispatch } from "./Dispatch";
 import { ClaimBar, EventMedia, SlaPill } from "./IncidentView";
 import { splitLanes } from "./queue";
 import { CallList, ResolvePane } from "./RightPane";
@@ -72,6 +73,7 @@ function PhoneSheet({ me, id, now, onBack }: { me: Me; id: number; now: number; 
       </header>
       <ClaimBar incident={incident} me={me} actions={actions} compact />
       {events[0] && <EventMedia key={`${events[0].server_id}:${events[0].event_id}`} ev={events[0]} />}
+      <Dispatch place={detail?.site} siteId={incident.location_id} map />
       {detail && <CallList incident={incident} contacts={detail.contacts} log={detail.log} actions={actions} enabled={incident.state === "claimed" && incident.claimed_by === me.user.id} phone />}
       <ResolvePane me={me} incident={incident} actions={actions} groups={soc.groups} phone onResolved={onBack} />
     </div>

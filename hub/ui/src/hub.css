@@ -216,3 +216,42 @@
   .arm-span { flex-wrap: wrap; }
   .arm-span input[type=time] { padding-left: 4px; padding-right: 4px; }
 }
+
+/* ---------- Site places: maps (map/SiteMap.tsx, a lazy chunk with Leaflet's CSS), the address lookup, the 📍 chip ---------- */
+.site-map { width: 100%; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: var(--panel-2); z-index: 0; }
+.site-map.loading { animation: none; }
+.site-map.static { cursor: default; }
+.site-map .leaflet-container, .site-map.leaflet-container { font: inherit; background: var(--panel-2); }
+/* dark UI: OSM's light raster tiles inverted (hue kept), so a map doesn't glare in a dark SOC; light theme shows them as drawn */
+.site-map .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(.92) contrast(.9) saturate(.8); }
+@media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) .site-map .leaflet-tile-pane { filter: none; } }
+:root[data-theme="light"] .site-map .leaflet-tile-pane { filter: none; }
+.site-map .leaflet-control-attribution { background: color-mix(in srgb, var(--panel) 85%, transparent); color: var(--muted); font-size: 10px; }
+.site-map .leaflet-control-attribution a { color: var(--accent); }
+.site-map .leaflet-bar a { background: var(--panel); color: var(--text); border-color: var(--border); }
+.site-map .leaflet-tooltip { background: var(--panel); color: var(--text); border-color: var(--border); box-shadow: none; }
+.site-map .leaflet-tooltip-top::before { border-top-color: var(--border); }
+/* a pin: a teardrop in the status colour with a dark ring, drawn in CSS (no marker images) */
+.map-pin { background: none; border: 0; }
+.map-pin-dot { --pin: var(--accent, #3b82f6); display: block; width: 18px; height: 18px; margin: 1px; border-radius: 50% 50% 50% 0; transform: rotate(-45deg);
+  background: var(--pin); border: 2px solid #0b0f14; box-shadow: 0 1px 4px rgba(0, 0, 0, .5); }
+.map-pin.big .map-pin-dot { width: 22px; height: 22px; }
+.leaflet-marker-draggable .map-pin-dot, .map-pin.leaflet-marker-draggable .map-pin-dot { cursor: grab; }
+.address-box { display: grid; gap: 8px; }
+.address-row { gap: 8px; align-items: stretch; flex-wrap: nowrap; }
+.address-input { position: relative; flex: 1; min-width: 0; }
+.address-input input { width: 100%; box-sizing: border-box; }
+.address-suggestions { position: absolute; left: 0; right: 0; top: calc(100% + 2px); z-index: 20; list-style: none; margin: 0; padding: 4px 0; max-height: 280px; overflow: auto;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 6px 18px rgba(0, 0, 0, .35); }
+.address-suggestions li { display: flex; flex-direction: column; gap: 2px; padding: 6px 10px; cursor: pointer; color: var(--text); font-size: 13px; }
+.address-suggestions li.active, .address-suggestions li:hover { background: var(--panel-2); }
+.address-note { margin: 0; }
+.coord-row { gap: 8px; flex-wrap: wrap; align-items: center; }
+.coord-row code { font-size: 12px; }
+.place-chip { text-decoration: none; white-space: nowrap; }
+.place-chip.muted { color: var(--muted); }
+.sites-map { display: grid; gap: 8px; }
+.map-legend { gap: 14px; flex-wrap: wrap; color: var(--muted); }
+.map-legend-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; vertical-align: -1px; }
+.not-located a { color: var(--accent); }
+@media (max-width: 767px) { .address-row { flex-wrap: wrap; } .address-input { flex: 1 1 100%; } .address-row > button { flex: 1; } .coord-row .spacer { display: none; } }

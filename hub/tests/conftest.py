@@ -10,6 +10,7 @@ os.environ["HUB_SECRET"] = "test-secret"
 os.environ["HUB_COOKIE_SECURE"] = "0"
 os.environ["HUB_PUBLIC_URL"] = "http://testserver"
 os.environ["HUB_SOC_LOOPS"] = "0"   # no background escalation racing the tests: they call soc.escalate_once(now)
+os.environ["HUB_GEOCODE_BACKFILL"] = "0"   # no geocoder calls from tests (test_geocode drives geocode.backfill with a fake transport)
 os.environ["NVR_DATA_DIR"] = str(Path(TMP, "site"))   # for tests that import the site package
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))

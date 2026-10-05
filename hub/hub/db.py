@@ -72,7 +72,11 @@ locations = Table("locations", metadata,
                   Column("arm_schedule", sa.JSON, nullable=True),    # [{dow: [0..6, Monday=0], from: "HH:MM", to: "HH:MM"}]
                   Column("arm_holidays", sa.JSON, nullable=True),    # [{date: "YYYY-MM-DD", name, armed, from?, to?}]
                   Column("arm_override", sa.JSON, nullable=True),    # {mode: arm|disarm, until, by, by_id, reason, at}
-                  Column("soc_group_minutes", Integer, nullable=True))   # events within this window join one incident
+                  Column("soc_group_minutes", Integer, nullable=True),   # events within this window join one incident
+                  # where the Site is (geocode.py): `address` stays the one-line address people read; these locate it
+                  Column("lat", Float, nullable=True), Column("lon", Float, nullable=True),
+                  Column("address_parts", sa.JSON, nullable=True),   # {house_number, street, city, county, state, state_code, postcode, country, country_code, display_name}
+                  Column("geocoded_at", Float, nullable=True), Column("geocode_source", String(32), nullable=True))   # nominatim | geocoder | marker | manual
 location_grants = Table("location_grants", metadata,
                         Column("user_id", String(24), primary_key=True), Column("location_id", String(24), primary_key=True))
 cameras = Table("cameras", metadata,
@@ -228,7 +232,9 @@ ADDED_COLUMNS = [("sites", "retired_at"), ("sites", "location_id"), ("membership
                  ("invites", "all_sites"), ("invites", "location_ids"), ("invites", "created_by"), ("invites", "created_at"),
                  ("invites", "accepted_user_id"), ("invites", "label"),
                  ("users", "soc_role"), ("locations", "monitored"), ("locations", "arm_schedule"), ("locations", "arm_holidays"),
-                 ("locations", "arm_override"), ("locations", "soc_group_minutes")]
+                 ("locations", "arm_override"), ("locations", "soc_group_minutes"),
+                 ("locations", "lat"), ("locations", "lon"), ("locations", "address_parts"), ("locations", "geocoded_at"),
+                 ("locations", "geocode_source")]
 
 
 def upgrade(eng: Engine) -> None:

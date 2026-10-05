@@ -29,7 +29,7 @@ import sqlalchemy as sa
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
-from . import auth, db, soc, soc_reports
+from . import auth, db, geocode, soc, soc_reports
 from .agents import registry
 from .roles import allows
 
@@ -479,7 +479,10 @@ async def incident_detail(iid: int, u: dict = Depends(user)):
     _staff(u)
     inc = _soc(soc.get, iid)
     logs = soc.log_of(iid)[iid]
-    return {"incident": inc, "events": soc.events_of(iid), "log": logs, "contacts": contacts_for(inc["location_id"]),
+    loc = db.one(sa.select(db.locations).where(db.locations.c.id == inc["location_id"])) or {}
+    # `site`: where to send help (the Dispatch block): the address an operator reads to police, and the point
+    site = {"id": inc["location_id"], "name": loc.get("name"), "address": loc.get("address") or "", "timezone": loc.get("timezone"), **geocode.place_of(loc)}
+    return {"incident": inc, "site": site, "events": soc.events_of(iid), "log": logs, "contacts": contacts_for(inc["location_id"]),
             "procedures": _procedures_with_progress(inc, logs), "calls": [r for r in logs if r["action"] == "call"]}
 
 
@@ -729,7 +732,8 @@ def soc_site(loc: dict, counts: dict | None = None, orgs: dict | None = None, se
             "next_change": soc.next_change(loc, now), "override": soc.active_override(loc, now),
             "open_incidents": sum(n for (lid, _, _), n in counts.items() if lid == loc["id"]),
             "ringing": counts.get((loc["id"], "new", "ring"), 0),
-            "servers_total": len(mine), "servers_online": sum(1 for s in mine if s["online"] and registry.get(s["id"]) is not None)}
+            "servers_total": len(mine), "servers_online": sum(1 for s in mine if s["online"] and registry.get(s["id"]) is not None),
+            "address": loc.get("address") or "", **geocode.place_of(loc)}
 
 
 @router.get("/api/soc/sites")

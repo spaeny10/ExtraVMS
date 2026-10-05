@@ -18,6 +18,7 @@ dependencies = [
   "py-vapid>=1.9",
   "cryptography>=42",
   "tzdata",            # zoneinfo's IANA database on hosts without one (Windows, slim images): SOC arming windows
+  "timezonefinder>=6.5",   # a Site's time zone from its coordinates, offline (geocode.tz_for)
   "tunnelproto",
 ]
 
