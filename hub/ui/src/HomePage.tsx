@@ -1,5 +1,5 @@
 /**
- * Home: the user's dashboard over every site they can see. Dashboards are per user; admins publish shared
+ * Home: the user's dashboard over every server they can see. Dashboards are per user; admins publish shared
  * ones. Nothing is stored until "Save as…", so the generated Default is always a safe starting point.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -136,7 +136,7 @@ export function HomePage({ org, me }: { org: Org; me: Me }) {
         canEdit={current.canEdit} canPublish={admin && !!current.id} isDefault={!!current.id && list.default_id === current.id}
         onSelect={select} onEditing={setEditing} onAdd={addWidget} onSave={save} onSaveAs={saveAs} onRename={rename} onDelete={del}
         onDiscard={() => setDraft(current.config)} onPublish={publish} onSetDefault={setDefault} />
-      {fleet && fleetEmpty(fleet, org) && <p className="muted small">No sites are enrolled yet. Add one under Organisation and its cameras will appear here.</p>}
+      {fleet && fleetEmpty(fleet, org) && <p className="muted small">No servers are enrolled yet. Add one under Customer → Servers and its cameras will appear here.</p>}
       <Dashboard source={source} config={draft} editing={editing} onChange={setDraft} onEditWidget={setSettingsFor} />
       {settingsFor && (
         <WidgetSettings widget={settingsFor} source={source} onClose={() => setSettingsFor(null)}

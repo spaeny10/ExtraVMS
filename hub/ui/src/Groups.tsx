@@ -1,4 +1,4 @@
-/** Organisation → Camera groups: named sets of cameras across sites, used by dashboard widgets. */
+/** Customer → Camera groups: named sets of cameras across servers, used by dashboard widgets. */
 import { useEffect, useMemo, useState } from "react";
 import { CameraPicker } from "@site/dashboard/CameraPicker";
 import type { CameraGroup, CameraRef } from "@site/dashboard/types";
@@ -23,7 +23,7 @@ export function GroupsBox({ org, fleet, canEdit }: { org: Org; fleet: Fleet | nu
   };
   return (
     <div className="card">
-      <div className="row"><h3 style={{ margin: 0 }}>Camera groups</h3><span className="muted small">reusable sets of cameras across sites, for dashboard tiles and event feeds</span><span className="spacer" />
+      <div className="row"><h3 style={{ margin: 0 }}>Camera groups</h3><span className="muted small">reusable sets of cameras across servers, for dashboard tiles and event feeds</span><span className="spacer" />
         {canEdit && <button className="ghost small" onClick={() => setEditing({ id: null, name: "", members: [] })}>New group</button>}</div>
       {groups.length === 0 && <p className="muted small" style={{ marginBottom: 0 }}>No groups yet.</p>}
       {groups.map((g) => (

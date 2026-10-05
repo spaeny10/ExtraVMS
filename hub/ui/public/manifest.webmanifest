@@ -1,0 +1,14 @@
+{
+  "name": "Axiom Vision Hub",
+  "short_name": "Axiom Vision",
+  "description": "Every site, server and camera of your Axiom Vision fleet.",
+  "start_url": "/sites",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0d1117",
+  "theme_color": "#0d1117",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

@@ -42,3 +42,45 @@
 .verb-card .examples li { font-style: italic; }
 .verb-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 @media (max-width: 767px) { .verb-cols { grid-template-columns: 1fr; } }
+
+/* ---------- Sites › Site › Server (tenancy stage 2) ---------- */
+.customer-pick { display: flex; align-items: center; gap: 6px; }
+.crumbs { margin: 0 0 6px; color: var(--muted); }
+.crumbs a { color: var(--muted); }
+.crumbs [aria-current] { color: var(--text); }
+.site-head { display: flex; align-items: flex-start; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+.site-head h2 { margin: 0; }
+.site-chips { gap: 6px; }
+.chip.warn { border-color: var(--bad); color: var(--bad); }
+.site-tabs { margin-bottom: 12px; max-width: 100%; overflow-x: auto; }
+.site-tabs button { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.server-dots { display: inline-flex; gap: 4px; }
+.dot.retired { background: var(--muted); }
+.site-card .server-actions { margin-top: 10px; gap: 6px; }
+.server-actions { gap: 6px; }
+.link-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; }
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 4px 12px; margin: 10px 0; }
+.site-settings { display: flex; flex-direction: column; gap: 10px; max-width: 640px; }
+.site-settings textarea { font: inherit; }
+.access-picker { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; margin-top: 6px; }
+/* ⋯ menu: a veil catches the outside click that closes it */
+.menu-anchor { position: relative; }
+.menu-veil { position: fixed; inset: 0; z-index: 19; }
+.menu-pop { position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; min-width: 220px; display: flex; flex-direction: column; padding: 6px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: 0 8px 24px rgb(0 0 0 / .35); }
+.menu-pop button, .menu-pop a { background: transparent; color: var(--text); text-align: left; padding: 6px 10px; border-radius: 6px; text-decoration: none; font-size: 14px; }
+.menu-pop button:hover, .menu-pop a:hover { background: var(--panel-2); }
+.menu-label { color: var(--muted); font-size: 12px; padding: 6px 10px 2px; border-top: 1px solid var(--border); margin-top: 4px; }
+
+/* phones: the header nav becomes the bottom tab bar (styles.css fixes every <nav> there; this lays out the hub's links) */
+@media (max-width: 700px) {
+  .hub-top { flex-wrap: nowrap; gap: 8px; padding: calc(6px + env(safe-area-inset-top)) 12px 6px; }
+  .hub-top nav { display: grid; gap: 0; }
+  .hub-top nav a { display: flex; flex-direction: column; align-items: center; gap: 1px; padding: 6px 0 5px; border-radius: 0; min-height: 52px; font-size: .62rem; }
+  .hub-top nav a.active { background: transparent; color: var(--accent); }
+  .customer-pick > span { display: none; }
+  .customer-pick select { max-width: 40vw; }
+  .hub-page { padding: 10px 10px calc(70px + env(safe-area-inset-bottom)); }
+  .site-head { flex-direction: column; gap: 6px; }
+  .hub-table { display: block; overflow-x: auto; }
+}

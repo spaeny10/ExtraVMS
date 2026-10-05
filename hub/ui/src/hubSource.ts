@@ -1,12 +1,13 @@
 /**
- * The dashboard's view of the fleet: cameras and sites from the Fleet summaries, per-site API clients under
- * /s/<site>/, events and live updates from the hub's fan-out endpoints, alerts/digest/Ask from the hub.
+ * The dashboard's view of the fleet: cameras and servers from the Fleet summaries, per-server API clients under
+ * /s/<server>/, events and live updates from the hub's fan-out endpoints, alerts/digest/Ask from the hub. The dashboard's
+ * `site` fields (SourceCamera.site, CameraRef.site) are server ids: the wire name predates Sites (= locations).
  */
 import { makeApi, type SiteApi } from "@site/api";
 import type { DashboardSource, SourceCamera, SourceSite } from "@site/dashboard/source";
 import type { CameraGroup } from "@site/dashboard/types";
 import { timelineHash } from "@site/nav";
-import { api, subscribeFleet, type Fleet, type Org, type Site } from "./api";
+import { api, subscribeFleet, type Fleet, type Org, type Server } from "./api";
 import { KIND_LABEL } from "./labels";
 
 const clients = new Map<string, SiteApi>();
@@ -16,12 +17,13 @@ export const siteApi = (site: string): SiteApi => {
   return c;
 };
 
-export function fleetSites(fleet: Fleet | null, org: Org): Site[] {
+/** The customer's servers (the fleet's flat list). */
+export function fleetServers(fleet: Fleet | null, org: Org): Server[] {
   return fleet?.orgs.find((o) => o.org.id === org.id)?.sites ?? [];
 }
 
 export function makeHubSource(org: Org, fleet: Fleet | null, groups: CameraGroup[]): DashboardSource {
-  const sites = fleetSites(fleet, org);
+  const sites = fleetServers(fleet, org);
   const cameras: SourceCamera[] = sites.flatMap((s) => (s.summary?.cameras ?? []).map((c) => ({
     site: s.id, siteName: s.name, id: c.id, name: c.name, streamReady: !!c.stream_ready, online: s.online, ptz: !!c.ptz,
   })));
