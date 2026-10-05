@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 
 from . import assistant, backup, baseline, footage, frames, health, identities, journeys, keep, mediamtx, policy, ptz, retention, zones
 from . import synopsis as vlm
-from . import advisor, ai_serve, direct, hub_agent, site_actions, siteconfig
+from . import advisor, ai_serve, detector, direct, hub_agent, site_actions, siteconfig
 from . import vlmroute
 from .config import ROOT, settings
 from .db import JOURNEY_CAMS_SQL, LOCKED_SQL, PRIORITY_RANK_SQL, db, event_filters
@@ -95,6 +95,7 @@ async def lifespan(app: FastAPI):
         *([("ollama", state.ollama.run())] if state.ollama else []),
         ("ingest", p.ingest_loop()),
         ("verify", p.verify_loop()),
+        ("detector-health", p.health_loop()),
         ("synopsis", p.synopsis_loop()),
         ("journeys", p.journey_loop()),
         ("journey-narratives", journeys.narrative_loop(p)),
@@ -1881,8 +1882,9 @@ async def system():
         "vlm_model": settings.vlm_model if settings.local_vlm_enabled else (settings.remote_vlm_model or "remote (not configured)") + " via remote",
         "local_vlm": settings.local_vlm_enabled,
         "vlm_state": state.pipeline.vlm_state, "vlm_down_since": state.pipeline.vlm_down_since,
-        "yolo_ready": state.pipeline.verifier is not None, "yolo_model": settings.yolo_model,
-        "yolo_device": getattr(state.pipeline.verifier, "device", None) or settings.yolo_device,
+        **detector.yolo_status(state.pipeline),   # yolo_ready, yolo_device, yolo_fallback (Hailo -> CPU)
+        "yolo_model": settings.yolo_model,
+        "health_alerts": detector.health_alerts(state.pipeline),
         "yolo_frame_ms": _median(getattr(state.pipeline.verifier, "frame_ms", None)),
         "events": counts,
         "webrtc_port": settings.mediamtx_webrtc_port,
@@ -1938,7 +1940,8 @@ async def home(since: float | None = None):
     p = state.pipeline
     return {"now": now, "since": since, "new_since": new_since, "attention": attention, "recent": recent, "cameras": cams,
             "briefing": b, "disk": {"free_gb": round(rec.free / 1e9), "total_gb": round(rec.total / 1e9)},
-            "retention_alert": retention.alert, "yolo_ready": p.verifier is not None, "vlm_ready": p.vlm_ready,
+            "retention_alert": retention.alert, "yolo_ready": detector.yolo_status(p)["yolo_ready"], "vlm_ready": p.vlm_ready,
+            "health_alerts": detector.health_alerts(p),
             "queues": {"verify": p.verify_q.qsize(), "synopsis": p.synopsis_q.qsize()}, "backup": backup.status()["last"],
             "baseline": baseline.status()}
 

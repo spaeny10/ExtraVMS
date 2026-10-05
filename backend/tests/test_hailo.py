@@ -161,7 +161,8 @@ def test_verifier_loads_hailo_for_a_hef():
         settings.yolo_device, settings.yolo_model = "hailo", "yolov11s.hef"
         hailo.HailoYOLO = _FakeHailo
         v = verifier.Verifier()
-        assert isinstance(v.model, _FakeHailo) and v.device == "hailo-8"
+        assert isinstance(v.model.model, _FakeHailo) and v.model.on_hailo and v.device == "hailo-8"   # supervised (detector.py)
+        assert v.model.status() is None and v.model.names == hailo.NAMES
         assert settings.torch_device == "cpu"                         # PPE / CLIP / re-ID stay on torch, on the CPU
         settings.yolo_model = "yolo11n.pt"
         try:

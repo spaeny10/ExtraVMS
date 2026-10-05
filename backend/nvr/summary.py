@@ -13,7 +13,7 @@ import time
 
 import httpx
 
-from . import backup, direct, mediamtx, retention
+from . import backup, detector, direct, mediamtx, retention
 from .config import settings
 from .db import db
 
@@ -57,7 +57,9 @@ async def site_summary(state, since: float | None = None, version: str = "") -> 
         "disk": {"free_gb": round(rec.free / 1e9), "total_gb": round(rec.total / 1e9)},
         "retention_alert": retention.alert,
         "queues": {"verify": p.verify_q.qsize(), "synopsis": p.synopsis_q.qsize()},
-        "yolo_ready": p.verifier is not None, "vlm_ready": p.vlm_ready, "vlm_model": settings.vlm_model,
+        "yolo_ready": detector.yolo_status(p)["yolo_ready"], "vlm_ready": p.vlm_ready, "vlm_model": settings.vlm_model,
+        # detector_fallback / detector_stalled: the hub opens an alert per kind while it is listed (hub alerts.py)
+        "health_alerts": detector.health_alerts(p),
         "cameras": cams, "today": today, "attention": attention,
         # disabled cameras, separately: `cameras` stays "enabled only" for older hubs, newer ones mark these
         # off in their cameras registry instead of "missing"

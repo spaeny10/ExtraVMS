@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     # YOLO
     yolo_model: str = "yolo11s.pt"
     yolo_device: str = "cuda:0"             # "cuda:0", "cpu", or "hailo" (Hailo-8 PCIe; yolo_model is then a .hef, see hailo.py)
+    hailo_retry_s: float = 600              # on the CPU fallback (Hailo not found / failing): try the Hailo again this often
     yolo_imgsz: int = 1280
     yolo_conf: float = 0.25
     verify_frames: int = 6                  # frames sampled per event

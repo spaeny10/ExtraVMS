@@ -5,7 +5,7 @@ import { WIDGET_DEFS } from "./palette";
 import type { DashboardSource } from "./source";
 import type { AnyWidget, EventsProps, WidgetProps } from "./types";
 
-const KINDS = ["offline", "camera_down", "disk", "clock", "event_high", "event_policy", "event_watched"];
+const KINDS = ["offline", "camera_down", "disk", "clock", "detector_fallback", "detector_stalled", "event_high", "event_policy", "event_watched"];
 
 /** Per-widget settings in a small modal; Save hands the new props back. */
 export function WidgetSettings({ widget, source, onSave, onClose }: {

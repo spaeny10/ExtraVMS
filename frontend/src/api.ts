@@ -295,11 +295,16 @@ export type ParsedQuery = { since: number | null; until: number | null; time_lab
   /** nothing to search by meaning ("what happened overnight?"): list the period's events instead */ listing?: boolean };
 
 /* ---- Home */
+/** A server health problem (backend nvr/detector.py health_alerts); the hub opens an alert of the same kind. */
+export type HealthAlert = { kind: "detector_fallback" | "detector_stalled" | string; text: string; since?: number | null; error?: string; queue?: number };
+/** YOLO wanted on the Hailo but running elsewhere (or nowhere: using null). */
+export type YoloFallback = { wanted: string; using: string | null; since: number; error: string; last_retry?: number };
 export type HomeCamera = { id: string; name: string; stream_ready: boolean; metadata: boolean; metadata_last: number | null; onvif_events: boolean; today: Record<string, number>; health: StreamHealth };
 export type HomeData = {
   now: number; since: number; new_since: number; attention: NvrEvent[]; recent: NvrEvent[]; cameras: HomeCamera[];
   briefing: { id: number; headline: string; period_start: number; period_end: number; created_at: number } | null;
   disk: { free_gb: number; total_gb: number }; retention_alert: unknown; yolo_ready: boolean; vlm_ready: boolean;
+  health_alerts?: HealthAlert[];
   queues: { verify: number; synopsis: number }; backup: { at: number; path: string } | null; baseline: BaselineCamera[];
 };
 
@@ -331,7 +336,9 @@ export type SystemInfo = {
   vlm_down_since?: number | null;
   yolo_ready: boolean;
   yolo_model: string;
-  yolo_device?: string;           // "cuda:0", "cpu", "hailo-8"
+  yolo_device?: string;           // "cuda:0", "cpu", "hailo-8", "cpu (hailo unavailable)"
+  yolo_fallback?: YoloFallback | null;
+  health_alerts?: HealthAlert[];
   yolo_frame_ms?: number | null;  // median YOLO time per verified frame
   events: Record<string, number>;
   webrtc_port: number;

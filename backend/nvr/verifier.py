@@ -177,14 +177,13 @@ def grab_frames(clip: Path, clip_start: float, targets: list[float]) -> dict[flo
 
 def load_yolo():
     """(model, device label) for settings.yolo_device: a Hailo-8 HEF (hailo.py), or ultralytics on CUDA / the CPU.
-    Both answer .names and .predict(...) the same way."""
+    Both answer .names and .predict(...) the same way. On the Hailo the label is None: the supervisor's .device says
+    where it runs now (it falls back to the CPU when the Hailo is missing)."""
     weights = ROOT / "models" / settings.yolo_model
     if settings.yolo_device == "hailo":
         if weights.suffix != ".hef":
             raise ValueError(f"NVR_YOLO_DEVICE=hailo needs a Hailo .hef in NVR_YOLO_MODEL, not {settings.yolo_model}")
-        from .hailo import HailoYOLO
-        model = HailoYOLO(weights)
-        return model, model.device_name
+        return load_hailo(weights), None
     from ultralytics import YOLO  # heavy import; keep module import cheap
 
     weights.parent.mkdir(exist_ok=True)
@@ -196,12 +195,36 @@ def load_yolo():
     return model, settings.yolo_device
 
 
+def load_hailo(weights: Path):
+    """The HEF on the Hailo, supervised: if the Hailo cannot be opened (or stops answering) YOLO runs on the CPU with
+    the matching .pt and the Hailo is retried every NVR_HAILO_RETRY_S (detector.py)."""
+    from . import detector
+
+    def hailo_factory():
+        from .hailo import HailoYOLO  # imports hailo_platform; an ImportError here is a fallback like any other
+        return HailoYOLO(weights)
+
+    def cpu_factory():
+        pt = detector.cpu_weights_for(weights.name, weights.parent)
+        if pt is None:
+            return None
+        log.warning("YOLO fallback: %s on the CPU", pt.name)
+        return detector.load_cpu_model(pt)
+
+    return detector.HailoSupervisor(hailo_factory, cpu_factory, retry_s=settings.hailo_retry_s)
+
+
 class Verifier:
     def __init__(self) -> None:
-        self.model, self.device = load_yolo()
+        self.model, self._device = load_yolo()
         self.frame_ms: deque[float] = deque(maxlen=200)  # YOLO time per frame (ms), for Optimize my system
         self._reid = None  # person re-ID (loaded on first person event)
         log.info("YOLO %s loaded on %s", settings.yolo_model, self.device)
+
+    @property
+    def device(self) -> str:
+        """Where YOLO runs now: on a Hailo site this follows the fallback (e.g. "cpu (hailo unavailable)")."""
+        return getattr(self, "_device", None) or getattr(getattr(self, "model", None), "device", None) or settings.yolo_device
 
     def _predict(self, images: list) -> list:
         """YOLO on the verifier's frames (masked), timed per frame."""
@@ -210,7 +233,11 @@ class Verifier:
         t0 = time.perf_counter()
         res = self.model.predict(images, imgsz=settings.yolo_imgsz, conf=settings.yolo_conf, device=settings.yolo_device,
                                  verbose=False, classes=sorted(PERSON | VEHICLE))
-        self.__dict__.setdefault("frame_ms", deque(maxlen=200)).append(round((time.perf_counter() - t0) * 1000 / len(images), 1))
+        ms = self.__dict__.setdefault("frame_ms", deque(maxlen=200))
+        if self.__dict__.get("_frame_dev") != (dev := self.device):   # a Hailo/CPU switch: time the new device afresh
+            ms.clear()
+            self._frame_dev = dev
+        ms.append(round((time.perf_counter() - t0) * 1000 / len(images), 1))
         return res
 
     def _reid_embedding(self, frames: dict, detections: list) -> list[float] | None:

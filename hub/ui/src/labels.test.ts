@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { whereLabel } from "./labels";
+import { KIND_LABEL, whereLabel } from "./labels";
 
 describe("whereLabel", () => {
   const p = { site: "HQ", server: "Hailo T1", camera: "Front door" };
@@ -17,5 +17,12 @@ describe("whereLabel", () => {
   it("skips missing parts and a server named like its Site", () => {
     expect(whereLabel({ site: null, server: "Box", camera: "cam1" })).toBe("Box · cam1");
     expect(whereLabel({ site: "Box", server: "Box", camera: "cam1" })).toBe("Box · cam1");
+  });
+});
+
+describe("KIND_LABEL", () => {
+  it("names the detector health alerts (hub alerts.py HEALTH_KINDS)", () => {
+    expect(KIND_LABEL.detector_fallback).toBe("Detection on CPU");
+    expect(KIND_LABEL.detector_stalled).toBe("Verification stalled");
   });
 });

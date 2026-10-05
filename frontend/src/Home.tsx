@@ -136,7 +136,8 @@ export function HomeView({ cameras, port, onGo }: { cameras: Camera[]; port: num
     if (c.stream_ready && c.metadata_last && h.now - c.metadata_last > 1800) problems.push(`${c.name}: no detections for ${Math.round((h.now - c.metadata_last) / 60)} min`);
   }
   if (h.retention_alert) problems.push("Retention can't hold the continuous window (disk full)");
-  if (!h.yolo_ready) problems.push("YOLO is still loading");
+  for (const a of h.health_alerts ?? []) problems.push(a.text);   // Hailo missing (YOLO on the CPU), verification stalled
+  if (!h.yolo_ready && !(h.health_alerts ?? []).some((a) => a.kind === "detector_fallback")) problems.push("YOLO is still loading");
   if (!h.vlm_ready) problems.push("Qwen is still loading");
   const healthy = problems.length === 0;
   const usedPct = Math.round((1 - h.disk.free_gb / h.disk.total_gb) * 100);

@@ -8,7 +8,11 @@ import sqlalchemy as sa
 
 from . import cameras, db
 
-KINDS = ("offline", "camera_down", "disk", "clock", "event_high", "event_policy", "event_watched")
+KINDS = ("offline", "camera_down", "disk", "clock", "detector_fallback", "detector_stalled", "event_high", "event_policy", "event_watched")
+# Server detector health, from the heartbeat's `health_alerts` list (backend nvr/detector.py): open while listed.
+#   detector_fallback  the Hailo accelerator is missing or failing; YOLO runs on the CPU (or nothing can detect)
+#   detector_stalled   the verify queue has had events for 15 min and none finished
+HEALTH_KINDS = ("detector_fallback", "detector_stalled")
 # Alerts about one site event. Unlike the condition kinds above (offline, disk...), which close when the condition
 # clears and must re-open when it returns, an event happens once: its key is the event id, and the same event is
 # re-published many times (heartbeat attention lists, synopsis, feedback, lock), so it dedupes on any row.
@@ -65,6 +69,13 @@ def on_heartbeat(site: dict, summary: dict, skew_s: float) -> None:
         open(site, "disk", "", summary["retention_alert"] if isinstance(summary["retention_alert"], dict) else {"message": str(summary["retention_alert"])})
     else:
         close(site, "disk")
+    health = {a["kind"]: a for a in summary.get("health_alerts") or [] if isinstance(a, dict) and a.get("kind") in HEALTH_KINDS}
+    for kind in HEALTH_KINDS:
+        if kind in health:
+            a = health[kind]
+            open(site, kind, "", {k: a[k] for k in ("text", "since", "error", "queue") if a.get(k) is not None})
+        else:
+            close(site, kind)
     if abs(skew_s) > 30:
         open(site, "clock", "", {"skew_s": round(skew_s)})
     else:

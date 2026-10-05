@@ -18,7 +18,7 @@ export function makeLocalSource(cameras: Camera[], home: HomeData | null, port: 
   }));
   const site: SourceSite = {
     id: LOCAL, name, online: true, cameras: cams.length, camerasUp: cams.filter((c) => c.streamReady).length,
-    diskFreeGb: home?.disk.free_gb ?? null, openAlerts: 0,
+    diskFreeGb: home?.disk.free_gb ?? null, openAlerts: home?.health_alerts?.length ?? 0,
   };
   const wanted = (p: EventsProps): CameraRef[] | null => (p.cameras?.length ? p.cameras.filter((c) => c.site === LOCAL) : null);
   return {

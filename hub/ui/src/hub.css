@@ -34,8 +34,8 @@
 .hub-table th, .hub-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
 .hub-table th { color: var(--muted); font-weight: 600; font-size: 12px; }
 .alert-kind { font-size: 11px; padding: 2px 6px; border-radius: 4px; background: var(--panel-2); border: 1px solid var(--border); white-space: nowrap; }
-.alert-kind.offline, .alert-kind.event_policy, .alert-kind.event_high { border-color: var(--bad); color: var(--bad); }
-.alert-kind.camera_down, .alert-kind.disk, .alert-kind.clock, .alert-kind.event_watched { border-color: var(--vehicle, #e0a020); color: var(--vehicle, #e0a020); }
+.alert-kind.offline, .alert-kind.event_policy, .alert-kind.event_high, .alert-kind.detector_stalled { border-color: var(--bad); color: var(--bad); }
+.alert-kind.camera_down, .alert-kind.disk, .alert-kind.clock, .alert-kind.event_watched, .alert-kind.detector_fallback { border-color: var(--vehicle, #e0a020); color: var(--vehicle, #e0a020); }
 .claim-box { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; }
 .claim-box .field { margin: 0; }
 .claim-box input { text-transform: uppercase; letter-spacing: .08em; }

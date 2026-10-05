@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 import cv2
 import httpx
 
-from . import baseline, cells, identities, journeys, policy, ppe, retention, vlmroute, zones, merge
+from . import baseline, cells, detector, identities, journeys, policy, ppe, retention, vlmroute, zones, merge
 from . import synopsis as vlm
 from .config import settings
 from .db import db
@@ -55,6 +55,9 @@ class Pipeline:
         self.tracker = Tracker(self.verify_q.put)
         self.gpu = ThreadPoolExecutor(max_workers=1, thread_name_prefix="yolo")
         self.verifier: Verifier | None = None
+        self.verify_done = 0              # events the verifier finished (verified / rejected / error): the stall check's progress
+        self._stall_state: dict | None = None
+        self.verify_stall: dict = {"stalled": False, "since": None, "queue": 0}   # detector.health_alerts reads this
         self.ppe = ppe.Detector()  # PPE YOLO, loaded on the GPU thread the first time a camera has a PPE zone
         self.subscribers: set[asyncio.Queue] = set()
         self.vlm_ready = False
@@ -148,7 +151,34 @@ class Pipeline:
             except Exception as e:  # keep the worker alive
                 log.exception("verify %s failed", event_id)
                 db.update_event(event_id, status="error", error=f"verify: {e}")
+            row = db.one("SELECT status FROM events WHERE id=?", [event_id])
+            if row and row["status"] in ("verified", "rejected", "error"):
+                self.verify_done += 1
             self.publish(event_id)
+
+    def check_verify_stall(self, now: float | None = None) -> bool:
+        """Verify queue with work and no event finished for detector.STALL_AFTER_S while YOLO claims to be ready:
+        log an ERROR once and raise `detector_stalled` (detector.health_alerts) until events move again."""
+        q = self.verify_q.qsize()
+        ready = detector.yolo_status(self)["yolo_ready"]
+        self._stall_state, stalled = detector.stall_check(self._stall_state, q if ready else 0, self.verify_done, now or time.time())
+        was = self.verify_stall.get("stalled")
+        if stalled and not was:
+            log.error("event verification has stalled: %d events waiting, none finished since %s (YOLO on %s)", q,
+                      time.strftime("%H:%M:%S", time.localtime(self._stall_state["since"])), getattr(self.verifier, "device", "?"))
+        elif was and not stalled:
+            log.info("event verification is moving again (%d waiting)", q)
+        self.verify_stall = {"stalled": stalled, "since": self._stall_state["since"], "queue": q}
+        return stalled
+
+    async def health_loop(self) -> None:
+        """Detector health every 30 s (the Hailo fallback reports itself; this catches a queue that stopped moving)."""
+        while True:
+            await asyncio.sleep(30)
+            try:
+                self.check_verify_stall()
+            except Exception:
+                log.exception("verify stall check failed")
 
     async def _verify(self, event_id: int) -> None:
         e = db.event(event_id)

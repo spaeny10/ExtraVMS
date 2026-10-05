@@ -19,6 +19,7 @@ import { SitePage } from "./SitePage";
 import { SitesPage } from "./SitesPage";
 import { type AuditRow, type HubAdmin, type Me, type Org, type PushInfo, ago, api, fmtTime } from "./api";
 import { ALL_CUSTOMERS } from "./hubAdmin";
+import { KIND_LABEL } from "./labels";
 import { isSocUser, socLanding } from "./access";
 import { SocHeader } from "./soc/SocHeader";
 import { SocRouter } from "./soc/SocRouter";
@@ -174,7 +175,7 @@ function PushCard() {
     if (sub) { await api.pushUnsubscribe(sub.endpoint); await sub.unsubscribe(); }
     toast.success("Notifications off on this browser"); load();
   };
-  const LABEL: Record<string, string> = { offline: "Server offline", camera_down: "Camera down", disk: "Disk low", clock: "Clock skew", event_high: "High-priority event", event_policy: "Site rule broken", event_watched: "Watched person/vehicle" };
+  const LABEL = KIND_LABEL;
   return (
     <div className="card">
       <h3>Notifications</h3>

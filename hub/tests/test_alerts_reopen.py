@@ -78,3 +78,26 @@ def test_false_alarm_and_priority_none_raise_nothing(client, superuser):
     alerts.on_event(s, _event(205, feedback={"verdict": "correct"}))
     alerts.on_event(s, _event(206, priority="low", policy={"text": "no one in the yard after 22:00"}))
     assert {(r["kind"], r["key"]) for r in _rows(s)} == {("event_high", "205"), ("event_policy", "206")}
+
+
+def test_detector_health_alerts_follow_the_heartbeat(client, superuser):
+    """A server whose Hailo is gone (YOLO on the CPU) or whose verify queue stopped moving: one open alert per kind
+    while the heartbeat lists it, closed when it no longer does."""
+    oid = _org(client, superuser, "detector-co")
+    s = server(oid, "Hailo box")
+    fb = {"kind": "detector_fallback", "text": "Hailo accelerator not found; detection is running on the CPU",
+          "since": 1000.0, "error": "HAILO_OUT_OF_PHYSICAL_DEVICES(74)"}
+    st = {"kind": "detector_stalled", "text": "Event verification has stalled: 2883 events waiting", "since": 900.0, "queue": 2883}
+    alerts.on_heartbeat(s, {"health_alerts": [fb, st, {"kind": "something_else"}]}, 0)
+    alerts.on_heartbeat(s, {"health_alerts": [fb, st]}, 0)
+    rows = [r for r in _rows(s) if r["closed_at"] is None]
+    assert sorted(r["kind"] for r in rows) == ["detector_fallback", "detector_stalled"]
+    d = {r["kind"]: r["detail"] for r in rows}
+    assert d["detector_fallback"]["text"] == fb["text"] and d["detector_fallback"]["error"] == fb["error"]
+    assert d["detector_stalled"]["text"].startswith("Event verification has stalled") and d["detector_stalled"]["queue"] == 2883
+    alerts.on_heartbeat(s, {"health_alerts": [fb]}, 0)                 # the queue moves again
+    assert [r["kind"] for r in _rows(s) if r["closed_at"] is None] == ["detector_fallback"]
+    alerts.on_heartbeat(s, {}, 0)                                      # the Hailo is back (or an older server)
+    assert [r for r in _rows(s) if r["closed_at"] is None] == []
+    assert "detector_fallback" in alerts.KINDS and "detector_stalled" in alerts.KINDS
+    assert not set(alerts.HEALTH_KINDS) & set(alerts.EVENT_KINDS)
