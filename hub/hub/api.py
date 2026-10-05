@@ -1336,7 +1336,7 @@ def _cam_refs(cameras: str | None) -> list[tuple[str, str]] | None:
 
 @app.get("/api/fleet/events")
 async def fleet_events(org: str, sites: str | None = None, cameras: str | None = None, group: str | None = None,
-                       classes: str | None = None, limit: int = Query(20, ge=1, le=100), since: float | None = None,
+                       classes: str | None = None, limit: int = Query(20, ge=1, le=500), since: float | None = None,
                        location: str | None = None, u: dict = Depends(user)):
     auth.require_role(u, org, "viewer")
     return await dashboards.fleet_events(u, org, [s for s in (sites or "").split(",") if s] or None, _cam_refs(cameras), group,
