@@ -99,7 +99,10 @@ def main() -> None:
         return
 
     import uvicorn
-    uvicorn.run("hub.api:app", host=settings.host, port=settings.port, log_level=settings.log_level, proxy_headers=True, forwarded_allow_ips="*")
+    # ws_ping_timeout: a site busy pushing playback chunks answers pings late; uvicorn's 20 s default dropped a live tunnel
+    # (Oct 5 2026) and every proxied request failed until it reconnected. 90 s rides out a saturated uplink.
+    uvicorn.run("hub.api:app", host=settings.host, port=settings.port, log_level=settings.log_level, proxy_headers=True, forwarded_allow_ips="*",
+                ws_ping_interval=20, ws_ping_timeout=90)
 
 
 if __name__ == "__main__":
