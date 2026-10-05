@@ -41,6 +41,41 @@ export type SocReport = (typeof SOC_REPORTS)[number];
 
 export type Page = "home" | "sites" | "site" | "server" | "find" | "alerts" | "customer" | "audit" | "account" | "invite" | "soc";
 /**
+ * The header's top-level items: path, label, icon (phone tab bar), the pages that light it up, an optional tooltip,
+ * `soc` (shown to SOC staff only) and `siteOwned` (hidden inside a Site, see topNav).
+ */
+export type TopNavItem = { path: string; label: string; icon: string; pages: Page[]; title?: string; soc?: boolean; siteOwned?: boolean };
+export const TOP_NAV: TopNavItem[] = [
+  { path: "/", label: "Home", icon: "home", pages: ["home"] },
+  { path: "/sites", label: "Sites", icon: "grid", pages: ["sites", "site", "server"] },
+  // labels stay short; the tooltip says they span every Site (a Site's own Find/Alerts are its tabs)
+  { path: "/find", label: "Find", icon: "find", pages: ["find"], title: "Find (all sites)", siteOwned: true },
+  { path: "/alerts", label: "Alerts", icon: "alert", pages: ["alerts"], title: "Alerts (all sites)", siteOwned: true },
+  { path: "/soc", label: "SOC", icon: "lock", pages: ["soc"], soc: true },
+  { path: "/customer", label: "Customer", icon: "settings", pages: ["customer"] },
+  { path: "/audit", label: "Audit", icon: "events", pages: ["audit"] },
+  { path: "/account", label: "Account", icon: "user", pages: ["account"] },
+];
+
+/** A page inside one Site (/sites/:id/*): its tabs are the navigation there. */
+export const inSite = (page: Page) => page === "site" || page === "server";
+
+/**
+ * The top items to show on `page`. Inside a Site the customer-wide Find and Alerts are hidden: the Site's own tabs are
+ * also called Find and Alerts but are scoped to the Site, and two same-named links that go to different places
+ * confused customers. Outside a Site they show as before (the Sites list also links to both).
+ */
+export function topNav(page: Page, socUser: boolean): TopNavItem[] {
+  return TOP_NAV.filter((n) => (!n.soc || socUser) && !(n.siteOwned && inSite(page)));
+}
+
+/**
+ * Pages laid out full-bleed like the server's own UI (no centred column): a Site's tabs (the Live grid and Timeline
+ * want every pixel) and the SOC console. Lists and forms (Sites, Customer, Audit, Account…) stay centred.
+ */
+export const fullBleed = (page: Page) => inSite(page) || page === "soc";
+
+/**
  * Where a path points. `redirect` is the canonical path when the one asked for is an alias or incomplete
  * (/sites/:id → /sites/:id/live, /org/… → /customer/…); the app replaces the URL with it so links and Back stay clean.
  */

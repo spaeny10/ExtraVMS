@@ -14,7 +14,7 @@ import { UndoButton } from "./customer/FleetActionsPage";
 import { FindPage } from "./FindPage";
 import { HomePage } from "./HomePage";
 import { InvitePage } from "./InvitePage";
-import { type CustomerTab, type Page, go, matchRoute, navigate, usePath } from "./nav";
+import { type CustomerTab, fullBleed, go, matchRoute, navigate, topNav, usePath } from "./nav";
 import { SitePage } from "./SitePage";
 import { SitesPage } from "./SitesPage";
 import { type AuditRow, type HubAdmin, type Me, type Org, type PushInfo, ago, api, fmtTime } from "./api";
@@ -23,18 +23,6 @@ import { isSocUser, socLanding } from "./access";
 import { SocHeader } from "./soc/SocHeader";
 import { SocRouter } from "./soc/SocRouter";
 import { SocStreamProvider } from "./soc/useSocStream";
-
-/** Header nav: path, label, icon (phone tab bar), the pages that light it up, and (soc) shown to SOC staff only. */
-const NAV: { path: string; label: string; icon: string; pages: Page[]; soc?: boolean }[] = [
-  { path: "/", label: "Home", icon: "home", pages: ["home"] },
-  { path: "/sites", label: "Sites", icon: "grid", pages: ["sites", "site", "server"] },
-  { path: "/find", label: "Find", icon: "find", pages: ["find"] },
-  { path: "/alerts", label: "Alerts", icon: "alert", pages: ["alerts"] },
-  { path: "/soc", label: "SOC", icon: "lock", pages: ["soc"], soc: true },
-  { path: "/customer", label: "Customer", icon: "settings", pages: ["customer"] },
-  { path: "/audit", label: "Audit", icon: "events", pages: ["audit"] },
-  { path: "/account", label: "Account", icon: "user", pages: ["account"] },
-];
 
 export default function App() {
   const path = usePath();
@@ -89,8 +77,9 @@ export default function App() {
       <OfflineBanner />
       <header className="hub-top">
         <span className="brand"><img className="logo" src="/axiom.webp" alt="Axiom Vision" /></span>
-        <nav>{NAV.filter((n) => !n.soc || soc).map((n) => (
-          <a key={n.path} href={n.path} className={n.pages.includes(page) ? "active" : ""} onClick={go(n.path)}>
+        {/* inside a Site the customer-wide Find/Alerts step aside for the Site's own tabs (nav.ts topNav) */}
+        <nav>{topNav(page, soc).map((n) => (
+          <a key={n.path} href={n.path} title={n.title} className={n.pages.includes(page) ? "active" : ""} onClick={go(n.path)}>
             <span className="tab-icon"><Icon name={n.icon} size={20} /></span>{n.label}
           </a>
         ))}</nav>
@@ -110,7 +99,7 @@ export default function App() {
         <ThemeToggle />
         <button className="ghost small" onClick={async () => { await api.logout(); setMe(null); }}>Sign out</button>
       </header>
-      <main className={`hub-page ${page === "soc" ? "soc-wide" : ""}`}>
+      <main className={`hub-page ${fullBleed(page) ? "wide" : ""} ${page === "soc" ? "soc-wide" : ""}`}>
         {page === "home" && current && <HomePage org={current} me={me} />}
         {page === "sites" && all && <AllSitesPage onOpenCustomer={openCustomer} />}
         {page === "sites" && !all && current && <SitesPage org={current} me={me} />}

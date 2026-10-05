@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { consoleHref, consoleTimelineHref, incidentHref, matchRoute, reportHref, serverHref, settingsHref, siteHref, socHref } from "./nav";
+import { consoleHref, consoleTimelineHref, fullBleed, incidentHref, matchRoute, reportHref, serverHref, settingsHref, siteHref, socHref, topNav } from "./nav";
 
 describe("invite route", () => {
   it("is public and carries the code", () => {
@@ -101,5 +101,49 @@ describe("hrefs", () => {
   it("server console", () => {
     expect(consoleHref("s_2")).toBe("/s/s_2/");
     expect(consoleHref("s_2", "timeline")).toBe("/s/s_2/#timeline");
+  });
+});
+
+describe("topNav", () => {
+  const labels = (path: string, soc = false) => topNav(matchRoute(path).page, soc).map((n) => n.label);
+
+  it("outside a Site: the customer-wide Find and Alerts are there", () => {
+    expect(labels("/")).toEqual(["Home", "Sites", "Find", "Alerts", "Customer", "Audit", "Account"]);
+    expect(labels("/sites")).toEqual(["Home", "Sites", "Find", "Alerts", "Customer", "Audit", "Account"]);
+    expect(labels("/find")).toContain("Find");
+    expect(labels("/alerts")).toContain("Alerts");
+    expect(labels("/customer/members")).toContain("Find");
+  });
+
+  it("inside a Site (every tab and the server panel): no Find or Alerts, the Site's tabs own them", () => {
+    for (const p of ["/sites/l_1/live", "/sites/l_1/timeline", "/sites/l_1/find", "/sites/l_1/alerts", "/sites/l_1/servers",
+      "/sites/l_1/settings/contacts", "/sites/l_1/servers/s_1"]) {
+      expect(labels(p)).toEqual(["Home", "Sites", "Customer", "Audit", "Account"]);
+      expect(labels(p, true)).toEqual(["Home", "Sites", "SOC", "Customer", "Audit", "Account"]);
+    }
+  });
+
+  it("SOC only for SOC staff", () => {
+    expect(labels("/", true)).toEqual(["Home", "Sites", "Find", "Alerts", "SOC", "Customer", "Audit", "Account"]);
+    expect(labels("/soc", false)).not.toContain("SOC");
+  });
+
+  it("the customer-wide items say so in their tooltip", () => {
+    const byLabel = Object.fromEntries(topNav("home", false).map((n) => [n.label, n]));
+    expect(byLabel.Find.title).toBe("Find (all sites)");
+    expect(byLabel.Alerts.title).toBe("Alerts (all sites)");
+  });
+
+  it("Sites stays lit inside a Site", () => {
+    const sites = topNav("site", false).find((n) => n.label === "Sites")!;
+    expect(sites.pages).toContain(matchRoute("/sites/l_1/live").page);
+    expect(sites.pages).toContain(matchRoute("/sites/l_1/servers/s_1").page);
+  });
+});
+
+describe("fullBleed", () => {
+  it("Site pages and the SOC fill the window; lists and forms stay centred", () => {
+    for (const p of ["/sites/l_1/live", "/sites/l_1/timeline", "/sites/l_1/servers/s_1", "/soc"]) expect(fullBleed(matchRoute(p).page)).toBe(true);
+    for (const p of ["/", "/sites", "/find", "/alerts", "/customer", "/audit", "/account"]) expect(fullBleed(matchRoute(p).page)).toBe(false);
   });
 });

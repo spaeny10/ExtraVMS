@@ -35,6 +35,11 @@ export function SitesPage({ org, me }: { org: Org; me: Me }) {
     <>
       <h2>Sites <span className="muted small">{org.name} · {live.filter((s) => s.online).length} of {live.length} servers online{g.open_alerts ? ` · ${g.open_alerts} open alerts` : ""}</span>
         {(g.retired ?? 0) > 0 && <label className="small muted" style={{ marginLeft: 12, fontWeight: 400 }}><input type="checkbox" checked={showRetired} onChange={(e) => setShowRetired(e.target.checked)} /> Show retired ({g.retired})</label>}</h2>
+      {/* customer-wide Find and Alerts, reachable from the hierarchy too: the top nav hides them inside a Site */}
+      <div className="row sites-links">
+        <a className="link-btn" href="/find" onClick={go("/find")}>Find across all sites</a>
+        <a className="link-btn" href="/alerts" onClick={go("/alerts")}>All alerts</a>
+      </div>
       {sites.length === 0 && unassigned.length === 0 && (
         <p className="muted">No sites yet. {isAdmin(org, me) ? <>Create one and enrol a server under <a href="/customer/sites" onClick={go("/customer/sites")}>Customer → Sites</a>.</> : "Ask an admin to add one."}</p>
       )}

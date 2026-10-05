@@ -3,10 +3,15 @@
 .hub-top .brand { font-weight: 700; display: flex; align-items: center; gap: 8px; }
 .hub-top .logo { height: 20px; width: auto; display: block; filter: brightness(1.75); }
 .hub-top nav { display: flex; gap: 4px; }
-.hub-top nav a { padding: 6px 10px; border-radius: 6px; color: var(--text); text-decoration: none; }
-.hub-top nav a.active { background: var(--panel-2); }
+/* as the server UI's top nav: muted items, the current one raised */
+.hub-top nav a { padding: 6px 10px; border-radius: 6px; color: var(--muted); text-decoration: none; }
+.hub-top nav a:hover { color: var(--text); }
+.hub-top nav a.active { background: var(--panel-2); color: var(--text); }
 .hub-top .spacer { flex: 1; }
+/* lists and forms read best in a centred column; Site pages and the SOC (nav.ts fullBleed) use the whole window with
+   the server UI's own 16 px page padding, so a Site's Live grid gets the same tile sizes as the server's LiveView */
 .hub-page { padding: 16px; max-width: 1400px; margin: 0 auto; }
+.hub-page.wide { max-width: none; margin: 0; }
 .hub-page h2 { margin: 0 0 12px; }
 .site-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
 .site-card { display: block; text-decoration: none; color: inherit; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; }
@@ -45,19 +50,26 @@
 
 /* ---------- Sites › Site › Server (tenancy stage 2) ---------- */
 .customer-pick { display: flex; align-items: center; gap: 6px; }
-.crumbs { margin: 0 0 6px; color: var(--muted); }
-.crumbs a { color: var(--muted); }
-.crumbs [aria-current] { color: var(--text); }
-.site-head { display: flex; align-items: flex-start; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
-.site-head h2 { margin: 0; }
-.site-chips { gap: 6px; }
+/* Site header: one row of "Customer › Site" title, address, rollup chips and the ⋯ menu (SitePage SiteHeader) */
+.site-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; min-height: 32px; }
+.crumbs-title { min-width: 0; flex: 0 1 auto; }
+.hub-page .crumbs-title h2 { margin: 0; font-size: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.crumb-up a { color: var(--muted); font-weight: 500; text-decoration: none; }
+.crumb-up a:hover { color: var(--accent); }
+.crumb-sep { color: var(--muted); font-weight: 400; }
+.site-addr { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 28ch; }
+.site-chips { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .chip.warn { border-color: var(--bad); color: var(--bad); }
 /* Direct-on-LAN (DirectChip): green when media comes straight from the server, the plain grey chip otherwise */
 .direct-chip { color: var(--muted); }
-.direct-chip.on { border-color: var(--ok); color: var(--ok); }
+/* the toolkit's .chip.on is the red "filter on" chip: reset its background, this "on" means healthy */
+.direct-chip.on { border-color: var(--ok); color: var(--ok); background: var(--panel-2); }
 .direct-chip.offer { color: var(--text); display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.site-tabs { margin-bottom: 12px; max-width: 100%; overflow-x: auto; }
-.site-tabs button { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+/* Site tabs look like the server UI's top nav (styles.css `nav button`), on a hairline that closes the header */
+.site-tabs { display: flex; gap: 2px; margin-bottom: 12px; padding-bottom: 6px; border-bottom: 1px solid var(--border); max-width: 100%; overflow-x: auto; }
+.site-tabs button { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; background: transparent; color: var(--muted); padding: 6px 12px; }
+.site-tabs button:hover { color: var(--text); }
+.site-tabs button.active { background: var(--panel-2); color: var(--text); }
 .server-dots { display: inline-flex; gap: 4px; }
 .dot.retired { background: var(--muted); }
 .site-card .server-actions { margin-top: 10px; gap: 6px; }
@@ -85,17 +97,36 @@
   .customer-pick > span { display: none; }
   .customer-pick select { max-width: 40vw; }
   .hub-page { padding: 10px 10px calc(70px + env(safe-area-inset-bottom)); }
-  .site-head { flex-direction: column; gap: 6px; }
+  /* the header row wraps: title and ⋯ on the first line, the chips scroll sideways under them */
+  .site-head { gap: 6px; }
+  .site-head .crumbs-title { flex: 1 1 0; }
+  .site-head .menu-anchor { order: 2; }
+  .site-head > .spacer, .site-addr { display: none; }
+  .site-chips { order: 3; flex: 1 0 100%; flex-wrap: nowrap; overflow-x: auto; }
+  .site-chips .chip { white-space: nowrap; }
+  .hub-page .crumbs-title h2 { font-size: 16px; }
+  .site-tabs { margin-bottom: 8px; }
   .hub-table { display: block; overflow-x: auto; }
 }
 
 /* ---------- Site › Live (combined grid over the site's servers; tiles reuse the server's live-grid/tile/dash-still) ---------- */
-.site-live-chips { flex-wrap: wrap; gap: 4px; margin: 0 0 8px; }
-.site-live-chip { cursor: pointer; display: inline-flex; align-items: center; gap: 4px; }
+/* "Cameras ▾" in the Live toolbar (SiteLive CameraPicker): a popover list of show/hide toggles, drag to reorder */
+.cams-toggle.filtered { border-color: var(--accent); }
+.menu-pop.cams-pop { min-width: 260px; max-height: min(60vh, 480px); overflow-y: auto; }
+.cams-hint { padding: 2px 10px 6px; }
+.menu-pop .site-live-chip { display: flex; align-items: center; gap: 8px; cursor: grab; }
 .site-live-chip.hidden-cam { color: var(--muted); opacity: .7; }
+.site-live-chip.dragging { opacity: .4; }
+.cams-eye { width: 1.2em; text-align: center; }
+.cams-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.menu-pop .cams-reset { border-top: 1px solid var(--border); border-radius: 0; margin-top: 4px; padding-top: 8px; color: var(--muted); }
 .site-live-cell { min-width: 0; }
 .site-live-down .player { background: #111; }
 .site-live-strip-off { aspect-ratio: 16 / 9; display: grid; place-items: center; background: #111; color: #aaa; font-size: 11px; }
+/* Sites list: the customer-wide Find and Alerts as small ghost buttons (links, so middle-click opens a tab) */
+.sites-links { gap: 6px; margin: -4px 0 12px; }
+.link-btn { display: inline-block; font-size: 12px; padding: 3px 9px; border: 1px solid var(--border); border-radius: 8px; color: var(--text); text-decoration: none; }
+.link-btn:hover { background: var(--panel-2); }
 /* Find / Alerts per Site: an EventCard (a button) with its "open on server" link under it */
 .find-hit { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .find-hit-out { align-self: flex-end; padding: 0 4px; }

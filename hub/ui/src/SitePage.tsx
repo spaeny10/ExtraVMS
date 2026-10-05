@@ -48,9 +48,9 @@ export function SitePage({ org, me, siteId, tab, section = "general", serverId, 
   const server = serverId ? site.servers.find((s) => s.id === serverId) : undefined;
   return (
     <>
-      <Breadcrumbs org={siteOrg} site={site} server={server} />
-      <SiteHeader site={site} servers={active} admin={admin} onChanged={reload} />
-      <div className="segmented site-tabs" role="tablist">
+      <SiteHeader org={siteOrg} site={site} server={server} servers={active} admin={admin} onChanged={reload} />
+      {/* styled like the server UI's top nav (plain buttons, the current one raised) so a Site reads like a server */}
+      <div className="site-tabs" role="tablist">
         {SITE_TABS.map((t) => (
           <button key={t} role="tab" aria-selected={tab === t} className={tab === t ? "active" : ""} onClick={() => navigate(siteHref(site.id, t))}>
             <Icon name={TAB_LABEL[t][1]} size={16} /> {TAB_LABEL[t][0]}
@@ -68,16 +68,20 @@ export function SitePage({ org, me, siteId, tab, section = "general", serverId, 
   );
 }
 
-function SiteHeader({ site, servers, admin, onChanged }: { site: Site; servers: Server[]; admin: boolean; onChanged: () => void }) {
+/**
+ * One row: "Customer › Site" as the title (the customer links back to its Sites list), the rollup chips, the ⋯ menu.
+ * It replaces a crumb line, a title block and a chip row, so the Live grid starts where the server UI's does.
+ */
+function SiteHeader({ org, site, server, servers, admin, onChanged }: {
+  org: Org; site: Site; server?: Server; servers: Server[]; admin: boolean; onChanged: () => void;
+}) {
   const [menu, setMenu] = useState(false);
   const save = async (b: { name?: string; address?: string }) => { try { await api.updateLocation(site.id, b); onChanged(); } catch (e) { toast.error(e); } };
   return (
     <div className="site-head">
-      <div>
-        <h2>{site.name}</h2>
-        {site.address && <div className="muted small">{site.address}</div>}
-      </div>
-      <div className="row site-chips">
+      <Breadcrumbs org={org} site={site} server={server} title={site.address || undefined} />
+      {site.address && <span className="muted small site-addr">{site.address}</span>}
+      <div className="site-chips">
         <span className={`chip ${site.servers_online < site.servers_total ? "warn" : ""}`}>Servers {ofTotal(site.servers_online, site.servers_total, "online")}</span>
         <span className={`chip ${site.cameras_online < site.cameras_total ? "warn" : ""}`}>Cameras {ofTotal(site.cameras_online, site.cameras_total, "up")}</span>
         {site.open_alerts > 0 && <span className="chip warn">⚠ {site.open_alerts} open alert{site.open_alerts > 1 ? "s" : ""}</span>}
@@ -101,8 +105,6 @@ function SiteHeader({ site, servers, admin, onChanged }: { site: Site; servers: 
     </div>
   );
 }
-
-/** Interim tab body: what is coming here, and each server's own page for it today. */
 
 function ServersTab({ site, admin, onChanged }: { site: Site; admin: boolean; onChanged: () => void }) {
   const [sites, setSites] = useState<Site[]>([]);

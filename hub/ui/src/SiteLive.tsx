@@ -46,8 +46,8 @@ function siteFleet(org: Org, site: Site): Fleet {
  * Embedding props (the SOC incident view; the Site's Live tab uses none of them):
  * `focus` puts the given tile keys (camKey) first or shows only them, and keeps them visible even if hidden in the
  * layout; `persist={false}` starts from the default layout and never writes this browser's stored one (an operator's
- * per-incident reshuffles shouldn't rearrange the customer's Live tab); `compact` drops the stream toolbar and the
- * camera chips; `hideActivity` drops the "Latest activity" column (the incident view has its own event list).
+ * per-incident reshuffles shouldn't rearrange the customer's Live tab); `compact` drops the stream toolbar (and with it the
+ * Cameras picker); `hideActivity` drops the "Latest activity" column (the incident view has its own event list).
  */
 export type SiteLiveProps = { org: Org; site: Site; focus?: LiveFocus | null; persist?: boolean; compact?: boolean; hideActivity?: boolean };
 
@@ -127,6 +127,8 @@ export function SiteLive({ org, site, focus: want = null, persist = true, compac
     <LiveBudgetProvider>
       <div className={`live-layout ${hideActivity ? "site-live-solo" : ""} ${compact ? "site-live-compact" : ""}`}>
         <div className="live-main">
+          {/* LiveView's one slim toolbar; which cameras show (and their order) sits behind "Cameras" in the same row
+              rather than a row of chips of its own, so the grid starts as high as on the server */}
           {!compact && <div className="toolbar live-toolbar">
             <span className="muted small">Stream</span>
             <div className="segmented">
@@ -134,14 +136,15 @@ export function SiteLive({ org, site, focus: want = null, persist = true, compac
               <button className={allHd ? "active" : ""} disabled={hdUnsupported} onClick={() => dispatch({ type: "allQuality", keys: liveKeys, quality: "hd" })} title="Full-resolution H.265 main stream">All HD</button>
             </div>
             {hdUnsupported && <span className="muted small">This browser can't play the H.265 main stream, so live view is using SD.</span>}
+            <span className="spacer" />
+            <CameraPicker tiles={ordered} layout={layout} multi={multi} dispatch={dispatch} />
           </div>}
-          {!compact && <CameraChips tiles={ordered} layout={layout} multi={multi} dispatch={dispatch} />}
           <div className="live-grid" style={{ gridTemplateColumns: `repeat(${focused ? 1 : gridCols(grid.length)}, minmax(0, 1fr))` }}>
             {grid.map((t) => (
               <SiteTile key={t.key} t={t} {...tileProps}
                 extra={<button className="ghost small" onClick={() => setExpanded(focused ? null : t.key)}>{focused ? "Grid" : "Expand"}</button>} />
             ))}
-            {grid.length === 0 && <div className="empty">Every camera is hidden. Show some with the chips above, or Reset.</div>}
+            {grid.length === 0 && <div className="empty">Every camera is hidden. Show some under Cameras above, or Reset.</div>}
           </div>
         </div>
         {feed}
@@ -259,28 +262,48 @@ type TileCommon = {
   activeOf: (key: string) => NvrEvent | undefined;
 };
 
-/** Show/hide chips (eye toggles, like the Timeline's lanes), drag a chip onto another to reorder, Reset. */
-function CameraChips({ tiles, layout, multi, dispatch }: { tiles: Tile[]; layout: LiveLayout; multi: boolean; dispatch: React.Dispatch<LayoutAction> }) {
+/**
+ * "Cameras n/m ▾" in the toolbar: a popover listing every camera with an eye toggle (like the Timeline's lanes); drag
+ * one onto another to reorder; Reset. A popover rather than a standing row of chips keeps the Live tab to one toolbar.
+ */
+function CameraPicker({ tiles, layout, multi, dispatch }: { tiles: Tile[]; layout: LiveLayout; multi: boolean; dispatch: React.Dispatch<LayoutAction> }) {
   const all = tiles.map((t) => t.key);
+  const [open, setOpen] = useState(false);
   const [drag, setDrag] = useState<string | null>(null);
   const custom = layout.visible !== null || layout.order !== null || Object.keys(layout.quality).length > 0;
+  const shownCount = tiles.filter((t) => isVisible(layout, t.key)).length;
   return (
-    <div className="row site-live-chips">
-      {tiles.map((t) => {
-        const on = isVisible(layout, t.key);
-        return (
-          <button key={t.key} className={`chip site-live-chip ${on ? "" : "hidden-cam"}`} draggable aria-pressed={on}
-            title={`${on ? "Hide" : "Show"} ${t.name}${t.state === "offline" ? " (server offline)" : ""} · drag to reorder`}
-            onClick={() => dispatch({ type: "toggle", key: t.key, all })}
-            onDragStart={(e) => { setDrag(t.key); e.dataTransfer.effectAllowed = "move"; }}
-            onDragOver={(e) => { if (drag && drag !== t.key) e.preventDefault(); }}
-            onDrop={(e) => { e.preventDefault(); if (drag) dispatch({ type: "move", key: drag, before: t.key, all }); setDrag(null); }}
-            onDragEnd={() => setDrag(null)}>
-            <span aria-hidden="true">{on ? "👁" : "◌"}</span> {tileLabel(t.server.name, t.name, multi)}
-          </button>
-        );
-      })}
-      {custom && <button className="ghost small" onClick={() => dispatch({ type: "reset" })} title="Show every camera in server order, all SD">Reset</button>}
+    <div className="menu-anchor">
+      <button className={`ghost small cams-toggle ${shownCount < tiles.length ? "filtered" : ""}`} aria-expanded={open} aria-haspopup="true" onClick={() => setOpen(!open)}
+        title="Choose which cameras show and in what order">
+        Cameras {shownCount < tiles.length ? `${shownCount}/${tiles.length}` : tiles.length} ▾
+      </button>
+      {open && (
+        <>
+          <div className="menu-veil" onClick={() => setOpen(false)} />
+          {/* stays open while toggling: several cameras are usually picked at once */}
+          <div className="menu-pop cams-pop" role="group" aria-label="Cameras">
+            <div className="muted small cams-hint">Click to show or hide · drag to reorder</div>
+            {tiles.map((t) => {
+              const on = isVisible(layout, t.key);
+              return (
+                <button key={t.key} className={`site-live-chip ${on ? "" : "hidden-cam"} ${drag === t.key ? "dragging" : ""}`} draggable aria-pressed={on}
+                  title={`${on ? "Hide" : "Show"} ${t.name}${t.state === "offline" ? " (server offline)" : ""} · drag to reorder`}
+                  onClick={() => dispatch({ type: "toggle", key: t.key, all })}
+                  onDragStart={(e) => { setDrag(t.key); e.dataTransfer.effectAllowed = "move"; }}
+                  onDragOver={(e) => { if (drag && drag !== t.key) e.preventDefault(); }}
+                  onDrop={(e) => { e.preventDefault(); if (drag) dispatch({ type: "move", key: drag, before: t.key, all }); setDrag(null); }}
+                  onDragEnd={() => setDrag(null)}>
+                  <span aria-hidden="true" className="cams-eye">{on ? "👁" : "◌"}</span>
+                  <span className={`dot ${t.state === "live" && t.streamReady ? "ok" : "bad"}`} />
+                  <span className="cams-name">{tileLabel(t.server.name, t.name, multi)}</span>
+                </button>
+              );
+            })}
+            {custom && <button className="cams-reset" onClick={() => { dispatch({ type: "reset" }); setOpen(false); }} title="Show every camera in server order, all SD">Reset layout</button>}
+          </div>
+        </>
+      )}
     </div>
   );
 }
