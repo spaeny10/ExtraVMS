@@ -18,11 +18,12 @@ from pydantic import BaseModel, EmailStr, Field
 
 from . import __version__, alerts, auth, backups, cameras, dashboards, db, digest, direct, fleet_actions, proxy, push, soc_api, turn, vlm_proxy
 from . import fleet as fleet_mod
+from . import find as find_mod
 from . import soc, soc_reports
 from fastapi.responses import StreamingResponse
 from .agents import registry
 from .config import settings
-from .roles import RANK, ROLES
+from .roles import RANK, ROLES, allows
 
 log = logging.getLogger("hub")
 
@@ -830,6 +831,7 @@ async def delete_location(location_id: str, move_to: str | None = None, u: dict 
         # the Site's SOC call list and procedures describe this place only: they go with it, not to move_to
         c.execute(sa.delete(db.location_contacts).where(db.location_contacts.c.location_id == location_id))
         c.execute(sa.delete(db.location_procedures).where(db.location_procedures.c.location_id == location_id))
+        find_mod.drop_views(c, location_id)
         c.execute(sa.delete(db.locations).where(db.locations.c.id == location_id))
     for srv in servers:
         registry.refresh(srv["id"])
@@ -912,6 +914,93 @@ async def location_search(location_id: str, q: str = Query(min_length=1, max_len
                           until: float | None = None, u: dict = Depends(user)):
     loc, _ = auth.location_access(u, location_id)
     return await fleet_mod.search(u, loc["org_id"], q, since, until, server_ids=_servers_of(u, loc))
+
+
+# ---- a Site's Find tab (find.py): the server UI's browse / search filters across the Site's servers, paged per server
+
+def _find_servers(u: dict, loc: dict) -> list[dict]:
+    """The Site's servers this user sees, in a stable order (name, then id): the merge's tie-break."""
+    return sorted((s for s in auth.visible_sites(u, loc["org_id"]) if s.get("location_id") == loc["id"]),
+                  key=lambda s: (s["name"].casefold(), s["id"]))
+
+
+async def _site_find(location_id: str, u: dict, path: str, params: dict, camera: str | None, cursor: str | None,
+                     limit: int, sort: str) -> dict:
+    loc, _ = auth.location_access(u, location_id)
+    servers = _find_servers(u, loc)
+    ids = {s["id"] for s in servers}
+    try:
+        cur = find_mod.parse_cursor(cursor, ids)
+        cam = find_mod.camera_param(camera, ids)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except LookupError:
+        return {"events": [], "next": None, "offline": [], "errors": []}   # a camera of another Site: nothing
+    flags_ok = {"rule", "ppe", "unusual", "watched", "multicam", "locked", "corrected", "false_alarm"}
+    if params.get("flags") and not set(params["flags"].split(",")) <= flags_ok:
+        raise HTTPException(400, "unknown flag")
+    return await find_mod.site_find(u, loc["org_id"], servers, path, params, cur, limit, sort, cam)
+
+
+@app.get("/api/locations/{location_id}/find/events")
+async def location_find_events(location_id: str, camera: str | None = Query(None, max_length=120), status: str | None = Query(None, max_length=60),
+                               label: str | None = Query(None, max_length=20), since: float | None = None, until: float | None = None,
+                               min_yolo: float = Query(0, ge=0, le=1), priority: Literal["low", "medium", "high"] | None = None,
+                               flags: str | None = Query(None, max_length=200), place: str | None = Query(None, max_length=120),
+                               ppe_zone: str | None = Query(None, max_length=120), attention: bool = False,
+                               sort: Literal["newest", "priority"] = "newest", limit: int = Query(60, ge=1, le=200),
+                               cursor: str | None = Query(None, max_length=4000), u: dict = Depends(user)):
+    """Browse a Site's events with a server's /api/events filters (camera = <server>:<camera>). Newest first (by
+    start time across servers) or by priority; `next` is the cursor for the following page (null = that's all)."""
+    params = {"status": status, "label": label, "since": since, "until": until, "min_yolo": min_yolo or None, "priority": priority,
+              "flags": flags, "place": place, "ppe_zone": ppe_zone, "attention": "true" if attention else None, "sort": sort}
+    return await _site_find(location_id, u, "/api/events", params, camera, cursor, limit, sort)
+
+
+@app.get("/api/locations/{location_id}/find/search")
+async def location_find_search(location_id: str, q: str = Query(min_length=1, max_length=200), camera: str | None = Query(None, max_length=120),
+                               status: str | None = Query(None, max_length=60), label: str | None = Query(None, max_length=20),
+                               since: float | None = None, until: float | None = None, min_yolo: float = Query(0, ge=0, le=1),
+                               priority: Literal["low", "medium", "high"] | None = None, flags: str | None = Query(None, max_length=200),
+                               place: str | None = Query(None, max_length=120), ppe_zone: str | None = Query(None, max_length=120),
+                               attention: bool = False, limit: int = Query(100, ge=1, le=200),
+                               cursor: str | None = Query(None, max_length=4000), u: dict = Depends(user)):
+    """Search a Site's events by meaning (each server's /api/search with the same filters), merged by relevance."""
+    params = {"q": q, "status": status, "label": label, "since": since, "until": until, "min_yolo": min_yolo or None, "priority": priority,
+              "flags": flags, "place": place, "ppe_zone": ppe_zone, "attention": "true" if attention else None}
+    return await _site_find(location_id, u, "/api/search", params, camera, cursor, limit, "score")
+
+
+def _can_edit_views(u: dict, org_id: str) -> bool:
+    role = auth.role_in(u, org_id)
+    return bool(role) and allows(role, "operator")
+
+
+class FindViewsIn(BaseModel):
+    views: list[dict] = Field(max_length=find_mod.MAX_VIEWS)
+
+
+@app.get("/api/locations/{location_id}/find-views")
+async def get_location_find_views(location_id: str, u: dict = Depends(user)):
+    """The Site's saved Find views (shared by everyone who sees the Site), shaped like a server's /api/find/views."""
+    loc, _ = auth.location_access(u, location_id)
+    return {"views": find_mod.get_views(loc["id"]), "can_edit": _can_edit_views(u, loc["org_id"])}
+
+
+@app.put("/api/locations/{location_id}/find-views")
+async def put_location_find_views(location_id: str, body: FindViewsIn, u: dict = Depends(user)):
+    loc, _ = auth.location_access(u, location_id)
+    auth.require_role(u, loc["org_id"], "operator")
+    try:
+        views = find_mod.clean_views(body.views)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    before = {v["id"]: v["name"] for v in find_mod.get_views(loc["id"])}
+    find_mod.set_views(loc["id"], views)
+    after = {v["id"]: v["name"] for v in views}
+    _audit(u, loc["org_id"], None, f"site find views saved: {loc['name']}",
+           {"location_id": loc["id"], "views": len(views), "added": sorted(after.keys() - before.keys()), "removed": sorted(before.keys() - after.keys())})
+    return {"views": views, "can_edit": True}
 
 
 @app.get("/api/locations/{location_id}/backups")

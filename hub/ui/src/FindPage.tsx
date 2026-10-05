@@ -1,5 +1,6 @@
 /**
- * Find / Ask across the customer's servers, or (with `site`) across one Site's servers: the Site page's Find tab.
+ * Find / Ask across the customer's servers (/find). A Site's own Find tab is SiteFind (the server UI's Find over the
+ * Site's servers); `site` here still scopes this page to one Site.
  * Results are server events shown with the server UI's EventCard (media fetched through that server's tunnel) and
  * labelled "Site · Server · Camera" (whereLabel). A click opens the event viewer in place (clip, synopsis, feedback), as
  * the server's own Find does; the viewer's "Open in Timeline" goes on to the Site's combined Timeline. Each card also
@@ -9,17 +10,16 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { NvrEvent } from "@site/api";
 import { EventCard } from "@site/Events";
 import { toast } from "@site/ui";
-import { type ExecPlan, type FleetSearch, type Org, type ServerTag, type Site, api, fleetAsk, fmtTime } from "./api";
-import { FleetActionCard, planAction } from "./customer/FleetActionsPage";
+import { type FleetSearch, type Org, type ServerTag, type Site, api, fmtTime } from "./api";
+import { FleetAskResults, useFleetAsk } from "./fleetAskPanel";
 import { type EventRef } from "./eventOpen";
 import { HubEventDetail } from "./HubEventDetail";
 import { useDirectVersion } from "./direct";
 import { mediaApi } from "./hubSource";
 import { whereLabel } from "./labels";
-import { consoleHref, consoleTimelineHref, go } from "./nav";
+import { consoleTimelineHref, go } from "./nav";
 import { siteTimelineHref } from "./timelineLink";
 
-type Answer = { name: string; text: string; error?: string; done?: boolean };
 type Where = { site?: string | null; server?: string | null; camera?: string | null };
 
 /**
@@ -27,7 +27,7 @@ type Where = { site?: string | null; server?: string | null; camera?: string | n
  * has (to drop the server from the label of a one-server Site). Inside a Site page that is the Site itself; across
  * the customer one /api/fleet read.
  */
-function useWhere(org: Org, site?: Site) {
+export function useWhere(org: Org, site?: Site) {
   const [fleetSites, setFleetSites] = useState<Site[] | null>(null);
   useEffect(() => {
     if (site) return;
@@ -54,17 +54,15 @@ export function FindPage({ org, site }: { org: Org; site?: Site }) {
   const fromUrl = useRef(!!new URLSearchParams(location.search).get("q"));
   const [res, setRes] = useState<FleetSearch | null>(null);
   const [busy, setBusy] = useState(false);
-  const [answers, setAnswers] = useState<Record<string, Answer>>({});
-  const [asking, setAsking] = useState(false);
-  const [action, setAction] = useState<ExecPlan | null>(null);
   const { label, serverOf, cameraName } = useWhere(org, site);
+  const scope = site?.id;
+  const fa = useFleetAsk(org, label, scope);
   const [open, setOpen] = useState<EventRef | null>(null);
   // snapshots come straight from a server this browser reaches on its LAN (re-rendered when that changes)
   useDirectVersion(useMemo(() => [...new Set((res?.events ?? []).map(serverOf))], [res, serverOf]));
-  const scope = site?.id;
   const search = async () => {
     if (!q.trim()) return;
-    setBusy(true); setAnswers({}); setAction(null);
+    setBusy(true); fa.reset();
     try { setRes(await api.fleetSearch(org.id, q.trim(), undefined, scope)); } catch (e) { toast.error(e); } finally { setBusy(false); }
   };
   // arrived from a dashboard Ask box: run the question once, then drop it from the URL
@@ -74,31 +72,8 @@ export function FindPage({ org, site }: { org: Org; site?: Site }) {
   }, []);
   const ask = async () => {
     if (!q.trim()) return;
-    setAsking(true); setRes(null); setAnswers({}); setAction(null);
-    // an instruction ("Migrate Ironsight to Hailo T1") gets a confirmation card instead of going to the servers;
-    // if the planner fails the question is simply asked as before
-    const plan = await planAction(org, q.trim());
-    if (plan) { setAction(plan); setAsking(false); return; }
-    try {
-      await fleetAsk(org.id, q.trim(), (c) => {
-        const tag = c as unknown as ServerTag & { site?: string };
-        const id = c.site as string | undefined;
-        if (c.type === "sites") {
-          const init: Record<string, Answer> = {};
-          for (const s of c.sites as (ServerTag & { site: string })[]) init[s.site] = { name: label({ ...s, site_id: s.site }), text: "" };
-          setAnswers(init);
-          return;
-        }
-        if (!id) return;
-        setAnswers((a) => {
-          const cur = a[id] ?? { name: label({ ...tag, site_id: id, site_name: String(c.site_name ?? id) }), text: "" };
-          if (c.type === "delta") return { ...a, [id]: { ...cur, text: cur.text + String(c.text ?? "") } };
-          if (c.type === "error") return { ...a, [id]: { ...cur, error: String(c.error), done: true } };
-          if (c.type === "site_done" || c.type === "done") return { ...a, [id]: { ...cur, done: true } };
-          return a;
-        });
-      }, scope);
-    } catch (e) { toast.error(e); } finally { setAsking(false); }
+    setRes(null);
+    await fa.ask(q);
   };
   /** The event viewer in place; its "Open in Timeline" knows the Site (or falls back to the server's console). */
   const openEvent = (e: FleetSearch["events"][number]) => setOpen({ server: serverOf(e), id: e.id, location: e.location_id ?? (site && site.id) });
@@ -109,13 +84,13 @@ export function FindPage({ org, site }: { org: Org; site?: Site }) {
         <input style={{ flex: 1, minWidth: 260 }} value={q} onChange={(e) => setQ(e.target.value)}
           placeholder={`Search ${site ? "this site" : "every server"}: "white pickup truck", "person at the back door last night"…`} />
         <button type="submit" disabled={busy || !q.trim()}>{busy ? "Searching…" : "Search"}</button>
-        <button type="button" className="ghost" disabled={asking || !q.trim()} onClick={ask}
+        <button type="button" className="ghost" disabled={fa.asking || !q.trim()} onClick={ask}
           title="Every server's assistant answers from its own footage. Instructions such as &quot;Migrate Ironsight to Hailo T1&quot; show a confirmation card instead">
           ✦ {site ? "Ask this site" : "Ask all servers"}
         </button>
       </form>
       <p className="small" style={{ margin: "4px 0 0" }}><a href="/customer/actions" onClick={go("/customer/actions")}>What can I ask the hub to do?</a></p>
-      {action && <FleetActionCard org={org} plan={action} onClose={() => setAction(null)} />}
+      <FleetAskResults org={org} answers={fa.answers} action={fa.action} onCloseAction={() => fa.setAction(null)} />
       {res && (
         <>
           <p className="muted small">{res.sites.map((s) => `${label(s)}: ${s.events} events, ${s.footage} moments${s.error ? ` (${s.error})` : ""}`).join(" · ")}{res.offline.length ? ` · offline: ${res.offline.join(", ")}` : ""}</p>
@@ -148,17 +123,6 @@ export function FindPage({ org, site }: { org: Org; site?: Site }) {
             </>
           )}
         </>
-      )}
-      {Object.keys(answers).length > 0 && (
-        <div className="site-grid" style={{ marginTop: 12 }}>
-          {Object.entries(answers).map(([id, a]) => (
-            <div key={id} className="site-card">
-              <div className="head"><strong>{a.name}</strong><span className="spacer" /><span className="muted small">{a.done ? "" : "thinking…"}</span></div>
-              {a.error ? <p className="small" style={{ color: "var(--bad)" }}>{a.error}</p> : <pre style={{ whiteSpace: "pre-wrap", font: "inherit", margin: "6px 0 0" }}>{a.text || (a.done ? "No answer." : "")}</pre>}
-              <a className="small" href={consoleHref(id, "find")}>Open this server's Find →</a>
-            </div>
-          ))}
-        </div>
       )}
       {open && <HubEventDetail ev={open} cameraName={cameraName(open.server)} onClose={() => setOpen(null)} />}
     </>

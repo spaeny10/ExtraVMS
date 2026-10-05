@@ -1,7 +1,7 @@
 /**
  * One Site: header with its rollup, tabs Live · Timeline · Find · Alerts · Servers · Settings, and the server panel at
- * /sites/:id/servers/:serverId. Live is the combined grid (SiteLive), Find and Alerts are the customer-wide pages scoped
- * to this Site (FindPage, AlertsPage's SiteAlerts).
+ * /sites/:id/servers/:serverId. Live is the combined grid (SiteLive), Find the server UI's Find over the Site's servers
+ * (SiteFind), Alerts the customer-wide page scoped to this Site (AlertsPage's SiteAlerts).
  */
 import { useCallback, useEffect, useState } from "react";
 import { Icon, confirmDialog, promptDialog, toast } from "@site/ui";
@@ -17,7 +17,7 @@ import { SiteIncidents } from "./site/SiteIncidents";
 import { ServerActions, ServerCard } from "./servers";
 import { SiteLive } from "./SiteLive";
 import { SiteTimeline } from "./SiteTimeline";
-import { FindPage } from "./FindPage";
+import { SiteFind } from "./SiteFind";
 import { SiteAlerts } from "./AlertsPage";
 
 const TAB_LABEL: Record<SiteTab, [string, string]> = {
@@ -60,7 +60,7 @@ export function SitePage({ org, me, siteId, tab, section = "general", serverId, 
       {serverId ? (server ? <ServerPanel site={site} server={server} admin={admin} onChanged={reload} /> : <p className="muted">That server isn't in this site. <a href={siteHref(site.id, "servers")} onClick={go(siteHref(site.id, "servers"))}>Servers</a></p>)
         : tab === "live" ? <SiteLive org={siteOrg} site={site} />
         : tab === "timeline" ? <SiteTimeline org={siteOrg} site={site} query={location.search} />
-        : tab === "find" ? <FindPage org={siteOrg} site={site} />
+        : tab === "find" ? <SiteFind org={siteOrg} site={site} />
         : tab === "alerts" ? <><SiteIncidents site={site} /><SiteAlerts org={siteOrg} site={site} /></>
         : tab === "servers" ? <ServersTab site={site} admin={admin} onChanged={reload} />
         : <SettingsSections site={site} org={siteOrg} me={me} section={section} admin={admin} onChanged={reload} />}

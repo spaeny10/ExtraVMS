@@ -1,5 +1,5 @@
 /** Hub API client. Same shape as the site's api.ts: relative URLs, cookie session, errors as `${status} ${text}`. */
-import type { NvrEvent } from "@site/api";
+import type { NvrEvent, SavedFindView } from "@site/api";
 import type { ActionCardData, ActionExtras, ActionPlanCore, ActionResult } from "@site/ActionCard";
 import type { CameraGroup, Dashboard, DashboardConfig, DashboardList, FleetEvent, FleetEvents } from "@site/dashboard/types";
 export type { CameraGroup, Dashboard, DashboardConfig, DashboardList, FleetEvent, FleetEvents, Widget, WidgetProps, DashboardWidgetType } from "@site/dashboard/types";
@@ -88,6 +88,11 @@ export type Usage = { ai_shared: boolean; configured: boolean; model: string; pr
  * the explicit server_* pair and the Site (location_*), so readers fall back to site_id when server_id is missing.
  */
 export type ServerTag = { site_id: string; site_name: string; server_id?: string; server_name?: string } & LocationTag;
+/** /api/locations/{id}/find/events|search: events tagged with their server; `next` is the opaque cursor (null = all). */
+export type SiteFindPage = {
+  events: (NvrEvent & ServerTag)[]; next: string | null; offline: string[];
+  errors: { server_id: string; server_name: string; error: string }[];
+};
 export type FleetSearchEvent = Record<string, unknown> & ServerTag & { id: number; camera_id: string; start_ts: number; synopsis?: string | null; camera_class: string; snapshot?: string | null };
 export type FleetSearch = {
   q: string; sites: (ServerTag & { error: string | null; events: number; footage: number })[]; offline: string[];
@@ -220,6 +225,12 @@ export const api = {
   /** The latest events across one Site's servers (same params and shape as fleetEvents). */
   locationEvents: (id: string, p: { cameras?: { site: string; camera: string }[]; classes?: string[]; limit?: number; since?: number } = {}) =>
     req<FleetEvents>(`/api/locations/${id}/events?${qs({ cameras: p.cameras?.map((c) => `${c.site}:${c.camera}`).join(","), classes: p.classes?.join(","), limit: p.limit, since: p.since })}`),
+  /** A Site's Find tab: one page of events (browse) or search hits across its servers; `next` goes back as `cursor`. */
+  locationFindEvents: (id: string, p: Record<string, string | number | boolean | undefined>) => req<SiteFindPage>(`/api/locations/${id}/find/events?${qs(p)}`),
+  locationFindSearch: (id: string, p: Record<string, string | number | boolean | undefined>) => req<SiteFindPage>(`/api/locations/${id}/find/search?${qs(p)}`),
+  /** The Site's saved Find views (everyone who sees the Site reads them; operators and up save them). */
+  locationFindViews: (id: string) => req<{ views: SavedFindView[]; can_edit: boolean }>(`/api/locations/${id}/find-views`),
+  saveLocationFindViews: (id: string, views: SavedFindView[]) => req<{ views: SavedFindView[]; can_edit: boolean }>(`/api/locations/${id}/find-views`, json("PUT", { views })),
   ack: (id: number) => req(`/api/alerts/${id}/ack`, { method: "POST" }),
   audit: (org: string, site?: string) => req<AuditRow[]>(`/api/audit?${qs({ org, site })}`),
   usage: (org: string, days = 30) => req<Usage>(`/api/orgs/${org}/usage?${qs({ days })}`),

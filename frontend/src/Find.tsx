@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { api, ask, fmtTime, type AskMeta, type AssistantMessage, type AssistantThread, type Camera, type NvrEvent, type ParsedQuery } from "./api";
+import { localFindSource, type FindCursor, type FindSource, type OpenedEvent } from "./findSource";
 import { Answer } from "./Ask";
 import { ActionCard, type ActionPlanCore } from "./ActionCard";
 import { ConfidenceSlider, loadNumber, saveNumber } from "./ConfidenceSlider";
@@ -7,7 +8,7 @@ import { EventCard } from "./Events";
 import { EventDetail } from "./EventDetail";
 import { FindSummary } from "./FindSummary";
 import {
-  DEFAULT_VIEW_KEY, FALLBACK_VIEW, FLAGS, PRESETS, PRIORITIES, SUGGESTIONS, buildQuery, defaultViewId, eventQuery, filterWindow,
+  FALLBACK_VIEW, FLAGS, PRESETS, PRIORITIES, SUGGESTIONS, buildQuery, defaultViewId, eventQuery, filterWindow,
   fromSaved, hourGroups, matchesFilters, parseQuery, placeNames, resolveFilters, sameFilters, toSaved,
   type FindFilters, type FindFlag, type FindMode, type FindView as View, type UrlState,
 } from "./findViews";
@@ -24,8 +25,8 @@ const RANK: Record<string, number> = { none: 0, low: 1, medium: 2, high: 3 };
 
 type Pending = { question: string; answer: string; meta?: AskMeta; model?: string; fallback?: string; error?: string };
 
-const readDefault = () => { try { return localStorage.getItem(DEFAULT_VIEW_KEY); } catch { return null; } };
-const writeDefault = (id: string) => { try { localStorage.setItem(DEFAULT_VIEW_KEY, id); } catch { /* private mode */ } };
+const readDefaultAt = (key: string) => { try { return localStorage.getItem(key); } catch { return null; } };
+const writeDefaultAt = (key: string, id: string) => { try { localStorage.setItem(key, id); } catch { /* private mode */ } };
 /** The page's own query string only: under the hub the path is /s/<site>/ and must stay as it is. */
 const writeUrl = (query: string, push: boolean) => {
   const url = `?${query}${location.hash}`;
@@ -36,10 +37,31 @@ const writeUrl = (query: string, push: boolean) => {
 /** One page for events. With an empty box it browses the latest events for the active view (live, older ones
  * as you scroll); typed text searches events by meaning plus footage by looks; Ask has Qwen look things up and
  * answer in words above those same results. Views (presets per role, plus saved ones) set the filters. */
+const NO_CAMERAS: Camera[] = [];
 /** Text that reads as a site action (backend site_actions.py) goes to the planner on plain Enter too. */
 const INSTRUCTION = /^(please\s+)?(rename|set\s+(the\s+)?retention|keep\s+\d+|lock|protect|stop\s+describing|start\s+describing|describe\s+only)\b/i;
 
-export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent | null }) {
+/**
+ * Ask handled by the embedding page instead of this server's assistant (the hub's Site Find: every server's assistant
+ * answers, instructions get the hub's action card). `panel` renders where the conversation would.
+ */
+export type ExternalAsk = { run: (text: string) => void; busy: boolean; label: string; title: string; panel?: React.ReactNode };
+
+export function FindView({ cameras = NO_CAMERAS, live = null, source: given, ask: external, handoff }: {
+  /** the camera picker: `id` = the camera filter's value (see FindSource.cameraKey), `name` its label */
+  cameras?: Camera[]; live?: NvrEvent | null;
+  /** where the data comes from (default this server) */
+  source?: FindSource;
+  /** Ask by the embedding page (used when the source has no assistant) */
+  ask?: ExternalAsk;
+  /** a question handed over (a dashboard's Ask box): asked once on open */
+  handoff?: string;
+}) {
+  const local = useMemo(() => localFindSource(), []);
+  const source = given ?? local;
+  const { features } = source;
+  const readDefault = () => readDefaultAt(source.views.defaultKey);
+  const writeDefault = (id: string) => writeDefaultAt(source.views.defaultKey, id);
   // ---- views and filters (URL > starred default > Attention)
   const initial = useMemo<UrlState & { id: string }>(() => {
     const u = parseQuery(typeof location === "undefined" ? "" : location.search);
@@ -50,7 +72,9 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
   const [saved, setSaved] = useState<View[] | null>(null);       // null until loaded
   const [viewId, setViewId] = useState(initial.id);
   const [filters, setFilters] = useState<FindFilters>(() => ({ ...resolveFilters(presetOf(initial.id) ?? presetOf(FALLBACK_VIEW), storedYolo()), ...initial.patch }));
-  const [mode, setMode] = useState<"sightings" | "grouped">(() => (initial.mode ?? presetOf(initial.id)?.mode) === "grouped" ? "grouped" : "sightings");
+  const [modeState, setMode] = useState<"sightings" | "grouped">(() => (initial.mode ?? presetOf(initial.id)?.mode) === "grouped" ? "grouped" : "sightings");
+  // grouped-by-who is this server's identities: a source without them always lists events
+  const mode = features.identities ? modeState : "sightings";
   const [defaultId, setDefaultId] = useState(readDefault);
   // a saved view named in the URL (or starred) is only known once the saved views load
   const [ready, setReady] = useState(() => !!presetOf(initial.id));
@@ -70,12 +94,15 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
   // results
   const [events, setEvents] = useState<NvrEvent[] | null>(null);
   const [more, setMore] = useState(false);
+  const next = useRef<FindCursor | null>(null);   // where the next page starts (browse and search)
   const [older, setOlder] = useState(0);  // search matches before the selected time chip's window
   const [busy, setBusy] = useState(false);
   const [nonce, setNonce] = useState(0);
-  const [open, setOpen] = useState<number | null>(null);
+  const [open, setOpen] = useState<OpenedEvent | null>(null);
+  const openId = (id: number) => setOpen({ id });
   const [focus, setFocus] = useState<number | null>(null);  // keyboard: index into events
   const sentinel = useRef<HTMLDivElement>(null);
+  const results = useRef<HTMLElement>(null);   // the event list (keyboard focus moves through its cards)
   const searchInput = useRef<HTMLInputElement>(null);
   const loadingMore = useRef(false);
   // conversation
@@ -85,11 +112,13 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
   const [pending, setPending] = useState<Pending | null>(null);
   const [showHistory, setShowHistory] = useState(false);
   const answerRef = useRef<HTMLDivElement>(null);
-  const name = (id: string) => cameras.find((c) => c.id === id)?.name ?? id;
+  const cams = cameras;   // ids are the camera filter's values (source.cameraKey)
+  const name = (id: string) => cams.find((c) => c.id === id)?.name ?? id;
+  const keyOf = source.eventKey;
   const browsing = !submitted;
 
   useEffect(() => {
-    api.findViews().then((r) => r.views.map(fromSaved)).catch(() => [] as View[]).then((list) => {
+    source.views.list().then((r) => r.map(fromSaved)).catch(() => [] as View[]).then((list) => {
       setSaved(list);
       if (!ready) {  // the URL / star named a saved view: apply it now (or fall back to Attention)
         const v = list.find((x) => x.id === initial.id);
@@ -136,8 +165,8 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
 
   const persistSaved = async (list: View[]) => {
     try {
-      const r = await api.saveFindViews(list.map((v) => toSaved(v.id, v.name, resolveFilters(v), v.mode)));
-      setSaved(r.views.map(fromSaved));
+      const r = await source.views.save(list.map((v) => toSaved(v.id, v.name, resolveFilters(v), v.mode)));
+      setSaved(r.map(fromSaved));
       return true;
     } catch (e) { toast.error(e); return false; }
   };
@@ -157,61 +186,79 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
   };
   const star = (v: View) => { writeDefault(v.id); setDefaultId(v.id); toast.success(`"${v.name}" opens by default`); };
 
-  const loadThreads = () => api.assistantThreads().then(setThreads).catch(() => {});
+  const loadThreads = () => { if (features.assistant) api.assistantThreads().then(setThreads).catch(() => {}); };
   useEffect(() => {
-    loadThreads();
-    api.remoteWarm().catch(() => {}); // a cold remote model (if configured) starts loading while you type
-    // a question handed over from the Home dashboard's Ask box
-    let handed: string | null = null;
-    try { handed = sessionStorage.getItem("findAsk"); sessionStorage.removeItem("findAsk"); } catch { /* ignore */ }
-    if (handed) askNvr(handed);
+    let handed: string | null = handoff ?? null;
+    if (features.assistant) {
+      loadThreads();
+      api.remoteWarm().catch(() => {}); // a cold remote model (if configured) starts loading while you type
+      // a question handed over from the Home dashboard's Ask box
+      try { handed = handed ?? sessionStorage.getItem("findAsk"); sessionStorage.removeItem("findAsk"); } catch { /* ignore */ }
+    }
+    if (handed) { if (!features.assistant) setQ(handed); askNvr(handed); }
     else if (initial.q) search(initial.q);  // a link with ?q=…
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   useEffect(() => {
-    if (threadId == null) { setMessages([]); return; }
+    if (threadId == null || !features.assistant) { setMessages([]); return; }
     api.assistantThread(threadId).then((t) => setMessages(t.messages)).catch(() => setMessages([]));
   }, [threadId]);
 
   // ---- browse: the latest events for the filters, older ones as you scroll
   const browseParams = () => ({ ...eventQuery(filters), ppe_zone: ppeZone || undefined, sort: filters.sort });
   const filtersKey = JSON.stringify(filters) + ppeZone;
+  const filtersKeyRef = useRef(filtersKey);
+  filtersKeyRef.current = filtersKey;
   useEffect(() => {
     if (!ready || !browsing || mode !== "sightings") return;
-    setBusy(true); setEvents(null); setFocus(null);
-    api.events({ ...browseParams(), limit: PAGE }).then((r) => { setEvents(r); setMore(r.length === PAGE); }).catch(() => setEvents([])).finally(() => setBusy(false));
+    let alive = true;
+    setBusy(true); setEvents(null); setFocus(null); next.current = null;
+    source.events(browseParams(), null, PAGE)
+      .then((r) => { if (!alive) return; next.current = r.next; setEvents(r.events); setMore(r.next != null); })
+      .catch(() => { if (alive) { setEvents([]); setMore(false); } })
+      .finally(() => { if (alive) setBusy(false); });
+    return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, browsing, mode, filtersKey]);
+  }, [ready, browsing, mode, filtersKey, source]);
 
   // a new or updated event from the live feed slots into the browse grid when it matches the filters
-  useEffect(() => {
-    if (!live || !browsing || mode !== "sightings") return;
-    const ok = matchesFilters(live, filters) && (!ppeZone || live.detections?.ppe?.zone === ppeZone);
+  const applyLive = (e: NvrEvent) => {
+    if (!browsing || mode !== "sightings") return;
+    const ok = matchesFilters({ ...e, camera_id: source.cameraKey(e) }, filters) && (!ppeZone || e.detections?.ppe?.zone === ppeZone);
     const byPriority = filters.sort === "priority";
+    const k = keyOf(e);
     setEvents((prev) => {
-      const rest = (prev ?? []).filter((x) => x.id !== live.id);
+      const rest = (prev ?? []).filter((x) => keyOf(x) !== k);
       if (!ok) return rest;
-      return [live, ...rest].sort((a, b) => (byPriority ? (RANK[b.priority ?? "none"] ?? 0) - (RANK[a.priority ?? "none"] ?? 0) : 0) || b.id - a.id);
+      return [e, ...rest].sort((a, b) => (byPriority ? (RANK[b.priority ?? "none"] ?? 0) - (RANK[a.priority ?? "none"] ?? 0) : 0) || source.newer(a, b));
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [live]);
+  };
+  const liveRef = useRef(applyLive);
+  liveRef.current = applyLive;
+  useEffect(() => { if (live) liveRef.current(live); }, [live]);
 
+  // removed events leave the list: this server's (App's nvr:event_removed, by id) or the source's own (by key)
   useEffect(() => {
-    const on = (ev: Event) => { const id = (ev as CustomEvent<number>).detail; setEvents((prev) => prev && prev.filter((x) => x.id !== id)); };
+    const drop = (k: string) => setEvents((prev) => prev && prev.filter((x) => keyOf(x) !== k));
+    const on = (ev: Event) => drop(String((ev as CustomEvent<number | string>).detail));
     window.addEventListener("nvr:event_removed", on);
-    return () => window.removeEventListener("nvr:event_removed", on);
-  }, []);
+    const unsub = source.subscribe?.({ event: (e) => liveRef.current(e), removed: drop });
+    return () => { window.removeEventListener("nvr:event_removed", on); unsub?.(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [source]);
 
   const loadMore = async () => {
-    if (loadingMore.current || !more || !events?.length) return;
+    if (loadingMore.current || !more || !events?.length || next.current == null) return;
     loadingMore.current = true;
+    const key = filtersKey;
     try {
-      // newest-first pages by id (live inserts don't shift it); priority order pages by offset
-      const page = filters.sort === "priority" ? { offset: events.length } : { before_id: events[events.length - 1]?.id };
-      const r = await api.events({ ...browseParams(), limit: PAGE, ...page });
-      setEvents((p) => { const seen = new Set((p ?? []).map((x) => x.id)); return [...(p ?? []), ...r.filter((x) => !seen.has(x.id))]; });
-      setMore(r.length === PAGE);
-    } finally { loadingMore.current = false; }
+      // the source's cursor: newest-first pages by id (live inserts don't shift it), priority order by offset
+      const r = await source.events(browseParams(), next.current, PAGE);
+      if (key !== filtersKeyRef.current) return;   // the filters changed meanwhile: that page is for the old ones
+      next.current = r.next;
+      setEvents((p) => { const seen = new Set((p ?? []).map(keyOf)); return [...(p ?? []), ...r.events.filter((x) => !seen.has(keyOf(x)))]; });
+      setMore(r.next != null && r.events.length > 0);
+    } catch { setMore(false); } finally { loadingMore.current = false; }
   };
   useEffect(() => {
     const el = sentinel.current;
@@ -228,9 +275,9 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
     const t = text.trim();
     if (!t) { clearSearch(); return; }
     setBusy(true);
-    setEvents(null); setMore(false); setFocus(null);
+    setEvents(null); setMore(false); setFocus(null); next.current = null;
     // "today", "last night", "past 3 hours"... in the text set the window (over the time chips)
-    const p = await api.parseQuery(t).catch(() => null);
+    const p = await source.parseQuery(t).catch(() => null);
     setParsed(p);
     setSubmitted(t);
     setNonce(Date.now());
@@ -240,29 +287,32 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
     try {
       // "what happened overnight?" has nothing to search by meaning: list that period's events, newest first
       const r = p?.listing
-        ? await api.events({ ...searchQuery(f), since: s, until: u, limit: SEARCH_PAGE })
-        : await api.search(p?.text || t, { ...searchQuery(f), since: s, until: u, limit: SEARCH_PAGE });
-      setEvents(r); setMore(r.length === SEARCH_PAGE);
+        ? await source.events({ ...searchQuery(f), since: s, until: u }, null, SEARCH_PAGE)
+        : await source.search(p?.text || t, { ...searchQuery(f), since: s, until: u }, null, SEARCH_PAGE);
+      next.current = r.next;
+      setEvents(r.events); setMore(r.next != null);
     } catch { setEvents([]); }
     setBusy(false);
     // a time chip is hiding older matches? count them so the page can say so instead of looking empty
     setOlder(0);
     if (s && !p?.time_label && !f.day && !p?.listing) {
-      api.search(p?.text || t, { ...searchQuery(f), since: undefined, until: undefined, limit: 200 })
-        .then((all) => setOlder(all.filter((e) => e.start_ts < s).length)).catch(() => {});
+      source.search(p?.text || t, { ...searchQuery(f), since: undefined, until: undefined }, null, 200)
+        .then((all) => setOlder(all.events.filter((e) => e.start_ts < s).length)).catch(() => {});
     }
   };
   const searchMore = async () => {
-    if (!events?.length || busy) return;
+    if (!events?.length || busy || next.current == null) return;
     const [ws, wu] = filterWindow(filters);
     const s = parsed?.time_label ? parsed.since ?? undefined : ws;
     const u = parsed?.time_label ? parsed.until ?? undefined : wu;
     setBusy(true);
     try {
       const r = parsed?.listing
-        ? await api.events({ ...searchQuery(filters), since: s, until: u, limit: SEARCH_PAGE, before_id: events[events.length - 1].id })
-        : await api.search(parsed?.text || submitted, { ...searchQuery(filters), since: s, until: u, limit: SEARCH_PAGE, offset: events.length });
-      setEvents((p) => [...(p ?? []), ...r]); setMore(r.length === SEARCH_PAGE);
+        ? await source.events({ ...searchQuery(filters), since: s, until: u }, next.current, SEARCH_PAGE)
+        : await source.search(parsed?.text || submitted, { ...searchQuery(filters), since: s, until: u }, next.current, SEARCH_PAGE);
+      next.current = r.next;
+      setEvents((p) => { const seen = new Set((p ?? []).map(keyOf)); return [...(p ?? []), ...r.events.filter((x) => !seen.has(keyOf(x)))]; });
+      setMore(r.next != null && r.events.length > 0);
     } catch { setMore(false); }
     setBusy(false);
   };
@@ -275,7 +325,9 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
   const [action, setAction] = useState<ActionPlanCore | null>(null);
   const askNvr = async (text = q) => {
     const question = text.trim();
-    if (!question || pending) return;
+    if (!question) return;
+    if (!features.assistant) { external?.run(question); return; }
+    if (pending) return;
     // an instruction ("Rename cam3 to Loading Dock", "Lock Side Yard footage 3-4 pm today") gets a confirmation
     // card instead of an answer; if the planner fails, the question is simply asked as before
     const planned = await api.assistantPlan(question).catch(() => null);
@@ -313,7 +365,8 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
     if (e.key !== "Enter") return;
     e.preventDefault();
     // a question (ends with "?"), an instruction ("Rename cam3 to …") or Shift+Enter asks; plain Enter searches instantly
-    if (e.shiftKey || q.trim().endsWith("?") || INSTRUCTION.test(q.trim())) askNvr(); else search();
+    const canAsk = features.assistant || !!external;
+    if (canAsk && (e.shiftKey || q.trim().endsWith("?") || INSTRUCTION.test(q.trim()))) askNvr(); else search();
   };
 
   // ---- keyboard: "/" focuses search, j/k (or ←/→) move between cards, Enter opens (Esc closes the detail)
@@ -329,10 +382,11 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
         e.preventDefault();
         const next = Math.max(0, Math.min(events.length - 1, focus === null ? 0 : focus + step));
         setFocus(next);
-        document.querySelector(`[data-event-id="${events[next].id}"]`)?.scrollIntoView({ block: "nearest" });
+        // by position: on the hub two servers' events can share an id
+        results.current?.querySelectorAll(".event-card")[next]?.scrollIntoView({ block: "nearest" });
       } else if (e.key === "Enter" && focus !== null && events[focus]) {
         e.preventDefault();
-        setOpen(events[focus].id);
+        setOpen({ id: events[focus].id, e: events[focus] });
       }
     };
     window.addEventListener("keydown", on);
@@ -341,9 +395,9 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
 
   const hasConversation = messages.length > 0 || pending;
   const grouped = browsing && mode === "grouped";
-  const places = placeNames(cameras, camera);
+  const places = placeNames(cams, camera);
   if (filters.place && !places.includes(filters.place)) places.unshift(filters.place);
-  const showSummary = !grouped && (filters.flags.includes("ppe") || filters.flags.includes("rule"));
+  const showSummary = features.summary && !grouped && (filters.flags.includes("ppe") || filters.flags.includes("rule"));
   const suggestions = view.suggestions ?? SUGGESTIONS;
   const timeLabel = day ? new Date(day + "T12:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" }) : RANGES.find(([, h]) => h === hours)?.[0];
   const filterLabel = [
@@ -356,7 +410,11 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
     browsing && status !== "verified" ? STATUSES.find(([v]) => v === status)?.[1].toLowerCase() ?? "" : "",
   ].filter(Boolean).join(" · ");
   const toggleFlag = (f: FindFlag) => setF({ flags: filters.flags.includes(f) ? filters.flags.filter((x) => x !== f) : [...filters.flags, f] });
-  const card = (e: NvrEvent, i: number) => <EventCard key={e.id} e={e} cameraName={name(e.camera_id)} onOpen={() => { setFocus(i); setOpen(e.id); }} focused={focus === i} />;
+  const card = (e: NvrEvent, i: number) => (
+    <EventCard key={keyOf(e)} e={e} cameraName={name(source.cameraKey(e))} site={source.mediaFor?.(e)}
+      onOpen={() => { setFocus(i); setOpen({ id: e.id, e }); }} focused={focus === i} />
+  );
+  const asking = features.assistant ? !!pending : !!external?.busy;
   const identityHours = day ? 0 : hours >= 168 ? 168 : hours >= 72 ? 72 : hours >= 24 ? 24 : 0;
   return (
     <div className="view find">
@@ -366,15 +424,15 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
             <button role="tab" aria-selected={v.id === viewId} className="linkish" onClick={() => chooseView(v)} title={v.title ?? v.name}>{v.icon} {v.name}</button>
             <button className={`linkish star ${defaultId === v.id || (!defaultId && v.id === FALLBACK_VIEW) ? "on" : ""}`}
               onClick={() => star(v)} title={defaultId === v.id ? "Opens by default" : "Open this view by default"} aria-label={`Open ${v.name} by default`}>★</button>
-            {!v.builtin && <button className="linkish small" onClick={() => deleteSaved(v)} title="Delete this saved view" aria-label={`Delete ${v.name}`}>✕</button>}
+            {!v.builtin && source.views.canEdit && <button className="linkish small" onClick={() => deleteSaved(v)} title="Delete this saved view" aria-label={`Delete ${v.name}`}>✕</button>}
           </span>
         ))}
-        <button className="ghost small" onClick={() => saveCurrent(true)} title="Save the current filters as a view of your own">+ Save current…</button>
+        {source.views.canEdit && <button className="ghost small" onClick={() => saveCurrent(true)} title="Save the current filters as a view of your own">+ Save current…</button>}
         {dirty && (
           <span className="muted small find-dirty">
             unsaved changes ·{" "}
-            {!view.builtin && <><button className="linkish small" onClick={() => saveCurrent(false)}>Save</button> · </>}
-            {view.builtin && <><button className="linkish small" onClick={() => saveCurrent(true)}>Save as…</button> · </>}
+            {source.views.canEdit && !view.builtin && <><button className="linkish small" onClick={() => saveCurrent(false)}>Save</button> · </>}
+            {source.views.canEdit && view.builtin && <><button className="linkish small" onClick={() => saveCurrent(true)}>Save as…</button> · </>}
             <button className="linkish small" onClick={() => chooseView(view)}>Reset</button>
           </span>
         )}
@@ -384,10 +442,12 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
           placeholder='Search "white pickup truck", or ask "Was anyone near the trailers after 6pm?"  ( / )' />
         {submitted && <button type="button" className="ghost" onClick={clearSearch} title="Back to the latest events">✕</button>}
         <button type="submit" disabled={busy || !q.trim()}>{busy && submitted ? "Searching…" : "Search"}</button>
-        <button type="button" className="ask-btn" disabled={!!pending || !q.trim()} onClick={() => askNvr()} title="Have Qwen look it up and answer in words (Shift+Enter, or end with ?)">✦ Ask</button>
+        {features.assistant
+          ? <button type="button" className="ask-btn" disabled={!!pending || !q.trim()} onClick={() => askNvr()} title="Have Qwen look it up and answer in words (Shift+Enter, or end with ?)">✦ Ask</button>
+          : external && <button type="button" className="ask-btn" disabled={external.busy || !q.trim()} onClick={() => askNvr()} title={external.title}>✦ {external.label}</button>}
       </form>
       <div className="toolbar search-filters">
-        {browsing && (
+        {browsing && features.identities && (
           <div className="segmented">
             <button className={mode === "sightings" ? "active" : ""} onClick={() => setMode("sightings")} title="Every event as its own card">Events</button>
             <button className={mode === "grouped" ? "active" : ""} onClick={() => setMode("grouped")} title="One row per person or vehicle, with all of their sightings">Grouped by who</button>
@@ -397,7 +457,8 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
           <>
             <select value={camera} onChange={(e) => setF({ camera: e.target.value })}>
               <option value="">All cameras</option>
-              {cameras.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              {cams.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              {camera && !cams.some((c) => c.id === camera) && <option value={camera}>{camera}</option>}
             </select>
             <select value={label} onChange={(e) => setF({ label: e.target.value })}>
               <option value="">Any type</option>
@@ -436,7 +497,7 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
           </>
         )}
         <span className="spacer" />
-        <button className="ghost small" onClick={() => setShowHistory(!showHistory)}>{showHistory ? "▾" : "▸"} Conversations{threads.length ? ` (${threads.length >= THREADS_CAP ? `${THREADS_CAP}+` : threads.length})` : ""}</button>
+        {features.assistant && <button className="ghost small" onClick={() => setShowHistory(!showHistory)}>{showHistory ? "▾" : "▸"} Conversations{threads.length ? ` (${threads.length >= THREADS_CAP ? `${THREADS_CAP}+` : threads.length})` : ""}</button>}
         {hasConversation && <button className="ghost small" onClick={() => { setThreadId(null); setPending(null); }}>New conversation</button>}
       </div>
       {!grouped && (
@@ -450,7 +511,7 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
           ))}
         </div>
       )}
-      {showHistory && (
+      {showHistory && features.assistant && (
         <div className="find-threads">
           {threads.length === 0 && <span className="muted small">No conversations yet.</span>}
           {threads.map((t) => (
@@ -476,27 +537,29 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
         <section className="find-answer" ref={answerRef}>
           {messages.map((m) => m.role === "user"
             ? <div key={m.id} className="ask-msg user">{m.content}</div>
-            : <Answer key={m.id} text={m.content} meta={m.calls} model={m.model} onEvent={setOpen} />)}
+            : <Answer key={m.id} text={m.content} meta={m.calls} model={m.model} onEvent={openId} />)}
           {pending && (
             <>
               <div className="ask-msg user">{pending.question}</div>
               {pending.error
                 ? <div className="ask-msg assistant error">{pending.error}</div>
                 : <Answer text={pending.answer || (pending.meta ? "…" : "Working out what to look up…")} meta={pending.meta ?? null}
-                    model={pending.model ?? null} fallback={pending.fallback} onEvent={setOpen} streaming />}
+                    model={pending.model ?? null} fallback={pending.fallback} onEvent={openId} streaming />}
             </>
           )}
         </section>
       )}
 
-      {browsing && !hasConversation && (
+      {!features.assistant && external?.panel}
+
+      {browsing && !hasConversation && (features.assistant || external) && (
         <div className="ask-suggestions" title="Search finds events by meaning and footage by looks; Ask has Qwen look things up and answer with links to the evidence">
-          {suggestions.map((s) => <button key={s} className="ghost small" onClick={() => askNvr(s)}>✦ {s}</button>)}
+          {suggestions.map((s) => <button key={s} className="ghost small" disabled={!features.assistant && asking} onClick={() => { if (!features.assistant) setQ(s); askNvr(s); }}>✦ {s}</button>)}
         </div>
       )}
 
-      {grouped ? <IdentitiesView key={`${camera}|${identityHours}`} cameras={cameras} initialCamera={camera} initialHours={identityHours} /> : browsing ? (
-        <section>
+      {grouped ? <IdentitiesView key={`${camera}|${identityHours}`} cameras={cams} initialCamera={camera} initialHours={identityHours} /> : browsing ? (
+        <section ref={results}>
           <h3>{view.name} <span className="muted small">{timeLabel}{filterLabel ? ` · ${filterLabel}` : ""}{filters.sort === "priority" ? " · most important first" : ""}</span></h3>
           {busy && !events && <SkeletonGrid n={6} />}
           {events && events.length === 0 && <div className="empty">No events match these filters{day || hours ? " in this period" : ""}.</div>}
@@ -513,7 +576,7 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
         </section>
       ) : (
         <>
-          <section>
+          <section ref={results}>
             <h3>Events <span className="muted small">{parsed?.listing ? "" : `matching "${parsed?.text || submitted}"`}{parsed?.time_label ? ` · ${parsed.time_label}` : timeLabel ? ` · ${timeLabel}` : ""}{filterLabel ? ` · ${filterLabel}` : ""}{events ? ` · ${events.length}${more ? "+" : ""}` : ""}</span></h3>
             {busy && !events && <SkeletonGrid n={3} />}
             {events && events.length === 0 && <div className="empty">No {parsed?.listing ? "" : "matching "}events {parsed?.time_label ? parsed.time_label : hours || day ? "in this period" : ""}.</div>}
@@ -526,19 +589,21 @@ export function FindView({ cameras, live }: { cameras: Camera[]; live: NvrEvent 
               </p>
             )}
           </section>
-          {parsed?.footage_text !== null && (
+          {features.footage && parsed?.footage_text !== null && (
             <section>
               <h3>Footage <span className="muted small">frames that look like "{parsed?.footage_text ?? submitted}"{parsed?.time_label ? ` · ${parsed.time_label}` : ""} · Qwen checks the best 8 · the outline is the part that matched</span></h3>
-              <FootageResults q={parsed?.footage_text ?? submitted} nonce={nonce} cameras={cameras} camera={camera} sinceHours={day ? 0 : hours}
+              <FootageResults q={parsed?.footage_text ?? submitted} nonce={nonce} cameras={cams} camera={camera} sinceHours={day ? 0 : hours}
                 window={parsed?.time_label ? { since: parsed.since, until: parsed.until } : day ? { since: filterWindow(filters)[0] ?? null, until: filterWindow(filters)[1] ?? null } : null} />
             </section>
           )}
-          {parsed && parsed.footage_text === null && (
+          {features.footage && parsed && parsed.footage_text === null && (
             <p className="muted small">Footage search is for things you can picture ("white van", "open gate"); {parsed.listing ? "this question is answered from the events above and by Ask" : "questions about people are answered from events above"}.</p>
           )}
         </>
       )}
-      {open !== null && <EventDetail id={open} cameraName={name} onClose={() => setOpen(null)} />}
+      {open !== null && (source.renderDetail
+        ? source.renderDetail(open, () => setOpen(null))
+        : <EventDetail id={open.id} cameraName={name} onClose={() => setOpen(null)} />)}
     </div>
   );
 }
