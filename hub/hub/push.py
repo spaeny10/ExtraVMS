@@ -10,7 +10,7 @@ from typing import Callable
 
 import sqlalchemy as sa
 
-from . import db
+from . import auth, db
 from .config import settings
 
 log = logging.getLogger("hub.push")
@@ -76,9 +76,10 @@ def _send_one(sub: dict, payload: dict) -> bool:
 
 
 async def notify_alert(org_id: str, site: dict, kind: str, detail: dict) -> int:
-    """Push an opened alert to every member of the org who chose this kind. Returns pushes sent."""
+    """Push an opened alert to every member of the org who may see this server and chose this kind. Returns pushes sent."""
     members = db.rows(sa.select(db.memberships.c.user_id).where(db.memberships.c.org_id == org_id))
-    uids = {m["user_id"] for m in members} | {u["id"] for u in db.rows(sa.select(db.users.c.id).where(db.users.c.is_super == True))}  # noqa: E712
+    uids = {m["user_id"] for m in members if auth.can_see_server(m["user_id"], org_id, site)}
+    uids |= {u["id"] for u in db.rows(sa.select(db.users.c.id).where(db.users.c.is_super == True))}  # noqa: E712
     if not uids:
         return 0
     subs = db.rows(sa.select(db.push_subscriptions).where(db.push_subscriptions.c.user_id.in_(list(uids))))

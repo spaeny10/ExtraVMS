@@ -50,7 +50,10 @@ async def proxy_api(site_id: str, path: str, request: Request):
     headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP and not k.lower().startswith("x-hub-")}
     headers.update({"x-hub-user": u["email"], "x-hub-role": role, "x-hub-site": site_id,
                     "x-forwarded-for": request.client.host if request.client else "", "x-forwarded-host": request.headers.get("host", ""),
-                    "x-forwarded-proto": request.url.scheme})
+                    "x-forwarded-proto": request.url.scheme,
+                    # the Site this server belongs to (cached on the connection; the agent passes headers as UTF-8)
+                    "x-hub-location": (conn.location or {}).get("id") or site.get("location_id") or "",
+                    "x-hub-location-name": (conn.location or {}).get("name") or ""})
     body = await request.body() if request.method in ("POST", "PUT", "PATCH") else None
     t0 = time.time()
     try:

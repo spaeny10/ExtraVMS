@@ -5,7 +5,7 @@ import time
 
 import sqlalchemy as sa
 
-from . import db
+from . import cameras, db
 
 KINDS = ("offline", "camera_down", "disk", "clock", "event_high", "event_policy", "event_watched")
 on_open = None   # set by api: called with (org_id, site, kind, detail) when a new alert opens (push notifications)
@@ -37,7 +37,13 @@ def close(site: dict, kind: str, key: str = "") -> None:
 
 
 def on_heartbeat(site: dict, summary: dict, skew_s: float) -> None:
+    off = cameras.disabled_ids(site["id"])   # a camera switched off at the server is not "down"
+    for cid in off:
+        _camera_strikes.pop((site["id"], cid), None)
+        close(site, "camera_down", cid)
     for cam in summary.get("cameras") or []:
+        if not isinstance(cam, dict) or not cam.get("id") or cam["id"] in off:
+            continue
         k = (site["id"], cam["id"])
         bad = not cam.get("stream_ready") or bool(cam.get("problems"))
         _camera_strikes[k] = _camera_strikes.get(k, 0) + 1 if bad else 0
@@ -79,6 +85,10 @@ def muted(site: dict) -> bool:
 
 def _from_event(site: dict, e: dict) -> None:
     if muted(site):
+        return
+    if not (e.get("policy") or e.get("watched") or e.get("priority") == "high"):
+        return
+    if e.get("camera_id") and str(e["camera_id"]) in cameras.disabled_ids(site["id"]):
         return
     key = str(e.get("id"))
     detail = {k: e.get(k) for k in ("id", "camera_id", "label", "start_ts", "priority", "synopsis")}

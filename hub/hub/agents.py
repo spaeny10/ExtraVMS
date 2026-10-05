@@ -16,7 +16,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from tunnelproto import CHUNK, WINDOW, Stream, chunk, decode, encode, split
 
-from . import alerts, db, turn
+from . import alerts, cameras, db, turn
 from .config import settings
 
 log = logging.getLogger("hub.agents")
@@ -37,6 +37,13 @@ class AgentConn:
         self.summary: dict | None = None
         self.subscribers: set[asyncio.Queue] = set()   # browsers on /s/{id}/api/ws
         self.closed = asyncio.Event()
+        self.location: dict | None = _location_of(site)   # the Site (locations row) this server belongs to
+
+    def tag(self) -> dict:
+        """What org-wide messages say about where they came from: the server and its Site."""
+        site = self.site or {}
+        loc = self.location or {}
+        return {"site_id": self.site_id, "site_name": site.get("name"), "location_id": loc.get("id"), "location_name": loc.get("name")}
 
     @property
     def ip(self) -> str | None:
@@ -112,6 +119,24 @@ class TooManyStreams(Exception):
     pass
 
 
+def _location_of(site: dict | None) -> dict | None:
+    if not site or not site.get("location_id"):
+        return None
+    try:
+        return db.one(sa.select(db.locations).where(db.locations.c.id == site["location_id"]))
+    except Exception:   # the tunnel must come up even if this lookup fails
+        log.exception("location lookup for %s", site.get("id"))
+        return None
+
+
+def _sync_cameras(site: dict, cams: list, disabled, source: str) -> None:
+    """Keep the cameras registry in step; registry trouble must never break the tunnel or alerting."""
+    try:
+        cameras.sync(site, cams, full=True, disabled=disabled if isinstance(disabled, list) else None, source=source)
+    except Exception:
+        log.exception("cameras registry sync for %s", site.get("id"))
+
+
 class AgentRegistry:
     def __init__(self) -> None:
         self.by_site: dict[str, AgentConn] = {}
@@ -180,13 +205,15 @@ class AgentRegistry:
                     db.run(sa.update(db.sites).where(db.sites.c.id == conn.site_id).values(
                         last_seen_at=time.time(), online=True, summary=conn.summary, clock_skew_s=round(skew, 1),
                         version=conn.summary.get("version") or conn.site.get("version")))
+                    if isinstance(conn.summary.get("cameras"), list):   # an empty summary says nothing about cameras
+                        _sync_cameras(conn.site, conn.summary["cameras"], conn.summary.get("disabled"), "heartbeat")
                     alerts.on_heartbeat(conn.site, conn.summary, skew)
             elif t == "event":
                 msg = frame.get("msg") or {}
                 conn.broadcast(msg)
                 if conn.site:
                     alerts.on_event(conn.site, msg)
-                    self.broadcast_org(conn.site["org_id"], {**msg, "site_id": conn.site_id, "site_name": conn.site["name"]})
+                    self.broadcast_org(conn.site["org_id"], {**msg, **conn.tag()})
             elif t == "res":
                 s = conn.streams.get(frame["id"])
                 if s is not None:
@@ -231,15 +258,18 @@ class AgentRegistry:
         db.run(sa.update(db.sites).where(db.sites.c.id == conn.site_id).values(
             online=True, last_seen_at=time.time(), agent_ip=conn.ip, hostname=frame.get("hostname"),
             version=frame.get("site_version")))
+        if isinstance(frame.get("cameras"), list):
+            _sync_cameras(conn.site, frame["cameras"], frame.get("disabled"), "hello")
         org = db.one(sa.select(db.orgs).where(db.orgs.c.id == conn.site["org_id"]))
         welcome = {"t": "welcome", "site_id": conn.site_id, "org": org["name"] if org else None,
+                   "location": (conn.location or {}).get("name"),   # the Site's name (additive; old agents ignore it)
                    "heartbeat_s": settings.heartbeat_s, "now": time.time(), "max_streams": settings.max_streams_per_site,
                    "turn": turn.mint(f"site:{conn.site_id}", settings.turn_site_ttl_s),
                    "vlm": self.vlm_config(org, conn.token, conn.site_id)}
         await conn.send(welcome)
         alerts.close(conn.site, "offline")
         log.info("site %s (%s) connected from %s", conn.site_id, conn.site["name"], conn.ip)
-        self.broadcast_org(conn.site["org_id"], {"type": "site_online", "site_id": conn.site_id, "site_name": conn.site["name"]})
+        self.broadcast_org(conn.site["org_id"], {"type": "site_online", **conn.tag()})
 
     def broadcast_org(self, org_id: str, msg: dict) -> None:
         """Dashboards and other org-wide pages listen on /api/fleet/ws; slow readers are skipped, not blocked."""
@@ -261,7 +291,22 @@ class AgentRegistry:
             db.run(sa.update(db.sites).where(db.sites.c.id == conn.site_id).values(online=False, last_seen_at=time.time()))
             log.info("site %s disconnected", conn.site_id)
             if conn.site:
-                self.broadcast_org(conn.site["org_id"], {"type": "site_offline", "site_id": conn.site_id, "site_name": conn.site["name"]})
+                self.broadcast_org(conn.site["org_id"], {"type": "site_offline", **conn.tag()})
+
+    def refresh(self, server_id: str) -> None:
+        """A server row or its Site changed at the hub (rename, move): re-read them for the live connection."""
+        conn = self.by_site.get(server_id)
+        if conn is None:
+            return
+        row = db.one(sa.select(db.sites).where(db.sites.c.id == server_id))
+        if row:
+            conn.site = row
+            conn.location = _location_of(row)
+
+    def refresh_location(self, location_id: str) -> None:
+        for conn in list(self.by_site.values()):
+            if conn.site and conn.site.get("location_id") == location_id:
+                self.refresh(conn.site_id)
 
     @staticmethod
     def vlm_config(org: dict | None, token: str | None, site_id: str | None = None) -> dict | None:

@@ -16,7 +16,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, W
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, EmailStr, Field
 
-from . import __version__, alerts, auth, backups, dashboards, db, digest, fleet_actions, proxy, push, turn, vlm_proxy
+from . import __version__, alerts, auth, backups, cameras, dashboards, db, digest, fleet_actions, proxy, push, turn, vlm_proxy
 from . import fleet as fleet_mod
 from fastapi.responses import StreamingResponse
 from .agents import registry
@@ -217,6 +217,8 @@ class MemberIn(BaseModel):
     email: EmailStr
     role: Literal["viewer", "operator", "admin", "owner"] = "viewer"
     password: str | None = Field(None, min_length=10, max_length=200)   # create the user if they don't exist yet
+    all_sites: bool | None = None          # None: unchanged (new members see every Site)
+    location_ids: list[str] | None = None  # given without all_sites: only these Sites
 
 
 @app.get("/api/orgs/{org_id}/members")
@@ -225,9 +227,8 @@ async def list_members(org_id: str, u: dict = Depends(user)):
     q = sa.select(db.users.c.id, db.users.c.email, db.users.c.totp_enabled, db.users.c.last_login_at, db.memberships.c.role) \
         .join(db.memberships, db.memberships.c.user_id == db.users.c.id).where(db.memberships.c.org_id == org_id).order_by(db.users.c.email)
     members = db.rows(q)
-    grants = db.rows(sa.select(db.site_grants).join(db.sites, db.sites.c.id == db.site_grants.c.site_id).where(db.sites.c.org_id == org_id))
     for m in members:
-        m["sites"] = [g["site_id"] for g in grants if g["user_id"] == m["id"]]
+        m.update(auth.access_of(org_id, m["id"]))   # all_sites, location_ids, and the legacy derived `sites`
     return members
 
 
@@ -244,9 +245,38 @@ async def add_member(org_id: str, body: MemberIn, u: dict = Depends(user)):
     if db.one(sa.select(db.memberships).where(db.memberships.c.user_id == target["id"], db.memberships.c.org_id == org_id)):
         db.run(sa.update(db.memberships).where(db.memberships.c.user_id == target["id"], db.memberships.c.org_id == org_id).values(role=body.role))
     else:
-        db.insert(db.memberships, {"user_id": target["id"], "org_id": org_id, "role": body.role})
+        db.insert(db.memberships, {"user_id": target["id"], "org_id": org_id, "role": body.role, "all_sites": True})
+    out = {"id": target["id"], "email": target["email"], "role": body.role}
+    if body.all_sites is not None or body.location_ids is not None:
+        all_sites = body.all_sites if body.all_sites is not None else not body.location_ids
+        out |= _set_access(org_id, target["id"], all_sites, body.location_ids or [])
     _audit(u, org_id, None, f"member {body.email} -> {body.role}")
-    return {"id": target["id"], "email": target["email"], "role": body.role}
+    return out
+
+
+def _set_access(org_id: str, uid: str, all_sites: bool, location_ids: list[str]) -> dict:
+    try:
+        return auth.set_access(org_id, uid, all_sites, location_ids)
+    except LookupError:
+        raise HTTPException(404, "not a member of this organisation")
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+
+
+class AccessIn(BaseModel):
+    all_sites: bool
+    location_ids: list[str] = []   # ignored for access while all_sites is true (kept as the member's list)
+
+
+@app.put("/api/orgs/{org_id}/members/{uid}/access")
+async def set_member_access(org_id: str, uid: str, body: AccessIn, u: dict = Depends(user)):
+    """A member's Sites: every Site of the customer, or exactly these (none = nothing at all)."""
+    auth.require_role(u, org_id, "admin")
+    out = _set_access(org_id, uid, body.all_sites, body.location_ids)
+    target = auth.user_by_id(uid)
+    _audit(u, org_id, None, f"member {target['email'] if target else uid} access: "
+                            + ("all sites" if out["all_sites"] else f"{len(out['location_ids'])} site(s)"))
+    return out
 
 
 class GrantsIn(BaseModel):
@@ -255,13 +285,14 @@ class GrantsIn(BaseModel):
 
 @app.put("/api/orgs/{org_id}/members/{uid}/grants")
 async def set_grants(org_id: str, uid: str, body: GrantsIn, u: dict = Depends(user)):
+    """Legacy (server ids): mapped to the Sites those servers belong to; [] = all Sites. Use .../access."""
     auth.require_role(u, org_id, "admin")
-    org_sites = {s["id"] for s in db.rows(sa.select(db.sites.c.id).where(db.sites.c.org_id == org_id))}
-    with db.engine().begin() as c:
-        c.execute(sa.delete(db.site_grants).where(db.site_grants.c.user_id == uid, db.site_grants.c.site_id.in_(list(org_sites))))
-        for sid in body.site_ids:
-            if sid in org_sites:
-                c.execute(db.site_grants.insert().values(user_id=uid, site_id=sid))
+    servers = db.rows(sa.select(db.sites).where(db.sites.c.org_id == org_id, db.sites.c.id.in_(body.site_ids or [""])))
+    locs = []
+    if servers:
+        with db.engine().begin() as c:
+            locs = list(dict.fromkeys(db.location_for_server(c, s) for s in servers))
+    _set_access(org_id, uid, not servers, locs)   # as before: no (valid) server ids = everything
     return {"ok": True}
 
 
@@ -270,7 +301,9 @@ async def remove_member(org_id: str, uid: str, u: dict = Depends(user)):
     auth.require_role(u, org_id, "admin")
     if uid == u["id"]:
         raise HTTPException(400, "remove yourself from another owner's account")
-    db.run(sa.delete(db.memberships).where(db.memberships.c.user_id == uid, db.memberships.c.org_id == org_id))
+    with db.engine().begin() as c:
+        c.execute(sa.delete(db.memberships).where(db.memberships.c.user_id == uid, db.memberships.c.org_id == org_id))
+        auth.drop_access(org_id, uid, c)
     _audit(u, org_id, None, f"member {uid} removed")
     return {"ok": True}
 
@@ -281,12 +314,14 @@ class ClaimIn(BaseModel):
     code: str = Field(min_length=8, max_length=9)
     name: str = Field(min_length=1, max_length=120)
     location: str = Field("", max_length=200)
+    location_id: str | None = Field(None, max_length=24)   # the Site to enrol into; None = a new one-server Site
 
 
 @app.get("/api/orgs/{org_id}/sites")
+@app.get("/api/orgs/{org_id}/servers")
 async def list_sites(org_id: str, u: dict = Depends(user)):
     auth.require_role(u, org_id, "viewer")
-    return [_site_card(s) for s in auth.visible_sites(u, org_id, include_retired=True)]
+    return _cards(auth.visible_sites(u, org_id, include_retired=True))
 
 
 @app.get("/api/claims/{code}")
@@ -299,6 +334,7 @@ async def claim_preview(code: str, u: dict = Depends(user)):
 
 
 @app.post("/api/orgs/{org_id}/sites/claim")
+@app.post("/api/orgs/{org_id}/servers/claim")
 async def claim_site(org_id: str, body: ClaimIn, u: dict = Depends(user)):
     auth.require_role(u, org_id, "admin")
     code = body.code.upper().strip()
@@ -307,12 +343,16 @@ async def claim_site(org_id: str, body: ClaimIn, u: dict = Depends(user)):
         raise HTTPException(404, "no site is waiting with that code")
     if code not in registry.pending:
         raise HTTPException(409, "the site is not connected right now; it reconnects within a minute")
+    if body.location_id and not _org_location(org_id, body.location_id):
+        raise HTTPException(404, "unknown site")
     token = db.new_token()
     site = {"id": db.new_id("s_"), "org_id": org_id, "name": body.name, "location": body.location, "token_hash": db.token_hash(token),
             "token_prev_hash": None, "token_rotated_at": None, "created_at": time.time(), "last_seen_at": None, "online": False,
             "version": (c["hint"] or {}).get("version"), "summary": None, "clock_skew_s": None, "agent_ip": c["agent_ip"],
-            "hostname": (c["hint"] or {}).get("hostname")}
-    db.insert(db.sites, site)
+            "hostname": (c["hint"] or {}).get("hostname"), "location_id": body.location_id or None}
+    with db.engine().begin() as conn:
+        conn.execute(db.sites.insert().values(**site))
+        db.location_for_server(conn, site)   # no Site chosen: its own one-server Site, as the fleet looked before Sites
     db.run(sa.update(db.claims).where(db.claims.c.code == code).values(consumed_site_id=site["id"]))
     if not await registry.enrol(code, site, token):
         raise HTTPException(409, "the site disconnected while enrolling; try again")
@@ -323,19 +363,39 @@ async def claim_site(org_id: str, body: ClaimIn, u: dict = Depends(user)):
 class SiteIn(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=120)
     location: str | None = Field(None, max_length=200)
+    location_id: str | None = Field(None, max_length=24)   # move the server to this Site (same customer)
 
 
 @app.patch("/api/sites/{site_id}")
+@app.patch("/api/servers/{site_id}")
 async def update_site(site_id: str, body: SiteIn, u: dict = Depends(user)):
     site, _ = auth.site_access(u, site_id)
     auth.require_role(u, site["org_id"], "admin")
     vals = {k: v for k, v in body.model_dump().items() if v is not None}
+    target = None
+    if vals.get("location_id") == site.get("location_id"):
+        vals.pop("location_id", None)
+    elif "location_id" in vals:
+        target = _org_location(site["org_id"], vals["location_id"])
+        if not target:
+            raise HTTPException(404, "unknown site")
     if vals:
-        db.run(sa.update(db.sites).where(db.sites.c.id == site_id).values(**vals))
+        with db.engine().begin() as c:
+            c.execute(sa.update(db.sites).where(db.sites.c.id == site_id).values(**vals))
+            if target:
+                cameras.relocate(site_id, target["id"], c)
+        registry.refresh(site_id)   # broadcasts and proxy headers use the live connection's copy
+    if target:
+        _audit(u, site["org_id"], site_id, f"server moved: {site['name']} -> {target['name']}", {"location_id": target["id"]})
     return _site_card(db.one(sa.select(db.sites).where(db.sites.c.id == site_id)))
 
 
+def _org_location(org_id: str, location_id: str) -> dict | None:
+    return db.one(sa.select(db.locations).where(db.locations.c.id == location_id, db.locations.c.org_id == org_id))
+
+
 @app.post("/api/sites/{site_id}/rotate-token")
+@app.post("/api/servers/{site_id}/rotate-token")
 async def rotate_token(site_id: str, u: dict = Depends(user)):
     site, _ = auth.site_access(u, site_id)
     auth.require_role(u, site["org_id"], "admin")
@@ -351,6 +411,7 @@ class RetireIn(BaseModel):
 
 
 @app.post("/api/sites/{site_id}/retire")
+@app.post("/api/servers/{site_id}/retire")
 async def retire_site(site_id: str, body: RetireIn, u: dict = Depends(user)):
     """Hide a site from Fleet, Home, Find, Ask and alerts (or bring it back). Its tunnel and data are untouched."""
     site, _ = auth.site_access(u, site_id)
@@ -361,24 +422,53 @@ async def retire_site(site_id: str, body: RetireIn, u: dict = Depends(user)):
 
 
 @app.delete("/api/sites/{site_id}")
+@app.delete("/api/servers/{site_id}")
 async def revoke_site(site_id: str, u: dict = Depends(user)):
+    """Remove a server and everything the hub keeps about it (its Site stays, even if now empty)."""
     site, _ = auth.site_access(u, site_id)
     auth.require_role(u, site["org_id"], "admin")
     await registry.push(site_id, {"t": "revoked", "reason": "removed at the hub"})
     with db.engine().begin() as c:
         c.execute(sa.delete(db.site_grants).where(db.site_grants.c.site_id == site_id))
         c.execute(sa.delete(db.alerts).where(db.alerts.c.site_id == site_id))
+        c.execute(sa.delete(db.config_backups).where(db.config_backups.c.site_id == site_id))
+        cameras.delete_server(site_id, c)
+        for g in c.execute(sa.select(db.camera_groups).where(db.camera_groups.c.org_id == site["org_id"])).mappings().all():
+            members = [m for m in (g["members"] or []) if m.get("site_id") != site_id]
+            if len(members) != len(g["members"] or []):
+                c.execute(sa.update(db.camera_groups).where(db.camera_groups.c.id == g["id"]).values(members=members, updated_at=time.time()))
         c.execute(sa.delete(db.sites).where(db.sites.c.id == site_id))
     _audit(u, site["org_id"], site_id, f"site removed: {site['name']}")
     return {"ok": True}
 
 
-def _site_card(s: dict) -> dict:
+def _site_card(s: dict, ctx: dict | None = None) -> dict:
+    """A server as the fleet pages show it. `ctx` (from _card_ctx) batches the lookups for a list of servers."""
+    ctx = ctx or _card_ctx([s])
     summ = s.get("summary") or {}
-    open_alerts = db.one(sa.select(sa.func.count()).select_from(db.alerts).where(db.alerts.c.site_id == s["id"], db.alerts.c.closed_at.is_(None)))
+    cams_total, cams_online = ctx["cameras"].get(s["id"], (0, 0))
     return {"id": s["id"], "org_id": s["org_id"], "name": s["name"], "location": s["location"], "online": bool(s["online"]) and s["id"] in registry.by_site,
             "last_seen_at": s["last_seen_at"], "version": s["version"], "hostname": s["hostname"], "clock_skew_s": s["clock_skew_s"],
-            "summary": summ, "open_alerts": list(open_alerts.values())[0] if open_alerts else 0, "retired_at": s.get("retired_at")}
+            "summary": summ, "open_alerts": ctx["alerts"].get(s["id"], 0), "retired_at": s.get("retired_at"),
+            "location_id": s.get("location_id"), "location_name": ctx["locations"].get(s.get("location_id")),
+            "cameras_total": cams_total, "cameras_online": cams_online}
+
+
+def _card_ctx(servers: list[dict]) -> dict:
+    ids = [s["id"] for s in servers]
+    if not ids:
+        return {"alerts": {}, "cameras": {}, "locations": {}}
+    alerts_by = {r["site_id"]: r["n"] for r in db.rows(sa.select(db.alerts.c.site_id, sa.func.count().label("n")).where(
+        db.alerts.c.site_id.in_(ids), db.alerts.c.closed_at.is_(None)).group_by(db.alerts.c.site_id))}
+    online = {s["id"] for s in servers if s["online"] and s["id"] in registry.by_site}
+    loc_ids = list({s.get("location_id") for s in servers if s.get("location_id")})
+    names = {r["id"]: r["name"] for r in db.rows(sa.select(db.locations.c.id, db.locations.c.name).where(db.locations.c.id.in_(loc_ids)))} if loc_ids else {}
+    return {"alerts": alerts_by, "cameras": cameras.counts(ids, online), "locations": names}
+
+
+def _cards(servers: list[dict]) -> list[dict]:
+    ctx = _card_ctx(servers)
+    return [_site_card(s, ctx) for s in servers]
 
 
 # ---------------------------------------------------------------- fleet, alerts, audit
@@ -391,11 +481,150 @@ async def fleet(org: str | None = None, include_retired: bool = False, u: dict =
     out = []
     for o in orgs:
         every = auth.visible_sites(u, o["id"], include_retired=True)
-        sites = [_site_card(s) for s in every if include_retired or not s.get("retired_at")]
+        cards = _cards(every)
+        sites = [c for c in cards if include_retired or not c["retired_at"]]
+        locs = _location_rollups(auth.visible_locations(u, o["id"]), cards, include_retired)
+        known = {loc["id"] for loc in locs}
         out.append({"org": {"id": o["id"], "name": o["name"], "slug": o["slug"], "role": o["role"]}, "sites": sites,
                     "open_alerts": sum(s["open_alerts"] for s in sites if not s["retired_at"]),
-                    "retired": sum(1 for s in every if s.get("retired_at"))})
+                    "retired": sum(1 for s in every if s.get("retired_at")),
+                    "locations": locs,
+                    "unassigned": [c for c in sites if c["location_id"] not in known]})   # servers with no (visible) Site
     return {"orgs": out, "now": time.time(), "offline_after_s": settings.offline_after_s}
+
+
+def _location_rollups(locs: list[dict], cards: list[dict], include_retired: bool = False) -> list[dict]:
+    """Each Site with its servers' cards and the numbers a Sites list shows. Retired servers are counted
+    (retired_servers) but left out of `servers` and the totals unless include_retired."""
+    out = []
+    for loc in locs:
+        mine = [c for c in cards if c["location_id"] == loc["id"]]
+        live = [c for c in mine if not c["retired_at"]]
+        out.append({**{k: loc[k] for k in ("id", "org_id", "name", "address", "timezone", "notes", "created_at", "updated_at")},
+                    "servers_total": len(live), "servers_online": sum(1 for c in live if c["online"]),
+                    "cameras_total": sum(c["cameras_total"] for c in live), "cameras_online": sum(c["cameras_online"] for c in live),
+                    "open_alerts": sum(c["open_alerts"] for c in live), "retired_servers": len(mine) - len(live),
+                    "servers": mine if include_retired else live})
+    return out
+
+
+def _locations_for(u: dict, org_id: str, include_retired: bool = False) -> list[dict]:
+    return _location_rollups(auth.visible_locations(u, org_id), _cards(auth.visible_sites(u, org_id, include_retired=True)), include_retired)
+
+
+def _location_tags(org_id: str) -> dict[str, dict]:
+    """server id -> {location_id, location_name}, for rows that only carry a server id (alerts, audit)."""
+    names = {r["id"]: r["name"] for r in db.rows(sa.select(db.locations.c.id, db.locations.c.name).where(db.locations.c.org_id == org_id))}
+    return {r["id"]: {"location_id": r["location_id"], "location_name": names.get(r["location_id"])}
+            for r in db.rows(sa.select(db.sites.c.id, db.sites.c.location_id).where(db.sites.c.org_id == org_id))} | \
+        {f"l:{lid}": {"location_id": lid, "location_name": name} for lid, name in names.items()}
+
+
+# ---------------------------------------------------------------- Sites (locations)
+
+class LocationIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    address: str = Field("", max_length=200)
+    timezone: str | None = Field(None, max_length=64)
+    notes: str | None = Field(None, max_length=2000)
+
+
+class LocationPatch(BaseModel):
+    name: str | None = Field(None, min_length=1, max_length=120)
+    address: str | None = Field(None, max_length=200)
+    timezone: str | None = Field(None, max_length=64)
+    notes: str | None = Field(None, max_length=2000)
+
+
+def _name_taken(org_id: str, name: str, exclude: str | None = None) -> bool:
+    q = sa.select(db.locations.c.id, db.locations.c.name).where(db.locations.c.org_id == org_id)
+    return any(r["name"].strip().casefold() == name.strip().casefold() and r["id"] != exclude for r in db.rows(q))
+
+
+@app.get("/api/orgs/{org_id}/locations")
+async def list_locations(org_id: str, include_retired: bool = False, u: dict = Depends(user)):
+    auth.require_role(u, org_id, "viewer")
+    return _locations_for(u, org_id, include_retired)
+
+
+@app.post("/api/orgs/{org_id}/locations")
+async def create_location(org_id: str, body: LocationIn, u: dict = Depends(user)):
+    auth.require_role(u, org_id, "admin")
+    if _name_taken(org_id, body.name):
+        raise HTTPException(409, "a site with that name already exists")
+    t = time.time()
+    loc = {"id": db.new_id("l_"), "org_id": org_id, "name": body.name.strip(), "address": body.address, "timezone": body.timezone,
+           "notes": body.notes, "created_at": t, "updated_at": t}
+    db.insert(db.locations, loc)
+    _audit(u, org_id, None, f"site created: {loc['name']}", {"location_id": loc["id"]})
+    return _location_rollups([loc], [])[0]
+
+
+@app.get("/api/locations/{location_id}")
+async def get_location(location_id: str, include_retired: bool = False, u: dict = Depends(user)):
+    loc, _ = auth.location_access(u, location_id)
+    servers = [s for s in auth.visible_sites(u, loc["org_id"], include_retired=True) if s.get("location_id") == location_id]
+    return _location_rollups([loc], _cards(servers), include_retired)[0]
+
+
+@app.patch("/api/locations/{location_id}")
+async def update_location(location_id: str, body: LocationPatch, u: dict = Depends(user)):
+    loc, _ = auth.location_access(u, location_id)
+    auth.require_role(u, loc["org_id"], "admin")
+    vals = {k: v for k, v in body.model_dump(exclude_unset=True).items() if k != "name" or v}
+    if "name" in vals:
+        vals["name"] = vals["name"].strip()
+        if _name_taken(loc["org_id"], vals["name"], exclude=location_id):
+            raise HTTPException(409, "a site with that name already exists")
+    if vals:
+        db.run(sa.update(db.locations).where(db.locations.c.id == location_id).values(**vals, updated_at=time.time()))
+        registry.refresh_location(location_id)   # welcome/proxy/broadcasts carry the Site name
+        _audit(u, loc["org_id"], None, f"site updated: {vals.get('name', loc['name'])}", {"location_id": location_id})
+    return await get_location(location_id, False, u)
+
+
+@app.delete("/api/locations/{location_id}")
+async def delete_location(location_id: str, move_to: str | None = None, u: dict = Depends(user)):
+    """Delete a Site. One that still has servers needs ?move_to=<another Site of the customer>; grants on the deleted
+    Site are dropped, not carried over (moving servers must never widen who sees them)."""
+    loc, _ = auth.location_access(u, location_id)
+    auth.require_role(u, loc["org_id"], "admin")
+    servers = db.rows(sa.select(db.sites.c.id).where(db.sites.c.location_id == location_id))
+    target = None
+    if servers:
+        if not move_to:
+            raise HTTPException(409, f"this site still has {len(servers)} server(s): move them first (or pass move_to)")
+        target = _org_location(loc["org_id"], move_to)
+        if not target or target["id"] == location_id:
+            raise HTTPException(404, "unknown site to move the servers to")
+    with db.engine().begin() as c:
+        if target:
+            c.execute(sa.update(db.sites).where(db.sites.c.location_id == location_id).values(location_id=target["id"]))
+            c.execute(sa.update(db.cameras).where(db.cameras.c.location_id == location_id).values(location_id=target["id"]))
+        c.execute(sa.delete(db.location_grants).where(db.location_grants.c.location_id == location_id))
+        c.execute(sa.delete(db.locations).where(db.locations.c.id == location_id))
+    for srv in servers:
+        registry.refresh(srv["id"])
+    _audit(u, loc["org_id"], None, f"site deleted: {loc['name']}" + (f" (servers moved to {target['name']})" if target else ""),
+           {"location_id": location_id, "moved_to": target["id"] if target else None})
+    return {"ok": True, "moved": len(servers)}
+
+
+@app.get("/api/locations/{location_id}/cameras")
+async def location_cameras(location_id: str, u: dict = Depends(user)):
+    """The registry's cameras for this Site's servers: `online` = stream ready on an online server; missing and
+    disabled cameras are included (missing_since / enabled say so)."""
+    loc, _ = auth.location_access(u, location_id)
+    servers = {s["id"]: s for s in auth.visible_sites(u, loc["org_id"]) if s.get("location_id") == location_id}
+    out = []
+    for cam in cameras.for_location(location_id):
+        srv = servers.get(cam["server_id"])
+        if srv is None:
+            continue   # retired server (or a stale denormalised row)
+        up = bool(srv["online"]) and srv["id"] in registry.by_site
+        out.append({**cam, "server_name": srv["name"], "server_online": up,
+                    "online": up and bool(cam["stream_ready"]) and bool(cam["enabled"]) and not cam["missing_since"]})
+    return out
 
 
 @app.get("/api/alerts")
@@ -407,8 +636,10 @@ async def list_alerts(org: str, open: bool = True, limit: int = Query(200, le=10
     else:
         rows = db.rows(sa.select(db.alerts).where(db.alerts.c.org_id == org, db.alerts.c.site_id.in_(site_ids)).order_by(db.alerts.c.opened_at.desc()).limit(limit))
     names = {s["id"]: s["name"] for s in db.rows(sa.select(db.sites.c.id, db.sites.c.name).where(db.sites.c.org_id == org))}
+    tags = _location_tags(org)
     for r in rows:
         r["site_name"] = names.get(r["site_id"], r["site_id"])
+        r |= tags.get(r["site_id"], {"location_id": None, "location_name": None})
     return rows
 
 
@@ -431,14 +662,17 @@ async def audit(org: str, site: str | None = None, since: float | None = None, l
     if since:
         q = q.where(db.audit_log.c.ts >= since)
     rows = db.rows(q)
+    tags = _location_tags(org)
     for r in rows:
         r["undo_until"] = fleet_actions.undo_until(r)   # fleet actions: Undo is offered on the row for 24 h
+        lid = (r.get("detail") or {}).get("location_id") if isinstance(r.get("detail"), dict) else None
+        r |= tags.get(r["site_id"]) or tags.get(f"l:{lid}") or {"location_id": lid, "location_name": None}
     return rows
 
 
-def _audit(u: dict, org_id: str | None, site_id: str | None, action: str) -> None:
+def _audit(u: dict, org_id: str | None, site_id: str | None, action: str, detail: dict | None = None) -> None:
     db.insert(db.audit_log, {"ts": time.time(), "user_id": u["id"], "user_email": u["email"], "org_id": org_id, "site_id": site_id,
-                             "action": action, "method": None, "path": None, "status": None, "ip": None, "detail": {}})
+                             "action": action, "method": None, "path": None, "status": None, "ip": None, "detail": detail or {}})
 
 
 # ---------------------------------------------------------------- fleet find / ask, digests, backups, push
@@ -545,6 +779,7 @@ async def org_digest_now(org_id: str, u: dict = Depends(user)):
 
 
 @app.get("/api/sites/{site_id}/backups")
+@app.get("/api/servers/{site_id}/backups")
 async def site_backups(site_id: str, u: dict = Depends(user)):
     site, _ = auth.site_access(u, site_id)
     auth.require_role(u, site["org_id"], "admin")
@@ -552,6 +787,7 @@ async def site_backups(site_id: str, u: dict = Depends(user)):
 
 
 @app.post("/api/sites/{site_id}/backups")
+@app.post("/api/servers/{site_id}/backups")
 async def site_backup_now(site_id: str, u: dict = Depends(user)):
     site, _ = auth.site_access(u, site_id)
     auth.require_role(u, site["org_id"], "admin")
@@ -566,6 +802,7 @@ async def site_backup_now(site_id: str, u: dict = Depends(user)):
 
 
 @app.get("/api/sites/{site_id}/backups/{backup_id}")
+@app.get("/api/servers/{site_id}/backups/{backup_id}")
 async def site_backup_download(site_id: str, backup_id: int, u: dict = Depends(user)):
     site, _ = auth.site_access(u, site_id)
     auth.require_role(u, site["org_id"], "admin")
@@ -580,6 +817,7 @@ class RestoreIn(BaseModel):
 
 
 @app.post("/api/sites/{site_id}/backups/{backup_id}/restore")
+@app.post("/api/servers/{site_id}/backups/{backup_id}/restore")
 async def site_backup_restore(site_id: str, backup_id: int, body: RestoreIn, u: dict = Depends(user)):
     site, _ = auth.site_access(u, site_id)
     auth.require_role(u, site["org_id"], "admin")
