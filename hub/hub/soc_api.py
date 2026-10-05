@@ -11,8 +11,11 @@ Who may do what:
   PUT  /api/locations/{id}/contacts|procedures   as monitoring PUT
   GET  /api/soc/dispositions                 SOC staff
   /api/soc/incidents..., presence, overview, sites, sla (GET), ws     SOC staff (operator or supervisor)
-  takeover, verify, PUT /api/soc/sla           SOC supervisors (hub administrators count as supervisors)
+  takeover, verify, reject, PUT /api/soc/sla   SOC supervisors (hub administrators count as supervisors)
   GET  /api/locations/{id}/incidents         anyone who can see the Site (what the SOC did there)
+  GET  /api/soc/reports/operators|false-alarms|shifts[/{id}]   SOC supervisors (colleagues' numbers)
+  POST /api/soc/reports/shifts/generate, GET /api/soc/reports/customers/{org}   SOC supervisors
+  GET  /api/orgs/{org}/soc/reports|false-alarms   a real admin of that customer (require_customer_role)
 Every write is audited in the customer's audit log (SOC staff changes hub-level, org_id NULL).
 """
 from __future__ import annotations
@@ -26,7 +29,7 @@ import sqlalchemy as sa
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
-from . import auth, db, soc
+from . import auth, db, soc, soc_reports
 from .agents import registry
 from .roles import allows
 
@@ -563,6 +566,17 @@ async def verify_incident(iid: int, u: dict = Depends(user)):
     return {"incident": _soc(soc.verify, iid, u)}
 
 
+class RejectIn(BaseModel):
+    note: str = Field(min_length=1, max_length=4000)
+
+
+@router.post("/api/soc/incidents/{iid}/reject")
+async def reject_incident(iid: int, body: RejectIn, u: dict = Depends(user)):
+    """Four eyes: send a pending_verify incident back to its resolver (or the queue when they are off shift)."""
+    _staff(u, "supervisor")
+    return {"incident": _soc(soc.reject, iid, u, body.note)}
+
+
 @router.post("/api/soc/incidents/{iid}/note")
 async def note_incident(iid: int, body: NoteIn, u: dict = Depends(user)):
     _staff(u)
@@ -668,6 +682,7 @@ async def overview(u: dict = Depends(user)):
     t = db.incidents
     rows = db.rows(sa.select(t.c.state, t.c.lane, t.c.escalation_level, t.c.claimed_by, t.c.resolved_by, t.c.sla_due_at,
                              t.c.resolve_due_at, t.c.opened_at).where(t.c.state.in_(list(soc.OPEN_STATES))))
+    active = [r for r in rows if r["state"] in soc.ACTIVE_STATES]   # escalation is about incidents still being worked
     by_state = {s: 0 for s in soc.STATES}
     by_lane = {lane: 0 for lane in soc.LANES}
     by_esc: dict[str, int] = {}
@@ -688,6 +703,9 @@ async def overview(u: dict = Depends(user)):
             "breaches": {"claim": sum(1 for r in rows if r["state"] == "new" and r["sla_due_at"] and r["sla_due_at"] < now),
                          "resolve": sum(1 for r in rows if r["state"] == "claimed" and r["resolve_due_at"] and r["resolve_due_at"] < now)},
             "oldest_unclaimed_at": min((r["opened_at"] for r in unclaimed), default=None),
+            # the escalation engine's state: open incidents at each level, and claimed ones past their resolve clock
+            "escalations": {f"level{n}": sum(1 for r in active if (r["escalation_level"] or 0) == n) for n in (1, 2, 3)},
+            "overdue": sum(1 for r in rows if r["state"] == "claimed" and r["resolve_due_at"] and r["resolve_due_at"] < now),
             "ring_count": ring, "sound": snd, "operators": ops}
 
 
@@ -737,7 +755,8 @@ async def soc_sites(u: dict = Depends(user)):
 @router.websocket("/api/soc/ws")
 async def soc_ws(ws: WebSocket):
     """Live queue for SOC staff: a `snapshot` frame (open incidents, roster), then incident_opened | incident_updated |
-    incident_event_added | incident_resolved | presence | arming. Every frame carries `sound` and `ring_count`.
+    incident_event_added | incident_resolved | presence | arming. Every frame carries `sound` and `ring_count`; an
+    incident_updated sent by the escalation engine also carries `escalation` {level, overdue?}.
     Connecting sets the user available, the last tab closing sets them offline; the open socket keeps them on shift.
     Client messages (any text) count as a heartbeat."""
     u = auth.current_user(ws)  # type: ignore[arg-type]
@@ -808,3 +827,119 @@ async def location_incidents(location_id: str, since: float | None = None, limit
                      "detail": lr["detail"]} for lr in logs.get(r["id"], [])]
         out.append(r)
     return out
+
+
+# ================================================================ reports (stage 5, soc_reports.py)
+# Windows are epoch seconds; incidents count in the period they opened in. Defaults: the last 7 days for SOC
+# reports, the last 30 for a customer's false-alarm view.
+
+WEEK_S, MONTH_S = 7 * 86400, 30 * 86400
+MAX_SPAN_S = 400 * 86400   # a year and a bit: enough for any report, bounded so one request can't scan everything
+
+
+def _window(since: float | None, until: float | None, default_s: float) -> tuple[float, float]:
+    until = time.time() if until is None else until
+    since = until - default_s if since is None else since
+    if since >= until:
+        raise HTTPException(422, "since must be before until")
+    if until - since > MAX_SPAN_S:
+        raise HTTPException(422, "a report covers at most 400 days")
+    return since, until
+
+
+def _report_out(r: dict, customer: bool = False) -> dict:
+    out = {k: r[k] for k in ("id", "kind", "org_id", "period_start", "period_end", "created_at", "text", "data", "model")}
+    if not customer:
+        out["created_by"] = r.get("created_by")
+    return out
+
+
+@router.get("/api/soc/reports/operators")
+async def report_operators(since: float | None = None, until: float | None = None, org: str | None = None, u: dict = Depends(user)):
+    _staff(u, "supervisor")
+    return soc_reports.operator_stats(*_window(since, until, WEEK_S), org)
+
+
+@router.get("/api/soc/reports/false-alarms")
+async def report_false_alarms(since: float | None = None, until: float | None = None, org: str | None = None, u: dict = Depends(user)):
+    _staff(u, "supervisor")
+    return soc_reports.false_alarm_rate(*_window(since, until, WEEK_S), org)
+
+
+@router.get("/api/soc/reports/shifts")
+async def report_shifts(limit: int = Query(20, ge=1, le=200), u: dict = Depends(user)):
+    """Stored shift reports, newest shift first."""
+    _staff(u, "supervisor")
+    return [_report_out(r) for r in soc_reports.stored("shift", limit=limit)]
+
+
+@router.get("/api/soc/reports/shifts/{rid}")
+async def report_shift(rid: int, u: dict = Depends(user)):
+    _staff(u, "supervisor")
+    r = soc_reports.stored_one(rid, "shift")
+    if r is None:
+        raise HTTPException(404, "unknown shift report")
+    return _report_out(r)
+
+
+class ShiftGenIn(BaseModel):
+    start: float | None = None
+    end: float | None = None
+
+
+@router.post("/api/soc/reports/shifts/generate")
+async def report_shift_generate(body: ShiftGenIn | None = None, u: dict = Depends(user)):
+    """Build and store a shift report now: [start, end), default the last completed shift (settings.soc_shift_ends)."""
+    _staff(u, "supervisor")
+    body = body or ShiftGenIn()
+    if body.start is None and body.end is None:
+        st, en = soc_reports.last_shift(dt.datetime.now())
+        start, end = st.timestamp(), en.timestamp()
+    else:
+        end = body.end if body.end is not None else time.time()
+        start = body.start if body.start is not None else end - 8 * 3600
+    start, end = _window(start, end, 0)
+    r = await soc_reports.shift_report(start, end, created_by=u["id"])
+    _audit(u, None, "soc shift report generated", {"report_id": r["id"], "start": start, "end": end})
+    return _report_out(r)
+
+
+def _month(year: int | None, month: int | None) -> tuple[int, int]:
+    if year is None and month is None:
+        return soc_reports.previous_month(dt.date.today())
+    if year is None or month is None:
+        raise HTTPException(422, "give both year and month, or neither (last month)")
+    if not (1 <= month <= 12 and 2000 <= year <= 2100):
+        raise HTTPException(422, "month is 1..12 and year 2000..2100")
+    return year, month
+
+
+@router.get("/api/soc/reports/customers/{org_id}")
+async def report_customer(org_id: str, year: int | None = None, month: int | None = None, u: dict = Depends(user)):
+    """A customer's monthly summary (default last month): the stored one, or built and stored now if missing."""
+    _staff(u, "supervisor")
+    if not db.one(sa.select(db.orgs.c.id).where(db.orgs.c.id == org_id)):
+        raise HTTPException(404, "unknown customer")
+    y, m = _month(year, month)
+    r = soc_reports.monthly_stored(org_id, y, m)
+    if r is None:
+        r = await asyncio.to_thread(soc_reports.monthly_customer_summary, org_id, y, m, u["id"])
+    return _report_out(r)
+
+
+# ---------------------------------------------------------------- customers: their SOC reports
+
+@router.get("/api/orgs/{org_id}/soc/reports")
+async def customer_soc_reports(org_id: str, limit: int = Query(12, ge=1, le=60), u: dict = Depends(user)):
+    """The customer's stored monthly summaries, newest first (a real admin of the customer: SOC supervisors read
+    them through /api/soc/reports/customers)."""
+    auth.require_customer_role(u, org_id, "admin")
+    return [_report_out(r, customer=True) for r in soc_reports.stored("monthly", org_id=org_id, limit=limit)]
+
+
+@router.get("/api/orgs/{org_id}/soc/false-alarms")
+async def customer_false_alarms(org_id: str, since: float | None = None, until: float | None = None, u: dict = Depends(user)):
+    """False-alarm rates at the customer's Sites and cameras since `since` (default 30 days): which cameras the
+    SOC keeps dismissing, so the customer can re-aim or re-zone them. `until` defaults to now."""
+    auth.require_customer_role(u, org_id, "admin")
+    return soc_reports.false_alarm_rate(*_window(since, until, MONTH_S), org_id)

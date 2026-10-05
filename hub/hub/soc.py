@@ -28,6 +28,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import sqlalchemy as sa
 
 from . import cameras, db
+from .config import settings
 
 log = logging.getLogger("hub.soc")
 
@@ -314,8 +315,8 @@ def next_change(loc: dict, now: float | None = None) -> dict | None:
 # was down) and are grouped: an event joins the Site's newest open incident if that incident saw an event within the
 # Site's grouping window, else it opens a new one. Every state change is one conditional UPDATE (WHERE state = ...),
 # so two operators clicking Claim at once get one winner and one 409, and each writes an incident_log row in the
-# same transaction. Escalation (stage 3) reads sla_due_at / resolve_due_at / next_escalation_at / escalation_level,
-# which the functions below keep current, so a pure escalate_once(now) can be added without touching them.
+# same transaction. Escalation (escalate_once, at the end of this module) reads sla_due_at / resolve_due_at /
+# next_escalation_at / escalation_level, which the functions below keep current.
 
 GROUP_WINDOW_S = 600          # default grouping window (locations.soc_group_minutes overrides it per Site)
 MAX_EVENT_AGE_S = 900         # sites re-publish old events (feedback, locks, synopsis reruns): those never open incidents
@@ -942,6 +943,52 @@ def verify(iid: int, u: dict) -> dict:
     return _emit("incident_resolved", get(iid))
 
 
+def reject(iid: int, u: dict, note_text: str) -> dict:
+    """Four eyes said no: a supervisor other than the resolver sends a pending_verify incident back to work. It goes
+    to the resolver (claimed, a fresh resolve clock) while they are on shift, else back to the queue (new, a fresh
+    claim clock and escalation ladder: nobody has been ignoring it until now). The disposition is cleared; the log
+    keeps the rejected resolution and the note. The route checks the level."""
+    note_text = (note_text or "").strip()
+    if not note_text:
+        raise Invalid("say why the resolution is rejected")
+    now = time.time()
+    t = db.incidents
+    with db.engine().begin() as c:
+        cur = _load(c, iid)
+        if cur["state"] != "pending_verify":
+            raise ConflictError("this incident is not waiting for verification")
+        if cur["resolved_by"] == u["id"]:
+            raise Forbidden("you resolved this incident: a different supervisor has to verify or reject it")
+        rules = sla().get(cur["priority"]) or {}
+        resolver = cur["resolved_by"]
+        cleared = {"disposition": None, "disposition_notes": None, "resolved_by": None, "resolved_at": None, "closed_at": None,
+                   "updated_at": now}
+        if resolver and resolver in on_shift_ids(now=now):
+            due = now + rules["resolve_s"] if rules.get("resolve_s") else None
+            vals = {**cleared, "state": "claimed", "claimed_by": resolver, "claimed_at": now, "resolve_due_at": due,
+                    "next_escalation_at": due, "assigned_by": u["id"]}
+            to = "claimed"
+        else:
+            due = now + rules["claim_s"] if cur["lane"] == "ring" and rules.get("claim_s") else None
+            vals = {**cleared, "state": "new", "claimed_by": None, "claimed_at": None, "resolve_due_at": None, "sla_due_at": due,
+                    "escalation_level": 0, "next_escalation_at": due}
+            to = "new"
+        res = c.execute(sa.update(t).where(t.c.id == iid, t.c.state == "pending_verify", _resolver(cur)).values(**vals))
+        if not res.rowcount:
+            raise ConflictError("the incident changed while you were rejecting it: try again")
+        _log(c, iid, u, "rejected", {"note": note_text[:4000], "to": to, "resolver_id": resolver,
+                                     "disposition": cur["disposition"], "disposition_notes": cur["disposition_notes"]}, now)
+    inc = _emit("incident_updated", get(iid))
+    if to == "claimed":
+        set_presence(resolver, "engaged", incident_id=iid)
+    return inc
+
+
+def _resolver(cur: dict):
+    t = db.incidents
+    return t.c.resolved_by == cur["resolved_by"] if cur["resolved_by"] else t.c.resolved_by.is_(None)
+
+
 def note(iid: int, u: dict, text: str) -> dict:
     text = (text or "").strip()
     if not text:
@@ -1081,14 +1128,25 @@ async def relay(iid: int, u: dict, level: str | None, server_id: str, camera_id:
     return {"ok": True, "status": status, "result": result, "incident": inc}
 
 
-async def send_feedback(iid: int, u: dict, note_text: str | None = None) -> dict:
+_AS_CALLER = object()
+
+
+async def send_feedback(iid: int, u: dict, note_text: str | None = None, server_ids: set[str] | None = None,
+                        actor=_AS_CALLER) -> dict:
     """A false-alarm resolution tells each event's server (PUT /api/events/{id}/feedback {verdict: false_alarm}) so
     the site's baseline learns. Each incident_event records sent | failed; failed rows (server offline, timeout) are
-    what a retry pass (stage 3: rows with feedback_state 'failed' on false-alarm incidents) picks up."""
+    what the escalation engine's retry pass (escalate_once) picks up once their server is back.
+
+    `u` is who the site is told gave the verdict (x-hub-user); `actor` is who the incident log names (default `u`;
+    None for the engine's retries, so the log never claims a person retried). `server_ids` limits the pass to those
+    servers (the retry only tries servers that are online, so an offline one is not re-marked failed every pass)."""
     from .agents import registry
     from .fleet_actions import _call
     ie = db.incident_events
-    rows = db.rows(sa.select(ie).where(ie.c.incident_id == iid, sa.or_(ie.c.feedback_state.is_(None), ie.c.feedback_state == "failed")))
+    q = sa.select(ie).where(ie.c.incident_id == iid, sa.or_(ie.c.feedback_state.is_(None), ie.c.feedback_state == "failed"))
+    if server_ids is not None:
+        q = q.where(ie.c.server_id.in_(list(server_ids) or [""]))
+    rows = db.rows(q)
     sent = failed = 0
     for r in rows:
         conn = registry.get(r["server_id"])
@@ -1104,7 +1162,8 @@ async def send_feedback(iid: int, u: dict, note_text: str | None = None) -> dict
         sent, failed = sent + ok, failed + (not ok)
     if rows:
         with db.engine().begin() as c:
-            _log(c, iid, u, "feedback", {"sent": sent, "failed": failed})
+            _log(c, iid, u if actor is _AS_CALLER else actor, "feedback",
+                 {"sent": sent, "failed": failed, **({"retry": True} if actor is not _AS_CALLER else {})})
         _emit("incident_updated", get(iid))
     return {"sent": sent, "failed": failed}
 
@@ -1200,3 +1259,180 @@ def socket_closed(u: dict) -> None:
 def snapshot() -> dict:
     """The first frame on /api/soc/ws: every open incident and the roster."""
     return frame("snapshot", incidents=query(OPEN_STATES, limit=1000), presence=roster())
+
+
+# ================================================================ escalation (stage 3)
+# escalation_loop runs escalate_once every 10 s. Each rule is a conditional UPDATE on the state it read (state,
+# lane, level, holder), so an operator claiming at the same moment wins cleanly: the engine's UPDATE then matches no
+# row and it does nothing. Pushes are awaited after the commit, outside the transaction.
+#
+#   new, ringing lane, past next_escalation_at (= sla_due_at at level 0)
+#       level 0 -> 1: push SOC staff on shift; next step in settings.soc_escalate_step_s
+#       level 1 -> 2: push supervisors and hub administrators (on shift or not); next step
+#       level 2 -> 3: log {pending: "customer contact"} and call on_level3 (the notification release plugs in there); stop
+#   claimed, past resolve_due_at: one `overdue` row and a supervisor push, level at least 1, once per incident
+#   new, quiet lane, no event for settings.soc_quiet_ttl_s: closed as `expired`
+#   false-alarm feedback that failed (server was offline): retried once the server is back
+
+ESCALATE_EVERY_S = 10
+MAX_LEVEL = 3
+FEEDBACK_MAX_AGE_S = 7 * 86400   # older false-alarm verdicts are stale for the site's baseline: stop retrying
+_feedback_next: dict[int, float] = {}   # incident id -> earliest next retry (in memory: a restart retries at once)
+
+
+def _default_level3(incident: dict) -> None:
+    """Level 3 = the customer should be contacted. Email/SMS/voice is a later release: it replaces on_level3."""
+    return None
+
+
+on_level3 = _default_level3   # module-level so the notification release (and tests) can swap it; may be async
+
+
+async def _push(incident: dict, audience: str) -> int:
+    from . import push   # lazily: push imports auth, which imports this module
+    try:
+        return await push.notify_soc(incident, audience)
+    except Exception:
+        log.exception("escalation push for incident %s", incident.get("id"))
+        return 0
+
+
+async def escalate_once(now: float | None = None) -> list[dict]:
+    """One pass of the escalation rules at `now` (injected by tests). Returns what it did:
+    [{incident_id, action: escalated | overdue | expired | feedback, ...}]. Awaits its pushes and hooks, so a test
+    sees every recipient by the time it returns."""
+    now = time.time() if now is None else now
+    done: list[dict] = []
+    done += await _escalate_unclaimed(now)
+    done += await _overdue(now)
+    done += _expire_quiet(now)
+    done += await _retry_feedback(now)
+    return done
+
+
+async def _escalate_unclaimed(now: float) -> list[dict]:
+    t = db.incidents
+    step = max(1, int(settings.soc_escalate_step_s))
+    due = db.rows(sa.select(t).where(
+        t.c.state == "new", t.c.lane == "ring", t.c.escalation_level < MAX_LEVEL,
+        sa.or_(t.c.next_escalation_at <= now,
+               # belt and braces: a level-0 incident whose next step was never set still escalates off its claim clock
+               sa.and_(t.c.next_escalation_at.is_(None), t.c.escalation_level == 0, t.c.sla_due_at <= now)))
+        .order_by(t.c.id))
+    out = []
+    for cur in due:
+        lvl = (cur["escalation_level"] or 0) + 1
+        nxt = now + step if lvl < MAX_LEVEL else None
+        with db.engine().begin() as c:
+            res = c.execute(sa.update(t).where(t.c.id == cur["id"], t.c.state == "new", t.c.lane == "ring",
+                                               t.c.escalation_level == cur["escalation_level"]).values(
+                escalation_level=lvl, next_escalation_at=nxt, updated_at=now))
+            if not res.rowcount:
+                continue   # claimed (or escalated by another worker) since the read
+            detail = {"level": lvl, "unclaimed_s": round(now - cur["opened_at"], 1)}
+            if lvl == MAX_LEVEL:
+                detail["pending"] = "customer contact"
+            _log(c, cur["id"], None, "escalated", detail, now)
+        inc = _emit("incident_updated", get(cur["id"]), escalation={"level": lvl})
+        act = {"incident_id": cur["id"], "action": "escalated", "level": lvl, "pushed": 0}
+        if lvl == 1:
+            act["pushed"] = await _push(inc, "operators")
+        elif lvl == 2:
+            act["pushed"] = await _push(inc, "supervisors")
+        else:
+            try:
+                r = on_level3(inc)
+                if asyncio.iscoroutine(r):
+                    await r
+            except Exception:
+                log.exception("on_level3 for incident %s", cur["id"])
+        out.append(act)
+    return out
+
+
+async def _overdue(now: float) -> list[dict]:
+    """Claimed but not resolved in time. claim / takeover / handoff set next_escalation_at = resolve_due_at; this
+    clears it, and the earlier `overdue` log row keeps it to once per incident when a handoff sets the clock again."""
+    t, lg = db.incidents, db.incident_log
+    rows = db.rows(sa.select(t).where(t.c.state == "claimed", t.c.resolve_due_at.is_not(None), t.c.resolve_due_at <= now,
+                                      t.c.next_escalation_at.is_not(None), t.c.next_escalation_at <= now))
+    out = []
+    for cur in rows:
+        lvl = max(cur["escalation_level"] or 0, 1)
+        with db.engine().begin() as c:
+            seen = c.execute(sa.select(lg.c.id).where(lg.c.incident_id == cur["id"], lg.c.action == "overdue").limit(1)).first()
+            res = c.execute(sa.update(t).where(t.c.id == cur["id"], t.c.state == "claimed", _holder(cur),
+                                               t.c.escalation_level == cur["escalation_level"],
+                                               t.c.next_escalation_at.is_not(None), t.c.next_escalation_at <= now).values(
+                next_escalation_at=None, escalation_level=lvl, updated_at=now))
+            if not res.rowcount or seen:
+                continue
+            _log(c, cur["id"], None, "overdue", {"level": lvl, "claimed_by": cur["claimed_by"],
+                                                 "overdue_s": round(now - cur["resolve_due_at"], 1)}, now)
+        inc = _emit("incident_updated", get(cur["id"]), escalation={"level": lvl, "overdue": True})
+        out.append({"incident_id": cur["id"], "action": "overdue", "level": lvl, "pushed": await _push(inc, "supervisors")})
+    return out
+
+
+def _expire_quiet(now: float) -> list[dict]:
+    """The quiet lane is swept by hand; whatever nobody swept closes once it has been silent for the TTL (counted
+    from its last event, so an incident still collecting events is not closed under the operator)."""
+    t = db.incidents
+    cutoff = now - max(60, int(settings.soc_quiet_ttl_s))
+    last = sa.func.coalesce(t.c.last_event_at, t.c.opened_at)
+    out = []
+    ids = [r["id"] for r in db.rows(sa.select(t.c.id).where(t.c.state == "new", t.c.lane == "quiet", last <= cutoff))]
+    for iid in ids:
+        with db.engine().begin() as c:
+            res = c.execute(sa.update(t).where(t.c.id == iid, t.c.state == "new", t.c.lane == "quiet", last <= cutoff).values(
+                state="closed", disposition="expired", resolved_by=None, resolved_at=now, closed_at=now, next_escalation_at=None,
+                updated_at=now))
+            if not res.rowcount:
+                continue
+            _log(c, iid, None, "expired", {"ttl_s": int(settings.soc_quiet_ttl_s)}, now)
+        _emit("incident_resolved", get(iid))
+        out.append({"incident_id": iid, "action": "expired"})
+    return out
+
+
+async def _retry_feedback(now: float) -> list[dict]:
+    """False-alarm verdicts that could not reach their server: retried (at most every soc_feedback_retry_s per
+    incident) once that server's tunnel is up, in the name of the operator who resolved it."""
+    from .agents import registry
+    t, ie = db.incidents, db.incident_events
+    rows = db.rows(sa.select(ie.c.incident_id, ie.c.server_id, t.c.resolved_by, t.c.disposition_notes)
+                   .select_from(ie.join(t, t.c.id == ie.c.incident_id))
+                   .where(ie.c.feedback_state == "failed", t.c.disposition.in_(list(FEEDBACK_DISPOSITIONS)),
+                          t.c.resolved_at >= now - FEEDBACK_MAX_AGE_S))
+    per: dict[int, dict] = {}
+    for r in rows:
+        if registry.get(r["server_id"]) is None:
+            continue   # still offline: leave it failed rather than re-mark it every pass
+        per.setdefault(r["incident_id"], {"row": r, "servers": set()})["servers"].add(r["server_id"])
+    out = []
+    every = max(10, int(settings.soc_feedback_retry_s))
+    for iid, x in per.items():
+        if _feedback_next.get(iid, 0) > now:
+            continue
+        _feedback_next[iid] = now + every   # a site that answers but refuses is not hammered every 10 s
+        r = x["row"]
+        who = db.one(sa.select(db.users.c.id, db.users.c.email).where(db.users.c.id == r["resolved_by"])) if r["resolved_by"] else None
+        try:
+            res = await send_feedback(iid, who or {"id": None, "email": "SOC"}, r["disposition_notes"], server_ids=x["servers"], actor=None)
+        except Exception:
+            log.exception("feedback retry for incident %s", iid)
+            continue
+        if not res["failed"]:
+            _feedback_next.pop(iid, None)
+        out.append({"incident_id": iid, "action": "feedback", **res})
+    return out
+
+
+async def escalation_loop() -> None:
+    """api.lifespan runs this beside the sweeper. Nothing escalates unless a Site is monitored (no incidents)."""
+    while True:
+        try:
+            await escalate_once()
+        except Exception:
+            log.exception("soc escalation")
+        await asyncio.sleep(ESCALATE_EVERY_S)

@@ -48,6 +48,13 @@ class Settings(BaseSettings):
     backup_hour: int = 3                      # nightly site config backups
     push_contact: str = ""                    # mailto for VAPID claims (defaults to admin@<public host>)
 
+    # SOC escalation (soc.escalate_once) and reports (soc_reports.py)
+    soc_escalate_step_s: int = 120            # unclaimed past SLA: level 1, then one level per step (2 supervisors, 3 customer contact)
+    soc_quiet_ttl_s: int = 86400              # an unclaimed quiet-lane incident with no new event for this long closes as `expired`
+    soc_feedback_retry_s: int = 300           # how often failed false-alarm feedback is retried once its server is back online
+    soc_shift_ends: str = "06:00,14:00,22:00" # hub-local shift boundaries: a shift report is stored at each one
+    soc_loops: bool = True                    # run the escalation and report loops (tests drive escalate_once themselves)
+
 
 settings = Settings()
 if not settings.secret:

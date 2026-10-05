@@ -18,7 +18,7 @@ from pydantic import BaseModel, EmailStr, Field
 
 from . import __version__, alerts, auth, backups, cameras, dashboards, db, digest, fleet_actions, proxy, push, soc_api, turn, vlm_proxy
 from . import fleet as fleet_mod
-from . import soc
+from . import soc, soc_reports
 from fastapi.responses import StreamingResponse
 from .agents import registry
 from .config import settings
@@ -33,6 +33,10 @@ async def lifespan(app: FastAPI):
     alerts.on_open = _notify
     tasks = [asyncio.create_task(_sweeper(), name="sweeper"), asyncio.create_task(digest.daily_loop(), name="digests"),
              asyncio.create_task(backups.nightly_loop(), name="backups")]
+    if settings.soc_loops:
+        # SOC: escalation every 10 s and the shift / monthly reports; both idle unless a Site is monitored
+        tasks += [asyncio.create_task(soc.escalation_loop(), name="soc-escalation"),
+                  asyncio.create_task(soc_reports.shift_loop(), name="soc-reports")]
     task = tasks[0]
     log.info("hub %s up on http://%s:%s (%s)", __version__, settings.host, settings.port, settings.public_url)
     yield
@@ -1158,7 +1162,7 @@ async def site_backup_restore(site_id: str, backup_id: int, body: RestoreIn, u: 
 @app.get("/api/push/vapid")
 async def push_vapid(u: dict = Depends(user)):
     return {"public_key": push.vapid()["public"], "subscriptions": [{"endpoint": s["endpoint"], "kinds": s["kinds"], "ua": s["ua"]} for s in push.subscriptions_for(u["id"])],
-            "kinds": list(alerts.KINDS)}
+            "kinds": list(push.CUSTOMER_KINDS)}   # soc_incident is opt-in (push.INCIDENT_KIND)
 
 
 class PushIn(BaseModel):

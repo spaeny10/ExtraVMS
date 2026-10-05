@@ -332,8 +332,12 @@ def test_push_to_soc_and_customers(client, superuser):
         assert asyncio.run(push.notify_soc(inc, "supervisors")) >= 1
         assert ids["sup"] in {u for u, _ in sent} and ids["op"] not in {u for u, _ in sent}
         sent.clear()
-        # customers: real members who see the Site and chose high-priority pushes (adm chose offline only)
+        # customers: only subscriptions that opted into soc_incident (the default kinds' event_high already pushes the
+        # same event, so view on the defaults gets nothing extra; adm chose offline only)
+        assert asyncio.run(push.notify_incident_customers(inc)) == 0
+        push.subscribe(ids["view"], {"endpoint": "https://push.example/view-pushsoc"}, [*push.DEFAULT_KINDS, "soc_incident"], "test")
         assert asyncio.run(push.notify_incident_customers(inc)) == 1
         assert sent[0][0] == ids["view"] and sent[0][1]["kind"] == "soc_incident" and sent[0][1]["url"] == f"/sites/{s['loc']['id']}/alerts"
+        assert "soc_incident" in s["view"].get("/api/push/vapid").json()["kinds"]   # the PushCard can offer it
     finally:
         push.set_sender(None)

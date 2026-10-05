@@ -10,7 +10,7 @@ from typing import Callable
 
 import sqlalchemy as sa
 
-from . import auth, db
+from . import alerts, auth, db
 from .config import settings
 
 log = logging.getLogger("hub.push")
@@ -116,7 +116,12 @@ async def notify_alert(org_id: str, site: dict, kind: str, detail: dict) -> int:
 # ---------------------------------------------------------------- SOC (soc.py)
 
 SOC_KIND = "soc"                 # pages to SOC staff: sent to every subscription they have (duty, not a preference)
-INCIDENT_KIND = "soc_incident"   # customers: "the SOC is handling an incident at your Site"
+# Customers: "the SOC is handling an incident at your Site". Opt-in only, and not in DEFAULT_KINDS: the same event
+# already pushes as event_high to whoever chose that, so sending this to event_high subscriptions too was a duplicate.
+# The UI's PushCard lists it from GET /api/push/vapid `kinds` (label: "SOC incident at my site"); it only ever fires
+# for Sites the customer has opted into SOC monitoring.
+INCIDENT_KIND = "soc_incident"
+CUSTOMER_KINDS = (*alerts.KINDS, INCIDENT_KIND)   # every kind a customer subscription may choose
 
 
 def _incident_text(incident: dict) -> tuple[str, str]:
@@ -155,8 +160,8 @@ async def notify_soc(incident: dict, audience: str = "operators") -> int:
 
 async def notify_incident_customers(incident: dict) -> int:
     """Tell the customer the SOC has a high-priority incident open at their Site: real members who can see the Site
-    (not SOC staff widened in, not hub administrators: notify_soc covers them), on subscriptions that chose
-    high-priority events or SOC incidents. Only monitored Sites have incidents, so opting in is the Site's."""
+    (not SOC staff widened in, not hub administrators: notify_soc covers them), only on subscriptions that chose
+    soc_incident (event_high already pushes the same event). Only monitored Sites have incidents."""
     org_id, lid = incident["org_id"], incident["location_id"]
     members = db.rows(sa.select(db.memberships.c.user_id, db.memberships.c.all_sites).where(db.memberships.c.org_id == org_id))
     uids = {m["user_id"] for m in members
@@ -164,7 +169,7 @@ async def notify_incident_customers(incident: dict) -> int:
     if not uids:
         return 0
     subs = [s for s in db.rows(sa.select(db.push_subscriptions).where(db.push_subscriptions.c.user_id.in_(list(uids))))
-            if {"event_high", INCIDENT_KIND} & set(s["kinds"] or DEFAULT_KINDS)]
+            if INCIDENT_KIND in (s["kinds"] or DEFAULT_KINDS)]
     _, body = _incident_text(incident)
     payload = {"title": f"{incident.get('location_name') or 'Your site'}: the SOC is reviewing a high-priority alarm", "body": body,
                "url": f"/sites/{lid}/alerts", "kind": INCIDENT_KIND, "incident_id": incident["id"], "location_id": lid}
