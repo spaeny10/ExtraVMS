@@ -25,12 +25,12 @@ export type SiteTab = (typeof SITE_TABS)[number];
 export const CUSTOMER_TABS = ["sites", "servers", "members", "invites", "ai", "actions"] as const;
 export type CustomerTab = (typeof CUSTOMER_TABS)[number];
 
-export type Page = "home" | "sites" | "site" | "server" | "find" | "alerts" | "customer" | "audit" | "account";
+export type Page = "home" | "sites" | "site" | "server" | "find" | "alerts" | "customer" | "audit" | "account" | "invite";
 /**
  * Where a path points. `redirect` is the canonical path when the one asked for is an alias or incomplete
  * (/sites/:id → /sites/:id/live, /org/… → /customer/…); the app replaces the URL with it so links and Back stay clean.
  */
-export type Route = { page: Page; siteId?: string; tab?: string; serverId?: string; redirect?: string };
+export type Route = { page: Page; siteId?: string; tab?: string; serverId?: string; code?: string; redirect?: string };
 
 const isOneOf = <T extends string>(list: readonly T[], v: string | undefined): v is T => !!v && (list as readonly string[]).includes(v);
 
@@ -58,6 +58,8 @@ export function matchRoute(path: string): Route {
     case "alerts": return { page: "alerts" };
     case "audit": return { page: "audit" };
     case "account": return { page: "account" };
+    // public: the accept page works signed out (App renders it before the sign-in check)
+    case "invite": return a ? { page: "invite", code: a } : { page: "home", redirect: "/" };
     default: return { page: "home" };
   }
 }
@@ -66,3 +68,14 @@ export const siteHref = (siteId: string, tab: SiteTab = "live") => `/sites/${enc
 export const serverHref = (siteId: string, serverId: string) => `/sites/${encodeURIComponent(siteId)}/servers/${encodeURIComponent(serverId)}`;
 /** The server's own UI through its tunnel (hash = its tab). */
 export const consoleHref = (serverId: string, hash = "") => `/s/${serverId}/${hash ? `#${hash}` : ""}`;
+
+/**
+ * A moment on the server's own Timeline (its UI routes on the hash): the "open on server" fallback next to links into
+ * the Site's combined Timeline (timelineLink.ts siteTimelineHref, same parameter names).
+ */
+export function consoleTimelineHref(serverId: string, at: { cam: string; event?: number; t?: number }): string {
+  const q = new URLSearchParams({ cam: at.cam });
+  if (at.event) q.set("event", String(at.event));
+  else if (at.t) q.set("t", String(Math.round(at.t)));
+  return consoleHref(serverId, `timeline?${q}`);
+}

@@ -7,10 +7,11 @@ import { Icon, toast } from "@site/ui";
 import { type Fleet, type Me, type Member, type Org, type Server, type Site, api } from "../api";
 import { isAdmin } from "../access";
 import { GroupsBox } from "../Groups";
-import { type CustomerTab, go, navigate } from "../nav";
+import { type CustomerTab, navigate } from "../nav";
 import { ClaimBox } from "./ClaimBox";
 import { CreateOrgBox } from "./CreateOrgBox";
 import { FleetActionsPage } from "./FleetActionsPage";
+import { InvitesBox } from "./InvitesBox";
 import { MembersBox } from "./MembersBox";
 import { ServersBox } from "./ServersBox";
 import { SharedAiBox } from "./SharedAiBox";
@@ -18,7 +19,7 @@ import { SitesBox } from "./SitesBox";
 
 const TABS: { tab: CustomerTab; label: string; icon: string; admin?: boolean }[] = [
   { tab: "sites", label: "Sites", icon: "grid" }, { tab: "servers", label: "Servers", icon: "settings" },
-  { tab: "members", label: "Members", icon: "user", admin: true }, { tab: "invites", label: "Invites (coming)", icon: "link", admin: true },
+  { tab: "members", label: "Members", icon: "user", admin: true }, { tab: "invites", label: "Invites", icon: "link", admin: true },
   { tab: "ai", label: "AI & relay", icon: "sparkle" }, { tab: "actions", label: "Actions", icon: "events" },
 ];
 
@@ -61,13 +62,7 @@ export function CustomerPage({ org, me, tab, onChanged }: { org: Org; me: Me; ta
         </>
       )}
       {shown === "members" && <MembersBox org={org} members={members} sites={sites} onChanged={() => { load(); onChanged(); }} />}
-      {shown === "invites" && (
-        <div className="card">
-          <h3>Invites</h3>
-          <p className="muted small" style={{ marginBottom: 0 }}>Invite links (choose role and sites, send the link, they set their own password) are coming.
-            For now add people under <a href="/customer/members" onClick={go("/customer/members")}>Members</a> with an initial password.</p>
-        </div>
-      )}
+      {shown === "invites" && <InvitesBox org={org} me={me} sites={sites} />}
       {shown === "ai" && <SharedAiBox org={org} canEdit={org.role === "owner" || me.user.is_super} />}
       {shown === "actions" && <FleetActionsPage org={org} />}
     </>

@@ -1,7 +1,7 @@
 /**
  * One Site: header with its rollup, tabs Live · Timeline · Find · Alerts · Servers · Settings, and the server panel at
- * /sites/:id/servers/:serverId. Live is the combined grid (SiteLive); the combined Timeline/Find come in later stages,
- * until then those tabs explain that and link to each server's own console.
+ * /sites/:id/servers/:serverId. Live is the combined grid (SiteLive), Find and Alerts are the customer-wide pages scoped
+ * to this Site (FindPage, AlertsPage's SiteAlerts).
  */
 import { useCallback, useEffect, useState } from "react";
 import { Icon, confirmDialog, promptDialog, toast } from "@site/ui";
@@ -11,6 +11,9 @@ import { Breadcrumbs } from "./Breadcrumbs";
 import { SITE_TABS, type SiteTab, consoleHref, go, navigate, serverHref, siteHref } from "./nav";
 import { ServerActions, ServerCard } from "./servers";
 import { SiteLive } from "./SiteLive";
+import { SiteTimeline } from "./SiteTimeline";
+import { FindPage } from "./FindPage";
+import { SiteAlerts } from "./AlertsPage";
 
 const TAB_LABEL: Record<SiteTab, [string, string]> = {
   live: ["Live", "live"], timeline: ["Timeline", "timeline"], find: ["Find", "find"], alerts: ["Alerts", "alert"], servers: ["Servers", "grid"], settings: ["Settings", "settings"],
@@ -49,9 +52,9 @@ export function SitePage({ org, me, siteId, tab, serverId, onOrg }: { org: Org; 
       </div>
       {serverId ? (server ? <ServerPanel site={site} server={server} admin={admin} onChanged={reload} /> : <p className="muted">That server isn't in this site. <a href={siteHref(site.id, "servers")} onClick={go(siteHref(site.id, "servers"))}>Servers</a></p>)
         : tab === "live" ? <SiteLive org={siteOrg} site={site} />
-        : tab === "timeline" ? <LinkOut site={site} servers={active} hash="timeline" what="One timeline for every camera at this site" />
-        : tab === "find" ? <LinkOut site={site} servers={active} hash="find" what="Searching this site's footage in one place" />
-        : tab === "alerts" ? <AlertsTab site={site} />
+        : tab === "timeline" ? <SiteTimeline org={siteOrg} site={site} query={location.search} />
+        : tab === "find" ? <FindPage org={siteOrg} site={site} />
+        : tab === "alerts" ? <SiteAlerts org={siteOrg} site={site} />
         : tab === "servers" ? <ServersTab site={site} admin={admin} onChanged={reload} />
         : <SettingsTab site={site} admin={admin} onChanged={reload} />}
     </>
@@ -92,31 +95,6 @@ function SiteHeader({ site, servers, admin, onChanged }: { site: Site; servers: 
 }
 
 /** Interim tab body: what is coming here, and each server's own page for it today. */
-function LinkOut({ site, servers, hash, what }: { site: Site; servers: Server[]; hash: string; what: string }) {
-  return (
-    <div className="card">
-      <p style={{ marginTop: 0 }}>{what} is on its way. For now, open it on each server:</p>
-      {servers.length === 0 && <p className="muted small">This site has no servers yet. {site.retired_servers ? `(${site.retired_servers} retired)` : ""}</p>}
-      <ul className="link-list">
-        {servers.map((s) => (
-          <li key={s.id}>
-            <span className={`dot ${s.online ? "ok" : ""}`} /> <a href={consoleHref(s.id, hash)}>{s.name} ↗</a>
-            <span className="muted small"> · {s.online ? `${s.cameras_online ?? 0}/${s.cameras_total ?? 0} cameras up` : `offline · last seen ${ago(s.last_seen_at)}`}</span>
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
-function AlertsTab({ site }: { site: Site }) {
-  return (
-    <div className="card">
-      <p style={{ marginTop: 0 }}>{site.open_alerts ? `${site.open_alerts} open alert${site.open_alerts > 1 ? "s" : ""} at this site.` : "Nothing open at this site."} A per-site alert list and digest are coming;
-        for now see <a href="/alerts" onClick={go("/alerts")}>Alerts</a> for the whole customer (the Server column says where).</p>
-    </div>
-  );
-}
 
 function ServersTab({ site, admin, onChanged }: { site: Site; admin: boolean; onChanged: () => void }) {
   const [sites, setSites] = useState<Site[]>([]);

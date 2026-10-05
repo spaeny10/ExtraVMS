@@ -4,8 +4,8 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "@site/ui";
-import { type Digest, type Fleet, type Me, type Org, type Server, type Site, ago, api } from "./api";
-import { isAdmin, lastEventBySite, ofTotal } from "./access";
+import { type Digest, type DigestPart, type Fleet, type Me, type Org, type Server, type Site, ago, api } from "./api";
+import { digestPartsFor, isAdmin, lastEventBySite, ofTotal } from "./access";
 import { go, siteHref } from "./nav";
 import { ServerCard } from "./servers";
 
@@ -79,17 +79,47 @@ export function ServerDot({ v, now }: { v: Server; now: number }) {
   return <span className={`dot ${v.online ? "ok" : ""} ${v.retired_at ? "retired" : ""}`} title={`${v.name}: ${state}`} />;
 }
 
-export function DigestCard({ org }: { org: Org }) {
+/**
+ * The customer's latest digest. With `site`: only that Site's servers, from the data the digest was written from
+ * (one line per server, named only when the Site has several); an older digest without that data shows its whole text.
+ */
+export function DigestCard({ org, site }: { org: Org; site?: Site }) {
   const [rows, setRows] = useState<Digest[]>([]);
   const [busy, setBusy] = useState(false);
   const load = useCallback(() => api.digests(org.id).then(setRows).catch(() => setRows([])), [org.id]);
   useEffect(() => { load(); }, [load]);
   const d = rows[0];
+  const parts = site && d ? digestPartsFor(d.data, site) : null;
   return (
     <div className="card" style={{ marginTop: 12 }}>
       <div className="row"><h3 style={{ margin: 0 }}>Digest</h3><span className="muted small">{d ? `${d.day}${d.model ? ` · ${d.model}` : ""}` : "none yet"}</span><span className="spacer" />
         <button className="ghost small" disabled={busy} onClick={async () => { setBusy(true); try { await api.digestNow(org.id); await load(); } catch (e) { toast.error(e); } finally { setBusy(false); } }}>Generate now</button></div>
-      {d && <pre style={{ whiteSpace: "pre-wrap", margin: "8px 0 0", font: "inherit" }}>{d.text}</pre>}
+      {d && (!site || !parts) && <pre style={{ whiteSpace: "pre-wrap", margin: "8px 0 0", font: "inherit" }}>{d.text}</pre>}
+      {d && parts && parts.length === 0 && <p className="muted small" style={{ marginBottom: 0 }}>This site had no servers when the digest was made.</p>}
+      {d && parts && parts.length > 0 && (
+        <>
+          {parts.map((p) => <DigestPartView key={p.site_id} p={p} named={parts.length > 1} />)}
+          <details className="small" style={{ marginTop: 8 }}><summary className="muted">Whole customer's digest</summary>
+            <pre style={{ whiteSpace: "pre-wrap", margin: "6px 0 0", font: "inherit" }}>{d.text}</pre></details>
+        </>
+      )}
+    </div>
+  );
+}
+
+function DigestPartView({ p, named }: { p: DigestPart; named: boolean }) {
+  return (
+    <div className="digest-part">
+      {named && <strong>{p.server_name ?? p.site_name}{p.online ? "" : " (offline)"} </strong>}
+      <span>{p.headline ?? (p.online ? "No briefing yet." : "Offline when the digest was made.")}</span>
+      {p.text && <p className="small" style={{ margin: "4px 0 0" }}>{p.text}</p>}
+      {(p.cameras_down.length > 0 || p.open_alerts.length > 0) && (
+        <div className="muted small">
+          {p.cameras_down.length > 0 && `Cameras down: ${p.cameras_down.join(", ")}`}
+          {p.cameras_down.length > 0 && p.open_alerts.length > 0 && " · "}
+          {p.open_alerts.length > 0 && `${p.open_alerts.length} open alert${p.open_alerts.length > 1 ? "s" : ""} then`}
+        </div>
+      )}
     </div>
   );
 }

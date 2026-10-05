@@ -4,17 +4,19 @@
  * to /sites; its server cards are kept under Customer → Servers.
  * Hierarchy: Customer (wire: org) › Site (wire: location) › Server (wire: site) › Camera.
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Dialogs, Icon, OfflineBanner, Toaster, confirmDialog, promptDialog, toast, useIsPhone } from "@site/ui";
 import { ThemeToggle } from "@site/ThemeToggle";
-import { ActionCard } from "@site/ActionCard";
+import { AlertsPage } from "./AlertsPage";
 import { CustomerPage } from "./customer/CustomerPage";
 import { UndoButton } from "./customer/FleetActionsPage";
+import { FindPage } from "./FindPage";
 import { HomePage } from "./HomePage";
+import { InvitePage } from "./InvitePage";
 import { type CustomerTab, type Page, go, matchRoute, navigate, usePath } from "./nav";
 import { SitePage } from "./SitePage";
 import { SitesPage } from "./SitesPage";
-import { type ActionPlan, type Alert, type AuditRow, type FleetSearch, type Me, type Org, type PushInfo, ago, api, fleetAsk, fmtTime } from "./api";
+import { type AuditRow, type Me, type Org, type PushInfo, api, fmtTime } from "./api";
 
 /** Header nav: path, label, icon (phone tab bar), and the pages that light it up. */
 const NAV: { path: string; label: string; icon: string; pages: Page[] }[] = [
@@ -39,6 +41,16 @@ export default function App() {
   // aliases and incomplete paths (/org/…, /sites/:id) are replaced by their canonical form, not pushed
   useEffect(() => { if (route.redirect) navigate(route.redirect + location.search + location.hash, true); }, [route.redirect]);
   if (me === undefined) return null;
+  // the invite page is public: it shows who invited you before any sign-in, and joins a signed-in account in one click
+  if (route.page === "invite" && route.code) {
+    return (
+      <>
+        <InvitePage code={route.code} me={me} onSignedOut={() => setMe(null)}
+          onJoined={async (orgId) => { await reload(); if (orgId) setOrg(orgId); navigate("/sites"); }} />
+        <Toaster /><Dialogs />
+      </>
+    );
+  }
   if (!me) return <><Login onDone={reload} /><Toaster /><Dialogs /></>;
   const orgs = me.orgs;
   const current = orgs.find((o) => o.id === org) ?? orgs[0];
@@ -110,145 +122,8 @@ function Login({ onDone }: { onDone: () => void }) {
       <label className="field"><span>Password</span><input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} /></label>
       {needTotp && <label className="field"><span>Authenticator code</span><input inputMode="numeric" autoComplete="one-time-code" value={totp} onChange={(e) => setTotp(e.target.value)} autoFocus /></label>}
       <button type="submit" disabled={busy || !email || !password}>Sign in</button>
+      <p className="muted small" style={{ margin: "12px 0 0" }}>Have an invite link? Open it in this browser to join.</p>
     </form>
-  );
-}
-
-// ---------------------------------------------------------------- find / ask across servers
-
-function FindPage({ org }: { org: Org }) {
-  const [q, setQ] = useState(() => new URLSearchParams(location.search).get("q") ?? "");
-  const fromUrl = useRef(!!new URLSearchParams(location.search).get("q"));
-  const [res, setRes] = useState<FleetSearch | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [answers, setAnswers] = useState<Record<string, { name: string; text: string; error?: string; done?: boolean }>>({});
-  const [asking, setAsking] = useState(false);
-  const [action, setAction] = useState<Exclude<ActionPlan, { action: "none" }> | null>(null);
-  const search = async () => {
-    if (!q.trim()) return;
-    setBusy(true); setAnswers({}); setAction(null);
-    try { setRes(await api.fleetSearch(org.id, q.trim())); } catch (e) { toast.error(e); } finally { setBusy(false); }
-  };
-  // arrived from a dashboard Ask box: run the question once, then drop it from the URL
-  useEffect(() => {
-    if (fromUrl.current) { fromUrl.current = false; history.replaceState(null, "", "/find"); ask(); }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-  const ask = async () => {
-    if (!q.trim()) return;
-    setAsking(true); setRes(null); setAnswers({}); setAction(null);
-    // an instruction ("Migrate Ironsight to Hailo T1") gets a confirmation card instead of going to the servers;
-    // if the planner fails the question is simply asked as before
-    const plan = await api.actionPlan(org.id, q.trim()).catch(() => null);
-    if (plan && plan.action !== "none") { setAction(plan as Exclude<ActionPlan, { action: "none" }>); setAsking(false); return; }
-    try {
-      await fleetAsk(org.id, q.trim(), (c) => {
-        const site = c.site as string | undefined;
-        if (c.type === "sites") { const init: typeof answers = {}; for (const s of c.sites as { site: string; site_name: string }[]) init[s.site] = { name: s.site_name, text: "" }; setAnswers(init); return; }
-        if (!site) return;
-        setAnswers((a) => {
-          const cur = a[site] ?? { name: String(c.site_name ?? site), text: "" };
-          if (c.type === "delta") return { ...a, [site]: { ...cur, text: cur.text + String(c.text ?? "") } };
-          if (c.type === "error") return { ...a, [site]: { ...cur, error: String(c.error), done: true } };
-          if (c.type === "site_done" || c.type === "done") return { ...a, [site]: { ...cur, done: true } };
-          return a;
-        });
-      });
-    } catch (e) { toast.error(e); } finally { setAsking(false); }
-  };
-  return (
-    <>
-      <h2>Find across {org.name}</h2>
-      <form className="row" onSubmit={(e) => { e.preventDefault(); search(); }}>
-        <input style={{ flex: 1, minWidth: 260 }} value={q} onChange={(e) => setQ(e.target.value)} placeholder='Search every server: "white pickup truck", "person at the back door last night"…' />
-        <button type="submit" disabled={busy || !q.trim()}>Search</button>
-        <button type="button" className="ghost" disabled={asking || !q.trim()} onClick={ask} title="Every server's assistant answers from its own footage. Instructions such as &quot;Migrate Ironsight to Hailo T1&quot; show a confirmation card instead">✦ Ask all servers</button>
-      </form>
-      <p className="small" style={{ margin: "4px 0 0" }}><a href="/customer/actions" onClick={go("/customer/actions")}>What can I ask the hub to do?</a></p>
-      {action && (
-        <ActionCard key={action.id} plan={action} helpHref="/customer/actions" onClose={() => setAction(null)}
-          onExecute={(x) => api.actionExecute(org.id, action.id, x)}
-          onUndo={(r) => api.actionUndo(org.id, r.audit_id!)} />
-      )}
-      {res && (
-        <>
-          <p className="muted small">{res.sites.map((s) => `${s.site_name}: ${s.events} events, ${s.footage} moments${s.error ? ` (${s.error})` : ""}`).join(" · ")}{res.offline.length ? ` · offline: ${res.offline.join(", ")}` : ""}</p>
-          {res.events.length === 0 && res.footage.length === 0 && <p className="muted">Nothing matched.</p>}
-          <div className="site-grid">
-            {res.events.map((e) => (
-              <a key={`${e.site_id}-${e.id}`} className="site-card" href={`/s/${e.site_id}/#timeline?cam=${e.camera_id}&event=${e.id}`}>
-                <div className="head"><strong>{e.site_name}</strong><span className="spacer" /><span className="muted small">{fmtTime(e.start_ts)}</span></div>
-                <div className="row" style={{ alignItems: "flex-start" }}>
-                  {e.snapshot ? <img src={`/s/${e.site_id}/api/events/${e.id}/media/snapshot.jpg`} alt="" style={{ width: 140, borderRadius: 6 }} /> : null}
-                  <div className="small">{e.synopsis || `${e.camera_class} · ${e.camera_id}`}</div>
-                </div>
-              </a>
-            ))}
-          </div>
-          {res.footage.length > 0 && (
-            <>
-              <h3>Footage moments</h3>
-              <div className="row">{res.footage.map((m, i) => <a key={i} className="chip" href={`/s/${m.site_id}/#timeline?cam=${m.camera_id}&t=${Math.round(m.ts)}`}>{m.site_name} · {m.camera_id} · {fmtTime(m.ts)}</a>)}</div>
-            </>
-          )}
-        </>
-      )}
-      {Object.keys(answers).length > 0 && (
-        <div className="site-grid" style={{ marginTop: 12 }}>
-          {Object.entries(answers).map(([id, a]) => (
-            <div key={id} className="site-card">
-              <div className="head"><strong>{a.name}</strong><span className="spacer" /><span className="muted small">{a.done ? "" : "thinking…"}</span></div>
-              {a.error ? <p className="small" style={{ color: "var(--bad)" }}>{a.error}</p> : <pre style={{ whiteSpace: "pre-wrap", font: "inherit", margin: "6px 0 0" }}>{a.text || (a.done ? "No answer." : "")}</pre>}
-              <a className="small" href={`/s/${id}/#find`}>Open this server's Find →</a>
-            </div>
-          ))}
-        </div>
-      )}
-    </>
-  );
-}
-
-// ---------------------------------------------------------------- alerts
-
-const KIND_LABEL: Record<string, string> = { offline: "Server offline", camera_down: "Camera down", disk: "Disk", clock: "Clock skew", event_high: "High priority", event_policy: "Site rule", event_watched: "Watch list" };
-
-function AlertsPage({ org }: { org: Org }) {
-  const [rows, setRows] = useState<Alert[]>([]);
-  const [showClosed, setShowClosed] = useState(false);
-  const load = useCallback(() => api.alerts(org.id, !showClosed).then(setRows).catch((e) => toast.error(e)), [org.id, showClosed]);
-  useEffect(() => { load(); const t = setInterval(load, 15000); return () => clearInterval(t); }, [load]);
-  const link = (a: Alert) => {
-    const d = a.detail as { id?: number; camera_id?: string; name?: string };
-    return d.id && d.camera_id ? `/s/${a.site_id}/#timeline?cam=${d.camera_id}&event=${d.id}` : a.kind === "camera_down" ? `/s/${a.site_id}/#cameras` : `/s/${a.site_id}/`;
-  };
-  return (
-    <>
-      <h2>Alerts <span className="muted small">{org.name}</span></h2>
-      <label className="row small"><input type="checkbox" checked={showClosed} onChange={(e) => setShowClosed(e.target.checked)} /> Include closed</label>
-      {rows.length === 0 ? <p className="muted">Nothing open.</p> : (
-        <table className="hub-table">
-          <thead><tr><th>When</th><th>Site</th><th>Server</th><th>Kind</th><th>What</th><th /></tr></thead>
-          <tbody>
-            {rows.map((a) => {
-              const d = a.detail as Record<string, unknown>;
-              const what = a.kind === "camera_down" ? `${d.name ?? a.key}: ${(d.problems as string[] | undefined)?.join("; ") || "no stream"}`
-                : a.kind === "clock" ? `${d.skew_s} s off` : a.kind === "disk" ? String(d.message ?? "low space")
-                : a.kind === "offline" ? `last seen ${ago(d.last_seen_at as number)}` : `${d.name ? `${d.name} · ` : ""}${d.text ?? d.synopsis ?? ""}`;
-              return (
-                <tr key={a.id} className={a.closed_at ? "muted" : ""}>
-                  <td>{fmtTime(a.opened_at)}</td>
-                  <td>{a.location_name ?? "—"}</td>
-                  <td>{a.site_name}</td>
-                  <td><span className={`alert-kind ${a.kind}`}>{KIND_LABEL[a.kind] ?? a.kind}</span></td>
-                  <td><a href={link(a)}>{what}</a></td>
-                  <td>{!a.closed_at && <button className="ghost small" onClick={async () => { await api.ack(a.id); load(); }}>Ack</button>}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      )}
-    </>
   );
 }
 

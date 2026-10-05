@@ -36,3 +36,20 @@ export const ofTotal = (n: number, total: number, word: string) => (total ? `${n
 
 /** Every server a Site page can act on (the rollup leaves retired ones out unless asked for). */
 export const siteServers = (s: Site | null | undefined): Server[] => s?.servers ?? [];
+
+/**
+ * One Site's part of a customer digest, in the digest's own Site grouping order when it has one. Null when the digest
+ * predates per-server data (callers then show the whole text). A server moved since the digest still counts for the
+ * Site it was in when it was written (location_id), plus any of the Site's current servers.
+ */
+export function digestPartsFor<P extends { site_id: string; location_id?: string | null }>(
+  data: { sites?: P[]; locations?: { id: string | null; servers: string[] }[] } | null | undefined,
+  site: { id: string; servers: { id: string }[] },
+): P[] | null {
+  if (!data?.sites) return null;
+  const mine = new Set(site.servers.map((s) => s.id));
+  const parts = data.sites.filter((p) => p.location_id === site.id || mine.has(p.site_id));
+  const order = data.locations?.find((g) => g.id === site.id)?.servers ?? [];
+  const rank = (id: string) => { const i = order.indexOf(id); return i < 0 ? order.length : i; };
+  return [...parts].sort((a, b) => rank(a.site_id) - rank(b.site_id));
+}

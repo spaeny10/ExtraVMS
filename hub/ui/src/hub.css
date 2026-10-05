@@ -92,3 +92,13 @@
 .site-live-cell { min-width: 0; }
 .site-live-down .player { background: #111; }
 .site-live-strip-off { aspect-ratio: 16 / 9; display: grid; place-items: center; background: #111; color: #aaa; font-size: 11px; }
+/* Find / Alerts per Site: an EventCard (a button) with its "open on server" link under it */
+.find-hit { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.find-hit-out { align-self: flex-end; padding: 0 4px; }
+.find-moment { display: inline-flex; align-items: center; gap: 4px; }
+.digest-part { margin-top: 8px; }
+/* Invites */
+.invite-form { align-items: flex-end; }
+.invite-form .field { margin: 0; }
+.invite-made { display: flex; flex-direction: column; gap: 6px; }
+.invite-box { max-width: 440px; }

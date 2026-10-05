@@ -1,0 +1,94 @@
+/**
+ * Alerts across the customer, or (with `site`) one Site's servers. Event alerts open the moment in the Site's combined
+ * Timeline (with the server console as a fallback link); server alerts open the server's panel in its Site.
+ * SiteAlerts is the Site page's Alerts tab: the list, a "Quiet alerts" fleet action and that Site's part of the digest.
+ */
+import { useCallback, useEffect, useState } from "react";
+import { toast } from "@site/ui";
+import { type Alert, type ExecPlan, type Org, type Site, ago, api, fmtTime } from "./api";
+import { FleetActionCard, planAction } from "./customer/FleetActionsPage";
+import { KIND_LABEL } from "./labels";
+import { consoleHref, consoleTimelineHref, go, serverHref } from "./nav";
+import { DigestCard } from "./SitesPage";
+import { siteTimelineHref } from "./timelineLink";
+
+/** Where an alert row points: [in-app href or null, server console href]. */
+function alertLinks(a: Alert): [string | null, string] {
+  const d = a.detail as { id?: number; camera_id?: string };
+  if (d.id && d.camera_id) {
+    return [a.location_id ? siteTimelineHref(a.location_id, a.site_id, d.camera_id, d.id) : null, consoleTimelineHref(a.site_id, { cam: d.camera_id, event: d.id })];
+  }
+  return [a.location_id ? serverHref(a.location_id, a.site_id) : null, consoleHref(a.site_id, a.kind === "camera_down" ? "cameras" : "")];
+}
+
+function describe(a: Alert): string {
+  const d = a.detail as Record<string, unknown>;
+  return a.kind === "camera_down" ? `${d.name ?? a.key}: ${(d.problems as string[] | undefined)?.join("; ") || "no stream"}`
+    : a.kind === "clock" ? `${d.skew_s} s off` : a.kind === "disk" ? String(d.message ?? "low space")
+    : a.kind === "offline" ? `last seen ${ago(d.last_seen_at as number)}` : `${d.name ? `${d.name} · ` : ""}${d.text ?? d.synopsis ?? ""}`;
+}
+
+export function AlertsPage({ org, site }: { org: Org; site?: Site }) {
+  const [rows, setRows] = useState<Alert[]>([]);
+  const [showClosed, setShowClosed] = useState(false);
+  const siteId = site?.id;
+  const load = useCallback(() => (siteId ? api.locationAlerts(siteId, !showClosed) : api.alerts(org.id, !showClosed)).then(setRows).catch((e) => toast.error(e)),
+    [org.id, siteId, showClosed]);
+  useEffect(() => { load(); const t = setInterval(load, 15000); return () => clearInterval(t); }, [load]);
+  // inside a Site the Site column is the page itself, and a one-server Site's Server column would repeat one name
+  const showServer = !site || site.servers.filter((s) => !s.retired_at).length > 1;
+  return (
+    <>
+      {site ? <h3 style={{ marginTop: 0 }}>Alerts</h3> : <h2>Alerts <span className="muted small">{org.name}</span></h2>}
+      <label className="row small"><input type="checkbox" checked={showClosed} onChange={(e) => setShowClosed(e.target.checked)} /> Include closed</label>
+      {rows.length === 0 ? <p className="muted">Nothing open.</p> : (
+        <table className="hub-table">
+          <thead><tr><th>When</th>{!site && <th>Site</th>}{showServer && <th>Server</th>}<th>Kind</th><th>What</th><th /></tr></thead>
+          <tbody>
+            {rows.map((a) => {
+              const [href, out] = alertLinks(a);
+              return (
+                <tr key={a.id} className={a.closed_at ? "muted" : ""}>
+                  <td>{fmtTime(a.opened_at)}</td>
+                  {!site && <td>{a.location_name ?? "—"}</td>}
+                  {showServer && <td>{a.site_name}</td>}
+                  <td><span className={`alert-kind ${a.kind}`}>{KIND_LABEL[a.kind] ?? a.kind}</span></td>
+                  <td>
+                    {href ? <a href={href} onClick={go(href)}>{describe(a)}</a> : <a href={out}>{describe(a)}</a>}
+                    {href && <> <a className="small muted" href={out} title="Open on server">↗</a></>}
+                  </td>
+                  <td>{!a.closed_at && <button className="ghost small" onClick={async () => { try { await api.ack(a.id); load(); } catch (e) { toast.error(e); } }}>Ack</button>}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+    </>
+  );
+}
+
+/** The Site page's Alerts tab. "Quiet alerts" goes through the fleet-actions planner so it gets the same card, role check and Undo. */
+export function SiteAlerts({ org, site }: { org: Org; site: Site }) {
+  const [plan, setPlan] = useState<ExecPlan | null>(null);
+  const [busy, setBusy] = useState(false);
+  const quiet = async () => {
+    setBusy(true);
+    try {
+      const p = await planAction(org, `Quiet alerts at ${site.name} for 2 hours`);
+      if (p) setPlan(p);
+      else toast.error("The hub couldn't plan that. Try Find → Ask, e.g. \"Quiet alerts at this site for 2 hours\".");
+    } finally { setBusy(false); }
+  };
+  return (
+    <>
+      <div className="row" style={{ marginBottom: 8 }}>
+        <span className="spacer" style={{ flex: 1 }} />
+        <button className="ghost small" disabled={busy} onClick={quiet}>{busy ? "Planning…" : `Quiet alerts at ${site.name}…`}</button>
+      </div>
+      {plan && <FleetActionCard org={org} plan={plan} onClose={() => setPlan(null)} />}
+      <AlertsPage org={org} site={site} />
+      <DigestCard org={org} site={site} />
+    </>
+  );
+}

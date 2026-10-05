@@ -49,6 +49,8 @@ export type ActionPlan = { action: "none" } | (ActionPlanCore & {
 });
 export type ActionVerb = { action: string; title: string; role: string; confirm_name: boolean; examples: string[]; moves: string[]; stays: string[]; undo: string; options: string[]; inputs: string[] };
 export type ActionRecent = { id: number; ts: number; user_email: string | null; action: string; status: number | null; lines: string[]; undo_until: number | null };
+/** A plan that is an action (the Ask box shows its confirmation card). */
+export type ExecPlan = Exclude<ActionPlan, { action: "none" }>;
 export type ActionReference = { verbs: ActionVerb[]; safety: string[]; capacity: string[]; recent: ActionRecent[]; undo_hours: number };
 export type Alert = { id: number; org_id: string; site_id: string; site_name: string; kind: string; key: string; opened_at: number; closed_at: number | null; acked_by: string | null; detail: Record<string, unknown> } & LocationTag;
 export type Member = { id: string; email: string; role: string; totp_enabled: boolean; last_login_at: number | null; sites: string[]; all_sites: boolean; location_ids: string[] };
@@ -56,12 +58,35 @@ export type Member = { id: string; email: string; role: string; totp_enabled: bo
 export type Access = { all_sites: boolean; location_ids: string[] };
 export type AuditRow = { id: number; ts: number; user_email: string | null; site_id: string | null; action: string; method: string | null; path: string | null; status: number | null; ip: string | null; undo_until?: number | null } & LocationTag;
 export type Usage = { ai_shared: boolean; configured: boolean; model: string; provider: { kind: "site" | "url" | "none"; site_id?: string; site_name?: string | null; online: boolean }; turn: boolean; days: number; sites: { site_id: string; site_name: string; requests: number; prompt_tokens: number; completion_tokens: number; latency_ms: number; errors: number }[] };
+/**
+ * Where a fan-out result came from. `site_id/site_name` are the server (the wire name predates Sites); newer hubs add
+ * the explicit server_* pair and the Site (location_*), so readers fall back to site_id when server_id is missing.
+ */
+export type ServerTag = { site_id: string; site_name: string; server_id?: string; server_name?: string } & LocationTag;
+export type FleetSearchEvent = Record<string, unknown> & ServerTag & { id: number; camera_id: string; start_ts: number; synopsis?: string | null; camera_class: string; snapshot?: string | null };
 export type FleetSearch = {
-  q: string; sites: { site_id: string; site_name: string; error: string | null; events: number; footage: number }[]; offline: string[];
-  events: (Record<string, unknown> & { id: number; camera_id: string; start_ts: number; synopsis?: string | null; camera_class: string; site_id: string; site_name: string; snapshot?: string | null })[];
-  footage: { camera_id: string; ts: number; score: number; site_id: string; site_name: string }[];
+  q: string; sites: (ServerTag & { error: string | null; events: number; footage: number })[]; offline: string[];
+  events: FleetSearchEvent[];
+  footage: (ServerTag & { camera_id: string; ts: number; score: number })[];
 };
-export type Digest = { id: number; org_id: string; day: string; created_at: number; text: string; model: string | null };
+/** One server's part of a digest (hub/hub/digest.py collect); `site_id` is the server. */
+export type DigestPart = ServerTag & {
+  online: boolean; headline: string | null; text: string | null; today: Record<string, number>; cameras_down: string[];
+  open_alerts: { kind: string; detail: Record<string, unknown> }[];
+};
+/** `data` is what the text was written from; `locations` groups its servers by Site (absent on digests older than Sites). */
+export type Digest = {
+  id: number; org_id: string; day: string; created_at: number; text: string; model: string | null;
+  data?: { generated_at?: number; sites?: DigestPart[]; locations?: { id: string | null; name: string; servers: string[] }[] } | null;
+};
+/** A pending invite link (GET /api/orgs/{org}/invites). `email` "" = anyone holding the link may accept it. */
+export type Invite = {
+  code: string; url: string; email: string; role: string; all_sites: boolean; location_ids: string[]; label: string | null;
+  expires_at: number; created_at: number | null; created_by: string | null; locations?: { id: string; name: string }[]; created_by_email?: string | null;
+};
+/** The public preview shown on /invite/<code> before anyone signs in; the address is masked (s***@example.com). */
+export type InvitePreview = { org_name: string; role: string; all_sites: boolean; locations: { id: string; name: string }[]; email_hint: string; expires_at: number; label: string | null };
+export type InviteAccepted = { totp_required?: boolean; user?: Me["user"]; orgs?: Org[]; org_id?: string; role?: string } & Partial<Access>;
 export type Backup = { id: number; created_at: number; bytes: number; cameras: number; identities: number; site_version: string | null };
 export type PushInfo = { public_key: string; subscriptions: { endpoint: string; kinds: string[]; ua: string }[]; kinds: string[] };
 export type ClaimPreview = { code: string; hint: { hostname?: string; cameras?: { id: string; name: string }[]; version?: string }; agent_ip: string | null; waiting: boolean };
@@ -114,11 +139,23 @@ export const api = {
   /** 409 while servers remain unless moveTo names another Site of the customer. */
   deleteLocation: (id: string, moveTo?: string) => req<{ ok: boolean; moved: number }>(`/api/locations/${id}?${qs({ move_to: moveTo })}`, { method: "DELETE" }),
   locationCameras: (id: string) => req<Camera[]>(`/api/locations/${id}/cameras`),
-  alerts: (org: string, open = true) => req<Alert[]>(`/api/alerts?${qs({ org, open })}`),
+  /** location narrows to one Site's servers (same rows as locationAlerts). */
+  alerts: (org: string, open = true, location?: string) => req<Alert[]>(`/api/alerts?${qs({ org, open, location })}`),
+  locationAlerts: (id: string, open = true, limit?: number) => req<Alert[]>(`/api/locations/${id}/alerts?${qs({ open, limit })}`),
+  /** The latest events across one Site's servers (same params and shape as fleetEvents). */
+  locationEvents: (id: string, p: { cameras?: { site: string; camera: string }[]; classes?: string[]; limit?: number; since?: number } = {}) =>
+    req<FleetEvents>(`/api/locations/${id}/events?${qs({ cameras: p.cameras?.map((c) => `${c.site}:${c.camera}`).join(","), classes: p.classes?.join(","), limit: p.limit, since: p.since })}`),
   ack: (id: number) => req(`/api/alerts/${id}/ack`, { method: "POST" }),
   audit: (org: string, site?: string) => req<AuditRow[]>(`/api/audit?${qs({ org, site })}`),
   usage: (org: string, days = 30) => req<Usage>(`/api/orgs/${org}/usage?${qs({ days })}`),
-  fleetSearch: (org: string, q: string, since?: number) => req<FleetSearch>(`/api/fleet/search?${qs({ org, q, since })}`),
+  fleetSearch: (org: string, q: string, since?: number, location?: string) => req<FleetSearch>(`/api/fleet/search?${qs({ org, q, since, location })}`),
+  // invites: links an admin hands out (nothing is emailed); the code in the link is the secret
+  invites: (org: string) => req<Invite[]>(`/api/orgs/${org}/invites`),
+  createInvite: (org: string, b: { email?: string; role: string; label?: string; expires_days: number } & Access) => req<Invite>(`/api/orgs/${org}/invites`, json("POST", b)),
+  revokeInvite: (org: string, code: string) => req(`/api/orgs/${org}/invites/${encodeURIComponent(code)}`, { method: "DELETE" }),
+  invitePreview: (code: string) => req<InvitePreview>(`/api/invites/${encodeURIComponent(code)}`),
+  /** Signed in: no body needed (the invite joins this account). Otherwise email + password (+ totp when asked for). */
+  acceptInvite: (code: string, b: { email?: string; password?: string; totp?: string } = {}) => req<InviteAccepted>(`/api/invites/${encodeURIComponent(code)}/accept`, json("POST", b)),
   // home dashboards, camera groups, fleet events
   dashboards: (org: string) => req<DashboardList>(`/api/orgs/${org}/dashboards`),
   dashboard: (org: string, id: string) => req<Dashboard & { can_edit: boolean }>(`/api/orgs/${org}/dashboards/${id}`),
@@ -158,9 +195,12 @@ export function subscribeFleet(org: string, onMessage: (m: FleetMessage) => void
   return () => { closed = true; ws?.close(); };
 }
 
-/** Fleet Ask: every site's assistant answers; onChunk gets {site, site_name, ...chunk} lines. */
-export async function fleetAsk(org: string, message: string, onChunk: (c: Record<string, unknown>) => void) {
-  const r = await fetch("/api/fleet/ask", json("POST", { org, message }));
+/**
+ * Fleet Ask: every server's assistant answers; onChunk gets {site, site_name, server_*, location_*, ...chunk} lines
+ * (`site` = the server id). `location` asks only that Site's servers.
+ */
+export async function fleetAsk(org: string, message: string, onChunk: (c: Record<string, unknown>) => void, location?: string) {
+  const r = await fetch("/api/fleet/ask", json("POST", { org, message, location }));
   if (!r.ok || !r.body) throw new Error(`${r.status} ${await r.text()}`);
   const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = "";
   for (;;) {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { accessLabel, lastEventBySite, ofTotal, toggleAccess } from "./access";
+import { accessLabel, digestPartsFor, lastEventBySite, ofTotal, toggleAccess } from "./access";
 
 describe("toggleAccess", () => {
   const a = { all_sites: false, location_ids: ["l_1"] };
@@ -36,5 +36,22 @@ describe("ofTotal", () => {
   it("formats", () => {
     expect(ofTotal(2, 3, "online")).toBe("2/3 online");
     expect(ofTotal(0, 0, "up")).toBe("—");
+  });
+});
+
+describe("digestPartsFor", () => {
+  const data = {
+    sites: [{ site_id: "s_a", location_id: "l_1" }, { site_id: "s_b", location_id: "l_2" }, { site_id: "s_c", location_id: "l_1" }, { site_id: "s_d", location_id: null }],
+    locations: [{ id: "l_1", servers: ["s_c", "s_a"] }, { id: "l_2", servers: ["s_b"] }],
+  };
+  it("keeps this Site's servers in the digest's order", () => {
+    expect(digestPartsFor(data, { id: "l_1", servers: [] })!.map((p) => p.site_id)).toEqual(["s_c", "s_a"]);
+  });
+  it("adds a server moved into the Site since", () => {
+    expect(digestPartsFor(data, { id: "l_2", servers: [{ id: "s_d" }] })!.map((p) => p.site_id)).toEqual(["s_b", "s_d"]);
+  });
+  it("null for a digest without per-server data", () => {
+    expect(digestPartsFor({}, { id: "l_1", servers: [] })).toBeNull();
+    expect(digestPartsFor(null, { id: "l_1", servers: [] })).toBeNull();
   });
 });

@@ -1,5 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { consoleHref, matchRoute, serverHref, siteHref } from "./nav";
+import { consoleHref, consoleTimelineHref, matchRoute, serverHref, siteHref } from "./nav";
+
+describe("invite route", () => {
+  it("is public and carries the code", () => {
+    expect(matchRoute("/invite/AbC_123")).toEqual({ page: "invite", code: "AbC_123" });
+    expect(matchRoute("/invite")).toEqual({ page: "home", redirect: "/" });
+  });
+});
+
+describe("consoleTimelineHref", () => {
+  it("an event or a moment on the server's own Timeline", () => {
+    expect(consoleTimelineHref("s_2", { cam: "c 1", event: 5 })).toBe("/s/s_2/#timeline?cam=c+1&event=5");
+    expect(consoleTimelineHref("s_2", { cam: "c", t: 10.4 })).toBe("/s/s_2/#timeline?cam=c&t=10");
+    expect(consoleTimelineHref("s_2", { cam: "c", event: 5, t: 9 })).toBe("/s/s_2/#timeline?cam=c&event=5");
+  });
+});
 
 describe("matchRoute", () => {
   it("top-level pages", () => {

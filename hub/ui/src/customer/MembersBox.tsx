@@ -6,6 +6,7 @@ import { useState } from "react";
 import { confirmDialog, toast } from "@site/ui";
 import { type Access, type Member, type Org, type Site, ago, api } from "../api";
 import { accessLabel, toggleAccess } from "../access";
+import { go } from "../nav";
 
 export const ROLES = ["viewer", "operator", "admin", "owner"];
 
@@ -39,6 +40,8 @@ export function MembersBox({ org, members, sites, onChanged }: { org: Org; membe
         </tbody>
       </table>
       <h4>Add a member</h4>
+      <p className="muted small" style={{ marginTop: 0 }}>Prefer invites: <a href="/customer/invites" onClick={go("/customer/invites")}>Invites</a> makes a link
+        and the person sets their own password. Adding here needs an initial password for someone new.</p>
       <div className="row">
         <input type="email" placeholder="email" value={email} onChange={(e) => setEmail(e.target.value)} />
         <select value={role} onChange={(e) => setRole(e.target.value)}>{ROLES.map((r) => <option key={r} value={r}>{r}</option>)}</select>
@@ -54,7 +57,7 @@ export function MembersBox({ org, members, sites, onChanged }: { org: Org; membe
 /** A hub older than Sites sends only `sites` (server ids, [] = all): treat that as All sites rather than "none". */
 const memberAccess = (m: Member): Access => ({ all_sites: m.all_sites ?? true, location_ids: m.location_ids ?? [] });
 
-function AccessPicker({ value, sites, onChange }: { value: Access; sites: Site[]; onChange: (a: Access) => void }) {
+export function AccessPicker({ value, sites, onChange }: { value: Access; sites: Site[]; onChange: (a: Access) => void }) {
   return (
     <div className="access-picker" title={accessLabel(value, sites)}>
       <label className="small"><input type="checkbox" checked={value.all_sites} onChange={(e) => onChange(toggleAccess(value, { all: e.target.checked }))} /> All sites</label>

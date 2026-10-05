@@ -1,7 +1,21 @@
 /** Customer → Fleet actions: what the hub's Ask box can be told to do, the safety rules, and the action log with Undo. */
 import { useCallback, useEffect, useState } from "react";
 import { confirmDialog, toast } from "@site/ui";
-import { type ActionReference, type Org, api, fmtTime } from "../api";
+import { ActionCard } from "@site/ActionCard";
+import { type ActionReference, type ExecPlan, type Org, api, fmtTime } from "../api";
+
+/** Plan an instruction; null when it isn't one (or the planner failed), so callers can fall back to asking. */
+export const planAction = (org: Org, text: string): Promise<ExecPlan | null> =>
+  api.actionPlan(org.id, text).then((p) => (p.action === "none" ? null : (p as ExecPlan))).catch(() => null);
+
+/** The confirmation card for a fleet action plan, wired to this customer's execute/undo (Find's Ask box, a Site's Alerts tab). */
+export function FleetActionCard({ org, plan, onClose }: { org: Org; plan: ExecPlan; onClose: () => void }) {
+  return (
+    <ActionCard key={plan.id} plan={plan} helpHref="/customer/actions" onClose={onClose}
+      onExecute={(x) => api.actionExecute(org.id, plan.id, x)}
+      onUndo={(r) => api.actionUndo(org.id, r.audit_id!)} />
+  );
+}
 
 /** Undo a fleet action from its audit row (offered for 24 h; the server runs the stored reverse plan). */
 export function UndoButton({ org, id, label, onDone }: { org: Org; id: number; label: string; onDone: () => void }) {
