@@ -1,6 +1,10 @@
 /** SOC client (hub/hub/soc_api.py): the same req/json/qs as api.ts, so errors read `${status} ${text}` everywhere. */
 import { json, qs, req } from "../api";
-import type { CallOutcome, Dispositions, Incident, IncidentDetail, Presence, PresenceStatus, SlaPolicy, SocMessage, SocSite } from "./types";
+import { normFalseAlarms, normOperators } from "./reports/normalize";
+import type {
+  CallOutcome, CustomerSummary, Dispositions, Incident, IncidentDetail, Overview, Presence, PresenceStatus, Priority,
+  ShiftReport, SlaPolicy, SlaRule, SocMessage, SocSite,
+} from "./types";
 
 const inc = (id: number | string, verb: string) => `/api/soc/incidents/${encodeURIComponent(String(id))}/${verb}`;
 const send = <T>(url: string, body?: unknown) => req<T>(url, body === undefined ? { method: "POST" } : json("POST", body));
@@ -62,3 +66,27 @@ export function subscribeSoc(onMessage: (m: SocMessage) => void, onStatus?: (up:
   connect();
   return () => { closed = true; if (timer) clearTimeout(timer); ws?.close(); };
 }
+
+/** Supervisor view and reports (stages 3 and 5). */
+export const socSupervisorApi = {
+  overview: () => req<Overview>("/api/soc/overview"),
+  /** {sla, defaults}: the editor shows the defaults next to what is in force */
+  slaFull: () => req<{ sla: SlaPolicy; defaults?: SlaPolicy }>("/api/soc/sla"),
+  /** Partial: per priority only the fields sent change; a priority sent as null goes back to its defaults. */
+  putSla: (patch: Partial<Record<Priority, Partial<SlaRule> | null>>) => req<{ sla: SlaPolicy; defaults?: SlaPolicy }>("/api/soc/sla", json("PUT", patch)),
+  /** Send a resolution awaiting verification back to its operator, with the reason. */
+  reject: (id: number, note: string) => post(inc(id, "reject"), { note }),
+};
+
+export type ReportQuery = { since?: number; until?: number; org?: string };
+export const socReportsApi = {
+  /** {operators, totals}; soc_reports.py nests the percentiles, normalize.ts flattens them */
+  operators: (q: ReportQuery = {}) => req<unknown>(`/api/soc/reports/operators?${qs(q)}`).then(normOperators),
+  falseAlarms: (q: ReportQuery = {}) => req<unknown>(`/api/soc/reports/false-alarms?${qs(q)}`).then(normFalseAlarms),
+  shifts: (limit = 60) => req<ShiftReport[] | { reports: ShiftReport[] }>(`/api/soc/reports/shifts?${qs({ limit })}`)
+    .then((r) => (Array.isArray(r) ? r : r.reports ?? [])),
+  shift: (id: number) => req<ShiftReport>(`/api/soc/reports/shifts/${encodeURIComponent(String(id))}`),
+  /** Blank: the last completed shift (the hub's shift ends). */
+  generateShift: (b: { start?: number; end?: number } = {}) => req<ShiftReport>("/api/soc/reports/shifts/generate", json("POST", b)),
+  customer: (org: string, year: number, month: number) => req<CustomerSummary>(`/api/soc/reports/customers/${encodeURIComponent(org)}?${qs({ year, month })}`),
+};

@@ -166,3 +166,80 @@ kbd, .soc-kbd { display: inline-block; font: 600 11px/1.4 ui-monospace, SFMono-R
 .site-incident-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
 .site-incident-list summary { cursor: pointer; padding: 4px 0; }
 .site-incident-body { padding: 4px 0 8px 12px; display: grid; gap: 6px; }
+
+/* ---- supervisor (/soc/supervisor) */
+.soc-sup { display: grid; gap: 12px; }
+.soc-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin-bottom: 10px; }
+.soc-tile { display: grid; gap: 2px; padding: 10px 12px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); }
+.soc-tile-value { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.soc-tile-name { font-size: 12px; color: var(--muted); }
+/* red when something is past its SLA; the ⚠ in the name says it without colour */
+.soc-tile.hot { background: color-mix(in srgb, var(--t-high) 22%, var(--panel)); border-color: var(--t-high); }
+.soc-tile.hot .soc-tile-name { color: var(--text); font-weight: 600; }
+.soc-tiles.small .soc-tile-value { font-size: 18px; }
+/* the incident panel sits beside the tables (wide screens only: SupervisorPage navigates instead below 1100 px) */
+.soc-sup-body { display: grid; gap: 12px; }
+.soc-sup-body.with-panel { grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); align-items: start; }
+.soc-sup-main { display: grid; gap: 12px; min-width: 0; }
+.soc-sup-panel { position: sticky; top: 8px; max-height: calc(100vh - 16px); max-height: calc(100dvh - 16px); overflow-y: auto; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; }
+.soc-sup-panel-head { gap: 10px; align-items: center; margin-bottom: 8px; }
+.soc-sup-panel-head strong { flex: 1; }
+/* IncidentPage's own two-column, full-height grid stacks inside the panel */
+.soc-sup-panel .soc-popout { grid-template-columns: 1fr; height: auto; min-height: 0; }
+.soc-sup-panel .soc-col { overflow: visible; }
+.soc-sup-card h3 { margin: 0 0 8px; font-size: 15px; }
+.soc-sup-head { gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+.soc-sup-head h3 { margin: 0; margin-right: auto; }
+.soc-sup-head select { font-size: 13px; }
+.soc-board-actions { white-space: nowrap; }
+.soc-board-actions > * + * { margin-left: 4px; }
+.soc-dot-available { background: var(--ok); }
+.soc-dot-engaged { background: var(--accent); }
+.soc-dot-break { background: var(--t-medium); }
+.soc-dot-offline { background: var(--muted); }
+tr.muted td { color: var(--muted); }
+.soc-row-escalated td { background: color-mix(in srgb, var(--t-high) 10%, transparent); }
+.soc-row-verify td { background: color-mix(in srgb, var(--t-medium) 10%, transparent); }
+/* a button that reads as a link (opens an incident in the panel, not a navigation) */
+.soc-linklike { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; text-align: left; font: inherit; }
+.soc-linklike:hover { text-decoration: underline; }
+.soc-sla-editor > summary { cursor: pointer; list-style: none; }
+.soc-sla-editor > summary::-webkit-details-marker { display: none; }
+.soc-sla-editor > summary h3::before { content: "▸ "; color: var(--muted); }
+.soc-sla-editor[open] > summary h3::before { content: "▾ "; }
+.soc-sla-editor input { width: 6em; }
+
+/* ---- reports (/soc/reports/…) */
+.soc-reports { display: grid; gap: 12px; }
+.soc-report h2 { margin: 0; margin-right: auto; font-size: 18px; }
+.soc-report-head { gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.soc-range { gap: 6px; align-items: center; flex-wrap: wrap; }
+.soc-range .segmented button { padding: 4px 10px; }
+.soc-report-scroll { overflow-x: auto; }
+.soc-report-table td, .soc-report-table th { white-space: nowrap; }
+.soc-report-table thead tr:first-child th[colspan] { text-align: center; }
+.soc-rate { display: inline-flex; align-items: center; gap: 6px; }
+.soc-bar { display: inline-block; width: 90px; height: 8px; border-radius: 99px; background: var(--panel-2); overflow: hidden; }
+.soc-bar > span { display: block; height: 100%; background: var(--t-medium); }
+.soc-fa-site td { border-top: 2px solid var(--border); }
+.soc-fa-indent { padding-left: 16px; }
+.soc-shifts { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 12px; }
+.soc-shift-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; align-content: start; max-height: 70vh; overflow-y: auto; }
+.soc-shift-item { display: grid; gap: 2px; width: 100%; text-align: left; padding: 6px 8px; background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; }
+.soc-shift-item.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--panel-2)); }
+.soc-generate { gap: 6px; align-items: center; flex-wrap: wrap; }
+.soc-report-text { white-space: pre-wrap; word-break: break-word; font-size: 14px; line-height: 1.5; font-family: inherit; background: var(--panel-2); border-radius: 8px; padding: 10px 12px; margin: 8px 0 0; }
+
+/* phones: everything stacks; tables scroll sideways inside their card rather than widening the page */
+@media (max-width: 700px) {
+  .soc-tiles { grid-template-columns: repeat(2, 1fr); }
+  .soc-shifts { grid-template-columns: 1fr; }
+  .soc-shift-list { max-height: 40vh; }
+  .soc-sup-card, .soc-report { overflow-x: auto; }
+  .soc-report-head > * { flex: 1 1 100%; }
+}
+.soc-report-total td { font-weight: 600; border-top: 2px solid var(--border); }
+.soc-breakdowns { display: grid; gap: 2px; margin: 0 0 8px; font-size: 13px; }
+.soc-breakdowns > div { display: grid; grid-template-columns: minmax(8em, max-content) 1fr; gap: 8px; }
+.soc-breakdowns dt { color: var(--muted); }
+.soc-breakdowns dd { margin: 0; }

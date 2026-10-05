@@ -99,3 +99,55 @@ export type SocMessage =
   /** the hub sends one changed entry; a whole roster is accepted too */
   | { type: "presence"; presence: Presence | Presence[]; sound?: SoundPolicy; ring_count?: number }
   | { type: "arming"; location_id: string; armed: boolean; reason: string; site?: SocSite; sound?: SoundPolicy; ring_count?: number };
+
+// ---- supervisor and reports (soc_api.py overview, soc_reports.py)
+
+/** A roster entry as the overview sends it: presence plus the operator's load. */
+export type OperatorLoad = Presence & { claimed?: number; pending_verify?: number; resolved_24h?: number };
+
+/**
+ * GET /api/soc/overview. `escalations` and `overdue` arrive with the escalation engine (stage 3); the page reads them
+ * when present and works them out from the queue otherwise.
+ */
+export type Overview = {
+  now: number; by_state: Record<string, number>; by_lane: Record<string, number>; by_escalation: Record<string, number>;
+  breaches: { claim: number; resolve: number }; oldest_unclaimed_at: number | null; ring_count: number; sound?: SoundPolicy;
+  operators: OperatorLoad[];
+  escalations?: { level1?: number; level2?: number; level3?: number };
+  overdue?: number;
+};
+
+export type OperatorStat = {
+  user_id: string; email: string; claimed: number; resolved: number;
+  p50_claim_s: number | null; p95_claim_s: number | null; p50_resolve_s: number | null; p95_resolve_s: number | null;
+  dispositions: Record<string, number>;
+  /** the hub's escalations_received: escalated / overdue while they held the incident */
+  escalations: number;
+  /** incidents they picked up after these had escalated */
+  escalated_claimed?: number;
+  false_alarm_share: number | null;
+};
+
+/**
+ * `rate` is false alarms over judged incidents (closed minus swept / expired ones nobody looked at); `last_ts` is
+ * the opening time of the newest closed incident (the hub's last_incident_at).
+ */
+export type FalseAlarmSite = { location_id: string; name: string; org_name: string | null; closed: number; judged: number; false: number; rate: number | null; top_disposition: string | null; last_ts: number | null };
+export type FalseAlarmCamera = {
+  location_id: string; server_id: string; server_name: string | null; camera_id: string; camera_name: string | null;
+  closed: number; judged: number; false: number; rate: number | null; top_disposition: string | null; last_ts: number | null;
+};
+export type FalseAlarms = { sites: FalseAlarmSite[]; cameras: FalseAlarmCamera[] };
+
+/** A stored shift report. `data` holds the numbers the text was written from (loosely typed: the hub may add more). */
+export type ShiftReport = { id: number; period_start: number; period_end: number; created_at: number; text: string | null; data: Record<string, unknown> | null; model: string | null };
+
+export type CustomerSummarySite = Record<string, unknown> & { location_id?: string; id?: string; name?: string };
+/**
+ * GET /api/soc/reports/customers/{org}: the stored monthly report row (the hub builds and stores it on first ask).
+ * `data` carries org_id, year, month, sites (per-Site numbers and breakdowns) and totals.
+ */
+export type CustomerSummary = {
+  id?: number; org_id?: string; period_start?: number; period_end?: number; created_at?: number; model?: string | null; text: string | null;
+  data: (Record<string, unknown> & { year?: number; month?: number; sites?: CustomerSummarySite[]; totals?: Record<string, unknown> }) | null;
+};

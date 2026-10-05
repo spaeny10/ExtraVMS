@@ -113,7 +113,7 @@ export function SocStreamProvider({ me, enabled, children }: { me: Me; enabled: 
     const before = levels.current.get(i.id) ?? 0;
     levels.current.set(i.id, i.escalation_level ?? 0);
     // level 2 = supervisors paged: a distinct chime, once per incident crossing it
-    if ((i.escalation_level ?? 0) >= 2 && before < 2 && i.state !== "closed") ringer().chime();
+    if ((i.escalation_level ?? 0) >= 2 && before < 2 && i.state !== "closed") ringer().chimeOnce(i.id);
     if (m.type === "incident_opened" && i.lane === "ring") {
       setAnnouncement(`New ${i.priority} priority incident at ${i.org_name} › ${i.location_name}${i.title ? `: ${i.title}` : ""}`);
     }

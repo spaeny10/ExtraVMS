@@ -135,6 +135,20 @@ export class Ringer {
     this.play(ESCALATION_CHIME);
   }
 
+  /**
+   * The chime once per incident (escalation frames repeat the level; the supervisor view also chimes for incidents
+   * that were already escalated when it opened). Returns false when this incident has had its chime.
+   */
+  private chimed = new Set<number>();
+  chimeOnce(id: number): boolean {
+    if (this.chimed.has(id)) return false;
+    this.chimed.add(id);
+    this.chime();
+    return true;
+  }
+  /** ids that have had their chime (read by supervisor.chimeDue) */
+  get chimedIds(): ReadonlySet<number> { return this.chimed; }
+
   private start() {
     if (this.timer) return;
     this.timer = setInterval(() => this.tick(), 1000);

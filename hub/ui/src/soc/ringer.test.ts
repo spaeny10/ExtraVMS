@@ -73,3 +73,13 @@ describe("Ringer across tabs", () => {
     r.stop();
   });
 });
+
+describe("chimeOnce", () => {
+  it("chimes each incident once", () => {
+    const r = new Ringer({ storage: () => null, channel: () => null, audio: () => null, now: () => 0 });
+    expect(r.chimeOnce(4)).toBe(true);
+    expect(r.chimeOnce(4)).toBe(false);
+    expect(r.chimeOnce(5)).toBe(true);
+    expect([...r.chimedIds]).toEqual([4, 5]);
+  });
+});
