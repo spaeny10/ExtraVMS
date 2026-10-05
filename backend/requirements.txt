@@ -17,3 +17,5 @@ numpy
 opencv-python-headless
 python-multipart
 pyyaml
+cryptography
+psutil

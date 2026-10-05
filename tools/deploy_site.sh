@@ -130,4 +130,7 @@ systemctl restart nvr
 sleep 8
 systemctl --no-pager --lines=5 status nvr || true
 echo
+# Ports: 8080 (HTTP UI) and 8443 (HTTPS, self-signed: Direct-on-LAN for hub users on this LAN, NVR_HTTPS_PORT)
+# must be reachable from the LAN. This script opens nothing; with a host firewall (ufw) run e.g.
+#   ufw allow from 192.168.0.0/16 to any port 8080,8443 proto tcp
 echo "== done. UI: http://$(hostname -I | awk '{print $1}'):8080   claim code: curl -s localhost:8080/api/hub"

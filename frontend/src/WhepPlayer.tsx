@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { api, makeApi } from "./api";
+import { api, makeApi, type SiteApi } from "./api";
 
 /**
  * WebRTC (WHEP) player for a MediaMTX path.
  * onUnsupported fires when the browser can't decode the stream's codec (e.g. H.265 main streams),
  * so the caller can fall back to the H.264 sub stream.
  */
-export function WhepPlayer({ path, port, className, onUnsupported, showSize = false, videoRef, children, iceServers, onFallback, base, muted = true, onAudio }: {
+export function WhepPlayer({ path, port, className, onUnsupported, showSize = false, videoRef, children, iceServers, onFallback, base, site: given, muted = true, onAudio }: {
   path: string; port: number; className?: string; onUnsupported?: () => void; showSize?: boolean;
   /** sound off (default); unmuting must follow a click, browsers block autoplaying audio */
   muted?: boolean;
@@ -14,6 +14,8 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
   onAudio?: (has: boolean) => void;
   /** URL prefix of the site that owns the camera ("/s/<site>" on the hub dashboard); default: this page's site */
   base?: string;
+  /** the camera's server client; wins over `base` (the hub's direct client carries a token a bare base can't) */
+  site?: SiteApi;
   /** STUN/TURN servers (a hub relay when viewed remotely); none = direct/LAN candidates only */
   iceServers?: RTCIceServer[];
   /** called after repeated connection failures so the caller can switch to a non-WebRTC picture */
@@ -32,7 +34,7 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
   const fallback = useRef(onFallback);
   fallback.current = onFallback;
   const failures = useRef(0);
-  const site = useMemo(() => (base === undefined ? api : makeApi(base)), [base]);
+  const site = useMemo(() => given ?? (base === undefined ? api : makeApi(base)), [given, base]);
   const audioCb = useRef(onAudio);
   audioCb.current = onAudio;
   useEffect(() => { if (video.current) video.current.muted = muted; }, [muted]);  // React doesn't sync the muted attribute

@@ -1,2 +1,4 @@
 /* The combined Timeline (SiteTimeline.tsx): the note naming servers whose lanes are missing. */
 .site-timeline-note { margin: 0 0 8px; }
+/* "Playing one camera via the hub" (TimelineView soloHint) */
+.tl-solo-hint { margin: 4px 0; }

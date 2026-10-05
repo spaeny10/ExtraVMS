@@ -379,20 +379,42 @@ const qs = (params: Record<string, string | number | undefined | null>) =>
     Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== "") as [string, string][],
   ).toString();
 
+/** Playback quality: "hd" = the recording as stored; "sd" = the server's 720p low-bitrate transcode (remote viewing). */
+export type PlaybackQuality = "sd" | "hd";
+
+/**
+ * Extra options for a client that talks to a server from somewhere other than its own origin (the hub's
+ * Direct-on-LAN client, base = "https://<lan-ip>:8443"):
+ * `query` is appended to every URL the client builds. <video>/<img> src can't carry headers and a cross-site cookie
+ * may be blocked as third-party, so the direct token travels in the URL (?direct=<token>).
+ * `fetchInit` is merged under each REST call's own init (e.g. credentials: "include" for the handshake cookie).
+ */
+export type ApiOptions = { query?: Record<string, string>; fetchInit?: RequestInit };
+
+/** Append `extra` to a URL that may already have a query string (`url` is a path or an absolute URL). */
+export function withQuery(url: string, extra?: Record<string, string>): string {
+  const q = extra ? qs(extra) : "";
+  if (!q) return url;
+  return url + (url.includes("?") ? "&" : "?") + q;
+}
+
 /**
  * All backend calls for one site. `api` is the site this page is served from (prefix BASE); the fleet hub's
  * dashboard builds one per site with makeApi("/s/<site>") so tiles and feeds can mix sites on one page.
+ * `opts` (ApiOptions) is only used by the hub's direct client; without it every URL is exactly as before.
  */
-export function makeApi(base: string) {
+export function makeApi(base: string, opts: ApiOptions = {}) {
+  const u = (path: string) => withQuery(base + path, opts.query);
+  const merged = (init?: RequestInit): RequestInit | undefined => (opts.fetchInit ? { ...opts.fetchInit, ...init } : init);
   const req = async <T,>(url: string, init?: RequestInit): Promise<T> => {
-    const r = await fetch(base + url, init);
+    const r = await fetch(u(url), merged(init));
     connection.data();
     if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
     return r.json();
   };
   /** NDJSON stream: one parsed object per line to onChunk. */
   const stream = async <C,>(url: string, init: RequestInit, onChunk: (c: C) => void) => {
-    const r = await fetch(base + url, init);
+    const r = await fetch(u(url), merged(init));
     if (!r.ok || !r.body) throw new Error(`${r.status} ${await r.text()}`);
     const reader = r.body.getReader();
     const dec = new TextDecoder();
@@ -412,12 +434,18 @@ export function makeApi(base: string) {
   return {
   base,
   // ---- URLs (media, frames, playback, WebRTC signalling, live socket)
-  media: (e: { id: number }, name: string) => `${base}/api/events/${e.id}/media/${name}`,
+  media: (e: { id: number }, name: string) => u(`/api/events/${e.id}/media/${name}`),
   frameUrl: (camera: string, t: number, w = 960, exact = false) =>
-    `${base}/api/frame/${camera}?${qs({ t: t.toFixed(2), w, exact: exact ? "true" : undefined })}`,
-  playbackUrl: (camera: string, start: number, duration = 300) => `${base}/api/playback/${camera}?${qs({ start, duration })}`,
-  whepUrl: (path: string) => `${base}/api/whep/${path}`,
-  wsUrl: () => `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${base}/api/ws`,
+    u(`/api/frame/${camera}?${qs({ t: t.toFixed(2), w, exact: exact ? "true" : undefined })}`),
+  /** `quality` "sd" asks for the server's low-bitrate transcode (q=sd); omitted or "hd" = the recording as stored. */
+  playbackUrl: (camera: string, start: number, duration = 300, quality?: PlaybackQuality) =>
+    u(`/api/playback/${camera}?${qs({ start, duration, q: quality === "sd" ? "sd" : undefined })}`),
+  /** What the server's playback can do: `sd` = it can transcode to the low-bitrate SD rendition. */
+  playbackCapabilities: () => req<{ sd: boolean; encoder?: string | null }>("/api/playback/capabilities"),
+  whepUrl: (path: string) => u(`/api/whep/${path}`),
+  // an absolute base (the direct client) is another origin: its socket goes there, not to this page's host
+  wsUrl: () => (/^https?:\/\//.test(base) ? u("/api/ws").replace(/^http/, "ws")
+    : `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${u("/api/ws")}`),
   /** Live updates. onMessage gets the other message types (e.g. {type: "briefing"}). */
   subscribe(onEvent: (e: NvrEvent) => void, onMessage?: (msg: { type: string; [k: string]: unknown }) => void): () => void {
     let ws: WebSocket | null = null;

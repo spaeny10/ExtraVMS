@@ -4,7 +4,8 @@
  * synopsis and why it matters, live video of the Site with the incident's cameras first, the Site's Timeline
  * deep-linked to the selected event, deterrence (relay), and the log.
  *
- * Everything per camera goes to that camera's server through the hub tunnel (siteApi(server)), as on Site pages.
+ * Everything per camera goes to that camera's server through the hub tunnel (siteApi(server)), as on Site pages;
+ * media (clips, snapshots, live, playback) comes straight from the server when this browser is on its LAN (mediaApi).
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Camera as ServerCam, NvrEvent } from "@site/api";
@@ -14,9 +15,11 @@ import { placeholder } from "@site/Events";
 import { NavContext, type TimelineTarget } from "@site/nav";
 import { camKey } from "@site/playback";
 import { confirmDialog } from "@site/ui";
-import type { Me } from "../api";
+import type { Me, Server } from "../api";
+import { DirectChips } from "../DirectChip";
+import { useDirectVersion } from "../direct";
 import { isSocSupervisor } from "../access";
-import { siteApi } from "../hubSource";
+import { mediaApi, siteApi } from "../hubSource";
 import { incidentHref, siteHref } from "../nav";
 import { useSite } from "../SitePage";
 import { SiteLive } from "../SiteLive";
@@ -70,6 +73,7 @@ export function IncidentView({ me, detail, incident, now, actions, cmd, popout =
   });
 
   const { site } = useSite(incident.location_id);
+  useDirectVersion(site?.servers ?? []);  // the thumbnails' media route follows each server's Direct-on-LAN state
   const org = incidentOrg(me, incident);
   // the incident's cameras first: from its events once the detail is in, from the queue row's camera list until then
   const focusKeys = useMemo(() => [...new Set(events.length ? events.map((e) => camKey(e.server_id, e.camera_id))
@@ -78,7 +82,7 @@ export function IncidentView({ me, detail, incident, now, actions, cmd, popout =
 
   return (
     <div className="soc-incident">
-      <IncidentHeader incident={incident} now={now} popout={popout} />
+      <IncidentHeader incident={incident} now={now} popout={popout} servers={site?.servers.filter((s) => !s.retired_at)} />
       <ClaimBar incident={incident} me={me} actions={actions} cmd={cmd} />
       <section className="soc-media" aria-label="Triggering event">
         {sel ? <EventMedia key={evKey(sel)} ev={sel} onDetails={() => setDrawer(sel)} /> : <p className="muted">No events in this incident yet.</p>}
@@ -87,7 +91,7 @@ export function IncidentView({ me, detail, incident, now, actions, cmd, popout =
             {events.map((e) => (
               <button key={evKey(e)} role="option" aria-selected={sel ? evKey(e) === evKey(sel) : false} className={`soc-thumb ${sel && evKey(e) === evKey(sel) ? "active" : ""}`}
                 onClick={() => setSelKey(evKey(e))} title={`${e.camera_name} · ${new Date(e.ts * 1000).toLocaleTimeString()}`}>
-                <img src={siteApi(e.server_id).media({ id: eventNum(e) }, "snapshot.jpg")} alt="" loading="lazy" onError={(x) => { (x.target as HTMLImageElement).style.visibility = "hidden"; }} />
+                <img src={mediaApi(e.server_id).media({ id: eventNum(e) }, "snapshot.jpg")} alt="" loading="lazy" onError={(x) => { (x.target as HTMLImageElement).style.visibility = "hidden"; }} />
                 <span className="small">{e.camera_name} · {age(e.ts, now)}</span>
                 <span className={priorityClass(e.priority)} aria-label={`${priorityLabel(e.priority)} priority`}>{priorityLabel(e.priority)}</span>
               </button>
@@ -124,7 +128,7 @@ export function IncidentView({ me, detail, incident, now, actions, cmd, popout =
 
       {drawer && (
         <NavContext.Provider value={{ openInTimeline: (e) => focusTimeline(drawer.server_id, e) }}>
-          <EventDetail id={eventNum(drawer)} site={siteApi(drawer.server_id)} variant="drawer" onClose={() => setDrawer(null)}
+          <EventDetail id={eventNum(drawer)} site={mediaApi(drawer.server_id)} variant="drawer" onClose={() => setDrawer(null)}
             cameraName={(id) => events.find((x) => x.server_id === drawer.server_id && x.camera_id === id)?.camera_name ?? id} />
         </NavContext.Provider>
       )}
@@ -141,7 +145,8 @@ export function SlaPill({ incident, now }: { incident: Incident; now: number }) 
   return <span className={`soc-sla ${v.tone}`} role="timer" aria-label={v.label} title={v.label}>{v.tone === "breach" ? "⚠ " : ""}{v.text}</span>;
 }
 
-export function IncidentHeader({ incident: i, now, popout }: { incident: Incident; now: number; popout?: boolean }) {
+/** `servers`: the Site's servers, for the Direct-on-LAN chips (absent until the Site has loaded, and on the phone). */
+export function IncidentHeader({ incident: i, now, popout, servers }: { incident: Incident; now: number; popout?: boolean; servers?: Server[] }) {
   return (
     <header className="soc-incident-head">
       <div className="soc-incident-where">
@@ -156,6 +161,7 @@ export function IncidentHeader({ incident: i, now, popout }: { incident: Inciden
         {i.escalation_level > 0 && <span className={`chip small ${i.escalation_level >= 2 ? "warn" : ""}`} title={i.escalation_level >= 2 ? "Supervisors have been paged" : "Operators have been paged"}>Escalated L{i.escalation_level}</span>}
         {i.claimed_by_email && <span className="chip small" title={i.claimed_at ? `Claimed ${age(i.claimed_at, now)} ago` : ""}>👤 {i.claimed_by_email}</span>}
         <span className="muted small" title={new Date(i.opened_at * 1000).toLocaleString()}>opened {age(i.opened_at, now)} ago · {i.event_count} event{i.event_count === 1 ? "" : "s"}</span>
+        {servers && <DirectChips servers={servers} />}
         {!popout && <a className="small" href={incidentHref(i.id)} target="_blank" rel="noreferrer" aria-keyshortcuts="P" title="Pop out (p)">Pop out ↗</a>}
       </div>
     </header>
@@ -241,7 +247,8 @@ export function useServerEvent(server: string, id: number) {
 
 export function EventMedia({ ev, onDetails }: { ev: IncidentEvent; onDetails?: () => void }) {
   const { e, failed } = useServerEvent(ev.server_id, eventNum(ev));
-  const s = siteApi(ev.server_id);
+  useDirectVersion([ev.server_id]);  // the clip and snapshot come direct when this browser is on the server's LAN
+  const s = mediaApi(ev.server_id);
   return (
     <div className="soc-media-grid">
       <div className="soc-clip">

@@ -117,6 +117,13 @@ class Settings(BaseSettings):
     hub_url: str = "wss://hub.axiomvision.ai/agent"   # the settings table can override (Settings -> System)
     hub_insecure: bool = False                         # NVR_HUB_INSECURE=1: accept a self-signed hub cert (dev only)
 
+    # Direct-on-LAN (direct.py): a browser that can reach this server on its LAN fetches live/playback/frames
+    # straight from it, authorised by a short-lived token the hub mints, instead of through the hub tunnel.
+    direct_enabled: bool = True
+    https_port: int = 8443                  # the same app over HTTPS (self-signed cert in data_dir/tls) for those browsers
+    # Low-bitrate playback (/api/playback?q=sd): concurrent 720p/700 kbps transcodes. 0 = auto: 4 with NVENC, 2 on CPU
+    playback_transcode_max: int = 0
+
     @property
     def torch_device(self) -> str:
         """Where the torch models (PPE YOLO .pt, CLIP, re-ID) run: the YOLO device, except on a Hailo site, where only

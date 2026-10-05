@@ -88,6 +88,8 @@ def info(summary: dict | None) -> dict:
     d = d if isinstance(d, dict) else {}
     urls = []
     for u in d.get("urls") or []:
+        if isinstance(u, str):  # the site sends LAN addresses as plain strings and the localhost hint as an object
+            u = {"url": u}
         if isinstance(u, dict) and isinstance(u.get("url"), str) and u["url"].lower().startswith(("https://", "http://")):
             urls.append({"url": u["url"], **({"local": True} if u.get("local") else {})})
     fp = d.get("fingerprint")

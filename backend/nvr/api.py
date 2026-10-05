@@ -19,13 +19,13 @@ from typing import Literal
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import assistant, backup, baseline, footage, frames, health, identities, journeys, keep, mediamtx, policy, ptz, retention, zones
 from . import synopsis as vlm
-from . import advisor, ai_serve, hub_agent, site_actions, siteconfig
+from . import advisor, ai_serve, direct, hub_agent, site_actions, siteconfig
 from . import vlmroute
 from .config import ROOT, settings
 from .db import JOURNEY_CAMS_SQL, LOCKED_SQL, PRIORITY_RANK_SQL, db, event_filters
@@ -108,6 +108,8 @@ async def lifespan(app: FastAPI):
         ("ptz", state.ptz.run()),
         ("hub-agent", state.hub.run()),
     ]]
+    https = _https_server() if settings.direct_enabled else None
+    https_task = asyncio.create_task(_serve_https(https), name="https") if https is not None else None
     await asyncio.sleep(1.5)  # let MediaMTX bind before readers connect
     sync_cameras()
     p.recover()
@@ -118,24 +120,165 @@ async def lifespan(app: FastAPI):
     await state.mtx.stop()
     if state.ollama is not None:   # a site without a local model has no Ollama to stop
         await state.ollama.stop()
+    if https is not None:
+        https.should_exit = True   # close its sockets and let open responses end before the loop goes away
+        await asyncio.wait([https_task], timeout=5)
+        https_task.cancel()
     for t in state.tasks:
         t.cancel()
+
+
+def _https_server():
+    """The same app on settings.https_port over TLS (self-signed, data_dir/tls) for Direct-on-LAN: a hub page is
+    HTTPS, so it may only fetch from this server over HTTPS. lifespan="off": MediaMTX, ingest and the rest are
+    already started by the main server's lifespan; this listener only adds a socket in the same event loop."""
+    import uvicorn
+
+    class QuietServer(uvicorn.Server):
+        @contextlib.contextmanager
+        def capture_signals(self):
+            # the main server (uvicorn.run in __main__) owns Ctrl+C / SIGTERM; a second capture_signals() would
+            # steal them and re-raise them when this one exits
+            yield
+
+    try:
+        cert, key = direct.ensure_cert()
+    except Exception as e:   # no cryptography and no openssl: the HTTP port keeps working, direct does not
+        log.warning("direct: no LAN certificate (%s); HTTPS port %s not started", e, settings.https_port)
+        return None
+    cfg = uvicorn.Config(app, host=settings.host, port=settings.https_port, ssl_certfile=str(cert), ssl_keyfile=str(key),
+                         lifespan="off", log_level="info", log_config=None)   # logging is set up by the main server
+    return QuietServer(cfg)
+
+
+async def _serve_https(server) -> None:
+    try:
+        await server.serve()
+    except SystemExit:
+        # uvicorn calls sys.exit(1) when it cannot bind; inside a task that would take the whole loop down
+        log.warning("direct: could not listen on HTTPS port %s (in use?); direct LAN access is off", settings.https_port)
 
 
 app = FastAPI(title="Axiom Vision", lifespan=lifespan)
 app.include_router(ai_serve.router)   # this site's Qwen for the fleet, tunnel-only (see ai_serve.py)
 
 
+DIRECT_WRITES = re.compile(r"^/api/whep/")   # WebRTC session lifecycle: the only non-GET a direct browser may send
+# what the hub's proxy refuses (hub/hub/proxy.py) is refused on a direct connection too
+DIRECT_HIDDEN = re.compile(r"^/api/(hub$|ai/|config/history|config/handoff$)")
+DIRECT_OPEN = ("/api/direct/probe", "/api/direct/handshake")   # answer the hub origin without a token
+
+
+def _cors_headers(origin: str, preflight: bool = False) -> dict[str, str]:
+    h = {"Access-Control-Allow-Origin": origin, "Access-Control-Allow-Credentials": "true", "Vary": "Origin",
+         "Access-Control-Expose-Headers": "location, etag, x-frame-time"}
+    if preflight:
+        h.update({"Access-Control-Allow-Methods": "GET, HEAD, POST, PATCH, DELETE",
+                  "Access-Control-Allow-Headers": "authorization, content-type, x-nvr-task",
+                  # Chrome's Private Network Access: a public (hub) page calling a private address must be let in
+                  "Access-Control-Allow-Private-Network": "true", "Access-Control-Max-Age": "600"})
+    return h
+
+
+def _strip_query_param(scope, name: str) -> None:
+    """Drop a token parameter from the query string in place: uvicorn's access log prints the query string from
+    this same scope dict, so the token would otherwise land in the log."""
+    q = urllib.parse.parse_qsl(scope.get("query_string", b"").decode("latin-1"), keep_blank_values=True)
+    scope["query_string"] = urllib.parse.urlencode([(k, v) for k, v in q if k != name]).encode("latin-1")
+
+
+def _deny(status: int, detail: str, cors: str | None) -> JSONResponse:
+    return JSONResponse({"detail": detail}, status_code=status, headers=_cors_headers(cors) if cors else None)
+
+
 @app.middleware("http")
 async def hub_headers(request: Request, call_next):
     """X-Hub-* headers identify the hub user behind a tunnelled request. Only the in-process tunnel may set
-    them: strip them from anything that arrived over the network so they can't be forged on the LAN."""
-    if request.scope.get("client") != hub_agent.IN_PROCESS_CLIENT:
-        request.scope["headers"] = [(k, v) for k, v in request.scope["headers"] if not k.startswith(b"x-hub-")]
-    elif request.method != "GET":
-        log.info("hub write: %s %s by %s (%s)", request.method, request.url.path,
-                 request.headers.get("x-hub-user", "?"), request.headers.get("x-hub-role", "?"))
-    return await call_next(request)
+    them: strip them from anything that arrived over the network so they can't be forged on the LAN.
+
+    Direct-on-LAN (direct.py): a LAN request carrying a hub-minted token (Authorization: Direct, ?direct= or the
+    `direct` cookie) gets the same x-hub-user/x-hub-role/x-hub-site headers a tunnelled one would, so role and
+    audit logic treat both alike, and is read-only apart from WHEP signalling. scope["client"] stays the real LAN
+    peer, so tunnel-only endpoints (_tunnel_only, ai_serve) still refuse it. A LAN request without a token is
+    exactly as before (the site's own UI)."""
+    scope = request.scope
+    if scope.get("client") == hub_agent.IN_PROCESS_CLIENT:
+        if request.method != "GET":
+            log.info("hub write: %s %s by %s (%s)", request.method, request.url.path,
+                     request.headers.get("x-hub-user", "?"), request.headers.get("x-hub-role", "?"))
+        return await call_next(request)
+    scope["headers"] = [(k, v) for k, v in scope["headers"] if not k.startswith(b"x-hub-")]
+    if not settings.direct_enabled:
+        return await call_next(request)
+    path = request.url.path
+    origin = request.headers.get("origin")
+    cors = origin if origin and origin.lower() in direct.allowed_origins() else None
+    if request.method == "OPTIONS" and cors and request.headers.get("access-control-request-method"):
+        # preflights carry no credentials, so they can't be checked against a token: answer for the allowed
+        # origins only; the real request that follows is checked
+        return Response(status_code=204, headers=_cors_headers(cors, preflight=True))
+    if path == "/api/direct/handshake" and "token" in request.query_params:
+        scope["nvr_handshake_token"] = request.query_params["token"]   # the route reads it here, not from the log
+        _strip_query_param(scope, "token")
+    token, where = direct.token_from(request.headers, request.cookies, request.query_params)
+    if where == "query":
+        _strip_query_param(scope, "direct")   # routes never need it either
+    claims = direct.verify(token) if token else None
+    if token and claims is None and (where != "cookie" or cors):
+        # an explicit token that fails (expired, rotated device token, other site) must not silently become
+        # anonymous LAN access; a stale cookie on a same-origin page is ignored instead
+        return _deny(401, "direct token invalid or expired", cors)
+    if claims is None:
+        resp = await call_next(request)
+        if cors and path in DIRECT_OPEN:
+            resp.headers.update(_cors_headers(cors))
+        return resp
+    if request.method not in ("GET", "HEAD") and not (request.method in ("POST", "PATCH", "DELETE") and DIRECT_WRITES.match(path)):
+        return _deny(403, "direct connection is read-only; use the hub", cors)
+    if DIRECT_HIDDEN.match(path):
+        return _deny(404, "not available on a direct connection", cors)
+    scope["headers"] += [(b"x-hub-user", str(claims.get("email") or claims.get("uid") or "?").encode()),
+                         (b"x-hub-role", claims["role"].encode()), (b"x-hub-site", str(claims["sid"]).encode()),
+                         (b"x-hub-direct", b"1")]
+    scope["nvr_direct"] = claims
+    resp = await call_next(request)
+    if cors:
+        resp.headers.update(_cors_headers(cors))
+    return resp
+
+
+# ---------------------------------------------------------------- direct on LAN
+
+@app.get("/api/direct/probe", include_in_schema=False)
+async def direct_probe():
+    """Can this browser reach the server directly (and has it accepted the certificate)? No auth: says nothing."""
+    return Response(status_code=204, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/direct/handshake")
+async def direct_handshake(request: Request):
+    """?token=<t>: exchange a hub-minted token for a `direct` cookie, so later requests from the hub page
+    (credentials: include) are authorised without the token in every URL. Browsers that block third-party
+    cookies keep using the header or ?direct= instead. (The middleware moves `token` out of the query string.)"""
+    token = request.scope.get("nvr_handshake_token")
+    claims = direct.verify(token)
+    if claims is None:
+        raise HTTPException(401, "direct token invalid or expired")
+    exp = int(claims["exp"])
+    resp = JSONResponse({"ok": True, "user": claims.get("email"), "role": claims["role"], "exp": exp},
+                        headers={"Cache-Control": "no-store"})
+    resp.set_cookie(direct.COOKIE, token, max_age=max(1, exp - int(time.time())), path="/", secure=True, httponly=True,
+                    samesite="none")
+    return resp
+
+
+@app.get("/api/direct/session")
+async def direct_session(request: Request):
+    """Who a direct request is acting as (the UI's "am I still direct?" check); 401 without a direct token."""
+    claims = request.scope.get("nvr_direct")
+    if not claims:
+        raise HTTPException(401, "not a direct connection")
+    return {"user": claims.get("email"), "role": claims["role"], "exp": int(claims["exp"]), "site_id": claims["sid"]}
 
 
 # ---------------------------------------------------------------- fleet hub
@@ -1312,8 +1455,11 @@ class SiteExecIn(BaseModel):
 
 
 def _hub_role(request: Request) -> str | None:
-    """The hub user's role when the request came down the tunnel (the middleware strips x-hub-* from the LAN)."""
-    return request.headers.get("x-hub-role") if request.scope.get("client") == hub_agent.IN_PROCESS_CLIENT else None
+    """The hub user's role when the request came down the tunnel or carried a direct token (the middleware strips
+    x-hub-* from the LAN and sets them itself only for a verified direct token)."""
+    if request.scope.get("client") == hub_agent.IN_PROCESS_CLIENT or request.scope.get("nvr_direct"):
+        return request.headers.get("x-hub-role")
+    return None
 
 
 @app.post("/api/assistant/plan")
@@ -1504,33 +1650,57 @@ async def _needs_audio_transcode(camera_id: str) -> bool:
     return needs
 
 
+def _ffmpeg_exe() -> str:
+    return shutil.which("ffmpeg") or r"C:\ffmpeg\bin\ffmpeg.exe"
+
+
+FMP4_OUT = ["-f", "mp4", "-movflags", "frag_keyframe+empty_moov+default_base_moof", "-frag_duration", "500000", "pipe:1"]
+
+
+def _mediamtx_fmp4(params: dict) -> str:
+    return f"{settings.mediamtx_playback}/get?" + urllib.parse.urlencode({**params, "format": "fmp4"})
+
+
 async def _playback_transcoded(camera_id: str, params: dict) -> StreamingResponse:
     """The same MediaMTX chunk, with the audio track converted to AAC (video copied, not re-encoded) so the
-    browser can play it. G.711 at 8 kHz costs almost nothing to convert, even on a CPU-only site.
+    browser can play it. G.711 at 8 kHz costs almost nothing to convert, even on a CPU-only site."""
+    cmd = [_ffmpeg_exe(), "-v", "error", "-nostdin", "-i", _mediamtx_fmp4(params), "-map", "0:v:0", "-map", "0:a:0?",
+           "-c:v", "copy", "-c:a", "aac", "-b:a", "48k", *FMP4_OUT]
+    return await _ffmpeg_stream(camera_id, cmd)
+
+
+async def _ffmpeg_stream(camera_id: str, cmd: list[str], on_close=None) -> StreamingResponse:
+    """Run ffmpeg and stream its stdout as video/mp4. `on_close` runs exactly once when ffmpeg is done with
+    (error, end of stream, client gone, or a response that was never started).
 
     ffmpeg is spawned and read from worker threads, not through asyncio's subprocess support: under uvloop on
     Python 3.14 (Qwenbot) `create_subprocess_exec` blocked the whole event loop and the site went silent."""
-    exe = shutil.which("ffmpeg") or r"C:fmpeginfmpeg.exe"
-    src = f"{settings.mediamtx_playback}/get?" + urllib.parse.urlencode({**params, "format": "fmp4"})
-    cmd = [exe, "-v", "error", "-nostdin", "-i", src, "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "copy", "-c:a", "aac", "-b:a", "48k",
-           "-f", "mp4", "-movflags", "frag_keyframe+empty_moov+default_base_moof", "-frag_duration", "500000", "pipe:1"]
+    import weakref
     errf = tempfile.TemporaryFile()   # stderr spools here so a chatty ffmpeg can never block on a full pipe
     try:
         proc = await asyncio.to_thread(subprocess.Popen, cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=errf)
     except OSError as e:
         errf.close()
+        if on_close:
+            on_close()
         log.warning("playback transcode %s: cannot start ffmpeg: %s", camera_id, e)
         raise HTTPException(502, "ffmpeg is not available on this site")
     out = proc.stdout
     assert out is not None
+    done = threading.Event()
 
     def finish() -> None:
         """Kill ffmpeg now (a plain syscall, safe inside a cancelled scope) and reap it from a detached thread.
         Nothing here is awaited: when the browser drops the connection, Starlette cancels the response inside a
         cancel scope where any further await is cancelled too, so an awaited cleanup could be skipped and ffmpeg
-        would sit blocked on a full pipe forever (seen on Hailo T1)."""
+        would sit blocked on a full pipe forever (seen on Hailo T1). Idempotent: also called by the finalizer."""
+        if done.is_set():
+            return
+        done.set()
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
+        if on_close:
+            on_close()
 
         def reap() -> None:
             proc.wait()
@@ -1539,7 +1709,11 @@ async def _playback_transcoded(camera_id: str, params: dict) -> StreamingRespons
 
         threading.Thread(target=reap, name="ffmpeg-reap", daemon=True).start()
 
-    first = await asyncio.to_thread(out.read1, 64 * 1024)
+    try:
+        first = await asyncio.to_thread(out.read1, 64 * 1024)
+    except BaseException:
+        finish()
+        raise
     if not first:
         await asyncio.to_thread(proc.wait)
         errf.seek(0)
@@ -1558,14 +1732,109 @@ async def _playback_transcoded(camera_id: str, params: dict) -> StreamingRespons
         finally:
             finish()
 
-    return StreamingResponse(body(), media_type="video/mp4")
+    gen = body()
+    # a response cancelled before its body was ever iterated never enters the generator's finally: the
+    # finalizer still kills ffmpeg and frees the transcode slot when the generator is dropped
+    weakref.finalize(gen, finish)
+    return StreamingResponse(gen, media_type="video/mp4")
+
+
+# ---- low-bitrate (SD) playback for viewers off-site: the hub tunnel is capped by the site's upload
+
+SD_HEIGHT, SD_FPS, SD_KBPS = 720, 15, 700
+_encoder: list = []          # [name | None] once probed
+_sd_active = 0
+
+
+def sd_ffmpeg_args(exe: str, src: str, encoder: str) -> list[str]:
+    """ffmpeg argv for the SD rendition of a MediaMTX fMP4 range: 720p (never upscaled, aspect kept), H.264
+    ~700 kbps, at most 15 fps, AAC audio as in the audio transcode, fragmented MP4 on stdout.
+    Keyframes every 2 s (by time, so 10 and 25 fps cameras fragment alike) keep the first bytes quick and seeks
+    cheap; yuv420p because browsers cannot decode the 10-bit / 4:2:2 some cameras record."""
+    rate = [f"{SD_KBPS}k", "-maxrate", f"{SD_KBPS * 3 // 2}k", "-bufsize", f"{SD_KBPS * 2}k"]
+    if encoder == "h264_nvenc":
+        pre = ["-hwaccel", "cuda"]   # decode on the GPU too when it can; frames come back to RAM for the scaler
+        enc = ["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "ll", "-rc", "vbr", "-b:v", *rate]
+    else:
+        pre = []
+        enc = ["-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-b:v", *rate]
+    return [exe, "-v", "error", "-nostdin", *pre, "-i", src, "-map", "0:v:0", "-map", "0:a:0?",
+            "-vf", f"scale=w=-2:h='min({SD_HEIGHT},ih)'", "-fpsmax", str(SD_FPS), "-pix_fmt", "yuv420p", *enc,
+            "-profile:v", "main", "-force_key_frames", "expr:gte(t,n_forced*2)",
+            "-c:a", "aac", "-b:a", "48k", *FMP4_OUT]
+
+
+def detect_encoder(exe: str | None = None) -> str | None:
+    """h264_nvenc when this ffmpeg has it AND a test encode works (NVENC is compiled into most builds, GPU or
+    not), else libx264 when present, else None. Blocking (a second or two): call from a thread."""
+    exe = exe or _ffmpeg_exe()
+    try:
+        r = subprocess.run([exe, "-hide_banner", "-encoders"], capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    names = {line.split()[1] for line in r.stdout.splitlines() if len(line.split()) > 1 and line.split()[0].startswith("V")}
+    if "h264_nvenc" in names:
+        try:
+            t = subprocess.run([exe, "-v", "error", "-nostdin", "-f", "lavfi", "-i", "color=c=black:s=640x360:d=0.2",
+                                "-c:v", "h264_nvenc", "-f", "null", "-"], capture_output=True, timeout=20)
+            if t.returncode == 0:
+                return "h264_nvenc"
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return "libx264" if "libx264" in names else None
+
+
+async def playback_encoder() -> str | None:
+    if not _encoder:
+        _encoder.append(await asyncio.to_thread(detect_encoder))
+        log.info("playback: SD transcode encoder %s", _encoder[0] or "none (ffmpeg missing or no H.264 encoder)")
+    return _encoder[0]
+
+
+def sd_max(encoder: str | None) -> int:
+    if settings.playback_transcode_max > 0:
+        return settings.playback_transcode_max
+    return 4 if encoder == "h264_nvenc" else 2
+
+
+@app.get("/api/playback/capabilities")
+async def playback_capabilities():
+    enc = await playback_encoder()
+    return {"sd": enc is not None, "encoder": enc}
+
+
+async def _playback_sd(camera_id: str, params: dict) -> StreamingResponse:
+    global _sd_active
+    enc = await playback_encoder()
+    if enc is None:
+        raise HTTPException(501, "this site cannot transcode playback")
+    # a plain counter, not an asyncio.Semaphore: the limit refuses at once (503) rather than queueing, and
+    # the release happens in finish(), which may run on the reaper's or the garbage collector's thread
+    with _sd_lock:
+        if _sd_active >= sd_max(enc):
+            raise HTTPException(503, "too many transcodes")
+        _sd_active += 1
+
+    def release() -> None:
+        global _sd_active
+        with _sd_lock:
+            _sd_active -= 1
+
+    return await _ffmpeg_stream(camera_id, sd_ffmpeg_args(_ffmpeg_exe(), _mediamtx_fmp4(params), enc), on_close=release)
+
+
+_sd_lock = threading.Lock()
 
 
 @app.get("/api/playback/{camera_id}")
-async def playback(camera_id: str, start: float, duration: float = Query(60, le=3600), fmt: str | None = Query(None, pattern="^(mp4|fmp4)$")):
+async def playback(camera_id: str, start: float, duration: float = Query(60, le=3600), fmt: str | None = Query(None, pattern="^(mp4|fmp4)$"),
+                   q: str | None = Query(None, pattern="^(sd|hd)$")):
     """Proxy MediaMTX playback so the browser stays same-origin. fMP4 streams as it is read from disk (first
-    bytes in ~0.2 s); plain MP4 has to be indexed over the whole range first (seconds, more on a spinning disk)."""
+    bytes in ~0.2 s); plain MP4 has to be indexed over the whole range first (seconds, more on a spinning disk).
+    q=sd: a 720p / ~700 kbps H.264 transcode for viewers behind the hub tunnel (fmt is ignored: always fMP4)."""
     params = {"path": camera_id, "start": mediamtx.rfc3339(start), "duration": str(duration), "format": fmt or settings.playback_format}
+    if q == "sd":
+        return await _playback_sd(camera_id, params)
     if await _needs_audio_transcode(camera_id):
         return await _playback_transcoded(camera_id, params)
     client = httpx.AsyncClient(timeout=None)

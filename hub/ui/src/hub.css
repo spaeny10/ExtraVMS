@@ -52,6 +52,10 @@
 .site-head h2 { margin: 0; }
 .site-chips { gap: 6px; }
 .chip.warn { border-color: var(--bad); color: var(--bad); }
+/* Direct-on-LAN (DirectChip): green when media comes straight from the server, the plain grey chip otherwise */
+.direct-chip { color: var(--muted); }
+.direct-chip.on { border-color: var(--ok); color: var(--ok); }
+.direct-chip.offer { color: var(--text); display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .site-tabs { margin-bottom: 12px; max-width: 100%; overflow-x: auto; }
 .site-tabs button { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .server-dots { display: inline-flex; gap: 4px; }

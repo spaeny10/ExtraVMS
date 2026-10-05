@@ -33,7 +33,17 @@ export type Server = {
   id: string; org_id: string; name: string; location: string; online: boolean; last_seen_at: number | null; version: string | null; hostname: string | null;
   clock_skew_s: number | null; summary: ServerSummary; open_alerts: number; retired_at?: number | null;
   location_id?: string | null; location_name?: string | null; cameras_total?: number; cameras_online?: number;
+  /** Direct-on-LAN (newer hubs): the server's own addresses a browser on its LAN can reach without the tunnel. */
+  direct?: DirectInfo;
 };
+/**
+ * `urls`: candidate base URLs of the server itself (`local` = only works from a browser on that machine, e.g.
+ * http://localhost:8080); `fingerprint`: its self-signed certificate's SHA-256, for the "accept the certificate" prompt.
+ */
+export type DirectInfo = { available: boolean; urls: { url: string; local?: boolean }[]; fingerprint: string | null };
+// (direct.candidates also accepts bare URL strings in `urls`: that is how the server's own heartbeat lists LAN URLs)
+/** POST /api/servers/{id}/direct-token: a short-lived token the server accepts for read-only + WHEP requests. */
+export type DirectToken = DirectInfo & { token: string; exp: number; role: string };
 /** A Site (wire: location) with its rollup and its servers' cards. Retired servers are counted (retired_servers) but left out of `servers` unless asked for. */
 export type Site = {
   id: string; org_id: string; name: string; address: string; timezone: string | null; notes: string | null; created_at: number; updated_at: number;
@@ -146,15 +156,34 @@ export const json = (method: string, body: unknown): RequestInit => ({ method, h
 export const qs = (p: Record<string, string | number | boolean | undefined | null>) =>
   new URLSearchParams(Object.entries(p).filter(([, v]) => v !== undefined && v !== null && v !== "").map(([k, v]) => [k, String(v)])).toString();
 
+/**
+ * Every server card the hub hands out (fleet, a Site, the Sites list) is offered to these listeners, so direct.ts knows
+ * each server's direct addresses even on pages that only have a server id (Find, Alerts, the SOC).
+ */
+type CardListener = (servers: Server[]) => void;
+const cardListeners = new Set<CardListener>();
+export function onServerCards(fn: CardListener): () => void {
+  cardListeners.add(fn);
+  return () => { cardListeners.delete(fn); };
+}
+function seen<T>(p: Promise<T>, pick: (x: T) => Server[]): Promise<T> {
+  return p.then((x) => {
+    if (cardListeners.size) { try { const s = pick(x); cardListeners.forEach((fn) => fn(s)); } catch { /* an unexpected shape never breaks the page */ } }
+    return x;
+  });
+}
+
 export const api = {
   me: () => req<Me>("/auth/me"),
+  directToken: (server: string) => req<DirectToken>(`/api/servers/${server}/direct-token`, { method: "POST" }),
   login: (email: string, password: string, totp?: string) => req<{ totp_required?: boolean } & Partial<Me>>("/auth/login", json("POST", { email, password, totp })),
   logout: () => req("/auth/logout", { method: "POST" }),
   totpSetup: () => req<{ secret: string; uri: string }>("/auth/totp/setup", { method: "POST" }),
   totpEnable: (code: string) => req("/auth/totp/enable", json("POST", { code })),
   totpDisable: () => req("/auth/totp/disable", { method: "POST" }),
   password: (current: string, next: string) => req("/auth/password", json("POST", { current, new: next })),
-  fleet: (org?: string, include_retired?: boolean) => req<Fleet>(`/api/fleet?${qs({ org, include_retired: include_retired || undefined })}`),
+  fleet: (org?: string, include_retired?: boolean) => seen(req<Fleet>(`/api/fleet?${qs({ org, include_retired: include_retired || undefined })}`),
+    (f) => f.orgs.flatMap((o) => [...o.sites, ...(o.locations ?? []).flatMap((l) => l.servers), ...(o.unassigned ?? [])])),
   retireServer: (id: string, retired: boolean) => req<Server>(`/api/sites/${id}/retire`, json("POST", { retired })),
   actionPlan: (org: string, text: string) => req<ActionPlan>(`/api/orgs/${org}/actions/plan`, json("POST", { text })),
   /** extras.inputs carries a new camera's password: sent in this one call, never stored. */
@@ -177,8 +206,9 @@ export const api = {
   rotateServer: (id: string) => req(`/api/sites/${id}/rotate-token`, { method: "POST" }),
   removeServer: (id: string) => req(`/api/sites/${id}`, { method: "DELETE" }),
   // Sites (wire: locations)
-  locations: (org: string, include_retired?: boolean) => req<Site[]>(`/api/orgs/${org}/locations?${qs({ include_retired: include_retired || undefined })}`),
-  location: (id: string, include_retired?: boolean) => req<Site>(`/api/locations/${id}?${qs({ include_retired: include_retired || undefined })}`),
+  locations: (org: string, include_retired?: boolean) => seen(req<Site[]>(`/api/orgs/${org}/locations?${qs({ include_retired: include_retired || undefined })}`),
+    (l) => l.flatMap((s) => s.servers)),
+  location: (id: string, include_retired?: boolean) => seen(req<Site>(`/api/locations/${id}?${qs({ include_retired: include_retired || undefined })}`), (s) => s.servers),
   createLocation: (org: string, b: { name: string; address?: string; timezone?: string }) => req<Site>(`/api/orgs/${org}/locations`, json("POST", b)),
   updateLocation: (id: string, b: { name?: string; address?: string; timezone?: string | null; notes?: string | null }) => req<Site>(`/api/locations/${id}`, json("PATCH", b)),
   /** 409 while servers remain unless moveTo names another Site of the customer. */

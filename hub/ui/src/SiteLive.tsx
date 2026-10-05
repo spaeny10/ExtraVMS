@@ -1,7 +1,9 @@
 /**
  * The Site's combined Live view: one grid over every camera of every server at the Site, with the activity of all of
  * them alongside. Each tile talks to its own server through the hub tunnel (siteApi(server) = /s/<server>/…), with
- * that server's TURN relay, so WHEP offers for one grid go to several /s/<id>/ prefixes.
+ * that server's TURN relay, so WHEP offers for one grid go to several /s/<id>/ prefixes. When this browser is on a
+ * server's LAN (direct.ts), that server's video, stills and snapshots come straight from it (mediaApi); writes such as
+ * PTZ and painted regions still go through the hub.
  *
  * Streams share the page budget (MAX_LIVE, as on dashboards): tiles past it show a still with a Play button.
  * A server that is offline (or goes offline mid-view, seen on the Site's 15 s poll) shows its cameras from the hub's
@@ -24,7 +26,8 @@ import { Icon, swipeHandlers, useIsPhone } from "@site/ui";
 import { type Camera as RegistryCam, type Fleet, type Org, type Server, type Site, api } from "./api";
 import { type EventRef, applyLiveEvent, cameraNameFor, mergePool, regionFeed, removeLiveEvent, siteRegionKeys, tagServer } from "./eventOpen";
 import { HubEventDetail } from "./HubEventDetail";
-import { makeHubSource, siteApi } from "./hubSource";
+import { useDirect, useDirectVersion } from "./direct";
+import { makeHubSource, mediaApi, siteApi } from "./hubSource";
 import { EMPTY_LAYOUT, type LayoutAction, type LiveFocus, type LiveLayout, type Quality, applyFocus, arrange, gridCols, isVisible, layoutReducer, loadLayout, saveLayout, tileLabel,
   wrapIndex } from "./liveLayout";
 
@@ -51,6 +54,7 @@ export type SiteLiveProps = { org: Org; site: Site; focus?: LiveFocus | null; pe
 export function SiteLive({ org, site, focus: want = null, persist = true, compact = false, hideActivity = false }: SiteLiveProps) {
   const servers = useMemo(() => site.servers.filter((s) => !s.retired_at), [site.servers]);
   const multi = servers.length > 1;
+  useDirectVersion(servers);  // re-render (feed snapshots, phone strip) when a server's media route changes
   // the Site object is replaced on every 15 s poll; a source rebuilt each time would make EventsWidget refetch and
   // re-open its socket. One source per Site, reading the latest servers through a ref, avoids that.
   const siteRef = useRef(site);
@@ -238,7 +242,7 @@ function SiteActivity({ site, servers, tiles, multi, activity: a }: { site: Site
         {a.pool.length > 0 && feed.length === 0 && <p className="muted">Nothing recent on that camera passed through the painted region.</p>}
         {feed.slice(0, 12).map((e) => (
           <EventCard key={`${e.site_id}-${e.id}`} e={e} cameraName={names.get(camKey(e.site_id, e.camera_id)) ?? e.camera_id}
-            site={siteApi(e.site_id)} siteName={multi ? e.site_name : undefined}
+            site={mediaApi(e.site_id)} siteName={multi ? e.site_name : undefined}
             onOpen={() => setOpen({ server: e.site_id, id: e.id, location: site.id })} />
         ))}
       </aside>
@@ -305,7 +309,8 @@ function SiteTile({ t, source, multi, q, dispatch, hdUnsupported, onUnsupported,
   const budget = useBudgetSlot(t.key, box);
   // TURN credentials are minted per server; until they arrive the tile shows a still rather than connecting twice
   const ice = useIceServers(source, t.server.id);
-  const site = siteApi(t.server.id);
+  useDirect(t.server);  // re-render when this server's media route changes (the tile reconnects on the new client)
+  const site = mediaApi(t.server.id);
   const hd = q(t.key) === "hd";
   const playing = t.state === "live" && (phone || budget.playing(t.key)) && ice !== undefined;
   const [stillTs, setStillTs] = useState(() => Date.now() / 1000 - 3);
@@ -373,7 +378,7 @@ function PhoneLive({ tiles, activity, ...common }: TileCommon & { tiles: Tile[];
           <div className="live-strip" role="tablist">
             {tiles.map((x, j) => (
               <button key={x.key} role="tab" aria-selected={j === i} className={`live-strip-item ${j === i ? "active" : ""}`} onClick={() => setIdx(j)}>
-                {x.state === "live" ? <img src={`${siteApi(x.server.id).frameUrl(x.id, Date.now() / 1000 - 15, 320)}&r=${tick}`} alt="" /> : <div className="site-live-strip-off">offline</div>}
+                {x.state === "live" ? <img src={`${mediaApi(x.server.id).frameUrl(x.id, Date.now() / 1000 - 15, 320)}&r=${tick}`} alt="" /> : <div className="site-live-strip-off">offline</div>}
                 <span><span className={`dot ${x.state === "live" && x.streamReady ? "ok" : "bad"}`} /> {tileLabel(x.server.name, x.name, common.multi)}</span>
               </button>
             ))}

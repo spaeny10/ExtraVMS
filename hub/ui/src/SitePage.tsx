@@ -8,6 +8,7 @@ import { Icon, confirmDialog, promptDialog, toast } from "@site/ui";
 import { type Camera, type Me, type Org, type Server, type Site, ago, api, fmtTime } from "./api";
 import { canEditMonitoring, isAdmin, isSocUser, ofTotal } from "./access";
 import { Breadcrumbs } from "./Breadcrumbs";
+import { DirectChips } from "./DirectChip";
 import { SETTINGS_SECTIONS, SITE_TABS, type SettingsSection, type SiteTab, consoleHref, go, navigate, serverHref, settingsHref, siteHref } from "./nav";
 import { ContactsBox } from "./site/ContactsBox";
 import { MonitoringBox } from "./site/MonitoringBox";
@@ -80,6 +81,7 @@ function SiteHeader({ site, servers, admin, onChanged }: { site: Site; servers: 
         <span className={`chip ${site.servers_online < site.servers_total ? "warn" : ""}`}>Servers {ofTotal(site.servers_online, site.servers_total, "online")}</span>
         <span className={`chip ${site.cameras_online < site.cameras_total ? "warn" : ""}`}>Cameras {ofTotal(site.cameras_online, site.cameras_total, "up")}</span>
         {site.open_alerts > 0 && <span className="chip warn">⚠ {site.open_alerts} open alert{site.open_alerts > 1 ? "s" : ""}</span>}
+        <DirectChips servers={servers} />
       </div>
       <span className="spacer" />
       <div className="menu-anchor">

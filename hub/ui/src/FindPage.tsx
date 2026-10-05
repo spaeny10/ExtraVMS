@@ -13,7 +13,8 @@ import { type ExecPlan, type FleetSearch, type Org, type ServerTag, type Site, a
 import { FleetActionCard, planAction } from "./customer/FleetActionsPage";
 import { type EventRef } from "./eventOpen";
 import { HubEventDetail } from "./HubEventDetail";
-import { siteApi } from "./hubSource";
+import { useDirectVersion } from "./direct";
+import { mediaApi } from "./hubSource";
 import { whereLabel } from "./labels";
 import { consoleHref, consoleTimelineHref, go } from "./nav";
 import { siteTimelineHref } from "./timelineLink";
@@ -58,6 +59,8 @@ export function FindPage({ org, site }: { org: Org; site?: Site }) {
   const [action, setAction] = useState<ExecPlan | null>(null);
   const { label, serverOf, cameraName } = useWhere(org, site);
   const [open, setOpen] = useState<EventRef | null>(null);
+  // snapshots come straight from a server this browser reaches on its LAN (re-rendered when that changes)
+  useDirectVersion(useMemo(() => [...new Set((res?.events ?? []).map(serverOf))], [res, serverOf]));
   const scope = site?.id;
   const search = async () => {
     if (!q.trim()) return;
@@ -122,7 +125,7 @@ export function FindPage({ org, site }: { org: Org; site?: Site }) {
               const server = serverOf(e);
               return (
                 <div key={`${server}-${e.id}`} className="find-hit">
-                  <EventCard e={e as unknown as NvrEvent} cameraName={label(e, e.camera_id)} site={siteApi(server)} onOpen={() => openEvent(e)} />
+                  <EventCard e={e as unknown as NvrEvent} cameraName={label(e, e.camera_id)} site={mediaApi(server)} onOpen={() => openEvent(e)} />
                   <a className="small muted find-hit-out" href={consoleTimelineHref(server, { cam: e.camera_id, event: e.id })}>Open on server ↗</a>
                 </div>
               );

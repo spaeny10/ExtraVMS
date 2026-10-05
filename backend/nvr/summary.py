@@ -13,7 +13,7 @@ import time
 
 import httpx
 
-from . import backup, mediamtx, retention
+from . import backup, direct, mediamtx, retention
 from .config import settings
 from .db import db
 
@@ -64,4 +64,6 @@ async def site_summary(state, since: float | None = None, version: str = "") -> 
         "disabled": [{"id": c["id"], "name": c["name"]} for c in db.cameras() if not c.get("enabled", 1)],
         "backup_last": (backup.status().get("last") or {}).get("at"),
         "bitrate_mbps": round(sum(c["bitrate_mbps"] or 0 for c in cams), 2),
+        # Direct-on-LAN: where a browser on this LAN can reach the server and the HTTPS cert's fingerprint (None = off)
+        "direct": direct.summary(),
     }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { defaultVisible, effectiveOffset, focusFor, fromLaneKeys, journeyMembers, layoutsStorageKey, localLayoutStore, momentTarget, parseLayouts,
-  parseSiteTimelineQuery, siteTimelineHref, withoutTimelineParams } from "./timelineLink";
+import { defaultVisible, effectiveOffset, focusFor, fromLaneKeys, initialTimelineLayout, journeyMembers, layoutsStorageKey, lightSolo, localLayoutStore,
+  momentTarget, parseLayouts, parseSiteTimelineQuery, siteTimelineHref, withoutTimelineParams } from "./timelineLink";
 
 describe("siteTimelineHref", () => {
   it("links an event, a journey and a moment", () => {
@@ -118,5 +118,32 @@ describe("fromLaneKeys", () => {
   });
   it("is null for a plain camera id (no server in the key)", () => {
     expect(fromLaneKeys({ id: 5, camera_id: "cam1", start_ts: 100, end_ts: 130 })).toBeNull();
+  });
+});
+
+describe("lighter remote default", () => {
+  const cams = (n: number) => Array.from({ length: n }, (_, i) => ({ key: `srv/c${i + 1}`, server: "srv" }));
+  const keys = (n: number) => cams(n).map((c) => c.key);
+  it("solos one camera only via the hub and only past two cameras", () => {
+    expect(lightSolo(keys(3), null, null, true)).toBe("srv/c1");
+    expect(lightSolo(keys(3), null, "srv/c2", true)).toBe("srv/c2");
+    expect(lightSolo(keys(3), ["srv/c3"], null, true)).toBe("srv/c3");
+    expect(lightSolo(keys(3), null, "gone/c9", true)).toBe("srv/c1");
+    expect(lightSolo(keys(2), null, null, true)).toBeNull();
+    expect(lightSolo(keys(5), null, null, false)).toBeNull();
+  });
+  it("first visit via the hub stores the solo and flags it; direct keeps the grid", () => {
+    expect(initialTimelineLayout({ stored: null, flag: null, cams: cams(3), focusKey: "srv/c2", viaHub: true }))
+      .toEqual({ config: { visible: null, solo: "srv/c2", order: null }, flag: "srv/c2" });
+    expect(initialTimelineLayout({ stored: null, flag: null, cams: cams(3), focusKey: null, viaHub: false })).toEqual({});
+  });
+  it("undoes its own solo once direct, and drops the flag once the user changed the layout", () => {
+    const stored = { visible: null, solo: "srv/c1", order: null };
+    expect(initialTimelineLayout({ stored, flag: "srv/c1", cams: cams(3), focusKey: null, viaHub: false }))
+      .toEqual({ config: { ...stored, solo: null }, flag: null });
+    expect(initialTimelineLayout({ stored, flag: "srv/c1", cams: cams(3), focusKey: null, viaHub: true })).toEqual({});
+    expect(initialTimelineLayout({ stored: { ...stored, solo: null }, flag: "srv/c1", cams: cams(3), focusKey: null, viaHub: false })).toEqual({ flag: null });
+    // a saved layout (no flag) is never touched
+    expect(initialTimelineLayout({ stored: { ...stored, solo: null }, flag: null, cams: cams(3), focusKey: null, viaHub: true })).toEqual({});
   });
 });

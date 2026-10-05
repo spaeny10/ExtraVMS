@@ -105,6 +105,41 @@ export function defaultVisible(cams: { key: string; server: string }[], perServe
   return out.length === cams.length ? null : out;
 }
 
+/**
+ * The lighter remote default: through the hub (the Site's uplink carries every tile), a Site with more than two
+ * cameras starts on one camera — the deep link's, else the first shown lane — with the other lanes still listed.
+ * null = keep the grid (direct/LAN, or a small Site).
+ */
+export function lightSolo(keys: string[], visible: string[] | null, focusKey: string | null, viaHub: boolean): string | null {
+  if (!viaHub || keys.length <= 2) return null;
+  if (focusKey && keys.includes(focusKey)) return focusKey;
+  return (visible ?? keys).find((k) => keys.includes(k)) ?? null;
+}
+
+export type StoredLayoutConfig = { visible: string[] | null; solo: string | null; order: string[] | null };
+/**
+ * What to write to TimelineView's stored layout before it mounts. `stored` = the saved config (null = first visit),
+ * `flag` = the camera an earlier hub visit soloed automatically (null = none). Returns the config to write
+ * (undefined = leave it) and the new flag (undefined = leave, null = remove).
+ * First visit: the per-server lane cap and, via the hub, the one-camera start (flagged, so it can be undone). Later
+ * visits only touch an automatic solo the user kept: back to the grid once the Site is reached directly. Once the
+ * user picks something else the flag is dropped, and the layout is theirs.
+ */
+export function initialTimelineLayout(o: {
+  stored: StoredLayoutConfig | null; flag: string | null; cams: { key: string; server: string }[]; focusKey: string | null; viaHub: boolean;
+}): { config?: StoredLayoutConfig; flag?: string | null } {
+  if (!o.stored) {
+    const visible = defaultVisible(o.cams);
+    const solo = lightSolo(o.cams.map((c) => c.key), visible, o.focusKey, o.viaHub);
+    if (!visible && !solo) return {};
+    return { config: { visible, solo, order: null }, ...(solo ? { flag: solo } : {}) };
+  }
+  if (!o.flag) return {};
+  if (o.stored.solo !== o.flag) return { flag: null };
+  if (!o.viaHub) return { config: { ...o.stored, solo: null }, flag: null };
+  return {};
+}
+
 // ---- named layouts kept in this browser per Site (until the hub stores them: GET/PUT /api/locations/{id}/layouts)
 
 export const layoutsStorageKey = (siteId: string) => `siteTimelineLayouts.${siteId}`;

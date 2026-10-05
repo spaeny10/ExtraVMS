@@ -147,7 +147,7 @@ class HubAgent:
             self._ws = ws
             cams = [{"id": c["id"], "name": c["name"]} for c in db.cameras(enabled_only=True)]
             await self._send({"t": "hello", "proto": PROTO, "site_version": __version__, "cameras": cams, "now": time.time(),
-                              "site_id": self.site_id, "hostname": socket.gethostname(), "caps": ["events", "turn", "vlm"]})
+                              "site_id": self.site_id, "hostname": socket.gethostname(), "caps": ["events", "turn", "vlm", *(["direct"] if settings.direct_enabled else [])]})
             try:
                 async for msg in ws:
                     await self._on_message(decode(msg))

@@ -4,21 +4,45 @@
  * (apiFor = siteApi → /s/<server>/…); lane keys are camKey(server, camera) and each server's clock skew is applied.
  * Named layouts are kept in this browser per Site until the hub stores them (timelineLink.localLayoutStore).
  *
+ * Direct-on-LAN (direct.ts): a server this browser reaches on its LAN plays from the server itself (mediaFor =
+ * mediaApi), at full quality with the server UI's local chunking. Servers still reached through the hub play the SD
+ * transcode by default when they offer one (SD/HD in the toolbar, kept per Site), and a first hub visit to a Site with
+ * more than two cameras starts on one camera (timelineLink.initialTimelineLayout).
+ *
  * Deep link (timelineLink.ts): ?server=&cam=&event=[&journey=1] focuses an event, ?server=&cam=&t= a moment.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { PlaybackQuality } from "@site/api";
 import type { Camera as ServerCam } from "@site/api";
 import { NavContext, type TimelineFocus, type TimelineTarget } from "@site/nav";
 import { camKey } from "@site/playback";
+import { toast } from "@site/ui";
 import { decodeCells, regions } from "@site/region";
 import { TimelineView, type TimelineCamera } from "@site/Timeline";
 import type { Org, Server, Site } from "./api";
-import { siteApi } from "./hubSource";
-import { defaultVisible, effectiveOffset, focusFor, fromLaneKeys, journeyMembers, localLayoutStore, momentTarget, parseSiteTimelineQuery,
-  siteTimelineHref, withoutTimelineParams } from "./timelineLink";
+import { directStateOf, useDirectVersion } from "./direct";
+import { isDirect, mediaApi, siteApi } from "./hubSource";
+import { effectiveOffset, focusFor, fromLaneKeys, initialTimelineLayout, journeyMembers, localLayoutStore, momentTarget, parseSiteTimelineQuery,
+  siteTimelineHref, withoutTimelineParams, type StoredLayoutConfig } from "./timelineLink";
 import "./siteTimeline.css";
 
 const CAMERA_REFRESH_MS = 60000;
+/** the Timeline waits this long at most for the Direct-on-LAN checks before choosing its first layout */
+const DIRECT_WAIT_MS = 6000;
+const HUB_SOLO_HINT = "Playing one camera via the hub · press 0 for the grid";
+/** a lane reached through the hub (slow uplink: short chunks, patient buffering); direct lanes play like the server UI */
+const viaHub = (server: string) => !isDirect(server);
+
+/** Can the server transcode playback to SD (q=sd)? Asked once per server per page load; an older server says no. */
+const sdCaps = new Map<string, Promise<boolean>>();
+const canSd = (server: string): Promise<boolean> => {
+  let p = sdCaps.get(server);
+  if (!p) {
+    p = siteApi(server).playbackCapabilities().then((c) => !!c?.sd).catch(() => false);
+    sdCaps.set(server, p);
+  }
+  return p;
+};
 const dropHashLink = (hash: string) => (hash.startsWith("#timeline") ? "" : hash);
 
 /**
@@ -67,20 +91,69 @@ export function SiteTimeline({ site, query, syncUrl = true }: { org: Org; site: 
   const storageKey = `timeline.${site.id}.`;
   const layoutStore = useMemo(() => localLayoutStore(site.id), [site.id]);
 
-  // first visit to a big Site: at most 8 lanes per server (only when nothing is stored yet)
-  const [readyFor, setReadyFor] = useState<string | null>(null);
-  const ready = readyFor === site.id;
+  // ---- Direct-on-LAN: which servers' media comes straight from them (re-rendered when that changes)
+  useDirectVersion(online);
+  const [directWaitOver, setDirectWaitOver] = useState(false);
+  useEffect(() => { const t = setTimeout(() => setDirectWaitOver(true), DIRECT_WAIT_MS); return () => clearTimeout(t); }, [site.id]);
+  const directSettled = directWaitOver || online.every((s) => directStateOf(s) !== "checking");
+  const anyHub = online.some((s) => viaHub(s.id));
+
+  // ---- quality for lanes still on the hub: SD (the server's transcode) by default where offered; kept per Site
+  const qualityKey = `${storageKey}playbackQuality`;
+  const [quality, setQualityState] = useState<PlaybackQuality>(() => {
+    try { return localStorage.getItem(qualityKey) === "hd" ? "hd" : "sd"; } catch { return "sd"; }
+  });
+  const setQuality = useCallback((q: PlaybackQuality) => {
+    setQualityState(q);
+    try { localStorage.setItem(qualityKey, q); } catch { /* private mode: this visit only */ }
+  }, [qualityKey]);
+  const [sd, setSd] = useState<Record<string, boolean>>({});
   useEffect(() => {
-    if (ready || !settled || !cameras.length) return;
-    const k = `${storageKey}timelineLayoutConfig`;
+    let alive = true;
+    (onlineKey ? onlineKey.split(",") : []).forEach((id) => canSd(id).then((ok) => { if (alive) setSd((m) => (m[id] === ok ? m : { ...m, [id]: ok })); }));
+    return () => { alive = false; };
+  }, [onlineKey]);
+  // servers that answered 503 to an SD chunk (transcode slots full): HD for the rest of this visit, not persisted
+  const [sdBusy, setSdBusy] = useState<Record<string, boolean>>({});
+  const busyRef = useRef<Set<string>>(new Set());   // several tiles of one server can hit it at once: toast once
+  const onSdBusy = useCallback((server: string) => {
+    if (busyRef.current.has(server)) return;
+    busyRef.current.add(server);
+    toast.info(`${serversRef.current.find((s) => s.id === server)?.name ?? "The server"} is busy with other SD streams; playing HD instead`);
+    setSdBusy((b) => ({ ...b, [server]: true }));
+  }, []);
+  const qualityFor = (server: string): PlaybackQuality | undefined => (viaHub(server) && sd[server] && !sdBusy[server] ? quality : undefined);
+  const hubSd = online.some((s) => viaHub(s.id) && sd[s.id]);
+
+  // first visit to a big Site: at most 8 lanes per server; through the hub, more than two cameras start on one
+  // (only when nothing is stored yet; an automatic solo is undone once the Site is reached directly)
+  const [readyFor, setReadyFor] = useState<string | null>(null);
+  const [hubSolo, setHubSolo] = useState(false);
+  const ready = readyFor === site.id;
+  const search = typeof query === "string" ? query : `?${query.toString()}`;
+  useEffect(() => {
+    if (ready || !settled || !cameras.length || !directSettled) return;
+    const k = `${storageKey}timelineLayoutConfig`, flagKey = `${storageKey}timelineHubSolo`;
+    let soloed = false;
     try {
-      if (localStorage.getItem(k) == null) {
-        const visible = defaultVisible(cameras.map((c) => ({ key: c.key!, server: c.server! })));
-        if (visible) localStorage.setItem(k, JSON.stringify({ visible, solo: null, order: null }));
-      }
+      const raw = localStorage.getItem(k);
+      const stored = raw == null ? null : (JSON.parse(raw) as StoredLayoutConfig | null);
+      const target = parseSiteTimelineQuery(search, location.hash);
+      const focusServer = target?.server ?? (online.length === 1 ? online[0].id : null);
+      const focusKey = target?.cam && focusServer ? camKey(focusServer, target.cam) : null;
+      const next = initialTimelineLayout({
+        stored: stored && typeof stored === "object" ? stored : null, flag: localStorage.getItem(flagKey),
+        cams: cameras.map((c) => ({ key: c.key!, server: c.server! })), focusKey, viaHub: anyHub,
+      });
+      if (next.config) localStorage.setItem(k, JSON.stringify(next.config));
+      if (next.flag === null) localStorage.removeItem(flagKey);
+      else if (next.flag) localStorage.setItem(flagKey, next.flag);
+      soloed = anyHub && !!localStorage.getItem(flagKey);
     } catch { /* private mode: TimelineView shows every lane */ }
+    setHubSolo(soloed);
     setReadyFor(site.id);
-  }, [ready, settled, cameras, storageKey, site.id]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, settled, cameras, storageKey, site.id, directSettled]);
 
   // ---- focus: from the deep link, or from an event viewer's "Open in Timeline"
   const [focus, setFocus] = useState<TimelineFocus | null>(null);
@@ -95,7 +168,6 @@ export function SiteTimeline({ site, query, syncUrl = true }: { org: Org; site: 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [site.id, syncUrl]);
 
-  const search = typeof query === "string" ? query : `?${query.toString()}`;
   useEffect(() => {
     const target = parseSiteTimelineQuery(search, location.hash);
     if (!target?.cam) return;
@@ -132,7 +204,7 @@ export function SiteTimeline({ site, query, syncUrl = true }: { org: Org; site: 
   if (online.length === 0) {
     return <p className="muted">Every server at this site is offline. Recordings are reached through their server, so the Timeline is back when one reconnects.</p>;
   }
-  if (!settled || (cameras.length > 0 && !ready)) return <p className="muted">Loading cameras…</p>;
+  if (!settled || (cameras.length > 0 && !ready)) return <p className="muted">{settled && !directSettled ? "Checking for a direct connection…" : "Loading cameras…"}</p>;
   if (!cameras.length) {
     return <p className="muted">{online.every((s) => failed[s.id]) ? "The servers at this site aren't answering right now. Retrying…" : "No cameras at this site yet."}</p>;
   }
@@ -143,7 +215,10 @@ export function SiteTimeline({ site, query, syncUrl = true }: { org: Org; site: 
   return (
     <NavContext.Provider value={nav}>
       {missing.length > 0 && <p className="muted small site-timeline-note">Not shown: {missing.map((s) => s.name).join(", ")} ({why}).</p>}
-      <TimelineView key={site.id} cameras={cameras} focus={focus} onClearFocus={clearFocus} apiFor={siteApi} remote layoutStore={layoutStore} storageKey={storageKey} />
+      <TimelineView key={site.id} cameras={cameras} focus={focus} onClearFocus={clearFocus} apiFor={siteApi} mediaFor={mediaApi} remote={viaHub}
+        qualityFor={qualityFor} onQualityUnavailable={onSdBusy} layoutStore={layoutStore} storageKey={storageKey}
+        qualityToggle={hubSd ? { value: quality, set: setQuality, title: "Playback quality for cameras reached through the hub: SD is a 720p low-bitrate copy that starts faster on a slow uplink" } : undefined}
+        soloHint={hubSolo && anyHub ? HUB_SOLO_HINT : undefined} />
     </NavContext.Provider>
   );
 }

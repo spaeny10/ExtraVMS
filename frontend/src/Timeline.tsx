@@ -1,6 +1,6 @@
 import { confirmDialog, promptDialog, toast, useIsPhone } from "./ui";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, fmtTime, localApi, type ApiResolver, type Camera, type KeptSpan, type Layout, type LayoutConfig, type Lock, type TimelineEvent, UNUSUAL_MIN } from "./api";
+import { api, fmtTime, localApi, type ApiResolver, type Camera, type KeptSpan, type Layout, type LayoutConfig, type Lock, type PlaybackQuality, type TimelineEvent, UNUSUAL_MIN } from "./api";
 import { ConfidenceSlider, loadNumber, saveNumber } from "./ConfidenceSlider";
 import { EventDetail } from "./EventDetail";
 import { NavContext, useNav, type TimelineFocus, type TimelineTarget } from "./nav";
@@ -160,7 +160,11 @@ function loadConfig(key: string): LayoutConfig {
   }
 }
 
-export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = localApi, layoutStore = apiLayoutStore, storageKey = "", remote }: {
+/** The hub's SD/HD switch for remote playback (absent on the server UI: there the toolbar has no quality control). */
+export type QualityToggle = { value: PlaybackQuality; set: (q: PlaybackQuality) => void; title?: string };
+
+export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = localApi, layoutStore = apiLayoutStore, storageKey = "", remote,
+  mediaFor, qualityFor, qualityToggle, soloHint, onQualityUnavailable }: {
   cameras: TimelineCamera[]; focus?: TimelineFocus | null; onClearFocus?: () => void;
   /** API client per server (default: every camera is on this server); must be stable */
   apiFor?: ApiResolver;
@@ -170,9 +174,25 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
   storageKey?: string;
   /** cameras are reached over a slow remote link (the hub): short playback chunks, patient buffering;
    *  default: true whenever `apiFor` isn't this server's own API */
-  remote?: boolean;
+  remote?: boolean | ((server: string) => boolean);
+  /** client for a server's video, frames and the event viewer's media (the hub's Direct-on-LAN client when reachable);
+   *  default `apiFor`. Its REST calls must still reach the server the normal way: the hub's direct client only swaps the
+   *  media URL builders, so the viewer's writes keep going through the hub. Must be stable while the route is unchanged. */
+  mediaFor?: ApiResolver;
+  /** playback quality per server (undefined = the recording as stored) */
+  qualityFor?: (server: string) => PlaybackQuality | undefined;
+  /** a server refused SD playback (503: its transcode slots are full); the host should fall back to HD for it */
+  onQualityUnavailable?: (server: string) => void;
+  /** shows an SD/HD switch in the toolbar */
+  qualityToggle?: QualityToggle;
+  /** shown above the controls while one camera is soloed (the hub's "playing one camera via the hub" note) */
+  soloHint?: string;
 }) {
-  const isRemote = remote ?? apiFor !== localApi;
+  const media = mediaFor ?? apiFor;
+  // per lane server: is it reached over the slow hub link? (a function on the hub, where some servers may be direct)
+  const remoteOf = (server: string) => (typeof remote === "function" ? remote(server) : remote ?? apiFor !== localApi);
+  // the shared clock's patience: remote if any camera is (one slow lane is what it has to wait for)
+  const isRemote = cameras.some((c) => remoteOf(c.server ?? splitKey(laneKey(c)).server));
   const sk = (name: string) => storageKey + name;
   // lane key -> camera; a lane's server, its id on that server and its clock offset (0 unless beyond SKEW_MIN_S)
   const camByKey = useMemo(() => new Map(cameras.map((c) => [laneKey(c), c])), [cameras]);
@@ -668,9 +688,9 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
   }, [lanes, showJourneys, focus?.nonce]);
 
   // ---- hover thumbnails (per lane)
-  const hoverFrameUrl = useCallback((k: string, t: number, w?: number, exact?: boolean) => apiFor(serverOf(k)).frameUrl(idOf(k), t + offOf(k), w, exact),
+  const hoverFrameUrl = useCallback((k: string, t: number, w?: number, exact?: boolean) => media(serverOf(k)).frameUrl(idOf(k), t + offOf(k), w, exact),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [apiFor, camByKey]);
+    [media, camByKey]);
   const hoverFrames = useLatestFrame(320, hoverFrameUrl);
   const lastScrubT = useRef<number | null>(null);
 
@@ -979,7 +999,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
             style={hero ? undefined : { gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
             {orderedTiles.map((id) => (
               <SyncTile
-                key={id}
+                key={`${id}:${qualityFor?.(serverOf(id)) ?? ""}`}
                 cam={id}
                 name={camName(id)}
                 spans={lanes[id]?.spans}
@@ -999,10 +1019,12 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
                 onDragPointerDown={(e, fromGrip) => startTileDrag(id, camName(id), e, fromGrip)}
                 camera={rawCams.get(id)}
                 hasAudio={hasAudioTrack(camByKey.get(id))}
-                site={apiFor(serverOf(id))}
+                site={media(serverOf(id))}
                 camId={idOf(id)}
                 timeOffsetS={offOf(id)}
-                remote={isRemote}
+                remote={remoteOf(serverOf(id))}
+                quality={qualityFor?.(serverOf(id))}
+                onSdUnavailable={onQualityUnavailable ? () => onQualityUnavailable(serverOf(id)) : undefined}
                 audioOn={audioCam === id}
                 onToggleAudio={() => setAudioCam((a) => (a === id ? null : id))}
               />
@@ -1030,6 +1052,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
           ))}
         </div>
       )}
+      {solo && soloHint && <div className="muted small tl-solo-hint">{soloHint}</div>}
       <div className={`tl-controls ${isPhone ? "phone" : ""}`}>
         <button onClick={() => seekTo((playhead ?? nowS()) - 10)} title="Back 10 s (←)">⏪ 10s</button>
         <button onClick={togglePlay} className="tl-play">{playing ? "⏸ Pause" : "▶ Play"}</button>
@@ -1038,6 +1061,12 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
           {SPEEDS.map((s) => <option key={s} value={s}>{s}×</option>)}
         </select>
         <span className="tl-clock">{playhead != null ? fmtClock(playhead) : "—"}</span>
+        {qualityToggle && (
+          <div className="segmented" title={qualityToggle.title ?? "Playback quality"}>
+            <button className={qualityToggle.value === "sd" ? "active" : ""} onClick={() => qualityToggle.set("sd")}>SD</button>
+            <button className={qualityToggle.value === "hd" ? "active" : ""} onClick={() => qualityToggle.set("hd")}>HD</button>
+          </div>
+        )}
         <span className="spacer" />
         {message && playhead != null && <span className="muted small">{message}</span>}
         <div className="segmented">
@@ -1302,7 +1331,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
       </div>
       {open !== null && (
         <NavContext.Provider value={detailNav}>
-          <EventDetail id={open.id} site={apiFor(serverOf(open.key))} cameraName={(id) => camName(keyFor(serverOf(open.key), id))}
+          <EventDetail id={open.id} site={media(serverOf(open.key))} cameraName={(id) => camName(keyFor(serverOf(open.key), id))}
             onClose={() => setOpen(null)} />
         </NavContext.Provider>
       )}

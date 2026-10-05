@@ -8,16 +8,57 @@ import type { DashboardSource, SourceCamera, SourceSite } from "@site/dashboard/
 import type { CameraGroup } from "@site/dashboard/types";
 import { timelineHash } from "@site/nav";
 import { api, subscribeFleet, type Fleet, type Org, type Server } from "./api";
+import { directEntry } from "./direct";
 import { KIND_LABEL } from "./labels";
 import { siteHref } from "./nav";
 import { siteTimelineHref } from "./timelineLink";
 
 const clients = new Map<string, SiteApi>();
+/** The hub-proxied client for a server (/s/<id>/…): every write, and media whenever Direct-on-LAN isn't active. */
 export const siteApi = (site: string): SiteApi => {
   let c = clients.get(site);
   if (!c) { c = makeApi(`/s/${site}`); clients.set(site, c); }
   return c;
 };
+
+/** The SiteApi members that only build media URLs (or read what playback can do): these may go direct. */
+const MEDIA_KEYS = ["media", "frameUrl", "playbackUrl", "whepUrl", "playbackCapabilities"] as const;
+
+/**
+ * A client whose media URLs point straight at the server on its LAN and whose REST calls (and so every write: locks,
+ * feedback, PTZ, regions) stay on the hub proxy, since the server accepts a direct token only for reads and WHEP.
+ * The token is read at call time, so a re-minted token doesn't change the client's identity (a new identity would
+ * make every live tile reconnect); a new base URL does.
+ */
+export function hybridApi(hub: SiteApi, base: string, token: () => string): SiteApi {
+  // ?direct= on every URL (a <video>/<img> src can't send a header) and Authorization: Direct on fetches; the
+  // handshake's cookie is not relied on: Safari and Chrome block it as a third-party cookie
+  const lan = () => { const t = token(); return makeApi(base, { query: { direct: t }, fetchInit: { headers: { Authorization: `Direct ${t}` } } }); };
+  const c: SiteApi = { ...hub };
+  const m = c as unknown as Record<string, unknown>;
+  for (const k of MEDIA_KEYS) m[k] = (...a: unknown[]) => (lan()[k] as (...x: unknown[]) => unknown)(...a);
+  return c;
+}
+
+const directClients = new Map<string, { base: string; client: SiteApi }>();
+/**
+ * The client for a server's media (live tiles, playback, frames, snapshots, clips): direct when this browser reaches
+ * the server on its LAN (direct.ts), else siteApi(server). Components that call it should also call useDirect /
+ * useDirectVersion for the server so they re-render when the route changes.
+ */
+export function mediaApi(server: string): SiteApi {
+  const d = directEntry(server);
+  if (d?.state !== "direct" || !d.base || !d.token) return siteApi(server);
+  const base = d.base;
+  let hit = directClients.get(server);
+  if (!hit || hit.base !== base) {
+    hit = { base, client: hybridApi(siteApi(server), base, () => directEntry(server)?.token ?? d.token!) };
+    directClients.set(server, hit);
+  }
+  return hit.client;
+}
+/** Is this server's media going direct right now? */
+export const isDirect = (server: string): boolean => directEntry(server)?.state === "direct";
 
 /** The customer's servers (the fleet's flat list). */
 export function fleetServers(fleet: Fleet | null, org: Org): Server[] {

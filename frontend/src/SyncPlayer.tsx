@@ -1,6 +1,6 @@
 import { RegionBadge, RegionOverlay } from "./RegionPaint";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type Camera, type SiteApi } from "./api";
+import { api, type Camera, type PlaybackQuality, type SiteApi } from "./api";
 import { PREFETCH_LEAD_S, chunkLen, driftReloadAllowed, dropPrefetch, firstChunkLen, isBuffered, prefetchChunk, shouldReload, spanAt, useLatestFrame, type Prefetched, type Span } from "./playback";
 
 export type TileStatus = "idle" | "paused" | "playing" | "buffering" | "gap";
@@ -20,7 +20,7 @@ const bufEnd = (v: HTMLVideoElement) => (v.buffered.length ? v.buffered.end(v.bu
 export function SyncTile({
   cam, name, spans, clockRef, playing, speed, scrubbing, scrubT, previewWidth, active, soloed,
   onSolo, onSelect, statusRef, dragging, dropTarget, onDragPointerDown, camera, hasAudio, audioOn, onToggleAudio,
-  site = api, camId, timeOffsetS = 0, remote = false,
+  site = api, camId, timeOffsetS = 0, remote = false, quality, onSdUnavailable,
 }: {
   cam: string; name: string; spans: Span[] | undefined; clockRef: React.RefObject<number | null>;
   playing: boolean; speed: number; scrubbing: boolean; scrubT: number | null; previewWidth: number;
@@ -39,6 +39,11 @@ export function SyncTile({
   timeOffsetS?: number;
   /** the camera is reached through the hub (slow site uplink): short chunks, and wait for a download that is still arriving */
   remote?: boolean;
+  /** playback rendition: "sd" = the server's low-bitrate transcode (via the hub); default = the recording as stored.
+   *  The Timeline remounts the tile when it changes, so the next chunk is fetched in the new quality at the clock. */
+  quality?: PlaybackQuality;
+  /** an SD chunk failed because the server is out of transcode slots (503): the host switches this server to HD */
+  onSdUnavailable?: () => void;
 }) {
   const id = camId ?? cam;
   const off = timeOffsetS;
@@ -78,7 +83,7 @@ export function SyncTile({
     blobInUse.current = null;
     const remote = props.current.remote;
     let len = cont ? chunkLen(t, remote) : firstChunkLen(t, remote);
-    let src = site.playbackUrl(id, t + off, len);
+    let src = site.playbackUrl(id, t + off, len, quality);
     const p = prefetch.current;
     if (p && Math.abs(p.start - t) < 1 && p.url) {
       len = p.len;
@@ -96,7 +101,7 @@ export function SyncTile({
     const next = c.start + c.len + 0.1;
     if (prefetch.current || !spanAt(props.current.spans, next)) return;
     const len = chunkLen(next, props.current.remote);
-    prefetch.current = prefetchChunk(site.playbackUrl(id, next + off, len), next, len);
+    prefetch.current = prefetchChunk(site.playbackUrl(id, next + off, len, quality), next, len);
   };
 
   /** Note whether the chunk's buffer grew or its video moved since last time. */
@@ -228,6 +233,14 @@ export function SyncTile({
           onProgress={(e) => { if (loaded.current) noteProgress(e.currentTarget); }}
           onSeeked={onCaughtUp}
           onPlaying={onCaughtUp}
+          onError={quality === "sd" && onSdUnavailable ? () => {
+            // a <video> error carries no HTTP status: ask again and read just the status line (the body is
+            // aborted), so only "too many transcodes" (503) flips to HD, not a gap or a dropped link
+            const src = chunk.src;
+            if (src.startsWith("blob:")) return;
+            const ctrl = new AbortController();
+            fetch(src, { signal: ctrl.signal }).then((r) => { ctrl.abort(); if (r.status === 503) onSdUnavailable(); }).catch(() => {});
+          } : undefined}
           onEnded={(e) => {
             const d = e.currentTarget.duration;
             const next = chunk.start + (Number.isFinite(d) && d > 0 ? d : chunk.len) + 0.1;

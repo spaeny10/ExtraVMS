@@ -1,7 +1,7 @@
 /**
  * The server UI's event viewer (clip, synopsis, lock / watch / feedback / Ask) opened in place on a hub page, for one
- * server's event: what a click on an event does in the server's own UI. Media and actions go to the event's server
- * through its tunnel (siteApi). The viewer's "Open in Timeline" is the one way from here to the Site's Timeline, so
+ * server's event: what a click on an event does in the server's own UI. Actions go to the event's server through its
+ * tunnel; media too, unless this browser reaches the server on its LAN (mediaApi, direct.ts). The viewer's "Open in Timeline" is the one way from here to the Site's Timeline, so
  * this provides the NavContext it calls (timelineTargetHref). Centred dialog on desktop, docked drawer on a phone.
  */
 import { useEffect, useMemo, useState } from "react";
@@ -10,12 +10,16 @@ import { NavContext, type TimelineTarget } from "@site/nav";
 import { camKey } from "@site/playback";
 import { useIsPhone } from "@site/ui";
 import { type Org, type Site, api } from "./api";
-import { siteApi } from "./hubSource";
+import { useDirectVersion } from "./direct";
+import { mediaApi } from "./hubSource";
 import { type EventRef, timelineTargetHref } from "./eventOpen";
 import { navigate } from "./nav";
 
 export function HubEventDetail({ ev, cameraName, onClose }: { ev: EventRef; cameraName: (cam: string) => string; onClose: () => void }) {
   const isPhone = useIsPhone();
+  // the clip, snapshot and crops come straight from the server on its LAN (mediaApi); lock, feedback, chat and the
+  // other writes stay on the hub proxy, because mediaApi only redirects media URL builders
+  useDirectVersion([ev.server]);
   const nav = useMemo(() => ({
     openInTimeline: (t: TimelineTarget) => {
       const href = timelineTargetHref(ev.location, ev.server, t);
@@ -26,7 +30,7 @@ export function HubEventDetail({ ev, cameraName, onClose }: { ev: EventRef; came
   return (
     <NavContext.Provider value={nav}>
       {/* keyed by server too: the same id on another server is another event */}
-      <EventDetail key={`${ev.server}/${ev.id}`} id={ev.id} site={siteApi(ev.server)} cameraName={cameraName} onClose={onClose}
+      <EventDetail key={`${ev.server}/${ev.id}`} id={ev.id} site={mediaApi(ev.server)} cameraName={cameraName} onClose={onClose}
         variant={isPhone ? "drawer" : "modal"} />
     </NavContext.Provider>
   );

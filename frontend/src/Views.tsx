@@ -46,7 +46,7 @@ export function LiveTile({ c, hd, port, active, onUnsupported, bar, phone, onSwi
     <div className={`tile ${active ? "alerting" : ""} ${painting ? "painting" : ""} ${ptzOn ? "ptz" : ""}`}
       {...(phone && onSwipe && !painting && !ptzOn ? swipeHandlers(onSwipe) : {})}>
       <LivePlayer key={`${c.id}-${hd ? "hd" : "sd"}`} path={hd ? c.id : `${c.id}_sub`} port={port} showSize className={hd ? "hd" : ""}
-        base={site === api ? undefined : site.base}
+        site={site === api ? undefined : site}
         onUnsupported={onUnsupported} videoRef={videoRef} iceServers={iceServers} muted={!sound} onAudio={setHasAudio}>
         {!ptzOn && <RegionOverlay cam={regionKey ?? c.id} videoRef={videoRef} editing={painting} onDone={() => setPainting(false)} camera={c} fallbackAspect={aspect} site={site} />}
         {ptz?.available && <PtzOverlay cam={c.id} videoRef={videoRef} active={ptzOn} onDone={() => setPtzOn(false)} fallbackAspect={aspect} site={site} />}
