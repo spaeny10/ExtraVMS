@@ -53,10 +53,21 @@ export function isBuffered(v: HTMLVideoElement, rel: number, margin = 0.3): bool
   return false;
 }
 
+/** Lane key for a camera on a server; this server's cameras ("" server) keep their bare id, so saved state still matches. */
+export const camKey = (server: string, id: string): string => (server ? `${server}/${id}` : id);
+/** Inverse of camKey: a key without "/" is a camera on this server. */
+export function splitKey(key: string): { server: string; id: string } {
+  const i = key.indexOf("/");
+  return i < 0 ? { server: "", id: key } : { server: key.slice(0, i), id: key.slice(i + 1) };
+}
+
 export type FrameShot = { url: string | null; t: number | null; cam: string };
 
 /** Preview frames from the recordings with at most one request in flight; the newest requested time wins. */
-export function useLatestFrame(width: number) {
+export type FrameUrlFor = (cam: string, t: number, w?: number, exact?: boolean) => string;
+
+/** `frameUrlFor` maps the requested cam (a lane key on the hub) to a URL; it must be stable (memoised). */
+export function useLatestFrame(width: number, frameUrlFor: FrameUrlFor = frameUrl) {
   const [shot, setShot] = useState<FrameShot | null>(null);
   const wanted = useRef<{ cam: string; t: number; exact: boolean } | null>(null);
   const last = useRef<string>("");
@@ -70,7 +81,7 @@ export function useLatestFrame(width: number) {
     const g = gen.current;
     inflight.current = true;
     try {
-      const r = await fetch(frameUrl(req.cam, req.t, width, req.exact));
+      const r = await fetch(frameUrlFor(req.cam, req.t, width, req.exact));
       const blob = r.ok ? await r.blob() : null;
       if (g === gen.current) {
         const url = blob ? URL.createObjectURL(blob) : null;

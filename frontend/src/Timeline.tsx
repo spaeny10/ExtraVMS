@@ -1,10 +1,10 @@
 import { confirmDialog, promptDialog, toast, useIsPhone } from "./ui";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, fmtTime, type Camera, type KeptSpan, type Layout, type LayoutConfig, type Lock, type TimelineEvent, UNUSUAL_MIN } from "./api";
+import { api, fmtTime, localApi, type ApiResolver, type Camera, type KeptSpan, type Layout, type LayoutConfig, type Lock, type TimelineEvent, UNUSUAL_MIN } from "./api";
 import { ConfidenceSlider, loadNumber, saveNumber } from "./ConfidenceSlider";
 import { EventDetail } from "./EventDetail";
 import type { TimelineFocus } from "./nav";
-import { LIVE_LAG, fmtClock, nowS, spanAt, useLatestFrame, type Span } from "./playback";
+import { LIVE_LAG, camKey, fmtClock, nowS, spanAt, splitKey, useLatestFrame, type Span } from "./playback";
 import { SyncTile, type TileStatus } from "./SyncPlayer";
 import { encodeCells, regionPass, regions, useRegions } from "./region";
 import { timelineHash } from "./nav";
@@ -39,14 +39,40 @@ function matches(e: Marker, f: Filter): boolean {
   return true;
 }
 
-function loadFilter(): Filter {
+function loadFilter(key: string): Filter {
   try {
-    return { ...DEFAULT_FILTER, ...JSON.parse(localStorage.getItem("timelineFilter") ?? "{}") };
+    return { ...DEFAULT_FILTER, ...JSON.parse(localStorage.getItem(key) ?? "{}") };
   } catch {
     return DEFAULT_FILTER;
   }
 }
 type Lane = { spans: Span[]; events: Marker[]; kept: KeptSpan[]; locks: Lock[] };
+
+/** A Timeline lane. The site UI passes plain cameras (lane key = camera id); the hub's combined Timeline sets
+ *  `key` (server/camera, see camKey), the camera's `server` and `serverName`, and its clock skew. */
+export type TimelineCamera = Camera & {
+  key?: string; server?: string; serverName?: string;
+  /** how far this server's clock is ahead of the shared clock, seconds (server time = shared + offset) */
+  timeOffsetS?: number;
+};
+/** Where named layouts are kept: this server's /layouts by default, the hub's per-site store there. */
+export type LayoutStore = {
+  list(): Promise<Layout[]>;
+  create(l: { name: string; config: LayoutConfig }): Promise<Layout>;
+  update(id: number, l: { name: string; config: LayoutConfig }): Promise<Layout>;
+  remove(id: number): Promise<unknown>;
+};
+const apiLayoutStore: LayoutStore = {
+  list: () => api.layouts(), create: (l) => api.createLayout(l), update: (id, l) => api.updateLayout(id, l), remove: (id) => api.deleteLayout(id),
+};
+const SKEW_MIN_S = 2; // clock offsets up to this are noise: leave times untouched
+const laneKey = (c: TimelineCamera) => c.key ?? c.id;
+/** Shift a lane's times by d seconds (identity when d = 0). */
+function shiftLane(l: Lane, d: number): Lane {
+  if (!d) return l;
+  const sh = <T extends { start_ts: number; end_ts: number | null }>(x: T): T => ({ ...x, start_ts: x.start_ts + d, end_ts: x.end_ts == null ? x.end_ts : x.end_ts + d });
+  return { spans: l.spans.map((x) => ({ start: x.start + d, end: x.end + d })), events: l.events.map(sh), kept: l.kept.map(sh), locks: l.locks.map(sh) };
+}
 type View = { start: number; end: number };
 type Drag =
   | { mode: "scrub"; pointer: number }
@@ -125,21 +151,46 @@ function nextRecording(lanes: Record<string, Lane>, ids: string[], t: number): n
   return best;
 }
 
-function loadConfig(): LayoutConfig {
+function loadConfig(key: string): LayoutConfig {
   try {
-    const c = JSON.parse(localStorage.getItem("timelineLayoutConfig") ?? "null");
+    const c = JSON.parse(localStorage.getItem(key) ?? "null");
     return c && typeof c === "object" ? { visible: c.visible ?? null, solo: c.solo ?? null, order: c.order ?? null } : ALL_CAMERAS;
   } catch {
     return ALL_CAMERAS;
   }
 }
 
-export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras: Camera[]; focus?: TimelineFocus | null; onClearFocus?: () => void }) {
+export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = localApi, layoutStore = apiLayoutStore, storageKey = "" }: {
+  cameras: TimelineCamera[]; focus?: TimelineFocus | null; onClearFocus?: () => void;
+  /** API client per server (default: every camera is on this server); must be stable */
+  apiFor?: ApiResolver;
+  /** where named layouts are listed/saved (default: this server) */
+  layoutStore?: LayoutStore;
+  /** prefix for this Timeline's localStorage keys ("" = today's key names, so saved state carries over) */
+  storageKey?: string;
+}) {
+  const sk = (name: string) => storageKey + name;
+  // lane key -> camera; a lane's server, its id on that server and its clock offset (0 unless beyond SKEW_MIN_S)
+  const camByKey = useMemo(() => new Map(cameras.map((c) => [laneKey(c), c])), [cameras]);
+  const serverOf = (k: string) => camByKey.get(k)?.server ?? splitKey(k).server;
+  const idOf = (k: string) => camByKey.get(k)?.id ?? splitKey(k).id;
+  const offOf = (k: string) => { const o = camByKey.get(k)?.timeOffsetS ?? 0; return Math.abs(o) > SKEW_MIN_S ? o : 0; };
+  /** the lane key of camera `id` on `server` (EventDetail speaks in server-local ids) */
+  const keyFor = (server: string, id: string) => {
+    const c = cameras.find((x) => x.id === id && (x.server ?? splitKey(laneKey(x)).server) === server);
+    return c ? laneKey(c) : camKey(server, id);
+  };
+  // the camera record without the lane fields, so "Save as named place" sends its server a plain camera
+  const rawCams = useMemo(() => new Map(cameras.map((c) => {
+    const { key: _k, server: _s, serverName: _n, timeOffsetS: _o, ...raw } = c;
+    return [laneKey(c), raw as Camera];
+  })), [cameras]);
+  const multiServer = useMemo(() => new Set(cameras.map((c) => c.server ?? splitKey(laneKey(c)).server)).size > 1, [cameras]);
   const [view, setView] = useState<View>(() => clampView(nowS() - 3600, nowS() + 300));
   // the selected camera (large tile in the 3-camera layout) starts as the first camera of the saved order
   const [cam, setCam] = useState(() => {
-    const first = loadConfig().order?.find((id) => cameras.some((c) => c.id === id));
-    return first ?? cameras[0]?.id ?? "";
+    const first = loadConfig(sk("timelineLayoutConfig")).order?.find((id) => cameras.some((c) => laneKey(c) === id));
+    return first ?? (cameras[0] ? laneKey(cameras[0]) : "");
   });
   const [lanes, setLanes] = useState<Record<string, Lane>>({});
   const [playhead, setPlayhead] = useState<number | null>(null);
@@ -147,15 +198,15 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
   const [speed, setSpeed] = useState(1);
   const [hover, setHover] = useState<{ x: number; t: number; cam: string } | null>(null);
   const [message, setMessage] = useState("");
-  const [open, setOpen] = useState<number | null>(null);
+  const [open, setOpen] = useState<{ id: number; key: string } | null>(null);   // key = the lane (server) the event is on
   const [width, setWidth] = useState(1000);
-  const [filter, setFilterState] = useState<Filter>(loadFilter);
+  const [filter, setFilterState] = useState<Filter>(() => loadFilter(sk("timelineFilter")));
   const filterActive = JSON.stringify({ ...DEFAULT_FILTER, ...filter }) !== JSON.stringify(DEFAULT_FILTER);
   const setFilter = (patch: Partial<Filter>) => {
     const next = { ...filter, ...patch };
     setFilterState(next);
     try {
-      localStorage.setItem("timelineFilter", JSON.stringify(next));
+      localStorage.setItem(sk("timelineFilter"), JSON.stringify(next));
     } catch {
       /* private mode */
     }
@@ -172,21 +223,26 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
   const range = view.end - view.start;
   const toX = useCallback((t: number) => ((t - view.start) / range) * width, [view.start, range, width]);
   const toT = useCallback((x: number) => view.start + (x / width) * range, [view.start, range, width]);
-  const camName = (id: string) => cameras.find((c) => c.id === id)?.name ?? id;
+  // "Server · Camera" once the Timeline spans more than one server
+  const camName = (k: string) => {
+    const c = camByKey.get(k);
+    if (!c) return k;
+    return multiServer && c.serverName ? `${c.serverName} · ${c.name}` : c.name;
+  };
 
   useEffect(() => {
-    if (!cam && cameras[0]) setCam(cameras[0].id);
+    if (!cam && cameras[0]) setCam(laneKey(cameras[0]));
   }, [cameras, cam]);
 
   // ---- layout: which cameras are shown and which one is soloed; named layouts live on the server
   const [layouts, setLayouts] = useState<Layout[]>([]);
-  const [layoutId, setLayoutIdState] = useState<number>(() => loadNumber("timelineLayoutId", 0));
-  const [config, setConfigState] = useState<LayoutConfig>(loadConfig);
+  const [layoutId, setLayoutIdState] = useState<number>(() => loadNumber(sk("timelineLayoutId"), 0));
+  const [config, setConfigState] = useState<LayoutConfig>(() => loadConfig(sk("timelineLayoutConfig")));
   const setConfig = (next: LayoutConfig | ((c: LayoutConfig) => LayoutConfig)) => {
     setConfigState((prev) => {
       const c = typeof next === "function" ? next(prev) : next;
       try {
-        localStorage.setItem("timelineLayoutConfig", JSON.stringify(c));
+        localStorage.setItem(sk("timelineLayoutConfig"), JSON.stringify(c));
       } catch {
         /* private mode */
       }
@@ -195,21 +251,22 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
   };
   const setLayoutId = (id: number) => {
     setLayoutIdState(id);
-    saveNumber("timelineLayoutId", id);
+    saveNumber(sk("timelineLayoutId"), id);
   };
-  const reloadLayouts = () => api.layouts().then(setLayouts).catch(() => {});
+  const reloadLayouts = () => layoutStore.list().then(setLayouts).catch(() => {});
   useEffect(() => {
     reloadLayouts();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layoutStore]);
 
   // display order: the layout's order first, then any cameras it doesn't mention
   const allIds = useMemo(() => {
-    const ids = cameras.map((c) => c.id);
+    const ids = cameras.map(laneKey);
     const ordered = (config.order ?? []).filter((id) => ids.includes(id));
     return [...ordered, ...ids.filter((id) => !ordered.includes(id))];
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cameras, (config.order ?? []).join(",")]);
-  const orderedCams = allIds.map((id) => cameras.find((c) => c.id === id)!).filter(Boolean);
+  const orderedCams = allIds.map((id) => camByKey.get(id)!).filter(Boolean);
   const [audioCam, setAudioCam] = useState<string | null>(null); // the one tile whose sound plays
   const [dragId, setDragId] = useState<string | null>(null);
   const [dropId, setDropId] = useState<string | null>(null);
@@ -276,7 +333,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
   const isPhone = useIsPhone();
   const autoSolo = useRef(false);
   useEffect(() => {  // a phone can't show a grid of full-resolution streams: one camera at a time
-    const flag = "timelineAutoSolo"; // survives a reload, so a phone visit never leaves a desktop stuck on one camera
+    const flag = sk("timelineAutoSolo"); // survives a reload, so a phone visit never leaves a desktop stuck on one camera
     const wasAuto = autoSolo.current || localStorage.getItem(flag) === "1";
     if (isPhone && !config.solo && allIds.length) {
       autoSolo.current = true;
@@ -313,7 +370,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
   const saveLayout = async () => {
     const l = layouts.find((x) => x.id === layoutId);
     if (!l) return saveLayoutAs();
-    await api.updateLayout(l.id, { name: l.name, config });
+    await layoutStore.update(l.id, { name: l.name, config });
     reloadLayouts();
     toast.success(`Layout "${l.name}" saved`);
   };
@@ -321,7 +378,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
     const name = (await promptDialog("Save layout as", { label: "Name, e.g. Doors or Perimeter" }))?.trim();
     if (!name) return;
     try {
-      const l = await api.createLayout({ name, config });
+      const l = await layoutStore.create({ name, config });
       await reloadLayouts();
       setLayoutId(l.id);
       toast.success(`Layout "${name}" saved`);
@@ -334,7 +391,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
     const name = l && (await promptDialog("Rename layout", { initial: l.name, confirmLabel: "Rename" }))?.trim();
     if (!l || !name) return;
     try {
-      await api.updateLayout(l.id, { name, config: l.config });
+      await layoutStore.update(l.id, { name, config: l.config });
       reloadLayouts();
       toast.success(`Renamed to "${name}"`);
     } catch (e) {
@@ -344,7 +401,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
   const deleteLayout = async () => {
     const l = layouts.find((x) => x.id === layoutId);
     if (!l || !await confirmDialog(`Delete the layout "${l.name}"?`, { confirmLabel: "Delete", danger: true })) return;
-    await api.deleteLayout(l.id);
+    await layoutStore.remove(l.id);
     setLayoutId(0);
     reloadLayouts();
     toast.success(`Deleted "${l.name}"`);
@@ -364,17 +421,20 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
     const margin = (v.end - v.start) * 0.5;
     const entries = await Promise.all(
       cameras.map(async (c) => {
+        const k = laneKey(c);
+        const off = offOf(k);   // ask in the server's clock, then shift the answer back onto the shared one
         try {
-          const r = await api.recordings(c.id, v.start - margin, v.end + margin);
-          return [c.id, { spans: mergeSpans(r.spans), events: r.events, kept: r.kept ?? [], locks: r.locks ?? [] }] as const;
+          const r = await apiFor(serverOf(k)).recordings(c.id, v.start - margin + off, v.end + margin + off);
+          return [k, shiftLane({ spans: mergeSpans(r.spans), events: r.events, kept: r.kept ?? [], locks: r.locks ?? [] }, -off)] as const;
         } catch {
-          return [c.id, { spans: [], events: [], kept: [], locks: [] }] as const;
+          return [k, { spans: [], events: [], kept: [], locks: [] }] as const;
         }
       }),
     );
     setLanes(Object.fromEntries(entries));
     loadedFor.current = { start: v.start - margin, end: v.end + margin };
-  }, [cameras]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cameras, apiFor]);
   useEffect(() => {
     const t = setTimeout(() => load(view), 200);
     return () => clearTimeout(t);
@@ -540,12 +600,13 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
   const focusMembers = focus ? (focus.members?.length ? focus.members : [{ id: focus.eventId, cam: focus.cam, start: focus.start, end: focus.end }]) : [];
 
   // ---- journey connectors: lines between linked sightings on different lanes
-  const [showJourneys, setShowJourneys] = useState(() => loadNumber("timelineShowJourneys", 0) === 1);
+  const [showJourneys, setShowJourneys] = useState(() => loadNumber(sk("timelineShowJourneys"), 0) === 1);
   const laneY = (camId: string): number | null => {
     let y = 26; // axis height
     for (const c of orderedCams) {
-      const h = visibleIds.includes(c.id) ? 34 : 18;
-      if (c.id === camId) return visibleIds.includes(c.id) ? y + h / 2 : null;
+      const k = laneKey(c);
+      const h = visibleIds.includes(k) ? 34 : 18;
+      if (k === camId) return visibleIds.includes(k) ? y + h / 2 : null;
       y += h;
     }
     return null;
@@ -571,7 +632,10 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
   }, [lanes, showJourneys, focus?.nonce]);
 
   // ---- hover thumbnails (per lane)
-  const hoverFrames = useLatestFrame(320);
+  const hoverFrameUrl = useCallback((k: string, t: number, w?: number, exact?: boolean) => apiFor(serverOf(k)).frameUrl(idOf(k), t + offOf(k), w, exact),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [apiFor, camByKey]);
+  const hoverFrames = useLatestFrame(320, hoverFrameUrl);
   const lastScrubT = useRef<number | null>(null);
 
   const scrubTo = (t: number) => {
@@ -592,10 +656,11 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
   // ---- locking ranges (Shift+drag) and existing locks
   const [selection, setSelection] = useState<{ cam: string; start: number; end: number } | null>(null);
   const [lockPrompt, setLockPrompt] = useState<{ cam: string; start: number; end: number; note: string } | null>(null);
-  const [openLock, setOpenLock] = useState<Lock | null>(null);
+  const [openLock, setOpenLock] = useState<(Lock & { key: string }) | null>(null);   // key = the lane it was clicked on
   const saveLock = async () => {
     if (!lockPrompt) return;
-    await api.createLock({ camera_id: lockPrompt.cam, start_ts: lockPrompt.start, end_ts: lockPrompt.end, note: lockPrompt.note });
+    const off = offOf(lockPrompt.cam);
+    await apiFor(serverOf(lockPrompt.cam)).createLock({ camera_id: idOf(lockPrompt.cam), start_ts: lockPrompt.start + off, end_ts: lockPrompt.end + off, note: lockPrompt.note });
     toast.success("Footage locked · kept until you unlock it");
     setLockPrompt(null);
     setSelection(null);
@@ -745,9 +810,10 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
   // the share link carries the focused event (or playhead) and the painted region of the selected camera
   const shareLink = () => {
     const rc = regionMap[cam] ? cam : Object.keys(regionMap)[0];
-    const region = rc ? { cam: rc, cells: encodeCells(regionMap[rc]) } : null;
-    const hash = focus ? timelineHash(focus.cam, focus.eventId, !!focus.members, focus.start, region)
-      : timelineHash(cam, 0, false, playhead ?? undefined, region);
+    const region = rc ? { cam: idOf(rc), cells: encodeCells(regionMap[rc]) } : null;
+    const fc = focus ? focus.cam : cam;   // a link names the camera by its id on its server, plus &server= when not this one
+    const hash = focus ? timelineHash(idOf(fc), focus.eventId, !!focus.members, focus.start, region, serverOf(fc) || undefined)
+      : timelineHash(idOf(fc), 0, false, playhead ?? undefined, region, serverOf(fc) || undefined);
     navigator.clipboard?.writeText(location.origin + location.pathname + hash).then(() => toast.success("Link copied")).catch(() => {});
   };
   const tileKey = tileIds.join(",");
@@ -778,7 +844,12 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
     const lo = dir > 0 ? ref + 0.5 : Math.max(0, ref - SEARCH_BACK_S);
     const hi = dir > 0 ? Math.min(nowS(), ref + SEARCH_BACK_S) : ref - 0.5;
     const found = (await Promise.all(tileIds.filter(inRegionScope).map(async (id) => {
-      try { return (await api.recordings(id, lo, hi)).events.filter((e) => matches(e, filter) && regionPass(e, regionMap[id])).map((e) => ({ ...e, camId: id })); }
+      const off = offOf(id);
+      try {
+        return (await apiFor(serverOf(id)).recordings(idOf(id), lo + off, hi + off)).events
+          .map((e) => (off ? { ...e, start_ts: e.start_ts - off, end_ts: e.end_ts == null ? e.end_ts : e.end_ts - off } : e))
+          .filter((e) => matches(e, filter) && regionPass(e, regionMap[id])).map((e) => ({ ...e, camId: id }));
+      }
       catch { return []; }
     }))).flat().sort((a, b) => a.start_ts - b.start_ts);
     const far = dir > 0 ? found.find((e) => e.start_ts - 2 > ref + 0.5) : [...found].reverse().find((e) => e.start_ts - 2 < ref - 0.5);
@@ -819,7 +890,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
     else if (ev.key === "]") jumpToEvent(1);
     else if (ev.key === "0") setConfig((c) => ({ ...c, solo: null }));
     else if (/^[1-9]$/.test(ev.key) && cameras[+ev.key - 1]) {
-      const id = cameras[+ev.key - 1].id;
+      const id = laneKey(cameras[+ev.key - 1]);
       setCam(id);
       setConfig((c) => ({ visible: c.visible && !c.visible.includes(id) ? [...c.visible, id] : c.visible, solo: id }));
     }
@@ -890,8 +961,11 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
                 dragging={dragId === id}
                 dropTarget={dropId === id && dragId !== id}
                 onDragPointerDown={(e, fromGrip) => startTileDrag(id, camName(id), e, fromGrip)}
-                camera={cameras.find((c) => c.id === id)}
-                hasAudio={hasAudioTrack(cameras.find((c) => c.id === id))}
+                camera={rawCams.get(id)}
+                hasAudio={hasAudioTrack(camByKey.get(id))}
+                site={apiFor(serverOf(id))}
+                camId={idOf(id)}
+                timeOffsetS={offOf(id)}
                 audioOn={audioCam === id}
                 onToggleAudio={() => setAudioCam((a) => (a === id ? null : id))}
               />
@@ -914,8 +988,8 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
       {isPhone && cameras.length > 1 && (
         <div className="tl-cam-picker" role="tablist">
           {orderedCams.map((c) => (
-            <button key={c.id} role="tab" aria-selected={solo === c.id} className={`chip ${solo === c.id ? "on-person" : ""}`}
-              onClick={() => setConfig((cfg) => ({ ...cfg, solo: c.id }))}>{c.name}</button>
+            <button key={laneKey(c)} role="tab" aria-selected={solo === laneKey(c)} className={`chip ${solo === laneKey(c) ? "on-person" : ""}`}
+              onClick={() => setConfig((cfg) => ({ ...cfg, solo: laneKey(c) }))}>{camName(laneKey(c))}</button>
           ))}
         </div>
       )}
@@ -993,9 +1067,9 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
         <ConfidenceSlider value={filter.minYolo} onChange={(v) => setFilter({ minYolo: v })} />
         <label className="row small"><input type="checkbox" checked={filter.hideFalseAlarms} onChange={(e) => setFilter({ hideFalseAlarms: e.target.checked })} /> Hide false alarms</label>
         <label className="row small"><input type="checkbox" checked={filter.synopsisOnly} onChange={(e) => setFilter({ synopsisOnly: e.target.checked })} /> With synopsis only</label>
-        <button className="ghost small" onClick={() => { setFilterState(DEFAULT_FILTER); try { localStorage.removeItem("timelineFilter"); } catch { /* ignore */ } }}>Reset</button>
+        <button className="ghost small" onClick={() => { setFilterState(DEFAULT_FILTER); try { localStorage.removeItem(sk("timelineFilter")); } catch { /* ignore */ } }}>Reset</button>
         <label className="row small" title="Draw lines between sightings of the same person on different cameras">
-          <input type="checkbox" checked={showJourneys} onChange={(e) => { setShowJourneys(e.target.checked); saveNumber("timelineShowJourneys", e.target.checked ? 1 : 0); }} /> Show journeys
+          <input type="checkbox" checked={showJourneys} onChange={(e) => { setShowJourneys(e.target.checked); saveNumber(sk("timelineShowJourneys"), e.target.checked ? 1 : 0); }} /> Show journeys
         </label>
         {Object.keys(regionMap).map((id) => (
           <span key={id} className="chip on region-chip" title="The Timeline shows only this camera's events that passed through the painted region; other lanes are dimmed (✎ on the tile to edit, ✕ to clear)">
@@ -1018,7 +1092,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
             : <span><strong>{camName(focus.cam)}</strong> · {fmtClock(focus.start)} · from footage search</span>}
           <span className="spacer" />
           <button className="ghost small" onClick={replayFocus} title={`Play from ${FOCUS_PREROLL_S} s before`}>↺ Replay{focus.eventId ? " event" : ""}</button>
-          {focus.eventId ? <button className="ghost small" onClick={() => setOpen(focus.eventId)}>Details</button> : null}
+          {focus.eventId ? <button className="ghost small" onClick={() => setOpen({ id: focus.eventId, key: focus.cam })}>Details</button> : null}
           <button className="ghost small" onClick={shareLink} title="Copy a link to this event on the Timeline (includes a painted region)">Copy link</button>
           <button className="ghost small" onClick={() => onClearFocus?.()} aria-label="Clear focus">✕</button>
         </div>
@@ -1033,11 +1107,11 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
       )}
       {openLock && (
         <div className="lock-bar">
-          <span>🔒 Locked {camName(openLock.camera_id)} {fmtClock(openLock.start_ts)} → {fmtClock(openLock.end_ts).slice(-8)}{openLock.note ? ` · ${openLock.note}` : ""}{openLock.event_id ? ` · event #${openLock.event_id}` : ""}</span>
-          <button className="ghost" onClick={() => { setView(clampView(openLock.start_ts - 60, openLock.end_ts + 60)); seekTo(openLock.start_ts, openLock.camera_id, true, { noSkip: true, until: openLock.end_ts }); setOpenLock(null); }}>Play</button>
+          <span>🔒 Locked {camName(openLock.key)} {fmtClock(openLock.start_ts)} → {fmtClock(openLock.end_ts).slice(-8)}{openLock.note ? ` · ${openLock.note}` : ""}{openLock.event_id ? ` · event #${openLock.event_id}` : ""}</span>
+          <button className="ghost" onClick={() => { setView(clampView(openLock.start_ts - 60, openLock.end_ts + 60)); seekTo(openLock.start_ts, openLock.key, true, { noSkip: true, until: openLock.end_ts }); setOpenLock(null); }}>Play</button>
           <button className="ghost" onClick={async () => {
             if (!await confirmDialog("Unlock this range?", { message: "It will follow the retention policy again.", confirmLabel: "Unlock", danger: true })) return;
-            await api.deleteLock(openLock.id); setOpenLock(null); load(viewRef.current); toast.success("Unlocked");
+            await apiFor(serverOf(openLock.key)).deleteLock(openLock.id); setOpenLock(null); load(viewRef.current); toast.success("Unlocked");
           }}>Unlock</button>
           <button className="ghost" onClick={() => setOpenLock(null)}>Close</button>
         </div>
@@ -1053,16 +1127,17 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
         <div className="tl-names">
           <div className="tl-axis-spacer" />
           {orderedCams.map((c) => {
-            const shown = visibleIds.includes(c.id);
-            const dim = (solo != null && solo !== c.id) || !inRegionScope(c.id);
+            const k = laneKey(c);
+            const shown = visibleIds.includes(k);
+            const dim = (solo != null && solo !== k) || !inRegionScope(k);
             return (
-              <div key={c.id} className={`tl-name-row ${shown ? "" : "lane-hidden"} ${dim ? "lane-dimmed" : ""} ${c.id === cam ? "active" : ""}`}>
-                <button className={`lane-btn lane-eye ${shown ? "on" : ""}`} onClick={() => toggleVisible(c.id)}
+              <div key={k} className={`tl-name-row ${shown ? "" : "lane-hidden"} ${dim ? "lane-dimmed" : ""} ${k === cam ? "active" : ""}`}>
+                <button className={`lane-btn lane-eye ${shown ? "on" : ""}`} onClick={() => toggleVisible(k)}
                   title={shown ? "Hide this camera" : "Show this camera"} aria-pressed={shown}>{shown ? "👁" : "◌"}</button>
-                <button className="tl-name" onClick={() => setCam(c.id)} title={c.name}>{c.name}</button>
+                <button className="tl-name" onClick={() => setCam(k)} title={camName(k)}>{camName(k)}</button>
                 {shown && (
-                  <button className={`lane-btn lane-solo ${solo === c.id ? "on" : ""}`} onClick={() => toggleSolo(c.id)}
-                    title={solo === c.id ? "Back to all shown cameras" : "Isolate this camera"} aria-pressed={solo === c.id}>🔍</button>
+                  <button className={`lane-btn lane-solo ${solo === k ? "on" : ""}`} onClick={() => toggleSolo(k)}
+                    title={solo === k ? "Back to all shown cameras" : "Isolate this camera"} aria-pressed={solo === k}>🔍</button>
                 )}
               </div>
             );
@@ -1089,12 +1164,13 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
             ))}
           </div>
           {orderedCams.map((c) => {
-            const lane = lanes[c.id];
-            const shown = visibleIds.includes(c.id);
-            const dim = (solo != null && solo !== c.id) || !inRegionScope(c.id);
-            if (!shown) return <div key={c.id} className="tl-lane lane-hidden" data-cam={c.id} />;
+            const k = laneKey(c);
+            const lane = lanes[k];
+            const shown = visibleIds.includes(k);
+            const dim = (solo != null && solo !== k) || !inRegionScope(k);
+            if (!shown) return <div key={k} className="tl-lane lane-hidden" data-cam={k} />;
             return (
-              <div key={c.id} className={`tl-lane ${c.id === cam ? "active" : ""} ${dim ? "lane-dimmed" : ""}`} data-cam={c.id}>
+              <div key={k} className={`tl-lane ${k === cam ? "active" : ""} ${dim ? "lane-dimmed" : ""}`} data-cam={k}>
                 {lane?.spans.map((s, i) => {
                   const x1 = Math.max(-2, toX(s.start));
                   const x2 = Math.min(width + 2, toX(s.end));
@@ -1112,13 +1188,13 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
                     <div key={`l${lk.id}`} className="tl-lock" style={{ left: x1, width: Math.max(3, x2 - x1) }}
                       title={`Locked${lk.note ? `: ${lk.note}` : ""}`}
                       onPointerDown={(ev) => ev.stopPropagation()}
-                      onClick={(ev) => { ev.stopPropagation(); setOpenLock(lk); }} />
+                      onClick={(ev) => { ev.stopPropagation(); setOpenLock({ ...lk, key: k }); }} />
                   ) : null;
                 })}
-                {selection && selection.cam === c.id && (
+                {selection && selection.cam === k && (
                   <div className="tl-selection" style={{ left: toX(selection.start), width: Math.max(1, toX(selection.end) - toX(selection.start)) }} />
                 )}
-                {filtered[c.id]?.map((e) => {
+                {filtered[k]?.map((e) => {
                   const x = toX(e.start_ts);
                   if (x < -10 || x > width + 10) return null;
                   const w = Math.max(3, toX(e.end_ts ?? e.start_ts) - x);
@@ -1130,12 +1206,12 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
                       title={`${e.yolo_class ?? e.camera_class} · ${fmtTime(e.start_ts)} · ${e.status}${e.ppe ? " · PPE violation" : ""}${e.threat ? ` · threat ${e.threat}` : ""}${e.priority && e.priority !== "none" ? ` · priority ${e.priority}` : ""}${(e.anomaly ?? 0) >= UNUSUAL_MIN ? " · unusual" : ""}${e.verdict ? ` · ${e.verdict.replace("_", " ")}` : ""}`}
                       onClick={(ev) => {
                         ev.stopPropagation();
-                        setOpen(e.id);
+                        setOpen({ id: e.id, key: k });
                       }}
                     />
                   );
                 })}
-                {focusMembers.filter((m) => m.cam === c.id).map((m) => {
+                {focusMembers.filter((m) => m.cam === k).map((m) => {
                   const x = toX(m.start);
                   if (x < -10 || x > width + 10) return null;
                   const ev = lane?.events.find((e) => e.id === m.id);
@@ -1143,7 +1219,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
                     <div key={`focus${m.id}`} className={`tl-marker focus ${ev?.camera_class ?? "person"}`}
                       style={{ left: x, width: Math.max(4, toX(m.end) - x) }}
                       title={`Event #${m.id}`}
-                      onClick={(e2) => { e2.stopPropagation(); if (m.id) setOpen(m.id); }} />
+                      onClick={(e2) => { e2.stopPropagation(); if (m.id) setOpen({ id: m.id, key: k }); }} />
                   );
                 })}
               </div>
@@ -1186,7 +1262,8 @@ export function TimelineView({ cameras, focus = null, onClearFocus }: { cameras:
           title={filter.ppe ? "Showing PPE violations only · tap to show everything" : "Tap to show PPE violations only"}><i className="sw ppe" /> PPE violation</button>
         <span>👁 show/hide · 🔍 isolate (1–9, 0 = grid) · double-click a tile to isolate · scroll to zoom · drag to pan · drag the playhead to scrub · Space / ← → / + − / [ ] events · Shift+drag a lane to lock</span>
       </div>
-      {open !== null && <EventDetail id={open} cameraName={camName} onClose={() => setOpen(null)} />}
+      {open !== null && <EventDetail id={open.id} site={apiFor(serverOf(open.key))} cameraName={(id) => camName(keyFor(serverOf(open.key), id))}
+        onClose={() => setOpen(null)} />}
     </div>
   );
 }

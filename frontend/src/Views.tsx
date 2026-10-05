@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { BASE, api, fmtTime, frameUrl, type BaselineCamera, type FootageStatus, type RemoteStatus, type Camera, type FeedbackStats, type HubStatus, type NvrEvent, type RetentionPolicy, type SystemInfo, type Zone } from "./api";
+import { BASE, api, fmtTime, frameUrl, type BaselineCamera, type FootageStatus, type RemoteStatus, type Camera, type FeedbackStats, type HubStatus, type NvrEvent, type RetentionPolicy, type SiteApi, type SystemInfo, type Zone } from "./api";
 import { EventCard } from "./Events";
 import { EventDetail } from "./EventDetail";
 import { LivePlayer } from "./LivePlayer";
@@ -27,9 +27,13 @@ function loadQuality(): Record<string, Quality> {
 }
 
 /** One live camera: the WHEP player with the paint-a-region overlay and the tile bar. */
-function LiveTile({ c, hd, port, active, onUnsupported, bar, phone, onSwipe, iceServers }: {
+export function LiveTile({ c, hd, port, active, onUnsupported, bar, phone, onSwipe, iceServers, site = api, regionKey }: {
   c: Camera; hd: boolean; port: number; active?: NvrEvent; onUnsupported?: () => void; bar: React.ReactNode; phone?: boolean; onSwipe?: (dir: -1 | 1) => void;
   iceServers?: RTCIceServer[];
+  /** the camera's server (the hub's combined Live); default: this server */
+  site?: SiteApi;
+  /** key the painted region is stored under (the hub uses server/camera); default: the camera id */
+  regionKey?: string;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [painting, setPainting] = useState(false);
@@ -42,14 +46,15 @@ function LiveTile({ c, hd, port, active, onUnsupported, bar, phone, onSwipe, ice
     <div className={`tile ${active ? "alerting" : ""} ${painting ? "painting" : ""} ${ptzOn ? "ptz" : ""}`}
       {...(phone && onSwipe && !painting && !ptzOn ? swipeHandlers(onSwipe) : {})}>
       <LivePlayer key={`${c.id}-${hd ? "hd" : "sd"}`} path={hd ? c.id : `${c.id}_sub`} port={port} showSize className={hd ? "hd" : ""}
+        base={site === api ? undefined : site.base}
         onUnsupported={onUnsupported} videoRef={videoRef} iceServers={iceServers} muted={!sound} onAudio={setHasAudio}>
-        {!ptzOn && <RegionOverlay cam={c.id} videoRef={videoRef} editing={painting} onDone={() => setPainting(false)} camera={c} fallbackAspect={aspect} />}
-        {ptz?.available && <PtzOverlay cam={c.id} videoRef={videoRef} active={ptzOn} onDone={() => setPtzOn(false)} fallbackAspect={aspect} />}
+        {!ptzOn && <RegionOverlay cam={regionKey ?? c.id} videoRef={videoRef} editing={painting} onDone={() => setPainting(false)} camera={c} fallbackAspect={aspect} site={site} />}
+        {ptz?.available && <PtzOverlay cam={c.id} videoRef={videoRef} active={ptzOn} onDone={() => setPtzOn(false)} fallbackAspect={aspect} site={site} />}
       </LivePlayer>
       <div className="tile-bar">
         {bar}
-        <PtzBadge cam={c.id} ptz={ptz} />
-        {!painting && <RegionBadge cam={c.id} onEdit={() => setPainting(true)} />}
+        <PtzBadge cam={c.id} ptz={ptz} site={site} />
+        {!painting && <RegionBadge cam={regionKey ?? c.id} onEdit={() => setPainting(true)} />}
         {hasAudio && <button className={`ghost small ${sound ? "on" : ""}`} title={sound ? "Mute" : "Listen"} onClick={() => setSound((s) => !s)}>{sound ? "🔊" : "🔇"}</button>}
         {ptz?.available && (
           <button className={`ghost small ${ptzOn ? "on" : ""}`} title={ptz.pan_tilt === false ? "Zoom, relay, digital input" : "Pan / tilt / zoom, presets, relay"} disabled={painting}

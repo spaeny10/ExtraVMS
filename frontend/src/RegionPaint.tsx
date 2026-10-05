@@ -3,7 +3,7 @@
  * the user brushes grid cells; the painted cells become that camera's event filter (region.ts).
  */
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { Camera } from "./api";
+import { api, type Camera, type SiteApi } from "./api";
 import { GRID_H, GRID_W, cellIndex, countCells, hasCell, isEmpty, regions, saveAsPlace, setCell, useRegion } from "./region";
 
 const COARSE = typeof matchMedia !== "undefined" && matchMedia("(pointer: coarse)").matches;
@@ -17,9 +17,11 @@ export function contentRect(box: { width: number; height: number }, aspect: numb
   return { left: 0, top: (box.height - h) / 2, width: box.width, height: h };
 }
 
-export function RegionOverlay({ cam, videoRef, editing, onDone, camera, fallbackAspect = 2592 / 1520 }: {
+export function RegionOverlay({ cam, videoRef, editing, onDone, camera, fallbackAspect = 2592 / 1520, site = api }: {
   cam: string; videoRef: React.RefObject<HTMLVideoElement | null>; editing: boolean; onDone: () => void;
   camera?: Camera; fallbackAspect?: number;
+  /** the camera's server, for "Save as named place" (default: this server) */
+  site?: SiteApi;
 }) {
   const stored = useRegion(cam);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -133,7 +135,7 @@ export function RegionOverlay({ cam, videoRef, editing, onDone, camera, fallback
           <span className="muted-on-dark">{countCells(bits)} cells</span>
           <button className="ghost small" disabled={isEmpty(bits)} onClick={() => { const b = new Uint8Array(bits.length); setBits(b); commit(b); }}>Clear</button>
           {camera && <button className="ghost small" disabled={isEmpty(bits)} title="Turn the painted cells into a named place (zone) on this camera"
-            onClick={() => saveAsPlace(camera, bits)}>Save as named place…</button>}
+            onClick={() => saveAsPlace(camera, bits, site)}>Save as named place…</button>}
           <button className="small" onClick={onDone}>Done</button>
         </div>
       )}

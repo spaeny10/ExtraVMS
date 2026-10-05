@@ -1,7 +1,6 @@
 import { RegionBadge, RegionOverlay } from "./RegionPaint";
-import { useEffect, useRef, useState } from "react";
-import { playbackUrl } from "./api";
-import type { Camera } from "./api";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { api, type Camera, type SiteApi } from "./api";
 import { PREFETCH_LEAD_S, chunkLen, dropPrefetch, firstChunkLen, isBuffered, prefetchChunk, spanAt, useLatestFrame, type Prefetched, type Span } from "./playback";
 
 export type TileStatus = "idle" | "paused" | "playing" | "buffering" | "gap";
@@ -18,6 +17,7 @@ const TICK_MS = 250;
 export function SyncTile({
   cam, name, spans, clockRef, playing, speed, scrubbing, scrubT, previewWidth, active, soloed,
   onSolo, onSelect, statusRef, dragging, dropTarget, onDragPointerDown, camera, hasAudio, audioOn, onToggleAudio,
+  site = api, camId, timeOffsetS = 0,
 }: {
   cam: string; name: string; spans: Span[] | undefined; clockRef: React.RefObject<number | null>;
   playing: boolean; speed: number; scrubbing: boolean; scrubT: number | null; previewWidth: number;
@@ -30,14 +30,21 @@ export function SyncTile({
   /** the camera record, so a painted region can be saved as a named place */
   camera?: Camera;
   statusRef: React.RefObject<Record<string, TileStatus>>;
+  /** the camera's server (default: this server); `cam` stays the lane key, `camId` is the id on that server */
+  site?: SiteApi; camId?: string;
+  /** how far this server's clock is ahead of the shared clock (server time = shared + offset; 0 = none) */
+  timeOffsetS?: number;
 }) {
+  const id = camId ?? cam;
+  const off = timeOffsetS;
+  const frameUrlFor = useCallback((_k: string, t: number, w?: number, exact?: boolean) => site.frameUrl(id, t + off, w, exact), [site, id, off]);
   const video = useRef<HTMLVideoElement>(null);
   const [chunk, setChunk] = useState<{ start: number; key: number; len: number; src: string } | null>(null);
   const loaded = useRef(false);
   const prefetch = useRef<Prefetched | null>(null);   // the chunk after the current one, downloading ahead of need
   const blobInUse = useRef<string | null>(null);      // the current chunk's blob URL, revoked when it is replaced
   const [status, setStatus] = useState<TileStatus>("idle");
-  const frames = useLatestFrame(previewWidth);
+  const frames = useLatestFrame(previewWidth, frameUrlFor);
   const props = useRef({ playing, speed, spans, scrubbing });
   props.current = { playing, speed, spans, scrubbing };
   const chunkRef = useRef(chunk);
@@ -54,7 +61,7 @@ export function SyncTile({
     if (blobInUse.current) URL.revokeObjectURL(blobInUse.current);
     blobInUse.current = null;
     let len = cont ? chunkLen(t) : firstChunkLen(t);
-    let src = playbackUrl(cam, t, len);
+    let src = site.playbackUrl(id, t + off, len);
     const p = prefetch.current;
     if (p && Math.abs(p.start - t) < 1 && p.url) {
       len = p.len;
@@ -72,7 +79,7 @@ export function SyncTile({
     const next = c.start + c.len + 0.1;
     if (prefetch.current || !spanAt(props.current.spans, next)) return;
     const len = chunkLen(next);
-    prefetch.current = prefetchChunk(playbackUrl(cam, next, len), next, len);
+    prefetch.current = prefetchChunk(site.playbackUrl(id, next + off, len), next, len);
   };
 
   // Follow the shared clock.
@@ -185,7 +192,7 @@ export function SyncTile({
         </div>
       )}
       {status === "gap" && !frames.shot && <div className="sync-gap">No recording at this time</div>}
-      <RegionOverlay cam={cam} videoRef={video} editing={painting} onDone={() => setPainting(false)} camera={camera} />
+      <RegionOverlay cam={cam} videoRef={video} editing={painting} onDone={() => setPainting(false)} camera={camera} site={site} />
       <div className="sync-bar">
         {onDragPointerDown && <span className="sync-grip" title="Drag to reorder" onPointerDown={(e) => { e.stopPropagation(); onDragPointerDown(e, true); }}>⠿</span>}
         <span className="sync-name">{name}</span>

@@ -4,7 +4,7 @@
  * release; the camera itself stops after 2 s if the re-sends stop.
  */
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { api, type Camera, type PtzInfo, type PtzStatus } from "./api";
+import { api, type Camera, type PtzInfo, type PtzStatus, type SiteApi } from "./api";
 import { contentRect } from "./RegionPaint";
 import { confirmDialog, promptDialog, toast } from "./ui";
 
@@ -23,10 +23,10 @@ function statusText(s: PtzStatus | null | undefined): string {
 }
 
 /** Hold-to-move helper shared by the pad, the drag surface and the keyboard. */
-function useHeldMove(cam: string) {
+function useHeldMove(cam: string, site: SiteApi) {
   const vel = useRef<Vel | null>(null);
   const timer = useRef<number | undefined>(undefined);
-  const send = () => { const v = vel.current; if (v) api.ptzMove(cam, v).catch(() => {}); };
+  const send = () => { const v = vel.current; if (v) site.ptzMove(cam, v).catch(() => {}); };
   const start = (v: Vel) => {
     vel.current = v;
     if (timer.current === undefined) { send(); timer.current = window.setInterval(send, SEND_MS); }
@@ -34,9 +34,9 @@ function useHeldMove(cam: string) {
   const stop = () => {
     if (timer.current === undefined && !vel.current) return;
     clearInterval(timer.current); timer.current = undefined; vel.current = null;
-    api.ptzStop(cam).catch(() => {});
+    site.ptzStop(cam).catch(() => {});
   };
-  useEffect(() => () => { clearInterval(timer.current); if (vel.current) api.ptzStop(cam).catch(() => {}); }, [cam]);
+  useEffect(() => () => { clearInterval(timer.current); if (vel.current) site.ptzStop(cam).catch(() => {}); }, [cam, site]);
   return { start, stop, held: () => vel.current !== null };
 }
 
@@ -47,8 +47,10 @@ const PAD_KEY = "ptzPad";
  * click = centre, wheel = zoom). A translucent pill in the corner holds presets, relay, input and Done; the
  * on-picture pad (big translucent arrows + zoom) is optional, toggled from the pill and remembered.
  */
-export function PtzOverlay({ cam, videoRef, active, onDone, fallbackAspect = 2592 / 1520 }: {
+export function PtzOverlay({ cam, videoRef, active, onDone, fallbackAspect = 2592 / 1520, site = api }: {
   cam: string; videoRef: React.RefObject<HTMLVideoElement | null>; active: boolean; onDone: () => void; fallbackAspect?: number;
+  /** the camera's server (default: this server) */
+  site?: SiteApi;
 }) {
   const [info, setInfo] = useState<PtzInfo | null>(null);
   const [pad, setPad] = useState(() => { try { return localStorage.getItem(PAD_KEY) === "1"; } catch { return false; } });
@@ -57,8 +59,8 @@ export function PtzOverlay({ cam, videoRef, active, onDone, fallbackAspect = 259
   const surface = useRef<HTMLDivElement>(null);
   const drag = useRef<{ x0: number; y0: number; moved: boolean } | null>(null);
   const lastWheel = useRef(0);
-  const { start, stop } = useHeldMove(cam);
-  const refresh = () => api.ptz(cam).then(setInfo).catch((e) => setInfo((i) => i ? { ...i, status: { ...i.status, last_error: String(e) } } : i));
+  const { start, stop } = useHeldMove(cam, site);
+  const refresh = () => site.ptz(cam).then(setInfo).catch((e) => setInfo((i) => i ? { ...i, status: { ...i.status, last_error: String(e) } } : i));
 
   useEffect(() => {
     if (!active) { stop(); return; }
@@ -99,7 +101,7 @@ export function PtzOverlay({ cam, videoRef, active, onDone, fallbackAspect = 259
 
   const saveAs = async () => {
     const name = await promptDialog("Save this view as a preset", { label: "Name", confirmLabel: "Save" });
-    if (name?.trim()) after(api.ptzSavePreset(cam, name.trim()).then(() => toast.success(`Preset "${name.trim()}" saved`)));
+    if (name?.trim()) after(site.ptzSavePreset(cam, name.trim()).then(() => toast.success(`Preset "${name.trim()}" saved`)));
   };
 
   return (
@@ -126,7 +128,7 @@ export function PtzOverlay({ cam, videoRef, active, onDone, fallbackAspect = 259
           if (!d) return;
           if (d.moved) { stop(); return; }
           const r = e.currentTarget.getBoundingClientRect();
-          after(api.ptzRelative(cam, { dx: (e.clientX - r.left) / r.width - 0.5, dy: (e.clientY - r.top) / r.height - 0.5 }));
+          after(site.ptzRelative(cam, { dx: (e.clientX - r.left) / r.width - 0.5, dy: (e.clientY - r.top) / r.height - 0.5 }));
         }}
         onPointerCancel={() => { drag.current = null; stop(); }}
         onWheel={(e) => {
@@ -134,16 +136,16 @@ export function PtzOverlay({ cam, videoRef, active, onDone, fallbackAspect = 259
           const now = Date.now();
           if (now - lastWheel.current < 150) return;
           lastWheel.current = now;
-          after(api.ptzRelative(cam, { zoom: e.deltaY < 0 ? 0.05 : -0.05 }));
+          after(site.ptzRelative(cam, { zoom: e.deltaY < 0 ? 0.05 : -0.05 }));
         }}
         onKeyDown={(e) => {
           if (e.repeat) return;
           const v: Record<string, Vel> = { ArrowLeft: { pan: -0.5, tilt: 0, zoom: 0 }, ArrowRight: { pan: 0.5, tilt: 0, zoom: 0 },
             ArrowUp: { pan: 0, tilt: 0.5, zoom: 0 }, ArrowDown: { pan: 0, tilt: -0.5, zoom: 0 } };
           if (v[e.key]) { e.preventDefault(); start(v[e.key]); }
-          else if (e.key === "+" || e.key === "=") after(api.ptzRelative(cam, { zoom: 0.05 }));
-          else if (e.key === "-") after(api.ptzRelative(cam, { zoom: -0.05 }));
-          else if (e.key === "Home") after(api.ptzHome(cam));
+          else if (e.key === "+" || e.key === "=") after(site.ptzRelative(cam, { zoom: 0.05 }));
+          else if (e.key === "-") after(site.ptzRelative(cam, { zoom: -0.05 }));
+          else if (e.key === "Home") after(site.ptzHome(cam));
           else if (e.key === "Escape") onDone();
         }}
         onKeyUp={(e) => { if (e.key.startsWith("Arrow")) stop(); }}
@@ -155,7 +157,7 @@ export function PtzOverlay({ cam, videoRef, active, onDone, fallbackAspect = 259
           <button className="ptz-arrow down" title="Tilt down (hold)" {...hold({ pan: 0, tilt: -0.5, zoom: 0 })}>▼</button>
           <button className="ptz-arrow left" title="Pan left (hold)" {...hold({ pan: -0.5, tilt: 0, zoom: 0 })}>◀</button>
           <button className="ptz-arrow right" title="Pan right (hold)" {...hold({ pan: 0.5, tilt: 0, zoom: 0 })}>▶</button>
-          <button className="ptz-arrow home" title="Go home" onClick={() => after(api.ptzHome(cam))}>⌂</button>
+          <button className="ptz-arrow home" title="Go home" onClick={() => after(site.ptzHome(cam))}>⌂</button>
           <div className="ptz-zoom">
             <button title="Zoom in (hold)" {...hold({ pan: 0, tilt: 0, zoom: 0.5 })}>+</button>
             <button title="Zoom out (hold)" {...hold({ pan: 0, tilt: 0, zoom: -0.5 })}>−</button>
@@ -171,7 +173,7 @@ export function PtzOverlay({ cam, videoRef, active, onDone, fallbackAspect = 259
         )}
         {panTilt && <select value="" title="Go to a preset" onChange={(e) => {
           const v = e.target.value;
-          if (v === "__save") saveAs(); else if (v) after(api.ptzGoto(cam, v));
+          if (v === "__save") saveAs(); else if (v) after(site.ptzGoto(cam, v));
         }}>
           <option value="">{s?.preset_name ? `at ${s.preset_name}` : "Preset…"}</option>
           {info?.presets.filter((p) => !p.system).map((p) => <option key={p.token} value={p.token}>{p.is_home ? "★ " : ""}{p.name}</option>)}
@@ -182,7 +184,7 @@ export function PtzOverlay({ cam, videoRef, active, onDone, fallbackAspect = 259
         </select>}
         {s?.relay && (
           <button className={`ghost small ${s.relay.state ? "on" : ""}`} title={`Relay output (${s.relay.mode})`}
-            onClick={() => after(api.relay(cam, s.relay!.mode === "monostable" ? true : !s.relay!.state))}>
+            onClick={() => after(site.relay(cam, s.relay!.mode === "monostable" ? true : !s.relay!.state))}>
             ⚡ {s.relay.label}{s.relay.mode === "monostable" || s.relay.state == null ? "" : s.relay.state ? " · on" : " · off"}
           </button>
         )}
@@ -196,14 +198,14 @@ export function PtzOverlay({ cam, videoRef, active, onDone, fallbackAspect = 259
 }
 
 /** Tile-bar badge: where a PTZ camera points when it isn't home, plus relay/input state. */
-export function PtzBadge({ cam, ptz }: { cam: string; ptz: PtzStatus | null | undefined }) {
+export function PtzBadge({ cam, ptz, site = api }: { cam: string; ptz: PtzStatus | null | undefined; site?: SiteApi }) {
   if (!ptz?.available) return null;
   const away = ptz.home_name && !ptz.at_home;
   const bits: React.ReactNode[] = [];
   if (away) bits.push(
     <span key="away" className="ptz-badge" title="The camera is turned away from its home view: zones, places and the learned baseline don't apply until it returns">
       ↗ {ptz.moving ? "moving" : ptz.preset_name ?? "away"}
-      <button className="linkish" title={`Return to home (${ptz.home_name})`} onClick={(e) => { e.stopPropagation(); api.ptzHome(cam).then(() => toast.info("Returning home")).catch((err) => toast.error(err)); }}>Home</button>
+      <button className="linkish" title={`Return to home (${ptz.home_name})`} onClick={(e) => { e.stopPropagation(); site.ptzHome(cam).then(() => toast.info("Returning home")).catch((err) => toast.error(err)); }}>Home</button>
     </span>);
   if (ptz.relay?.state) bits.push(<span key="relay" className="ptz-badge" title="Relay output is on">⚡ {ptz.relay.label}</span>);
   if (ptz.input?.state) bits.push(<span key="input" className="ptz-badge" title="Digital input is active">⏺ {ptz.input.label}</span>);

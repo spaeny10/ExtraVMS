@@ -561,6 +561,12 @@ export function makeApi(base: string) {
 export type SiteApi = ReturnType<typeof makeApi>;
 /** The site this page is served from. */
 export const api = makeApi(BASE);
+/** A camera on a given server; server "" = this server (the site UI). */
+export type CameraRef = { server: string; id: string };
+/** Which API client talks to `server` (the hub resolves one per server; the site UI only has itself). */
+export type ApiResolver = (server: string) => SiteApi;
+/** The site UI's resolver: every camera lives on this server. Module-level so its identity is stable. */
+export const localApi: ApiResolver = () => api;
 
 /* ---- Ask the NVR */
 export type CiteRefs = {

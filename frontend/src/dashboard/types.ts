@@ -6,6 +6,7 @@ import type { NvrEvent } from "../api";
 
 export type DashboardWidgetType = "camera" | "events" | "briefing" | "alerts" | "health" | "ask";
 
+/** Persisted wire shape (dashboards, groups): `site` is the SERVER id (legacy naming; do not rename). */
 export type CameraRef = { site: string; camera: string };
 export type CameraProps = { site: string; camera: string; quality?: "sd" | "hd" };
 export type EventsProps = { sites?: string[]; cameras?: CameraRef[]; group?: string; classes?: ("person" | "vehicle")[]; limit?: number };

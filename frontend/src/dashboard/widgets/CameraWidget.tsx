@@ -3,21 +3,12 @@ import { LivePlayer } from "../../LivePlayer";
 import { nowS } from "../../playback";
 import { Icon } from "../../ui";
 import { useBudget } from "../Dashboard";
+import { useIceServers } from "../ice";
 import type { DashboardSource } from "../source";
 import type { Widget } from "../types";
 
-const iceCache = new Map<string, Promise<RTCIceServer[]>>();
-export function useIceServers(source: DashboardSource, site: string): RTCIceServer[] | undefined {
-  const [ice, setIce] = useState<RTCIceServer[] | undefined>(undefined);
-  useEffect(() => {
-    if (!site) return;
-    if (!iceCache.has(site)) iceCache.set(site, source.iceServers(site).catch(() => []));
-    let alive = true;
-    iceCache.get(site)!.then((v) => { if (alive) setIce(v); });
-    return () => { alive = false; };
-  }, [source, site]);
-  return ice;
-}
+// moved to ../ice so the hub's combined Live can share it; re-exported for existing importers
+export { useIceServers };
 
 export function cameraTitle(w: Widget<"camera">, source: DashboardSource): string {
   const cam = source.cameras().find((c) => c.site === w.props.site && c.id === w.props.camera);

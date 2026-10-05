@@ -16,8 +16,9 @@ export const useNav = () => useContext(NavContext);
 export type HashRegion = { cam: string; cells: string };
 
 /** #timeline?cam=cam1&event=123[&journey=1]  or  #timeline?cam=cam1&t=1790270080 (a moment);
- *  either may carry &region=<cam>:<96 base64url chars> (a painted region filter, region.ts) */
-export function parseTimelineHash(hash: string): { cam: string | null; event: number | null; journey: boolean; t: number | null; region: HashRegion | null } | null {
+ *  either may carry &region=<cam>:<96 base64url chars> (a painted region filter, region.ts)
+ *  and &server=<id> (the camera's server, in the hub's combined Timeline) */
+export function parseTimelineHash(hash: string): { cam: string | null; event: number | null; journey: boolean; t: number | null; region: HashRegion | null; server: string | null } | null {
   if (!hash.startsWith("#timeline")) return null;
   const q = new URLSearchParams(hash.split("?")[1] ?? "");
   const ev = Number(q.get("event"));
@@ -25,10 +26,11 @@ export function parseTimelineHash(hash: string): { cam: string | null; event: nu
   const reg = q.get("region") ?? "";
   const m = /^([a-z0-9_]{1,32}):([A-Za-z0-9_-]{96})$/.exec(reg);
   return { cam: q.get("cam"), event: Number.isFinite(ev) && ev > 0 ? ev : null, journey: q.get("journey") === "1",
-    t: Number.isFinite(t) && t > 0 ? t : null, region: m ? { cam: m[1], cells: m[2] } : null };
+    t: Number.isFinite(t) && t > 0 ? t : null, region: m ? { cam: m[1], cells: m[2] } : null, server: q.get("server") };
 }
 
-export const timelineHash = (cam: string, eventId: number, journey = false, t?: number, region?: HashRegion | null) =>
+export const timelineHash = (cam: string, eventId: number, journey = false, t?: number, region?: HashRegion | null, server?: string) =>
   (eventId ? `#timeline?cam=${encodeURIComponent(cam)}&event=${eventId}${journey ? "&journey=1" : ""}`
     : `#timeline?cam=${encodeURIComponent(cam)}${t ? `&t=${Math.round(t)}` : ""}`)
-  + (region ? `&region=${encodeURIComponent(region.cam)}:${region.cells}` : "");
+  + (region ? `&region=${encodeURIComponent(region.cam)}:${region.cells}` : "")
+  + (server ? `&server=${encodeURIComponent(server)}` : "");

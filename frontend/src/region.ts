@@ -5,7 +5,7 @@
  * Regions live in localStorage (regionFilter.<cam>) and are shared by the Live and Timeline views.
  */
 import { useSyncExternalStore } from "react";
-import { api, type Camera, type Zone } from "./api";
+import { api, type Camera, type SiteApi, type Zone } from "./api";
 import { promptDialog, toast } from "./ui";
 
 export const GRID_W = 32, GRID_H = 18, NBYTES = (GRID_W * GRID_H) / 8;
@@ -137,16 +137,16 @@ export function cellsToPolygon(b: Uint8Array): { points: [number, number][]; com
   return { points: pts.map(([x, y]) => [x / GRID_W, y / GRID_H] as [number, number]), components: comps.length };
 }
 
-/** Promote the painted region to a named place (zone type "area") on the camera. */
-export async function saveAsPlace(camera: Camera, bits: Uint8Array): Promise<boolean> {
+/** Promote the painted region to a named place (zone type "area") on the camera; `site` = the camera's server. */
+export async function saveAsPlace(camera: Camera, bits: Uint8Array, site: SiteApi = api): Promise<boolean> {
   const { points, components } = cellsToPolygon(bits);
   if (points.length < 3) { toast.error("Paint an area first"); return false; }
   const name = await promptDialog("Name this place", { message: components > 1 ? `Only the largest painted patch is used (${components} separate patches painted).` : "Events that walk into it will be tagged with this name, and Ask/Find will understand it.", label: "Name", confirmLabel: "Save place" });
   if (!name?.trim()) return false;
   const zone: Zone = { name: name.trim(), type: "area", points };
   try {
-    await api.saveCamera({ ...camera, zones: [...(camera.zones ?? []), zone] });
-    await api.applyZones(camera.id);
+    await site.saveCamera({ ...camera, zones: [...(camera.zones ?? []), zone] });
+    await site.applyZones(camera.id);
     toast.success(`Saved "${zone.name}" as a named place on ${camera.name}`);
     return true;
   } catch (e) { toast.error(e); return false; }

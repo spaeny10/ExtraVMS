@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CHUNK, FAR_CHUNK, FIRST_FAR_CHUNK, chunkLen, dropPrefetch, firstChunkLen, nowS, prefetchChunk } from "./playback";
+import { CHUNK, FAR_CHUNK, FIRST_FAR_CHUNK, camKey, chunkLen, dropPrefetch, firstChunkLen, nowS, prefetchChunk, splitKey } from "./playback";
 
 describe("chunk lengths", () => {
   it("near live: long chunks; far back: a short first chunk then full ones", () => {
@@ -38,5 +38,17 @@ describe("prefetch", () => {
     const p = prefetchChunk("/api/playback/cam1?start=1&duration=120", 1, 120);
     await vi.waitFor(() => expect(p.done).toBe(true));
     expect(p.url).toBeNull();
+  });
+});
+
+describe("camera keys", () => {
+  it("this server's cameras keep their bare id", () => {
+    expect(camKey("", "cam1")).toBe("cam1");
+    expect(splitKey("cam1")).toEqual({ server: "", id: "cam1" });
+  });
+  it("another server's cameras are server/id and split back", () => {
+    expect(camKey("srv_a", "cam1")).toBe("srv_a/cam1");
+    expect(splitKey("srv_a/cam1")).toEqual({ server: "srv_a", id: "cam1" });
+    expect(splitKey(camKey("s", "c_sub"))).toEqual({ server: "s", id: "c_sub" });
   });
 });

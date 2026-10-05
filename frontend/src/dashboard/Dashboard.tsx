@@ -18,16 +18,21 @@ import { HealthWidget } from "./widgets/HealthWidget";
 export const MAX_LIVE = 9;
 
 /** Which camera tiles may hold a live stream: the first MAX_LIVE visible ones, or any the viewer pressed Play on. */
-type Budget = { playing: (id: string) => boolean; visible: (id: string, on: boolean) => void; force: (id: string) => void };
+export type Budget = { playing: (id: string) => boolean; visible: (id: string, on: boolean) => void; force: (id: string) => void };
 const BudgetCtx = createContext<Budget>({ playing: () => true, visible: () => {}, force: () => {} });
 export const useBudget = () => useContext(BudgetCtx);
 
-function useBudgetProvider(): Budget {
+export function useBudgetProvider(): Budget {
   const [order, setOrder] = useState<string[]>([]);
   const visible = useCallback((id: string, on: boolean) => setOrder((o) => (on ? (o.includes(id) ? o : [...o, id]) : o.filter((x) => x !== id))), []);
   const force = useCallback((id: string) => setOrder((o) => [id, ...o.filter((x) => x !== id)]), []);
   const playing = useCallback((id: string) => { const i = order.indexOf(id); return i >= 0 && i < MAX_LIVE; }, [order]);
   return useMemo(() => ({ playing, visible, force }), [playing, visible, force]);
+}
+
+/** The live-stream budget for any grid of live tiles outside a Dashboard (e.g. the hub's combined Live). */
+export function LiveBudgetProvider({ children }: { children: ReactNode }) {
+  return <BudgetCtx.Provider value={useBudgetProvider()}>{children}</BudgetCtx.Provider>;
 }
 
 export type DashboardProps = {

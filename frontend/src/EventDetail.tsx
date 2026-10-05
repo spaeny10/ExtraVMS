@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   type NamedIdentity,
-  api, askClip, fmtDuration, fmtTime, media, ppeItemsText,
+  api, fmtDuration, fmtTime, ppeItemsText, type SiteApi,
   type ChatMessage, type Feedback, type Journey, type NvrEvent, type Synopsis, type Threat, type Verdict,
 } from "./api";
 import { StatusBadge, placeholder, rejectedReason } from "./Events";
@@ -12,7 +12,8 @@ const REASONS = ["Wrong object", "Missed detail", "Made something up", "Threat t
 const VERDICTS: [Verdict, string][] = [["correct", "Correct detection"], ["false_alarm", "False alarm"], ["wrong_class", "Wrong class"]];
 const THREATS: Threat[] = ["none", "low", "medium", "high"];
 
-export function EventDetail({ id: initialId, cameraName, onClose }: { id: number; cameraName: (id: string) => string; onClose: () => void }) {
+/** `site` = the API of the server the event lives on (the hub passes one per server; default: this server). */
+export function EventDetail({ id: initialId, cameraName, onClose, site = api }: { id: number; cameraName: (id: string) => string; onClose: () => void; site?: SiteApi }) {
   const [id, setId] = useState(initialId); // the viewer can step to another camera's sighting of the same person
   useEffect(() => setId(initialId), [initialId]);
   const [e, setE] = useState<NvrEvent | null>(null);
@@ -25,8 +26,8 @@ export function EventDetail({ id: initialId, cameraName, onClose }: { id: number
 
   const gone = () => { toast.info("This sighting was merged into a longer event"); onClose(); };
   useEffect(() => {
-    api.event(id).then(setE).catch(gone);
-    api.chat(id).then(setChat).catch(() => {});
+    site.event(id).then(setE).catch(gone);
+    site.chat(id).then(setChat).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
   useEffect(() => {
@@ -37,7 +38,7 @@ export function EventDetail({ id: initialId, cameraName, onClose }: { id: number
   // Poll while the pipeline is still working on this event.
   useEffect(() => {
     if (!e || (e.status !== "open" && e.status !== "pending" && !(e.status === "verified" && !e.synopsis && e.camera_class === "person"))) return;
-    const t = setInterval(() => api.event(id).then(setE).catch(gone), 3000);
+    const t = setInterval(() => site.event(id).then(setE).catch(gone), 3000);
     return () => clearInterval(t);
   }, [e, id]);
 
@@ -62,11 +63,11 @@ export function EventDetail({ id: initialId, cameraName, onClose }: { id: number
             <StatusBadge e={e} />
             {e.feedback?.verdict === "false_alarm" && <span className="badge status-error">Marked false alarm</span>}
             <button className="ghost" onClick={() => { openInTimeline(e); onClose(); }} title="Show this event on the Timeline, playing from just before it">⏱ Open in Timeline</button>
-            <LockControl e={e} onChange={() => api.event(e.id).then(setE)} />
-            {e.status === "verified" && <WatchControl e={e} onChange={() => api.event(e.id).then(setE)} />}
+            <LockControl e={e} site={site} onChange={() => site.event(e.id).then(setE)} />
+            {e.status === "verified" && <WatchControl e={e} site={site} onChange={() => site.event(e.id).then(setE)} />}
             {e.status === "open" || e.status === "pending"
               ? <span className="muted small" title="Verification runs automatically once the event ends">{e.status === "open" ? "Still tracking…" : "Verifying…"}</span>
-              : <button className="ghost" onClick={() => api.reprocess(e.id).then(onClose).catch((err) => toast.error(err))} title="Run YOLO verification and the synopsis again">Reprocess</button>}
+              : <button className="ghost" onClick={() => site.reprocess(e.id).then(onClose).catch((err) => toast.error(err))} title="Run YOLO verification and the synopsis again">Reprocess</button>}
             <button className="ghost" onClick={onClose} aria-label="Close">✕</button>
           </div>
         </header>
@@ -80,10 +81,10 @@ export function EventDetail({ id: initialId, cameraName, onClose }: { id: number
         <div className={`modal-grid ${isPhone ? "phone" : ""}`}>
           {(!isPhone || tab === "clip") && <div>
             {e.clip ? (
-              <video ref={video} className="clip" src={media(e, "clip.mp4")} poster={e.snapshot ? media(e, "snapshot.jpg") : undefined} controls autoPlay muted />
+              <video ref={video} className="clip" src={site.media(e, "clip.mp4")} poster={e.snapshot ? site.media(e, "snapshot.jpg") : undefined} controls autoPlay muted />
             ) : e.snapshot ? (
               <>
-                <img className="clip" src={media(e, "snapshot.jpg")} alt="" />
+                <img className="clip" src={site.media(e, "snapshot.jpg")} alt="" />
                 {e.status !== "open" && e.status !== "pending" && (
                   <p className="muted small">The clip for this event has expired under the retention policy; only the snapshot remains.</p>
                 )}
@@ -93,7 +94,7 @@ export function EventDetail({ id: initialId, cameraName, onClose }: { id: number
             )}
             {crops.length > 0 && (
               <div className="crops">
-                {crops.map((k) => <img key={k.file} src={media(e, k.file)} alt="" />)}
+                {crops.map((k) => <img key={k.file} src={site.media(e, k.file)} alt="" />)}
               </div>
             )}
             {isPhone && <p className="synopsis">{e.synopsis ?? <span className="muted">{placeholder(e)}</span>}</p>}
@@ -107,12 +108,12 @@ export function EventDetail({ id: initialId, cameraName, onClose }: { id: number
             </div>}
             {tab !== "chat" ? (
               <>
-                <JourneySection e={e} cameraName={cameraName} onShow={(eid) => setId(eid)}
+                <JourneySection e={e} site={site} cameraName={cameraName} onShow={(eid) => setId(eid)}
                   onOpenTimeline={(members) => { openInTimeline({ ...e, members }); onClose(); }} />
-                <Details e={e} setE={setE} notes={chat.filter((m) => m.saved)} onUnsave={(m) => api.saveNote(e.id, m.id, false).then(setChat)} seek={seek} />
+                <Details e={e} site={site} setE={setE} notes={chat.filter((m) => m.saved)} onUnsave={(m) => site.saveNote(e.id, m.id, false).then(setChat)} seek={seek} />
               </>
             ) : (
-              <ChatPanel e={e} chat={chat} setChat={setChat} video={video} seek={seek} />
+              <ChatPanel e={e} site={site} chat={chat} setChat={setChat} video={video} seek={seek} />
             )}
           </aside>}
         </div>
@@ -122,12 +123,12 @@ export function EventDetail({ id: initialId, cameraName, onClose }: { id: number
 }
 
 /** Cross-camera journey: the same person seen on neighbouring cameras (re-ID + Qwen confirmed). */
-function JourneySection({ e, cameraName, onShow, onOpenTimeline }: {
-  e: NvrEvent; cameraName: (id: string) => string; onShow: (id: number) => void;
+function JourneySection({ e, site, cameraName, onShow, onOpenTimeline }: {
+  e: NvrEvent; site: SiteApi; cameraName: (id: string) => string; onShow: (id: number) => void;
   onOpenTimeline: (members: { id: number; cam: string; start: number; end: number }[]) => void;
 }) {
   const [j, setJ] = useState<Journey | null>(null);
-  const load = () => api.eventJourney(e.id).then(setJ).catch(() => setJ(null));
+  const load = () => site.eventJourney(e.id).then(setJ).catch(() => setJ(null));
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -149,14 +150,14 @@ function JourneySection({ e, cameraName, onShow, onOpenTimeline }: {
           return (
             <li key={m.id} className={m.id === e.id ? "current" : ""}>
               <button className="journey-thumb" onClick={() => m.id !== e.id && onShow(m.id)} title={m.id === e.id ? "This event" : "Show this sighting"}>
-                {m.snapshot ? <img src={media(m, "snapshot.jpg")} alt="" /> : <span className="thumb-empty">{m.camera_class}</span>}
+                {m.snapshot ? <img src={site.media(m, "snapshot.jpg")} alt="" /> : <span className="thumb-empty">{m.camera_class}</span>}
               </button>
               <div className="journey-info">
                 <div><strong>{cameraName(m.camera_id)}</strong> <span className="muted small">{fmtTime(m.start_ts)}{m.start_ts > first ? ` · +${Math.round(m.start_ts - first)} s` : ""}</span></div>
                 {link && (
                   <div className="small muted">
                     Same person ({link.confidence ?? "?"}, re-ID {link.sim.toFixed(2)}, {link.gap_s >= 0 ? `${Math.round(link.gap_s)} s walk` : "overlapping views"}): {link.reason}
-                    <button className="linkish" onClick={async () => { await api.rejectLink(link.id); load(); }}>Not the same person</button>
+                    <button className="linkish" onClick={async () => { await site.rejectLink(link.id); load(); }}>Not the same person</button>
                   </div>
                 )}
               </div>
@@ -170,19 +171,19 @@ function JourneySection({ e, cameraName, onShow, onOpenTimeline }: {
 
 /** Put the person (or vehicle) in this clip on the watch list: future sightings that match their appearance are
  * raised to medium priority and shown under Needs attention. Names the fingerprint if it has no name yet. */
-function WatchControl({ e, onChange }: { e: NvrEvent; onChange: () => void }) {
+function WatchControl({ e, site, onChange }: { e: NvrEvent; site: SiteApi; onChange: () => void }) {
   const [ident, setIdent] = useState<(NamedIdentity & { sim: number }) | null | undefined>(undefined);
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [note, setNote] = useState("");
   const [known, setKnown] = useState<NamedIdentity[]>([]);  // so an existing name can be picked (adds this look)
   const isPerson = e.camera_class === "person";
-  useEffect(() => { api.eventIdentity(e.id).then(setIdent).catch(() => setIdent(null)); }, [e.id, e.watched]);
+  useEffect(() => { site.eventIdentity(e.id).then(setIdent).catch(() => setIdent(null)); }, [e.id, e.watched]);
   if (ident === undefined) return null;
   const watching = ident?.watch ? ident : null;
   const stop = async () => {
     if (!watching) return;
-    await api.watchIdentity(watching.id, false);
+    await site.watchIdentity(watching.id, false);
     toast.success(`Stopped watching ${watching.name}`);
     onChange();
   };
@@ -190,11 +191,11 @@ function WatchControl({ e, onChange }: { e: NvrEvent; onChange: () => void }) {
     ev.preventDefault();
     try {
       if (ident) {
-        await api.watchIdentity(ident.id, true, note);
+        await site.watchIdentity(ident.id, true, note);
         toast.success(`Watching ${ident.name}: matching sightings will be flagged`);
       } else {
         if (!name.trim()) return;
-        await api.nameIdentity({ kind: e.camera_class, name: name.trim(), notes: "", event_ids: [e.id], watch: true, watch_note: note });
+        await site.nameIdentity({ kind: e.camera_class, name: name.trim(), notes: "", event_ids: [e.id], watch: true, watch_note: note });
         toast.success(`Watching "${name.trim()}": matching sightings will be flagged`);
       }
       setOpen(false);
@@ -206,7 +207,7 @@ function WatchControl({ e, onChange }: { e: NvrEvent; onChange: () => void }) {
   }
   return (
     <span className="watch-control">
-      <button className="ghost" onClick={() => { setOpen(!open); if (!open) api.identities(e.camera_class as "person" | "vehicle", 0).then((x) => setKnown(x.named)).catch(() => {}); }}
+      <button className="ghost" onClick={() => { setOpen(!open); if (!open) site.identities(e.camera_class as "person" | "vehicle", 0).then((x) => setKnown(x.named)).catch(() => {}); }}
         title="Flag future sightings of this person's appearance (clothing, build) as medium priority. Re-ID sees the outfit, not the face: name them again in each outfit.">
         👁 Watch this {isPerson ? "person" : "vehicle"}
       </button>
@@ -227,7 +228,7 @@ function WatchControl({ e, onChange }: { e: NvrEvent; onChange: () => void }) {
 }
 
 /** Lock keeps this event's footage (with padding) forever, exempt from retention. */
-function LockControl({ e, onChange }: { e: NvrEvent; onChange: () => void }) {
+function LockControl({ e, site, onChange }: { e: NvrEvent; site: SiteApi; onChange: () => void }) {
   const [asking, setAsking] = useState(false);
   const [note, setNote] = useState("");
   if (e.lock) {
@@ -235,7 +236,7 @@ function LockControl({ e, onChange }: { e: NvrEvent; onChange: () => void }) {
       <button className="ghost lock-on" title={`Locked${e.lock.note ? `: ${e.lock.note}` : ""}. Footage is kept until unlocked.`}
         onClick={async () => {
           if (!await confirmDialog("Unlock this event's footage?", { message: "It will follow the normal retention policy again.", confirmLabel: "Unlock", danger: true })) return;
-          await api.unlockEvent(e.id); onChange(); toast.success("Unlocked");
+          await site.unlockEvent(e.id); onChange(); toast.success("Unlocked");
         }}>
         <Icon name="lock" size={14} /> Locked
       </button>
@@ -243,7 +244,7 @@ function LockControl({ e, onChange }: { e: NvrEvent; onChange: () => void }) {
   }
   if (asking) {
     return (
-      <form className="row lock-form" onSubmit={(ev) => { ev.preventDefault(); api.lockEvent(e.id, note).then(() => { setAsking(false); onChange(); }); }}>
+      <form className="row lock-form" onSubmit={(ev) => { ev.preventDefault(); site.lockEvent(e.id, note).then(() => { setAsking(false); onChange(); }); }}>
         <input autoFocus placeholder="Reason (optional), e.g. police report #123" value={note} onChange={(ev) => setNote(ev.target.value)} />
         <button type="submit">Lock</button>
         <button type="button" className="ghost" onClick={() => setAsking(false)}>Cancel</button>
@@ -255,8 +256,8 @@ function LockControl({ e, onChange }: { e: NvrEvent; onChange: () => void }) {
 
 /* ------------------------------------------------------------------ details tab */
 
-function Details({ e, setE, notes, onUnsave, seek }: {
-  e: NvrEvent; setE: (e: NvrEvent) => void; notes: ChatMessage[]; onUnsave: (m: ChatMessage) => void; seek: (t: number) => void;
+function Details({ e, site, setE, notes, onUnsave, seek }: {
+  e: NvrEvent; site: SiteApi; setE: (e: NvrEvent) => void; notes: ChatMessage[]; onUnsave: (m: ChatMessage) => void; seek: (t: number) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const s = e.synopsis_json;
@@ -279,14 +280,14 @@ function Details({ e, setE, notes, onUnsave, seek }: {
             {canGenerate && !editing && (
               <button className="ghost small" disabled={e.synopsis_pending} onClick={async () => {
                 if (e.corrected_at && !await confirmDialog("Replace your corrected synopsis?", { message: "Qwen will write a new one; your correction is lost.", confirmLabel: "Regenerate", danger: true })) return;
-                await api.generateSynopsis(e.id); toast.info("Qwen is writing a new synopsis…"); api.event(e.id).then(setE);
+                await site.generateSynopsis(e.id); toast.info("Qwen is writing a new synopsis…"); site.event(e.id).then(setE);
               }}>{e.synopsis_pending ? "Qwen is writing…" : s ? "Regenerate" : "Generate with Qwen"}</button>
             )}
           </div>
         </div>
         {editing ? (
           <SynopsisEditor initial={s ?? blankSynopsis(e)} onCancel={() => setEditing(false)} onSave={async (next) => {
-            setE(await api.correctSynopsis(e.id, next));
+            setE(await site.correctSynopsis(e.id, next));
             setEditing(false);
           }} />
         ) : (
@@ -304,7 +305,7 @@ function Details({ e, setE, notes, onUnsave, seek }: {
             {ppe && ["violation", "compliant", "unclear"].includes(ppe.verdict) ? (
               <div className={`d-line ${ppe.verdict === "violation" ? "rule-broken" : ""}`} title="PPE zone from Settings → Cameras → Zones. The PPE detector checks the recorded frames; Qwen looks when it is unsure.">
                 🦺 <strong>PPE in '{ppe.zone}':</strong> {ppe.verdict === "violation" ? (e.policy?.kind === "ppe" ? e.policy.text : "violation") : ppe.verdict === "compliant" ? "required items worn" : "could not tell"}
-                <span className="muted small"> · {ppeItemsText(ppe.items, ppe.required)}{ppe.marked ? <> · <a href={media(e, ppe.marked)} target="_blank" rel="noreferrer">marked frame</a></> : null}</span>
+                <span className="muted small"> · {ppeItemsText(ppe.items, ppe.required)}{ppe.marked ? <> · <a href={site.media(e, ppe.marked)} target="_blank" rel="noreferrer">marked frame</a></> : null}</span>
               </div>
             ) : null}
             {e.anomaly_json?.reasons?.length ? (
@@ -327,7 +328,7 @@ function Details({ e, setE, notes, onUnsave, seek }: {
                 {e.synopsis_original && (
                   <div className="original small">
                     <p className="muted">Qwen's original: {e.synopsis_original.summary} <em>(threat: {e.synopsis_original.threat_level})</em></p>
-                    <button className="ghost small" onClick={async () => setE(await api.revertSynopsis(e.id))}>Revert to original</button>
+                    <button className="ghost small" onClick={async () => setE(await site.revertSynopsis(e.id))}>Revert to original</button>
                   </div>
                 )}
               </details>
@@ -336,7 +337,7 @@ function Details({ e, setE, notes, onUnsave, seek }: {
         )}
       </section>
 
-      <FeedbackBar e={e} setE={setE} />
+      <FeedbackBar e={e} site={site} setE={setE} />
 
       {notes.length > 0 && (
         <section className="d-section">
@@ -382,11 +383,11 @@ function Details({ e, setE, notes, onUnsave, seek }: {
 }
 
 /** One compact row: rate the synopsis, judge the detection, add a note. Detail appears only when needed. */
-function FeedbackBar({ e, setE }: { e: NvrEvent; setE: (e: NvrEvent) => void }) {
+function FeedbackBar({ e, site, setE }: { e: NvrEvent; site: SiteApi; setE: (e: NvrEvent) => void }) {
   const fb: Feedback = e.feedback ?? {};
   const [note, setNote] = useState(fb.note ?? "");
   const [noteOpen, setNoteOpen] = useState(Boolean(fb.note));
-  const send = async (patch: Feedback) => { setE(await api.feedback(e.id, patch)); toast.success("Feedback saved"); };
+  const send = async (patch: Feedback) => { setE(await site.feedback(e.id, patch)); toast.success("Feedback saved"); };
   const toggleReason = (r: string) => {
     const reasons = new Set(fb.reasons ?? []);
     if (reasons.has(r)) reasons.delete(r);
@@ -489,8 +490,8 @@ function SynopsisEditor({ initial, onSave, onCancel }: { initial: Synopsis; onSa
 
 const SUGGESTIONS = ["What is the person doing?", "Describe their clothing and anything they carry.", "Which way did they come from and leave?", "Is anything suspicious here?"];
 
-function ChatPanel({ e, chat, setChat, video, seek }: {
-  e: NvrEvent; chat: ChatMessage[]; setChat: (c: ChatMessage[]) => void;
+function ChatPanel({ e, site, chat, setChat, video, seek }: {
+  e: NvrEvent; site: SiteApi; chat: ChatMessage[]; setChat: (c: ChatMessage[]) => void;
   video: React.RefObject<HTMLVideoElement | null>; seek: (t: number) => void;
 }) {
   const [q, setQ] = useState("");
@@ -520,7 +521,7 @@ function ChatPanel({ e, chat, setChat, video, seek }: {
     setQ("");
     setPending({ q: text, at, answer: "", frames: [] });
     try {
-      await askClip(e.id, text, at, (c) => {
+      await site.askClip(e.id, text, at, (c) => {
         if (c.type === "frames") setPending((p) => p && { ...p, frames: c.frames });
         if (c.type === "delta") setPending((p) => p && { ...p, answer: p.answer + c.text });
         if (c.type === "error") setErr(c.error);
@@ -528,7 +529,7 @@ function ChatPanel({ e, chat, setChat, video, seek }: {
     } catch (ex) {
       setErr(String(ex));
     }
-    setChat(await api.chat(e.id));
+    setChat(await site.chat(e.id));
     setPending(null);
   };
 
@@ -546,15 +547,15 @@ function ChatPanel({ e, chat, setChat, video, seek }: {
           </div>
         )}
         {chat.map((m) => (
-          <Bubble key={m.id} role={m.role} text={m.content} at={m.at} frames={m.frames} e={e} seek={seek}
+          <Bubble key={m.id} role={m.role} text={m.content} at={m.at} frames={m.frames} e={e} site={site} seek={seek}
             action={m.role === "assistant" ? (
-              <button className="linkish" onClick={() => api.saveNote(e.id, m.id, !m.saved).then(setChat)}>{m.saved ? "Saved as note ✓" : "Save as note"}</button>
+              <button className="linkish" onClick={() => site.saveNote(e.id, m.id, !m.saved).then(setChat)}>{m.saved ? "Saved as note ✓" : "Save as note"}</button>
             ) : null} />
         ))}
         {pending && (
           <>
-            <Bubble role="user" text={pending.q} at={pending.at} frames={[]} e={e} seek={seek} />
-            <Bubble role="assistant" text={pending.answer || (pending.frames.length ? "Looking at the frames…" : "Pulling frames from the clip…")} at={null} frames={pending.frames} e={e} seek={seek} />
+            <Bubble role="user" text={pending.q} at={pending.at} frames={[]} e={e} site={site} seek={seek} />
+            <Bubble role="assistant" text={pending.answer || (pending.frames.length ? "Looking at the frames…" : "Pulling frames from the clip…")} at={null} frames={pending.frames} e={e} site={site} seek={seek} />
           </>
         )}
         {err && <p className="error small">{err}</p>}
@@ -570,15 +571,15 @@ function ChatPanel({ e, chat, setChat, video, seek }: {
           <button type="submit" disabled={!q.trim() || Boolean(pending)}>Ask</button>
         </div>
         {chat.some((m) => !m.saved) && !pending && (
-          <button type="button" className="linkish small" onClick={() => api.clearChat(e.id).then(setChat)}>Clear conversation (keeps saved notes)</button>
+          <button type="button" className="linkish small" onClick={() => site.clearChat(e.id).then(setChat)}>Clear conversation (keeps saved notes)</button>
         )}
       </form>
     </div>
   );
 }
 
-function Bubble({ role, text, at, frames, e, seek, action }: {
-  role: string; text: string; at: number | null; frames: { file: string; t: number }[]; e: NvrEvent; seek: (t: number) => void; action?: React.ReactNode;
+function Bubble({ role, text, at, frames, e, site, seek, action }: {
+  role: string; text: string; at: number | null; frames: { file: string; t: number }[]; e: NvrEvent; site: SiteApi; seek: (t: number) => void; action?: React.ReactNode;
 }) {
   return (
     <div className={`bubble ${role}`}>
@@ -587,7 +588,7 @@ function Bubble({ role, text, at, frames, e, seek, action }: {
       {frames.length > 0 && (
         <div className="bubble-frames">
           {frames.map((f) => (
-            <img key={f.file} src={media(e, f.file)} alt={`t=${f.t}s`} title={`Jump to ${f.t.toFixed(1)}s`} onClick={() => seek(f.t)} />
+            <img key={f.file} src={site.media(e, f.file)} alt={`t=${f.t}s`} title={`Jump to ${f.t.toFixed(1)}s`} onClick={() => seek(f.t)} />
           ))}
         </div>
       )}

@@ -5,7 +5,14 @@
 import type { NvrEvent, SiteApi } from "../api";
 import type { CameraGroup, EventsProps, FleetEvents } from "./types";
 
-export type SourceCamera = { site: string; siteName: string; id: string; name: string; streamReady: boolean; online: boolean; ptz?: boolean };
+export { camKey, splitKey } from "../playback";
+
+/** `site`/`siteName` are the SERVER id/name (legacy naming, matches the persisted CameraRef). The optional
+ *  `server`/`serverName` say the same explicitly; `siteId`/`locationName` are the physical Site the server is in. */
+export type SourceCamera = { site: string; siteName: string; id: string; name: string; streamReady: boolean; online: boolean; ptz?: boolean;
+  server?: string; serverName?: string; siteId?: string; locationName?: string };
+/** A physical Site and the servers in it, for grouping pickers (Site → Server → cameras). */
+export type SourceSiteGroup = { id: string; name: string; servers: string[] };
 export type SourceSite = { id: string; name: string; location?: string; online: boolean; camerasUp: number; cameras: number; diskFreeGb?: number | null; openAlerts: number; version?: string | null };
 export type SourceAlert = { id: number; site_id: string; site_name: string; kind: string; opened_at: number; acked_by: string | null; detail: Record<string, unknown> };
 export type SourceDigest = { day: string; text: string; model: string | null; created_at: number } | null;
@@ -19,6 +26,8 @@ export interface DashboardSource {
   cameras(): SourceCamera[];
   sites(): SourceSite[];
   groups(): CameraGroup[];
+  /** physical Sites with their servers, when the source knows them (the hub); absent = no grouping */
+  siteGroups?(): SourceSiteGroup[];
   /** API client for one site (URLs under that site's prefix) */
   siteApi(site: string): SiteApi;
   iceServers(site: string): Promise<RTCIceServer[]>;
