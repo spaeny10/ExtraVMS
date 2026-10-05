@@ -253,6 +253,13 @@ async def add_member(org_id: str, body: MemberIn, u: dict = Depends(user)):
     if body.role == "owner" and role != "owner":
         raise HTTPException(403, "only an owner can add an owner")
     target = auth.user_by_email(body.email)
+    existing = target and db.one(sa.select(db.memberships).where(db.memberships.c.user_id == target["id"], db.memberships.c.org_id == org_id))
+    if body.all_sites is not None or body.location_ids is not None:
+        auth.check_grant_scope(u, org_id, body.all_sites if body.all_sites is not None else not body.location_ids, body.location_ids)
+    elif not existing:
+        # a new member with no access fields defaults to every Site, which a Site-restricted admin can't grant;
+        # checked before the user is created so a refused request leaves nothing behind
+        auth.check_grant_scope(u, org_id, True, [])
     if not target:
         if not body.password:
             raise HTTPException(400, "new user: supply an initial password (they can change it after signing in)")
@@ -287,6 +294,7 @@ class AccessIn(BaseModel):
 async def set_member_access(org_id: str, uid: str, body: AccessIn, u: dict = Depends(user)):
     """A member's Sites: every Site of the customer, or exactly these (none = nothing at all)."""
     auth.require_role(u, org_id, "admin")
+    auth.check_grant_scope(u, org_id, body.all_sites, body.location_ids)
     out = _set_access(org_id, uid, body.all_sites, body.location_ids)
     target = auth.user_by_id(uid)
     _audit(u, org_id, None, f"member {target['email'] if target else uid} access: "
@@ -307,6 +315,7 @@ async def set_grants(org_id: str, uid: str, body: GrantsIn, u: dict = Depends(us
     if servers:
         with db.engine().begin() as c:
             locs = list(dict.fromkeys(db.location_for_server(c, s) for s in servers))
+    auth.check_grant_scope(u, org_id, not servers, locs)   # [] meaning "everything" is exactly what a restricted admin can't grant
     _set_access(org_id, uid, not servers, locs)   # as before: no (valid) server ids = everything
     return {"ok": True}
 
@@ -389,6 +398,8 @@ async def create_invite(org_id: str, body: InviteIn, u: dict = Depends(user)):
     bad = [lid for lid in wanted if lid not in org_locs]
     if bad:
         raise HTTPException(422, f"unknown site {bad[0]}")
+    # an invite is a deferred grant: capped like a direct one, or it would be the easy way round the cap
+    auth.check_grant_scope(u, org_id, body.all_sites, [] if body.all_sites else wanted)
     t = time.time()
     inv = {"code": db.new_token(), "org_id": org_id, "email": email, "role": body.role, "expires_at": t + body.expires_days * 86400,
            "accepted_at": None, "all_sites": body.all_sites, "location_ids": [] if body.all_sites else wanted, "created_by": u["id"],
@@ -997,7 +1008,7 @@ async def action_execute(org_id: str, body: ActionExecIn, u: dict = Depends(user
         raise HTTPException(403, f"needs {_verb_role(p['action'])} in this organisation")
     want = (p["card"] or {}).get("confirm_name")
     if want and " ".join(str(body.confirm_name or "").split()).casefold() != " ".join(want.split()).casefold():
-        raise HTTPException(400, f'type the site name "{want}" to confirm')
+        raise HTTPException(400, f'type the server name "{want}" to confirm')
     try:
         return await fleet_actions.execute(p, u, {"options": body.options or {}, "camera": body.camera})
     except fleet_actions.ActionError as e:
@@ -1337,7 +1348,9 @@ async def ui(full_path: str):
     dist: Path = settings.ui_dir
     target = (dist / full_path).resolve() if full_path else None
     if target and full_path and target.is_file() and str(target).startswith(str(dist.resolve())):
-        return FileResponse(target, headers={"Cache-Control": "public, max-age=31536000, immutable" if full_path.startswith("hub-assets/") else "no-cache"})
+        # .webmanifest isn't in every platform's mimetypes table (Windows reads the registry), so don't guess
+        media = "application/manifest+json" if target.suffix == ".webmanifest" else None
+        return FileResponse(target, media_type=media, headers={"Cache-Control": "public, max-age=31536000, immutable" if full_path.startswith("hub-assets/") else "no-cache"})
     index = dist / "index.html"
     if not index.exists():
         return JSONResponse({"detail": "hub UI not built (run npm run build in hub/ui)"}, status_code=503)

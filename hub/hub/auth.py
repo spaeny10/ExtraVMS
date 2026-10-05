@@ -305,6 +305,27 @@ def set_access(org_id: str, uid: str, all_sites: bool, location_ids: list[str]) 
     return access_of(org_id, uid)
 
 
+GRANT_SCOPE_MSG = "you can only grant Sites you can see"
+
+
+def check_grant_scope(u: dict, org_id: str, all_sites: bool, location_ids: list[str] | None) -> None:
+    """403 unless `u` may hand out this Site access in this customer. An admin can grant at most what they can
+    see themselves: otherwise a Site-restricted admin could invite (or add) a member with every Site, sign in as
+    them and escalate. Hub administrators and all-sites members (any role: an owner can be restricted too, since
+    all_sites lives on the membership, not the role) are unrestricted. Refused outright rather than silently
+    narrowed, so the admin knows the grant didn't happen as asked."""
+    m = membership(u, org_id)
+    if not m:
+        raise HTTPException(403, "not a member of this organisation")
+    if m["all_sites"]:
+        return
+    if all_sites:
+        raise HTTPException(403, GRANT_SCOPE_MSG)
+    granted = granted_location_ids(u["id"], org_id)
+    if any(lid not in granted for lid in (location_ids or [])):
+        raise HTTPException(403, GRANT_SCOPE_MSG)
+
+
 def access_of(org_id: str, uid: str) -> dict:
     """{all_sites, location_ids, sites}; `sites` is the legacy view (server ids, [] = all) for the current UI."""
     m = db.one(sa.select(db.memberships).where(db.memberships.c.user_id == uid, db.memberships.c.org_id == org_id))

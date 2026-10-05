@@ -549,7 +549,7 @@ def test_type_to_confirm(fleet):
     assert p["card"]["confirm_name"] == "Delta"
     assert execute(fleet, p["id"]).status_code == 400
     r = execute(fleet, p["id"], confirm_name="Delt")
-    assert r.status_code == 400 and 'type the site name "Delta"' in r.json()["detail"]
+    assert r.status_code == 400 and 'type the server name "Delta"' in r.json()["detail"]
     assert _site_row(fleet, "Delta")["retired_at"] is None
     r = execute(fleet, p["id"], confirm_name="  delta ")
     assert r.status_code == 200 and r.json()["ok"]
