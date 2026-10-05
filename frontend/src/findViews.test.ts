@@ -1,7 +1,7 @@
 import { expect, test } from "vitest";
 import type { NvrEvent } from "./api";
 import {
-  DEFAULT_FILTERS, PRESETS, buildQuery, defaultViewId, eventQuery, fromSaved, hourGroups, matchesFilters, parseQuery,
+  DEFAULT_FILTERS, PRESETS, activeFilterCount, buildQuery, defaultViewId, eventQuery, fromSaved, hourGroups, matchesFilters, parseQuery,
   placeNames, resolveFilters, sameFilters, toSaved, type FindFilters,
 } from "./findViews";
 
@@ -79,4 +79,18 @@ test("hour headers group consecutive events by local hour", () => {
   const g = hourGroups([{ start_ts: t(15, 50) }, { start_ts: t(15, 5) }, { start_ts: t(14, 59) }], now);
   expect(g.map((x) => x.events.length)).toEqual([2, 1]);
   expect(g[0].label.startsWith("Today")).toBe(true);
+});
+
+test("activeFilterCount: what the phone's Filters toggle counts", () => {
+  expect(activeFilterCount(DEFAULT_FILTERS)).toBe(0);
+  // Attention: needs attention + most important first (24 h is the default window)
+  expect(activeFilterCount(resolveFilters(view("attention")))).toBe(2);
+  // Investigate: any time
+  expect(activeFilterCount(resolveFilters(view("investigate")))).toBe(1);
+  const f: FindFilters = { ...DEFAULT_FILTERS, camera: "cam3", flags: ["ppe", "rule"], day: "2026-10-01", minYolo: 0.4, status: "", sort: "priority" };
+  expect(activeFilterCount(f)).toBe(7);
+  // searching: status and sort have no say (their controls are hidden)
+  expect(activeFilterCount(f, false)).toBe(5);
+  // the slider set back to 0 and the default window are not filters
+  expect(activeFilterCount({ ...DEFAULT_FILTERS, minYolo: 0, hours: 24 })).toBe(0);
 });

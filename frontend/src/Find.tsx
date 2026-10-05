@@ -8,7 +8,7 @@ import { EventCard } from "./Events";
 import { EventDetail } from "./EventDetail";
 import { FindSummary } from "./FindSummary";
 import {
-  FALLBACK_VIEW, FLAGS, PRESETS, PRIORITIES, SUGGESTIONS, buildQuery, defaultViewId, eventQuery, filterWindow,
+  FALLBACK_VIEW, FLAGS, PRESETS, PRIORITIES, SUGGESTIONS, activeFilterCount, buildQuery, defaultViewId, eventQuery, filterWindow,
   fromSaved, hourGroups, matchesFilters, parseQuery, placeNames, resolveFilters, sameFilters, toSaved,
   type FindFilters, type FindFlag, type FindMode, type FindView as View, type UrlState,
 } from "./findViews";
@@ -111,6 +111,8 @@ export function FindView({ cameras = NO_CAMERAS, live = null, source: given, ask
   const [messages, setMessages] = useState<AssistantMessage[]>([]);
   const [pending, setPending] = useState<Pending | null>(null);
   const [showHistory, setShowHistory] = useState(false);
+  // phones: the filters fold behind one toggle (styles.css .find-more-*), as the Timeline's "Layout & filters" does
+  const [moreOpen, setMoreOpen] = useState(false);
   const answerRef = useRef<HTMLDivElement>(null);
   const cams = cameras;   // ids are the camera filter's values (source.cameraKey)
   const name = (id: string) => cams.find((c) => c.id === id)?.name ?? id;
@@ -409,6 +411,7 @@ export function FindView({ cameras = NO_CAMERAS, live = null, source: given, ask
     ppeZone ? `PPE zone ${ppeZone}` : "",
     browsing && status !== "verified" ? STATUSES.find(([v]) => v === status)?.[1].toLowerCase() ?? "" : "",
   ].filter(Boolean).join(" · ");
+  const activeCount = activeFilterCount(filters, browsing);
   const toggleFlag = (f: FindFlag) => setF({ flags: filters.flags.includes(f) ? filters.flags.filter((x) => x !== f) : [...filters.flags, f] });
   const card = (e: NvrEvent, i: number) => (
     <EventCard key={keyOf(e)} e={e} cameraName={name(source.cameraKey(e))} site={source.mediaFor?.(e)}
@@ -447,6 +450,12 @@ export function FindView({ cameras = NO_CAMERAS, live = null, source: given, ask
           : external && <button type="button" className="ask-btn" disabled={external.busy || !q.trim()} onClick={() => askNvr()} title={external.title}>✦ {external.label}</button>}
       </form>
       <div className="toolbar search-filters">
+        <button className="ghost small find-more-toggle" onClick={() => setMoreOpen(!moreOpen)} aria-expanded={moreOpen}
+          title="Camera, type, time, priority, place, sort, confidence, status and flags">
+          {moreOpen ? "▾" : "▸"} Filters{activeCount ? ` (${activeCount})` : ""}
+        </button>
+        {/* desktop: display: contents, so these sit in the toolbar exactly as before; phones: the fold */}
+        <div className={`find-more-fields ${moreOpen ? "open" : ""}`}>
         {browsing && features.identities && (
           <div className="segmented">
             <button className={mode === "sightings" ? "active" : ""} onClick={() => setMode("sightings")} title="Every event as its own card">Events</button>
@@ -496,12 +505,14 @@ export function FindView({ cameras = NO_CAMERAS, live = null, source: given, ask
             )}
           </>
         )}
+        </div>
         <span className="spacer" />
         {features.assistant && <button className="ghost small" onClick={() => setShowHistory(!showHistory)}>{showHistory ? "▾" : "▸"} Conversations{threads.length ? ` (${threads.length >= THREADS_CAP ? `${THREADS_CAP}+` : threads.length})` : ""}</button>}
         {hasConversation && <button className="ghost small" onClick={() => { setThreadId(null); setPending(null); }}>New conversation</button>}
       </div>
+      {/* folded on a phone, only the flags that are on stay visible (each drops with a tap, ✕ added by styles.css) */}
       {!grouped && (
-        <div className="find-flags" role="group" aria-label="Flags">
+        <div className={`find-flags ${moreOpen ? "open" : ""} ${filters.attention || filters.flags.length ? "" : "none-on"}`} role="group" aria-label="Flags">
           {filters.attention && (
             <button className="chip on" onClick={() => setF({ attention: false })} title="Priority medium+, a broken rule, unusual or watched · click to drop">⚑ Needs attention ✕</button>
           )}
@@ -553,7 +564,7 @@ export function FindView({ cameras = NO_CAMERAS, live = null, source: given, ask
       {!features.assistant && external?.panel}
 
       {browsing && !hasConversation && (features.assistant || external) && (
-        <div className="ask-suggestions" title="Search finds events by meaning and footage by looks; Ask has Qwen look things up and answer with links to the evidence">
+        <div className={`ask-suggestions find-more ${moreOpen ? "open" : ""}`} title="Search finds events by meaning and footage by looks; Ask has Qwen look things up and answer with links to the evidence">
           {suggestions.map((s) => <button key={s} className="ghost small" disabled={!features.assistant && asking} onClick={() => { if (!features.assistant) setQ(s); askNvr(s); }}>✦ {s}</button>)}
         </div>
       )}

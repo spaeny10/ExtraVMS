@@ -29,16 +29,16 @@ export function ServersBox({ servers, sites, admin, onChanged }: { servers: Serv
       {servers.length === 0 ? <p className="muted">None yet.</p> : view === "cards" ? (
         <div className="site-grid" style={{ marginTop: 10 }}>{servers.map((s) => <ServerCard key={s.id} s={s} now={now} />)}</div>
       ) : (
-        <table className="hub-table">
+        <table className="hub-table stack">
           <thead><tr><th>Server</th><th>Site</th><th>Status</th><th>Host</th><th>Version</th><th /></tr></thead>
           <tbody>{servers.map((s) => (
             <tr key={s.id}>
-              <td>{s.name} <span className="muted small">{s.id}</span>{s.location && <div className="muted small">{s.location}</div>}</td>
+              <td className="lead">{s.name} <span className="muted small">{s.id}</span>{s.location && <div className="muted small">{s.location}</div>}</td>
               <td>{s.location_id ? <a href={siteHref(s.location_id, "servers")} onClick={go(siteHref(s.location_id, "servers"))}>{s.location_name ?? s.location_id}</a> : <span className="muted">unassigned</span>}</td>
               <td>{s.online ? "online" : `offline · ${ago(s.last_seen_at)}`}{s.retired_at ? <> · <span className="alert-kind">retired</span></> : null}</td>
               <td className="muted small">{s.hostname}</td>
-              <td>{s.version}</td>
-              <td className="row"><ServerActions s={s} admin={admin} sites={sites} onChanged={onChanged} /></td>
+              <td data-label={s.version ? "Version" : undefined}>{s.version}</td>
+              <td className="row wide"><ServerActions s={s} admin={admin} sites={sites} onChanged={onChanged} /></td>
             </tr>))}
           </tbody>
         </table>

@@ -17,18 +17,18 @@ export function SitesBox({ org, sites, admin, onChanged }: { org: Org; sites: Si
     <div className="card">
       <h3>Sites <span className="muted small">physical places; each holds one or more servers</span></h3>
       {sites.length === 0 ? <p className="muted">None yet.</p> : (
-        <table className="hub-table">
+        <table className="hub-table stack">
           <thead><tr><th>Name</th><th>Address</th><th>Servers</th><th>Cameras</th>{admin && <th />}</tr></thead>
           <tbody>{sites.map((s) => {
             const remaining = s.servers_total + s.retired_servers;
             return (
               <tr key={s.id}>
-                <td><a href={siteHref(s.id)} onClick={go(siteHref(s.id))}>{s.name}</a></td>
+                <td className="lead"><a href={siteHref(s.id)} onClick={go(siteHref(s.id))}>{s.name}</a></td>
                 <td>{s.address || <span className="muted">—</span>}</td>
-                <td>{ofTotal(s.servers_online, s.servers_total, "online")}{s.retired_servers ? <span className="muted small"> · {s.retired_servers} retired</span> : null}</td>
-                <td>{ofTotal(s.cameras_online, s.cameras_total, "up")}</td>
+                <td data-label="Servers">{ofTotal(s.servers_online, s.servers_total, "online")}{s.retired_servers ? <span className="muted small"> · {s.retired_servers} retired</span> : null}</td>
+                <td data-label="Cameras">{ofTotal(s.cameras_online, s.cameras_total, "up")}</td>
                 {admin && (
-                  <td className="row">
+                  <td className="row wide">
                     <button className="ghost small" onClick={async () => { const n = await promptDialog("Rename site", { initial: s.name, label: "Name" }); if (n?.trim()) await run(() => api.updateLocation(s.id, { name: n.trim() })); }}>Rename</button>
                     <button className="ghost small" onClick={async () => { const a = await promptDialog("Site address", { initial: s.address, label: "Address" }); if (a != null) await run(() => api.updateLocation(s.id, { address: a.trim() })); }}>Address</button>
                     {deleting === s.id ? (

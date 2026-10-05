@@ -19,6 +19,7 @@ import { SiteLive } from "./SiteLive";
 import { SiteTimeline } from "./SiteTimeline";
 import { SiteFind } from "./SiteFind";
 import { SiteAlerts } from "./AlertsPage";
+import { useTabStrip } from "./tabStrip";
 
 const TAB_LABEL: Record<SiteTab, [string, string]> = {
   live: ["Live", "live"], timeline: ["Timeline", "timeline"], find: ["Find", "find"], alerts: ["Alerts", "alert"], servers: ["Servers", "grid"], settings: ["Settings", "settings"],
@@ -38,6 +39,8 @@ export function SitePage({ org, me, siteId, tab, section = "general", serverId, 
   org: Org; me: Me; siteId: string; tab: string; section?: SettingsSection; serverId?: string; onOrg: (id: string) => void;
 }) {
   const { site, error, reload } = useSite(siteId);
+  // phones: the six tabs scroll sideways, the current one kept in view (tabStrip.ts, hub.css .scroll-tabs)
+  const strip = useTabStrip(tab);
   // a link into another customer's Site switches the header's Customer picker to it
   useEffect(() => { if (site && site.org_id !== org.id && me.orgs.some((o) => o.id === site.org_id)) onOrg(site.org_id); }, [site, org.id, me.orgs, onOrg]);
   if (error) return <p className="muted">{error} <a href="/sites" onClick={go("/sites")}>All sites</a></p>;
@@ -50,7 +53,7 @@ export function SitePage({ org, me, siteId, tab, section = "general", serverId, 
     <>
       <SiteHeader org={siteOrg} site={site} server={server} servers={active} admin={admin} onChanged={reload} />
       {/* styled like the server UI's top nav (plain buttons, the current one raised) so a Site reads like a server */}
-      <div className="site-tabs" role="tablist">
+      <div ref={strip.ref} className={`site-tabs ${strip.className}`} role="tablist">
         {SITE_TABS.map((t) => (
           <button key={t} role="tab" aria-selected={tab === t} className={tab === t ? "active" : ""} onClick={() => navigate(siteHref(site.id, t))}>
             <Icon name={TAB_LABEL[t][1]} size={16} /> {TAB_LABEL[t][0]}
@@ -134,9 +137,10 @@ function SettingsSections({ site, org, me, section, admin, onChanged }: { site: 
   const canArm = editor || isSocUser(me) || org.role === "operator";
   const allowed = SETTINGS_SECTIONS.filter((s) => editor || s === "general" || s === "monitoring");
   const cur = allowed.includes(section) ? section : "general";
+  const strip = useTabStrip(cur);
   return (
     <>
-      <div className="segmented settings-tabs" role="tablist">
+      <div ref={strip.ref} className={`segmented settings-tabs ${strip.className}`} role="tablist">
         {allowed.map((s) => (
           <button key={s} role="tab" aria-selected={cur === s} className={cur === s ? "active" : ""} onClick={() => navigate(settingsHref(site.id, s))}>{SECTION_LABEL[s]}</button>
         ))}
@@ -213,15 +217,15 @@ function ServerPanel({ site, server, admin, onChanged }: { site: Site; server: S
       <div className="card">
         <h3 style={{ marginTop: 0 }}>Cameras</h3>
         {cams === null ? <p className="muted small">Loading…</p> : cams.length === 0 ? <p className="muted small">None reported yet.</p> : (
-          <table className="hub-table">
+          <table className="hub-table stack">
             <thead><tr><th>Camera</th><th>Status</th><th>Stream</th><th>Problems</th><th /></tr></thead>
             <tbody>{cams.map((c) => (
               <tr key={c.camera_id} className={c.enabled ? "" : "muted"}>
-                <td>{c.name}</td>
+                <td className="lead">{c.name}</td>
                 <td>{!c.enabled ? "disabled" : c.missing_since ? `missing since ${fmtTime(c.missing_since)}` : c.online ? "up" : server.online ? "no stream" : "server offline"}</td>
                 <td>{c.bitrate_mbps != null ? `${c.bitrate_mbps} Mbps` : "—"}</td>
-                <td className="small">{(c.problems ?? []).join("; ") || "—"}</td>
-                <td><a className="small" href={consoleHref(server.id, "live")}>Live ↗</a></td>
+                <td className="small wide">{(c.problems ?? []).join("; ") || "—"}</td>
+                <td className="acts"><a className="small" href={consoleHref(server.id, "live")}>Live ↗</a></td>
               </tr>))}
             </tbody>
           </table>

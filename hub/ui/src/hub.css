@@ -97,16 +97,46 @@
   .customer-pick > span { display: none; }
   .customer-pick select { max-width: 40vw; }
   .hub-page { padding: 10px 10px calc(70px + env(safe-area-inset-bottom)); }
-  /* the header row wraps: title and ⋯ on the first line, the chips scroll sideways under them */
+  /* the header row wraps: title and ⋯ on the first line, the chips wrap in rows under them */
   .site-head { gap: 6px; }
   .site-head .crumbs-title { flex: 1 1 0; }
   .site-head .menu-anchor { order: 2; }
   .site-head > .spacer, .site-addr { display: none; }
-  .site-chips { order: 3; flex: 1 0 100%; flex-wrap: nowrap; overflow-x: auto; }
+  .site-chips { order: 3; flex: 1 0 100%; gap: 4px 6px; }
   .site-chips .chip { white-space: nowrap; }
+  .site-chips .direct-chip.offer { white-space: normal; border-radius: 10px; }
   .hub-page .crumbs-title h2 { font-size: 16px; }
   .site-tabs { margin-bottom: 8px; }
+  .site-tabs button { padding: 6px 10px; }
   .hub-table { display: block; overflow-x: auto; }
+  /* tab strips (Site, Site → Settings, Customer) scroll sideways: no scrollbar, tabs snap, the hidden side fades
+     (tabStrip.ts sets fade-l / fade-r and keeps the current tab in view) */
+  .scroll-tabs { scrollbar-width: none; scroll-snap-type: x proximity; overscroll-behavior-x: contain; }
+  .scroll-tabs::-webkit-scrollbar { display: none; }
+  .scroll-tabs > button { flex: none; scroll-snap-align: start; }
+  .scroll-tabs.fade-r { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent); }
+  .scroll-tabs.fade-l { -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 32px), transparent); mask-image: linear-gradient(to left, #000 calc(100% - 32px), transparent); }
+  .scroll-tabs.fade-l.fade-r {
+    -webkit-mask-image: linear-gradient(to right, transparent, #000 32px, #000 calc(100% - 32px), transparent);
+    mask-image: linear-gradient(to right, transparent, #000 32px, #000 calc(100% - 32px), transparent);
+  }
+  /* list tables (.hub-table.stack) become one card-like block per row: no header row, cells wrap; `lead` takes the
+     first line, `wide` the last, `acts` sits at the right, data-label names a bare value ("2FA on") */
+  .hub-table.stack { display: block; overflow: visible; }
+  .hub-table.stack thead { display: none; }
+  .hub-table.stack tbody { display: block; }
+  .hub-table.stack tr { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; padding: 8px 2px; border-bottom: 1px solid var(--border); }
+  .hub-table.stack td { border: 0; padding: 0; min-width: 0; overflow-wrap: anywhere; }
+  .hub-table.stack td:empty { display: none; }
+  .hub-table.stack td.lead { flex: 1 0 100%; }
+  .hub-table.stack td.wide { flex: 1 0 100%; order: 1; }
+  .hub-table.stack td.acts { margin-left: auto; }
+  .hub-table.stack td[data-label]::before { content: attr(data-label) " "; color: var(--muted); font-size: 12px; }
+  /* forms in cards: inputs share the row and shrink instead of pushing it wider than the screen */
+  .hub-page:not(.soc-wide) .card .row > input:not([type=checkbox]):not([type=radio]):not([type=number]) { flex: 1 1 160px; min-width: 0; }
+  .claim-box .field, .invite-form .field { flex: 1 1 100%; }
+  .claim-box .field input, .claim-box .field select, .invite-form .field input, .invite-form .field select { width: 100% !important; box-sizing: border-box; }
+  .claim-box > button, .invite-form > button { flex: 1 1 100%; }
 }
 
 /* ---------- Site › Live (combined grid over the site's servers; tiles reuse the server's live-grid/tile/dash-still) ---------- */
@@ -181,4 +211,8 @@
   .contact-row .drag-handle { display: none; }
   .contact-row .row-actions { grid-column: 1 / -1; justify-content: flex-end; }
   .step-row { flex-wrap: wrap; }
+  /* Monitoring: a day's windows wrap under each other rather than past the card */
+  .arm-day { grid-template-columns: 36px minmax(0, 1fr); gap: 6px; }
+  .arm-span { flex-wrap: wrap; }
+  .arm-span input[type=time] { padding-left: 4px; padding-right: 4px; }
 }

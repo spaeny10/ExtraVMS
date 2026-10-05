@@ -498,6 +498,9 @@ h3.spaced { margin-top: 18px; }
 /* ---------- phones & installed app: bottom tab bar, one column, full-screen dialogs ---------- */
 .tab-icon { display: none; }
 .tl-more-toggle { display: none; }
+/* Find: on phones the filters fold behind "Filters (n)"; on wider screens the wrapper is invisible to layout */
+.find-more-toggle { display: none; }
+.find-more-fields { display: contents; }
 @media (max-width: 700px) {
   .topbar { flex-wrap: nowrap; height: auto; padding: calc(6px + env(safe-area-inset-top)) 12px 6px; gap: 8px; }
   .top-status { margin-left: auto; gap: 8px; font-size: .85rem; }
@@ -517,6 +520,15 @@ h3.spaced { margin-top: 18px; }
   .modal { width: 100%; height: 100dvh; max-height: 100dvh; border-radius: 0; border: 0; }
   .tl-more-toggle { display: inline-flex; margin: 6px 0; }
   .tl-more:not(.open) { display: none; }
+  .find-more-toggle { display: inline-flex; }
+  .find-more-fields { display: none; }
+  .find-more-fields.open { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; flex: 1 0 100%; order: 1; }
+  .find-more:not(.open) { display: none; }
+  .find-flags:not(.open) .chip:not(.on), .find-flags.none-on:not(.open) { display: none; }
+  .find-flags:not(.open) .chip.on[aria-pressed="true"]::after { content: " ✕"; }
+  .search-bar { flex-wrap: wrap; }
+  .search-bar input { flex: 1 1 160px; min-width: 0; }
+  .event-grid { grid-template-columns: minmax(0, 1fr); }
   .ask-input { bottom: calc(62px + env(safe-area-inset-bottom)); }
   .cite-preview { width: 160px; }
   .tl { grid-template-columns: 108px minmax(0, 1fr); }   /* narrower camera names: more room for the track */

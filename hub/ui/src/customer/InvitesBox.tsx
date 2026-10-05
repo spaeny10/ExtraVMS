@@ -71,16 +71,16 @@ export function InvitesBox({ org, me, sites }: { org: Org; me: Me; sites: Site[]
       <div className="card">
         <h3>Pending invites</h3>
         {rows.length === 0 ? <p className="muted small" style={{ marginBottom: 0 }}>None. Accepted and expired links drop off this list.</p> : (
-          <table className="hub-table">
+          <table className="hub-table stack">
             <thead><tr><th>For</th><th>Role</th><th>Sites</th><th>Expires</th><th>Created by</th><th /></tr></thead>
             <tbody>{rows.map((i) => (
               <tr key={i.code}>
-                <td>{i.label || i.email || <span className="muted">anyone with the link</span>}{i.label && i.email ? <div className="muted small">{i.email}</div> : null}</td>
+                <td className="lead">{i.label || i.email || <span className="muted">anyone with the link</span>}{i.label && i.email ? <div className="muted small">{i.email}</div> : null}</td>
                 <td>{i.role}</td>
                 <td className="small">{inviteAccessSummary(i, sites)}</td>
-                <td title={fmtTime(i.expires_at)}>{expiresIn(i.expires_at)}</td>
+                <td title={fmtTime(i.expires_at)} data-label="Expires">{expiresIn(i.expires_at)}</td>
                 <td className="small">{i.created_by_email ?? "—"}{i.created_at ? <div className="muted">{fmtTime(i.created_at)}</div> : null}</td>
-                <td className="row" style={{ gap: 6, flexWrap: "nowrap" }}>
+                <td className="row acts" style={{ gap: 6, flexWrap: "nowrap" }}>
                   <button className="ghost small" onClick={() => copy(i.url)}>Copy link</button>
                   <button className="ghost small" onClick={() => revoke(i)}>Revoke</button>
                 </td>

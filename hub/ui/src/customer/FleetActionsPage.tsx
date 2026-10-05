@@ -70,14 +70,14 @@ export function FleetActionsPage({ org }: { org: Org }) {
         {!admin && <p className="muted small">Only admins see the action log.</p>}
         {admin && ref.recent.length === 0 && <p className="muted small">None yet.</p>}
         {admin && ref.recent.length > 0 && (
-          <table className="hub-table">
+          <table className="hub-table stack">
             <thead><tr><th>When</th><th>Who</th><th>Action</th><th>Status</th><th /></tr></thead>
             <tbody>{ref.recent.map((r) => (
               <tr key={r.id}>
                 <td>{fmtTime(r.ts)}</td><td>{r.user_email ?? "—"}</td>
-                <td title={r.lines.join(" · ")}>{r.action.replace(/^fleet action: /, "")}</td>
+                <td className="wide" title={r.lines.join(" · ")}>{r.action.replace(/^fleet action: /, "")}</td>
                 <td>{r.status === 200 ? "done" : "failed"}</td>
-                <td>{r.undo_until ? <UndoButton org={org} id={r.id} label={r.action} onDone={load} /> : null}</td>
+                <td className="acts">{r.undo_until ? <UndoButton org={org} id={r.id} label={r.action} onDone={load} /> : null}</td>
               </tr>
             ))}</tbody>
           </table>

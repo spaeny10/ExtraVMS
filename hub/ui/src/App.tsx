@@ -201,11 +201,11 @@ function AuditPage({ org }: { org: Org }) {
   return (
     <>
       <h2>Audit <span className="muted small">{org.name} · who did what through the hub</span></h2>
-      <table className="hub-table">
+      <table className="hub-table stack">
         <thead><tr><th>When</th><th>Who</th><th>Site · Server</th><th>Action</th><th>Result</th><th>From</th></tr></thead>
         <tbody>{rows.map((r) => <tr key={r.id}><td>{fmtTime(r.ts)}</td><td>{r.user_email ?? "—"}</td><td className="muted small">{[r.location_name, r.site_id].filter(Boolean).join(" · ")}</td>
-          <td>{r.action}{r.undo_until ? <> <UndoButton org={org} id={r.id} label={r.action} onDone={load} /></> : null}</td>
-          <td>{r.status ?? ""}</td><td className="muted small">{r.ip ?? ""}</td></tr>)}</tbody>
+          <td className="wide">{r.action}{r.undo_until ? <> <UndoButton org={org} id={r.id} label={r.action} onDone={load} /></> : null}</td>
+          <td data-label={r.status != null ? "Result" : undefined}>{r.status ?? ""}</td><td className="muted small">{r.ip ?? ""}</td></tr>)}</tbody>
       </table>
       {rows.length === 0 && <p className="muted">Nothing yet.</p>}
     </>
@@ -280,12 +280,12 @@ function HubAdminsBox({ me, onChanged }: { me: Me; onChanged: () => void }) {
     <div className="card">
       <h3>Hub administrators</h3>
       <p className="muted small" style={{ marginTop: 0 }}>Owners of every customer on this hub: they see all Sites and manage everything, without being listed as members.</p>
-      <table className="hub-table">
+      <table className="hub-table stack">
         <thead><tr><th>Email</th><th>2FA</th><th>Last sign-in</th><th /></tr></thead>
         <tbody>{admins.map((a) => (
-          <tr key={a.id}><td>{a.email}{a.id === me.user.id ? <span className="muted small"> (you)</span> : null}</td><td>{a.totp_enabled ? "on" : "off"}</td>
-            <td>{a.last_login_at ? ago(a.last_login_at) : "never"}</td>
-            <td><button className="ghost small" onClick={() => remove(a)}>Remove</button></td></tr>))}
+          <tr key={a.id}><td className="lead">{a.email}{a.id === me.user.id ? <span className="muted small"> (you)</span> : null}</td><td data-label="2FA">{a.totp_enabled ? "on" : "off"}</td>
+            <td data-label="Last sign-in">{a.last_login_at ? ago(a.last_login_at) : "never"}</td>
+            <td className="acts"><button className="ghost small" onClick={() => remove(a)}>Remove</button></td></tr>))}
         </tbody>
       </table>
       <form className="row" style={{ marginTop: 8 }} onSubmit={(e) => { e.preventDefault(); if (email.trim()) add(); }}>

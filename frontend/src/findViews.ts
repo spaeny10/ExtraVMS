@@ -89,6 +89,20 @@ export function sameFilters(a: FindFilters, b: FindFilters): boolean {
     k === "flags" ? [...a.flags].sort().join() === [...b.flags].sort().join() : a[k] === b[k]);
 }
 
+/**
+ * How many filters are set away from the plain defaults: the count on the phone's folded "Filters" toggle. Each
+ * flag and "Needs attention" count one; the time window counts when it isn't the default 24 h (a picked day always
+ * does); status and sort only while browsing (search ignores them, and their controls are hidden then).
+ */
+export function activeFilterCount(f: FindFilters, browsing = true): number {
+  const d = DEFAULT_FILTERS;
+  return [
+    f.camera !== d.camera, f.label !== d.label, !!f.day || f.hours !== d.hours, f.priority !== d.priority,
+    f.place !== d.place, f.minYolo > 0, f.attention,
+    browsing && f.status !== d.status, browsing && f.sort !== d.sort,
+  ].filter(Boolean).length + f.flags.length;
+}
+
 /** A saved view from the API, made safe to use (unknown flags dropped, filters typed). */
 export function fromSaved(v: SavedFindView): FindView {
   const f = (v.filters ?? {}) as Partial<FindFilters>;

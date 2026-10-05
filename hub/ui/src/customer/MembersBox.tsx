@@ -24,18 +24,18 @@ export function MembersBox({ org, members, sites, onChanged }: { org: Org; membe
   return (
     <div className="card">
       <h3>Members</h3>
-      <table className="hub-table">
+      <table className="hub-table stack">
         <thead><tr><th>Email</th><th>Role</th><th>Sites</th><th>2FA</th><th>Last sign-in</th><th /></tr></thead>
         <tbody>{members.map((m) => (
           <tr key={m.id}>
-            <td>{m.email}</td>
+            <td className="lead">{m.email}</td>
             <td><select value={m.role} onChange={async (e) => { try { await api.addMember(org.id, { email: m.email, role: e.target.value }); onChanged(); } catch (err) { toast.error(err); } }}>{ROLES.map((r) => <option key={r} value={r}>{r}</option>)}</select></td>
-            <td><AccessPicker value={memberAccess(m)} sites={sites} onChange={async (next) => {
+            <td className="wide"><AccessPicker value={memberAccess(m)} sites={sites} onChange={async (next) => {
               try { await api.setAccess(org.id, m.id, next); onChanged(); } catch (e) { toast.error(e); }
             }} /></td>
-            <td>{m.totp_enabled ? "on" : "off"}</td>
-            <td>{m.last_login_at ? ago(m.last_login_at) : "never"}</td>
-            <td><button className="ghost small" onClick={async () => { if (await confirmDialog(`Remove ${m.email} from ${org.name}?`, { danger: true, confirmLabel: "Remove" })) { await api.removeMember(org.id, m.id); onChanged(); } }}>Remove</button></td>
+            <td data-label="2FA">{m.totp_enabled ? "on" : "off"}</td>
+            <td data-label="Last sign-in">{m.last_login_at ? ago(m.last_login_at) : "never"}</td>
+            <td className="acts"><button className="ghost small" onClick={async () => { if (await confirmDialog(`Remove ${m.email} from ${org.name}?`, { danger: true, confirmLabel: "Remove" })) { await api.removeMember(org.id, m.id); onChanged(); } }}>Remove</button></td>
           </tr>))}
         </tbody>
       </table>

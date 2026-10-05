@@ -47,7 +47,7 @@ export function AlertsPage({ org, site }: { org: Org; site?: Site }) {
       {site ? <h3 style={{ marginTop: 0 }}>Alerts</h3> : <h2>Alerts <span className="muted small">{org.name}</span></h2>}
       <label className="row small"><input type="checkbox" checked={showClosed} onChange={(e) => setShowClosed(e.target.checked)} /> Include closed</label>
       {rows.length === 0 ? <p className="muted">Nothing open.</p> : (
-        <table className="hub-table">
+        <table className="hub-table stack">
           <thead><tr><th>When</th>{!site && <th>Site</th>}{showServer && <th>Server</th>}<th>Kind</th><th>What</th><th /></tr></thead>
           <tbody>
             {rows.map((a) => {
@@ -57,14 +57,14 @@ export function AlertsPage({ org, site }: { org: Org; site?: Site }) {
               return (
                 <tr key={a.id} className={a.closed_at ? "muted" : ""}>
                   <td>{fmtTime(a.opened_at)}</td>
-                  {!site && <td>{a.location_name ?? "—"}</td>}
-                  {showServer && <td>{a.site_name}</td>}
+                  {!site && <td data-label="Site">{a.location_name ?? "—"}</td>}
+                  {showServer && <td data-label="Server">{a.site_name}</td>}
                   <td><span className={`alert-kind ${a.kind}`}>{KIND_LABEL[a.kind] ?? a.kind}</span></td>
-                  <td>
+                  <td className="wide">
                     <a href={href ?? out} onClick={click} title={ev ? "Show the clip and synopsis" : undefined}>{describe(a)}</a>
                     {href && <> <a className="small muted" href={out} title="Open on server">↗</a></>}
                   </td>
-                  <td>{!a.closed_at && <button className="ghost small" onClick={async () => { try { await api.ack(a.id); load(); } catch (e) { toast.error(e); } }}>Ack</button>}</td>
+                  <td className="acts">{!a.closed_at && <button className="ghost small" onClick={async () => { try { await api.ack(a.id); load(); } catch (e) { toast.error(e); } }}>Ack</button>}</td>
                 </tr>
               );
             })}

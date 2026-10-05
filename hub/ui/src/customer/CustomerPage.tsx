@@ -16,6 +16,7 @@ import { MembersBox } from "./MembersBox";
 import { ServersBox } from "./ServersBox";
 import { SharedAiBox } from "./SharedAiBox";
 import { SitesBox } from "./SitesBox";
+import { useTabStrip } from "../tabStrip";
 
 const TABS: { tab: CustomerTab; label: string; icon: string; admin?: boolean }[] = [
   { tab: "sites", label: "Sites", icon: "grid" }, { tab: "servers", label: "Servers", icon: "settings" },
@@ -38,10 +39,11 @@ export function CustomerPage({ org, me, tab, onChanged }: { org: Org; me: Me; ta
   useEffect(() => { load(); }, [load]);
   const tabs = TABS.filter((t) => admin || !t.admin);
   const shown = tabs.some((t) => t.tab === tab) ? tab : "sites";
+  const strip = useTabStrip(shown);
   return (
     <>
       <h2>{org.name} <span className="muted small">customer · your role: {org.role}</span></h2>
-      <div className="segmented site-tabs" role="tablist">
+      <div ref={strip.ref} className={`segmented site-tabs ${strip.className}`} role="tablist">
         {tabs.map((t) => (
           <button key={t.tab} role="tab" aria-selected={shown === t.tab} className={shown === t.tab ? "active" : ""} onClick={() => navigate(`/customer/${t.tab}`)}>
             <Icon name={t.icon} size={16} /> {t.label}
