@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 import cv2
 import httpx
 
-from . import baseline, cells, identities, journeys, policy, ppe, vlmroute, zones, merge
+from . import baseline, cells, identities, journeys, policy, ppe, retention, vlmroute, zones, merge
 from . import synopsis as vlm
 from .config import settings
 from .db import db
@@ -176,6 +176,10 @@ class Pipeline:
         if result["status"] == "verified" and e["camera_class"] == "vehicle":
             clip = await self.get_clip()
             await asyncio.get_running_loop().run_in_executor(self.gpu, identities.embed_vehicle, clip, event_id)
+        # Verified from the clip (snapshot, re-ID and fingerprint are made); a camera over the hourly event limit
+        # keeps the snapshot only, or its clips fill the disk (retention.EventRateGuard).
+        if retention.rate_guard.check(e["camera_id"]):
+            retention.drop_clip_media(event_id)
         if result["status"] == "verified" and (watched := identities.check_watch(event_id)):
             log.info("event %s matches watched %s '%s'", event_id, e["camera_class"], watched)
         log.info("event %s %s (yolo %s, %s hits)", event_id, result["status"],

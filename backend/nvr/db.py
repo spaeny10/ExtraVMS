@@ -10,6 +10,7 @@ from typing import Any, Iterable
 
 import sqlite_vec
 
+from . import diskguard
 from .config import settings
 
 EMBED_DIM = 768  # nomic-embed-text
@@ -338,12 +339,19 @@ def event_filters(camera: str | None = None, label: str | None = None, threat: s
 class Database:
     def __init__(self, path):
         path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.enable_load_extension(True)
-        sqlite_vec.load(self.conn)
-        self.conn.enable_load_extension(False)
-        self.conn.execute("PRAGMA journal_mode=WAL")
+        # A full disk must not stop the service from starting (it restart-looped 41 times on a box whose event
+        # clips had filled it): make room from event media, on the filesystem alone, before SQLite needs any.
+        need = int(settings.disk_emergency_free_gb * 1e9)
+        diskguard.emergency_free(path.parent, need)
+        self._connect(path)
+        try:
+            self.conn.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.OperationalError as e:  # "disk I/O error" / "database or disk is full": free more, retry once
+            diskguard.log.error("opening the database failed (%s); freeing event media and retrying", e)
+            self.conn.close()
+            diskguard.emergency_free(path.parent, diskguard.free_bytes(path.parent) + need, min_age_s=0)
+            self._connect(path)
+            self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         # vehicle fingerprints changed width (CLIP only -> CLIP + colour): drop the old table, the backfill refills it
         old = self.conn.execute("SELECT sql FROM sqlite_master WHERE name='vehicle_vec'").fetchone()
@@ -360,6 +368,21 @@ class Database:
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {definition}")
         self.lock = threading.RLock()
+        self._null_cleared_clips()
+
+    def _connect(self, path) -> None:
+        self.conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.enable_load_extension(True)
+        sqlite_vec.load(self.conn)
+        self.conn.enable_load_extension(False)
+
+    def _null_cleared_clips(self) -> None:
+        """Events whose clips diskguard deleted before the database opened: their clip is gone, say so."""
+        ids, diskguard.cleared[:] = list(diskguard.cleared), []
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            self.conn.execute(f"UPDATE events SET clip=NULL WHERE id IN ({','.join('?' * len(chunk))})", chunk)
 
     def execute(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
         with self.lock:

@@ -107,6 +107,16 @@ class Settings(BaseSettings):
     # Retention: the policy (continuous days, what to keep, free-space floor) lives in the database and is
     # edited in the UI (System → Retention); see nvr/keep.py for defaults.
     retention_dry_run: bool = False     # NVR_RETENTION_DRY_RUN=1: log decisions, delete nothing
+    # Event media (clip.mp4, wide/crop jpgs under data_dir/events) can fill the disk on its own: a noisy PTZ
+    # camera once wrote 193 GB of clips in 3 days next to 91 MB of recordings. See retention.enforce_disk_floor.
+    event_media_min_free_gb: float = 0      # free-space floor on the data_dir volume; 0 = auto (the site floor
+                                            # when it shares the recordings disk, else 10% of it, 10-200 GB)
+    disk_floor_hysteresis_pct: float = 5.0  # event media pruning stops at floor + this % of the disk, not at the
+                                            # floor itself, so it is not back again on the next clip
+    disk_emergency_free_gb: float = 5.0     # before SQLite opens: free event media until this much is free
+                                            # (at 0 bytes the database cannot open and the service restart-loops)
+    event_rate_max_per_hour: int = 600      # per camera; above it events still open but keep no clip/crops
+                                            # (snapshot only). 0 = no limit
 
     # API
     host: str = "0.0.0.0"
