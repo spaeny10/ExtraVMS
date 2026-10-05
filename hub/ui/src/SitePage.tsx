@@ -1,7 +1,7 @@
 /**
  * One Site: header with its rollup, tabs Live · Timeline · Find · Alerts · Servers · Settings, and the server panel at
- * /sites/:id/servers/:serverId. The combined Live/Timeline/Find views come in later stages; until then those tabs
- * explain that and link to each server's own console, so the Site page is already the place to start from.
+ * /sites/:id/servers/:serverId. Live is the combined grid (SiteLive); the combined Timeline/Find come in later stages,
+ * until then those tabs explain that and link to each server's own console.
  */
 import { useCallback, useEffect, useState } from "react";
 import { Icon, confirmDialog, promptDialog, toast } from "@site/ui";
@@ -10,6 +10,7 @@ import { isAdmin, ofTotal } from "./access";
 import { Breadcrumbs } from "./Breadcrumbs";
 import { SITE_TABS, type SiteTab, consoleHref, go, navigate, serverHref, siteHref } from "./nav";
 import { ServerActions, ServerCard } from "./servers";
+import { SiteLive } from "./SiteLive";
 
 const TAB_LABEL: Record<SiteTab, [string, string]> = {
   live: ["Live", "live"], timeline: ["Timeline", "timeline"], find: ["Find", "find"], alerts: ["Alerts", "alert"], servers: ["Servers", "grid"], settings: ["Settings", "settings"],
@@ -47,7 +48,7 @@ export function SitePage({ org, me, siteId, tab, serverId, onOrg }: { org: Org; 
         ))}
       </div>
       {serverId ? (server ? <ServerPanel site={site} server={server} admin={admin} onChanged={reload} /> : <p className="muted">That server isn't in this site. <a href={siteHref(site.id, "servers")} onClick={go(siteHref(site.id, "servers"))}>Servers</a></p>)
-        : tab === "live" ? <LinkOut site={site} servers={active} hash="live" what="Live view across all of this site's servers" />
+        : tab === "live" ? <SiteLive org={siteOrg} site={site} />
         : tab === "timeline" ? <LinkOut site={site} servers={active} hash="timeline" what="One timeline for every camera at this site" />
         : tab === "find" ? <LinkOut site={site} servers={active} hash="find" what="Searching this site's footage in one place" />
         : tab === "alerts" ? <AlertsTab site={site} />

@@ -1,6 +1,7 @@
 /**
  * Hub shell: header (nav, Customer picker), routing (nav.ts matchRoute) and the smaller pages: Find, Alerts, Audit,
- * Account and the old Fleet list. Sites live in SitesPage/SitePage, Customer admin in customer/.
+ * Account. Sites live in SitesPage/SitePage, Customer admin in customer/. /fleet (the old flat server list) redirects
+ * to /sites; its server cards are kept under Customer → Servers.
  * Hierarchy: Customer (wire: org) › Site (wire: location) › Server (wire: site) › Camera.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -12,14 +13,13 @@ import { UndoButton } from "./customer/FleetActionsPage";
 import { HomePage } from "./HomePage";
 import { type CustomerTab, type Page, go, matchRoute, navigate, usePath } from "./nav";
 import { SitePage } from "./SitePage";
-import { DigestCard, SitesPage } from "./SitesPage";
-import { ServerCard } from "./servers";
-import { type ActionPlan, type Alert, type AuditRow, type Fleet, type FleetSearch, type Me, type Org, type PushInfo, ago, api, fleetAsk, fmtTime } from "./api";
+import { SitesPage } from "./SitesPage";
+import { type ActionPlan, type Alert, type AuditRow, type FleetSearch, type Me, type Org, type PushInfo, ago, api, fleetAsk, fmtTime } from "./api";
 
 /** Header nav: path, label, icon (phone tab bar), and the pages that light it up. */
 const NAV: { path: string; label: string; icon: string; pages: Page[] }[] = [
   { path: "/", label: "Home", icon: "home", pages: ["home"] },
-  { path: "/sites", label: "Sites", icon: "grid", pages: ["sites", "site", "server", "fleet"] },
+  { path: "/sites", label: "Sites", icon: "grid", pages: ["sites", "site", "server"] },
   { path: "/find", label: "Find", icon: "find", pages: ["find"] },
   { path: "/alerts", label: "Alerts", icon: "alert", pages: ["alerts"] },
   { path: "/customer", label: "Customer", icon: "settings", pages: ["customer"] },
@@ -71,7 +71,6 @@ export default function App() {
         {(page === "site" || page === "server") && current && route.siteId && (
           <SitePage key={route.siteId} org={current} me={me} siteId={route.siteId} tab={route.tab ?? "live"} serverId={route.serverId} onOrg={setOrg} />
         )}
-        {page === "fleet" && <FleetPage org={current} me={me} />}
         {page === "alerts" && current && <AlertsPage org={current} />}
         {page === "find" && current && <FindPage org={current} />}
         {page === "customer" && current && <CustomerPage org={current} me={me} tab={(route.tab ?? "sites") as CustomerTab} onChanged={reload} />}
@@ -112,31 +111,6 @@ function Login({ onDone }: { onDone: () => void }) {
       {needTotp && <label className="field"><span>Authenticator code</span><input inputMode="numeric" autoComplete="one-time-code" value={totp} onChange={(e) => setTotp(e.target.value)} autoFocus /></label>}
       <button type="submit" disabled={busy || !email || !password}>Sign in</button>
     </form>
-  );
-}
-
-// ---------------------------------------------------------------- fleet (the old flat server list; /sites replaces it)
-
-function FleetPage({ org, me }: { org: Org | undefined; me: Me }) {
-  const [fleet, setFleet] = useState<Fleet | null>(null);
-  const [showRetired, setShowRetired] = useState(false);
-  const load = useCallback(() => api.fleet(org?.id, showRetired).then(setFleet).catch((e) => toast.error(e)), [org?.id, showRetired]);
-  useEffect(() => { load(); const t = setInterval(load, 15000); return () => clearInterval(t); }, [load]);
-  if (!fleet) return null;
-  const groups = me.user.is_super && !org ? fleet.orgs : fleet.orgs.filter((g) => !org || g.org.id === org.id);
-  return (
-    <>
-      <p className="muted small">The flat server list. <a href="/sites" onClick={go("/sites")}>Sites</a> groups servers by place.</p>
-      {groups.map((g) => (
-        <section key={g.org.id}>
-          <h2>{g.org.name} <span className="muted small">{g.sites.filter((s) => s.online && !s.retired_at).length} of {g.sites.filter((s) => !s.retired_at).length} online{g.open_alerts ? ` · ${g.open_alerts} open alerts` : ""}</span>
-            {(g.retired ?? 0) > 0 && <label className="small muted" style={{ marginLeft: 12, fontWeight: 400 }}><input type="checkbox" checked={showRetired} onChange={(e) => setShowRetired(e.target.checked)} /> Show retired ({g.retired})</label>}</h2>
-          {g.sites.length === 0 && <p className="muted">No servers yet. Enrol one under Customer → Servers.</p>}
-          <div className="site-grid">{g.sites.map((s) => <ServerCard key={s.id} s={s} now={fleet.now} />)}</div>
-          <DigestCard org={g.org} />
-        </section>
-      ))}
-    </>
   );
 }
 

@@ -1,14 +1,34 @@
-/** Customer → Servers: every server of the customer (retired ones too), the Site it belongs to, and its admin actions. */
+/**
+ * Customer → Servers: every server of the customer (retired ones too), the Site it belongs to, and its admin actions.
+ * The Cards view is the old /fleet page's server cards (status, cameras, disk, AI), kept here now /fleet goes to Sites.
+ */
+import { useState } from "react";
 import type { Server, Site } from "../api";
 import { ago } from "../api";
 import { go, siteHref } from "../nav";
-import { ServerActions } from "../servers";
+import { ServerActions, ServerCard } from "../servers";
+
+type View = "table" | "cards";
+const VIEW_KEY = "customerServersView";
+const loadView = (): View => { try { return localStorage.getItem(VIEW_KEY) === "cards" ? "cards" : "table"; } catch { return "table"; } };
 
 export function ServersBox({ servers, sites, admin, onChanged }: { servers: Server[]; sites: Site[]; admin: boolean; onChanged: () => void }) {
+  const [view, setViewState] = useState<View>(loadView);
+  const setView = (v: View) => { setViewState(v); try { localStorage.setItem(VIEW_KEY, v); } catch { /* private mode */ } };
+  const now = Date.now() / 1000;
   return (
     <div className="card">
-      <h3>Servers <span className="muted small">the NVR boxes enrolled with this hub</span></h3>
-      {servers.length === 0 ? <p className="muted">None yet.</p> : (
+      <div className="row">
+        <h3 style={{ margin: 0 }}>Servers <span className="muted small">the NVR boxes enrolled with this hub</span></h3>
+        <span className="spacer" />
+        <div className="segmented small-seg">
+          <button className={view === "table" ? "active" : ""} onClick={() => setView("table")}>Table</button>
+          <button className={view === "cards" ? "active" : ""} onClick={() => setView("cards")}>Cards</button>
+        </div>
+      </div>
+      {servers.length === 0 ? <p className="muted">None yet.</p> : view === "cards" ? (
+        <div className="site-grid" style={{ marginTop: 10 }}>{servers.map((s) => <ServerCard key={s.id} s={s} now={now} />)}</div>
+      ) : (
         <table className="hub-table">
           <thead><tr><th>Server</th><th>Site</th><th>Status</th><th>Host</th><th>Version</th><th /></tr></thead>
           <tbody>{servers.map((s) => (

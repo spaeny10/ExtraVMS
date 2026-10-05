@@ -10,7 +10,6 @@ describe("matchRoute", () => {
     expect(matchRoute("/alerts")).toEqual({ page: "alerts" });
     expect(matchRoute("/audit")).toEqual({ page: "audit" });
     expect(matchRoute("/account")).toEqual({ page: "account" });
-    expect(matchRoute("/fleet")).toEqual({ page: "fleet" });
     expect(matchRoute("/nowhere")).toEqual({ page: "home" });
   });
 
@@ -44,6 +43,10 @@ describe("matchRoute", () => {
   it("decodes path segments", () => {
     expect(matchRoute("/sites/a%20b/live").siteId).toBe("a b");
   });
+});
+
+it("/fleet redirects to /sites", () => {
+  expect(matchRoute("/fleet")).toEqual({ page: "sites", redirect: "/sites" });
 });
 
 describe("hrefs", () => {

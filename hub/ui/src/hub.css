@@ -84,3 +84,11 @@
   .site-head { flex-direction: column; gap: 6px; }
   .hub-table { display: block; overflow-x: auto; }
 }
+
+/* ---------- Site › Live (combined grid over the site's servers; tiles reuse the server's live-grid/tile/dash-still) ---------- */
+.site-live-chips { flex-wrap: wrap; gap: 4px; margin: 0 0 8px; }
+.site-live-chip { cursor: pointer; display: inline-flex; align-items: center; gap: 4px; }
+.site-live-chip.hidden-cam { color: var(--muted); opacity: .7; }
+.site-live-cell { min-width: 0; }
+.site-live-down .player { background: #111; }
+.site-live-strip-off { aspect-ratio: 16 / 9; display: grid; place-items: center; background: #111; color: #aaa; font-size: 11px; }

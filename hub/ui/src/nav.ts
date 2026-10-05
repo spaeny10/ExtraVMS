@@ -25,7 +25,7 @@ export type SiteTab = (typeof SITE_TABS)[number];
 export const CUSTOMER_TABS = ["sites", "servers", "members", "invites", "ai", "actions"] as const;
 export type CustomerTab = (typeof CUSTOMER_TABS)[number];
 
-export type Page = "home" | "sites" | "site" | "server" | "fleet" | "find" | "alerts" | "customer" | "audit" | "account";
+export type Page = "home" | "sites" | "site" | "server" | "find" | "alerts" | "customer" | "audit" | "account";
 /**
  * Where a path points. `redirect` is the canonical path when the one asked for is an alias or incomplete
  * (/sites/:id → /sites/:id/live, /org/… → /customer/…); the app replaces the URL with it so links and Back stay clean.
@@ -52,7 +52,8 @@ export function matchRoute(path: string): Route {
       const canonical = a && tab === a ? `/customer/${tab}` : "/customer";
       return { page: "customer", tab, ...(head === "org" || (a && tab !== a) ? { redirect: canonical } : {}) };
     }
-    case "fleet": return { page: "fleet" };
+    // the old flat server list: Sites replaced it (the server cards live on under Customer → Servers)
+    case "fleet": return { page: "sites", redirect: "/sites" };
     case "find": return { page: "find" };
     case "alerts": return { page: "alerts" };
     case "audit": return { page: "audit" };
