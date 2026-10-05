@@ -484,7 +484,14 @@ class Database:
     # ---- settings
     def get_setting(self, key: str, default=None):
         row = self.one("SELECT value FROM settings WHERE key=?", [key])
-        return json.loads(row["value"]) if row else default
+        # A row whose value is SQL NULL (seen on Hailo T1 for retention_policy) must read as "unset", not crash
+        # json.loads: that TypeError took the whole retention pass down and the disk filled up.
+        if not row or row["value"] is None:
+            return default
+        try:
+            return json.loads(row["value"])
+        except (TypeError, ValueError):
+            return default
 
     def set_setting(self, key: str, value) -> None:
         self.execute("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
