@@ -1,8 +1,9 @@
 /**
  * Find / Ask across the customer's servers, or (with `site`) across one Site's servers: the Site page's Find tab.
  * Results are server events shown with the server UI's EventCard (media fetched through that server's tunnel) and
- * labelled "Site · Server · Camera" (whereLabel). A click opens the moment in the Site's combined Timeline; each card
- * also keeps a link to the same moment on the server's own console.
+ * labelled "Site · Server · Camera" (whereLabel). A click opens the event viewer in place (clip, synopsis, feedback), as
+ * the server's own Find does; the viewer's "Open in Timeline" goes on to the Site's combined Timeline. Each card also
+ * keeps a link to the same moment on the server's own console; footage moments (no event to show) open the Timeline.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { NvrEvent } from "@site/api";
@@ -10,9 +11,11 @@ import { EventCard } from "@site/Events";
 import { toast } from "@site/ui";
 import { type ExecPlan, type FleetSearch, type Org, type ServerTag, type Site, api, fleetAsk, fmtTime } from "./api";
 import { FleetActionCard, planAction } from "./customer/FleetActionsPage";
+import { type EventRef } from "./eventOpen";
+import { HubEventDetail } from "./HubEventDetail";
 import { siteApi } from "./hubSource";
 import { whereLabel } from "./labels";
-import { consoleHref, consoleTimelineHref, go, navigate } from "./nav";
+import { consoleHref, consoleTimelineHref, go } from "./nav";
 import { siteTimelineHref } from "./timelineLink";
 
 type Answer = { name: string; text: string; error?: string; done?: boolean };
@@ -39,7 +42,9 @@ function useWhere(org: Org, site?: Site) {
       const w: Where = { site: t.location_name, server: t.server_name ?? t.site_name, camera: camera ? cams.get(`${serverOf(t)}/${camera}`) ?? camera : null };
       return whereLabel(w, { showSite: !site, serverCount: t.location_id ? count.get(t.location_id) : undefined }) || (t.server_name ?? t.site_name);
     };
-    return { label, serverOf };
+    /** just the camera's name, for the event viewer's title */
+    const cameraName = (server: string) => (camera: string) => cams.get(`${server}/${camera}`) ?? camera;
+    return { label, serverOf, cameraName };
   }, [site, fleetSites]);
 }
 
@@ -51,7 +56,8 @@ export function FindPage({ org, site }: { org: Org; site?: Site }) {
   const [answers, setAnswers] = useState<Record<string, Answer>>({});
   const [asking, setAsking] = useState(false);
   const [action, setAction] = useState<ExecPlan | null>(null);
-  const { label, serverOf } = useWhere(org, site);
+  const { label, serverOf, cameraName } = useWhere(org, site);
+  const [open, setOpen] = useState<EventRef | null>(null);
   const scope = site?.id;
   const search = async () => {
     if (!q.trim()) return;
@@ -91,12 +97,8 @@ export function FindPage({ org, site }: { org: Org; site?: Site }) {
       }, scope);
     } catch (e) { toast.error(e); } finally { setAsking(false); }
   };
-  /** In-app to the Site's combined Timeline; a server in no Site has only its console. */
-  const openEvent = (e: FleetSearch["events"][number]) => {
-    const server = serverOf(e);
-    if (e.location_id) navigate(siteTimelineHref(e.location_id, server, e.camera_id, e.id));
-    else location.href = consoleTimelineHref(server, { cam: e.camera_id, event: e.id });
-  };
+  /** The event viewer in place; its "Open in Timeline" knows the Site (or falls back to the server's console). */
+  const openEvent = (e: FleetSearch["events"][number]) => setOpen({ server: serverOf(e), id: e.id, location: e.location_id ?? (site && site.id) });
   return (
     <>
       {site ? <h3 style={{ marginTop: 0 }}>Find across {site.name}</h3> : <h2>Find across {org.name}</h2>}
@@ -155,6 +157,7 @@ export function FindPage({ org, site }: { org: Org; site?: Site }) {
           ))}
         </div>
       )}
+      {open && <HubEventDetail ev={open} cameraName={cameraName(open.server)} onClose={() => setOpen(null)} />}
     </>
   );
 }

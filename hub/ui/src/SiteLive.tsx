@@ -6,17 +6,24 @@
  * Streams share the page budget (MAX_LIVE, as on dashboards): tiles past it show a still with a Play button.
  * A server that is offline (or goes offline mid-view, seen on the Site's 15 s poll) shows its cameras from the hub's
  * registry as dark "Server offline" tiles: frames come through the tunnel, so there is no still to show.
+ *
+ * "Latest activity" mirrors the server UI's LiveView: event cards that open the event viewer in place (HubEventDetail),
+ * filtered by a region painted on a tile (only that camera's events whose path crossed it), and tiles with an event
+ * in progress marked as alerting. The pool and the filtering are eventOpen.ts.
  */
 import { useEffect, useMemo, useReducer, useRef, useState } from "react";
-import type { Camera as ServerCam } from "@site/api";
+import type { Camera as ServerCam, NvrEvent } from "@site/api";
+import { EventCard } from "@site/Events";
 import { LiveTile } from "@site/Views";
 import { LiveBudgetProvider, useBudget } from "@site/dashboard/Dashboard";
 import { useIceServers } from "@site/dashboard/ice";
-import { camKey, type DashboardSource } from "@site/dashboard/source";
-import { EventsWidget } from "@site/dashboard/widgets/EventsWidget";
-import type { Widget } from "@site/dashboard/types";
+import { camKey, splitKey, type DashboardSource } from "@site/dashboard/source";
+import type { FleetEvent } from "@site/dashboard/types";
+import { regions, useRegions } from "@site/region";
 import { Icon, swipeHandlers, useIsPhone } from "@site/ui";
 import { type Camera as RegistryCam, type Fleet, type Org, type Server, type Site, api } from "./api";
+import { type EventRef, applyLiveEvent, cameraNameFor, mergePool, regionFeed, removeLiveEvent, siteRegionKeys, tagServer } from "./eventOpen";
+import { HubEventDetail } from "./HubEventDetail";
 import { makeHubSource, siteApi } from "./hubSource";
 import { EMPTY_LAYOUT, type LayoutAction, type LiveFocus, type LiveLayout, type Quality, applyFocus, arrange, gridCols, isVisible, layoutReducer, loadLayout, saveLayout, tileLabel,
   wrapIndex } from "./liveLayout";
@@ -26,7 +33,7 @@ import { EMPTY_LAYOUT, type LayoutAction, type LiveFocus, type LiveLayout, type 
 type TileState = "live" | "loading" | "unreachable" | "offline";
 type Tile = { key: string; server: Server; id: string; name: string; state: TileState; cam: ServerCam | null; streamReady: boolean };
 
-/** The hub source over just this Site's servers, so EventsWidget and the ICE cache work as on a dashboard. */
+/** The hub source over just this Site's servers: the tiles' ICE cache and the fleet socket, as on a dashboard. */
 function siteFleet(org: Org, site: Site): Fleet {
   // retired servers are left out: they would only add "Server · " prefixes to the activity feed
   return { orgs: [{ org, sites: site.servers.filter((s) => !s.retired_at), open_alerts: site.open_alerts }], now: Date.now() / 1000, offline_after_s: 0 };
@@ -96,14 +103,16 @@ export function SiteLive({ org, site, focus: want = null, persist = true, compac
   const q = (key: string): Quality => (hdUnsupported ? "sd" : layout.quality[key] ?? "sd");
   const [expanded, setExpanded] = useState<string | null>(null);
   const isPhone = useIsPhone();
+  // the SOC incident view hides the column (it has its own event list): no feed fetches or socket for it either
+  const activity = useSiteActivity(site, servers, source, !hideActivity);
+  const activeOf = (key: string) => activity.recent?.find((e) => camKey(e.site_id, e.camera_id) === key && (e.status === "open" || e.status === "pending"));
 
   if (servers.length === 0) return <p className="muted">This site has no servers yet.</p>;
   if (tiles.length === 0) return <p className="muted">{Object.keys(full).length || registry.length ? "No cameras at this site yet." : "Loading cameras…"}</p>;
 
-  const tileProps = { source, multi, q, dispatch, hdUnsupported, onUnsupported: () => setHdUnsupported(true) };
-  const events: Widget<"events"> = { id: `site-live-${site.id}`, type: "events", x: 0, y: 0, w: 1, h: 1, props: { sites: servers.map((s) => s.id), limit: 12 } };
-  const activity = hideActivity ? null : <aside className="live-feed"><h3>Latest activity</h3><EventsWidget widget={events} source={source} /></aside>;
-  if (isPhone) return <PhoneLive tiles={shown.length ? shown : ordered} activity={activity} {...tileProps} />;
+  const tileProps = { source, multi, q, dispatch, hdUnsupported, onUnsupported: () => setHdUnsupported(true), activeOf };
+  const feed = hideActivity ? null : <SiteActivity site={site} servers={servers} tiles={tiles} multi={multi} activity={activity} />;
+  if (isPhone) return <PhoneLive tiles={shown.length ? shown : ordered} activity={feed} {...tileProps} />;
 
   const focused = expanded ? shown.find((t) => t.key === expanded) : undefined;
   const grid = focused ? [focused] : shown;
@@ -131,15 +140,119 @@ export function SiteLive({ org, site, focus: want = null, persist = true, compac
             {grid.length === 0 && <div className="empty">Every camera is hidden. Show some with the chips above, or Reset.</div>}
           </div>
         </div>
-        {activity}
+        {feed}
       </div>
     </LiveBudgetProvider>
+  );
+}
+
+// ---------------------------------------------------------------- Latest activity (LiveView's feed, across servers)
+
+const RECENT_LIMIT = 50; // the Site's recent events; a painted camera adds up to 100 of its own (as LiveView)
+const SCOPED_LIMIT = 100;
+
+type Activity = {
+  /** the Site's recent events kept fresh from the fleet socket (null: loading) */
+  recent: FleetEvent[] | null;
+  /** recent + the painted cameras' deeper history */
+  pool: FleetEvent[];
+  /** painted lane keys of this Site's cameras */
+  regionKeys: string[];
+  regionMap: Record<string, Uint8Array>;
+  offline: string[];
+};
+
+/**
+ * LiveView's `recent + socket` pool and its painted-region fetches, for every server at the Site: the Site's latest
+ * events from the hub, live updates from the fleet socket (this Site's servers only), and up to 100 recent events of
+ * each painted camera from its own server.
+ */
+function useSiteActivity(site: Site, servers: Server[], source: DashboardSource, enabled: boolean): Activity {
+  const serverKey = servers.map((s) => s.id).sort().join(",");
+  const serversRef = useRef(servers);
+  serversRef.current = servers;
+  const [recent, setRecent] = useState<FleetEvent[] | null>(null);
+  const [offline, setOffline] = useState<string[]>([]);
+  useEffect(() => {
+    if (!enabled) return;
+    const own = new Set(serverKey.split(",").filter(Boolean));
+    let alive = true;
+    setRecent(null);
+    // updates that arrive before the first answer are kept: merged over it, the live copy wins
+    api.locationEvents(site.id, { limit: RECENT_LIMIT })
+      .then((r) => { if (alive) { setRecent((prev) => mergePool(r.events, prev ?? [])); setOffline(r.offline); } })
+      .catch(() => { if (alive) setRecent((prev) => prev ?? []); });
+    const unsub = source.subscribe((m) => {
+      if (!own.has(m.site_id)) return;
+      if (m.type === "event_removed") setRecent((prev) => prev && removeLiveEvent(prev, m.site_id, m.id));
+      else if (m.type === "event") setRecent((prev) => applyLiveEvent(prev ?? [], { ...m.event, site_id: m.site_id, site_name: m.site_name }));
+    });
+    return () => { alive = false; unsub(); };
+  }, [enabled, site.id, serverKey, source]);
+
+  const regionMap = useRegions();
+  const regionKeys = useMemo(() => siteRegionKeys(regionMap, serverKey.split(",")), [regionMap, serverKey]);
+  const scopeKey = regionKeys.join(",");
+  const [scoped, setScoped] = useState<FleetEvent[]>([]);
+  useEffect(() => {
+    if (!enabled || !scopeKey) { setScoped([]); return; }
+    let alive = true;
+    const nameOf = (id: string) => serversRef.current.find((s) => s.id === id)?.name ?? id;
+    Promise.all(scopeKey.split(",").map((k) => {
+      const { server, id } = splitKey(k);
+      return siteApi(server).events({ camera: id, status: "open,pending,verified", limit: SCOPED_LIMIT })
+        .then((evs) => tagServer(evs, server, nameOf(server))).catch(() => [] as FleetEvent[]);
+    })).then((lists) => { if (alive) setScoped(lists.flat()); });
+    return () => { alive = false; };
+  }, [enabled, scopeKey]);
+
+  const pool = useMemo(() => (scopeKey ? mergePool(scoped, recent ?? []) : recent ?? []), [scopeKey, scoped, recent]);
+  return { recent, pool, regionKeys, regionMap, offline };
+}
+
+/** The "Latest activity" column: LiveView's feed and RegionNote, with the event viewer opened in place. */
+function SiteActivity({ site, servers, tiles, multi, activity: a }: { site: Site; servers: Server[]; tiles: Tile[]; multi: boolean; activity: Activity }) {
+  const [open, setOpen] = useState<EventRef | null>(null);
+  const names = useMemo(() => new Map(tiles.map((t) => [t.key, t.name])), [tiles]);
+  /** "Server · Camera" on a multi-server Site, as the tiles are labelled */
+  const label = (key: string) => {
+    const t = tiles.find((x) => x.key === key);
+    const { server, id } = splitKey(key);
+    return t ? tileLabel(t.server.name, t.name, multi) : tileLabel(servers.find((s) => s.id === server)?.name ?? server, id, multi);
+  };
+  const feed = regionFeed(a.pool, a.regionMap, a.regionKeys);
+  const offline = a.offline.map((id) => servers.find((s) => s.id === id)?.name ?? id);
+  return (
+    <>
+      <aside className="live-feed">
+        <h3>Latest activity</h3>
+        {a.regionKeys.length > 0 && (
+          <p className="muted small">
+            Showing only {a.regionKeys.map(label).join(" and ")} events that passed through the painted region ·{" "}
+            <button className="linkish" onClick={() => a.regionKeys.forEach((k) => regions.set(k, null))}>Clear</button>
+          </p>
+        )}
+        {offline.length > 0 && <p className="muted small">Offline: {offline.join(", ")}</p>}
+        {a.recent === null && <p className="muted">Loading…</p>}
+        {a.recent !== null && a.pool.length === 0 && <p className="muted">Nothing yet.</p>}
+        {a.pool.length > 0 && feed.length === 0 && <p className="muted">Nothing recent on that camera passed through the painted region.</p>}
+        {feed.slice(0, 12).map((e) => (
+          <EventCard key={`${e.site_id}-${e.id}`} e={e} cameraName={names.get(camKey(e.site_id, e.camera_id)) ?? e.camera_id}
+            site={siteApi(e.site_id)} siteName={multi ? e.site_name : undefined}
+            onOpen={() => setOpen({ server: e.site_id, id: e.id, location: site.id })} />
+        ))}
+      </aside>
+      {/* a sibling of the column, as in LiveView, so the column's scroll and card styles don't reach the viewer */}
+      {open && <HubEventDetail ev={open} cameraName={cameraNameFor(names, open.server)} onClose={() => setOpen(null)} />}
+    </>
   );
 }
 
 type TileCommon = {
   source: DashboardSource; multi: boolean; q: (key: string) => Quality; dispatch: React.Dispatch<LayoutAction>;
   hdUnsupported: boolean; onUnsupported: () => void;
+  /** the camera's event in progress (open or pending), as LiveView marks a tile alerting */
+  activeOf: (key: string) => NvrEvent | undefined;
 };
 
 /** Show/hide chips (eye toggles, like the Timeline's lanes), drag a chip onto another to reorder, Reset. */
@@ -185,7 +298,7 @@ function useBudgetSlot(key: string, box: React.RefObject<HTMLDivElement | null>)
 
 const STATE_TEXT: Record<Exclude<TileState, "live">, string> = { offline: "Server offline", unreachable: "Server not answering", loading: "Connecting…" };
 
-function SiteTile({ t, source, multi, q, dispatch, hdUnsupported, onUnsupported, extra, phone, onSwipe }: TileCommon & {
+function SiteTile({ t, source, multi, q, dispatch, hdUnsupported, onUnsupported, activeOf, extra, phone, onSwipe }: TileCommon & {
   t: Tile; extra?: React.ReactNode; phone?: boolean; onSwipe?: (dir: -1 | 1) => void;
 }) {
   const box = useRef<HTMLDivElement>(null);
@@ -202,6 +315,7 @@ function SiteTile({ t, source, multi, q, dispatch, hdUnsupported, onUnsupported,
     return () => clearInterval(i);
   }, [playing, t.state]);
   const label = tileLabel(t.server.name, t.name, multi);
+  const active = activeOf(t.key);
   const qualityButtons = (
     <div className="segmented small-seg" title="Stream quality for this camera">
       <button className={!hd ? "active" : ""} onClick={() => dispatch({ type: "quality", key: t.key, quality: "sd" })}>SD</button>
@@ -211,10 +325,11 @@ function SiteTile({ t, source, multi, q, dispatch, hdUnsupported, onUnsupported,
   return (
     <div ref={box} className="site-live-cell">
       {playing && t.cam ? (
-        <LiveTile c={t.cam} hd={hd} port={source.port} iceServers={ice} site={site} regionKey={t.key} phone={phone} onSwipe={onSwipe}
+        <LiveTile c={t.cam} hd={hd} port={source.port} iceServers={ice} site={site} regionKey={t.key} phone={phone} onSwipe={onSwipe} active={active}
           onUnsupported={hd ? onUnsupported : undefined} bar={<>
             <span className={`dot ${t.streamReady ? "ok" : "bad"}`} title={t.streamReady ? "Recording" : "No stream"} />
             <span>{label}</span>
+            {active && <span className={`label-chip ${active.camera_class}`}>{active.camera_class}</span>}
             <span className="spacer" />
             {qualityButtons}
             {extra}

@@ -1,10 +1,13 @@
 /**
  * Site → Alerts: what the SOC did at this Site, above the customer's own alerts. Each incident expands into its
- * read-only log (calls made, procedure steps, the disposition), with links into the Site's Timeline for its events.
+ * read-only log (calls made, procedure steps, the disposition), "Open event" (the event viewer in place, as on the
+ * server's own UI) for its first event, and a link into the Site's Timeline.
  * Renders nothing for a Site the SOC doesn't monitor, so customers without the service never see an empty SOC box.
  */
 import { useEffect, useState } from "react";
 import { type Site, api, fmtTime } from "../api";
+import { type EventRef } from "../eventOpen";
+import { HubEventDetail } from "../HubEventDetail";
 import { siteTimelineHref } from "../timelineLink";
 import { go } from "../nav";
 import { STATE_LABEL, cameraNames, eventNum, incidentTitle } from "../soc/format";
@@ -55,6 +58,7 @@ export function SiteIncidents({ site }: { site: Site }) {
 
 function SiteIncidentRow({ site, i }: { site: Site; i: Incident }) {
   const cams = cameraNames(i);
+  const [open, setOpen] = useState<EventRef | null>(null);
   // the list rows name the incident's cameras, not its events: the Timeline opens on the first camera at the moment
   // the incident opened (an event link when a payload does carry events)
   const first = [...(i.events ?? [])].sort((a, b) => a.ts - b.ts)[0];
@@ -70,11 +74,21 @@ function SiteIncidentRow({ site, i }: { site: Site; i: Incident }) {
           <span className="muted small"> · {fmtTime(i.opened_at)}{cams.length ? ` · ${cams.join(", ")}` : ""} · {i.state === "closed" ? (i.disposition ? i.disposition.replace(/_/g, " ") : "closed") : STATE_LABEL[i.state] ?? i.state}</span>
         </summary>
         <div className="site-incident-body">
-          {href && <a className="small" href={href} onClick={go(href)}>Open in Timeline</a>}
+          {(first || href) && (
+            <div className="row">
+              {first && <button className="ghost small" onClick={() => setOpen({ server: first.server_id, id: eventNum(first), location: site.id })}>Open event</button>}
+              {href && <a className="small" href={href} onClick={go(href)}>Open in Timeline</a>}
+            </div>
+          )}
           {i.disposition_notes && <p className="small">{i.disposition_notes}</p>}
           <IncidentLog rows={i.log ?? []} follow={false} />
         </div>
       </details>
+      {open && first && (
+        <HubEventDetail ev={open} onClose={() => setOpen(null)}
+          cameraName={(cam) => i.events?.find((x) => x.server_id === open.server && x.camera_id === cam)?.camera_name
+            ?? i.cameras?.find((x) => x.server_id === open.server && x.camera_id === cam)?.name ?? cam} />
+      )}
     </li>
   );
 }

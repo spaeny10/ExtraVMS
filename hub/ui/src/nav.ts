@@ -13,12 +13,18 @@ export function usePath() {
   return p;
 }
 
-/** An <a> click that stays in the app (plain href kept so middle-click / open-in-new-tab still work). */
-export const go = (path: string) => (e: React.MouseEvent) => {
+/**
+ * An <a> whose plain click does something in place (opens the event viewer) while its href still serves middle-click
+ * and open-in-new-tab (e.g. the event's Timeline link).
+ */
+export const inPlace = (fn: () => void) => (e: React.MouseEvent) => {
   if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
   e.preventDefault();
-  navigate(path);
+  fn();
 };
+
+/** An <a> click that stays in the app (plain href kept so middle-click / open-in-new-tab still work). */
+export const go = (path: string) => inPlace(() => navigate(path));
 
 export const SITE_TABS = ["live", "timeline", "find", "alerts", "servers", "settings"] as const;
 export type SiteTab = (typeof SITE_TABS)[number];
