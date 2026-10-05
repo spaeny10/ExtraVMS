@@ -23,7 +23,7 @@ cp hub/.env.example hub/.env
 ```
 Edit `hub/.env`: `HUB_DOMAIN=hub.axiomvision.ai`, `HUB_PUBLIC_URL=https://hub.axiomvision.ai`,
 `HUB_SECRET=$(openssl rand -hex 32)`, `POSTGRES_PASSWORD=$(openssl rand -hex 24)`, `HUB_TURN_SECRET=$(openssl rand -hex 24)`,
-`HUB_VLLM_SITE=<site id of the GPU site>` (the hub UI shows site ids under Organisation → Sites), `HUB_VLLM_MODEL=qwen3.5:9b`.
+`HUB_VLLM_SITE=<site id of the GPU site>` (the hub UI shows server ids under Customer → Servers), `HUB_VLLM_MODEL=qwen3.5:9b`.
 ```bash
 docker compose -f hub/docker-compose.yml up -d --build      # first build takes a few minutes (two UI bundles)
 docker compose -f hub/docker-compose.yml logs -f caddy hub    # wait for "certificate obtained" and "hub ... up"
@@ -52,7 +52,7 @@ Do the GPU site first (it serves the shared AI). `GET /api/hub` shows `connected
 (sites verify the hub's certificate against certifi's bundle, so a Windows site works too);
 the hub's Fleet page shows the site online. Also set `NVR_HUB_URL=wss://hub.axiomvision.ai/agent` in each site's
 `.env` (the database setting wins, but a fresh install reads `.env`). New sites: `tools/deploy_site.sh` already
-writes that URL; claim them from Organisation → Add site.
+writes that URL; claim them from Customer → Servers → Add server.
 
 ## 6. Afterwards
 - Remove any router port-forward that pointed at the old hub, and stop the old `python -m hub`.
@@ -60,11 +60,42 @@ writes that URL; claim them from Organisation → Add site.
 - Update: `cd /opt/axiom && git pull && docker compose -f hub/docker-compose.yml up -d --build`.
 - Database dump (root's crontab, installed on hub.axiomvision.ai, 14 days kept): `0 4 * * * docker compose -f /opt/axiom/hub/docker-compose.yml exec -T postgres pg_dump -U hub hub | gzip > /srv/backups/hub-$(date +\%F).sql.gz`
 
+## Upgrading to 0.2.0 (Sites, tenancy v2)
+Hubs before 0.2.0 grouped cameras straight under servers ("sites"). 0.2.0 adds **Sites** (physical places, each with
+one or more servers) between the customer and its servers. Take a dump first, since the first start changes data,
+then update as usual:
+```bash
+docker compose -f hub/docker-compose.yml exec -T postgres pg_dump -U hub hub | gzip > /srv/backups/hub-pre-0.2.0.sql.gz
+cd /opt/axiom && git pull && docker compose -f hub/docker-compose.yml up -d --build
+```
+On its first start the hub, by itself and idempotently (each later start finds nothing to do; a hub already running
+a tenancy v2 commit before 0.2.0, like hub.axiomvision.ai at 6af80ae, only does the `site_grants` drop):
+- adds the new columns and tables;
+- puts every server in its own one-server Site named after it (address from the server's location note), so the fleet
+  looks as before; afterwards move servers into shared Sites (Site → Servers → the server) and delete the empty ones;
+- turns per-server grants into Site grants once (kv `schema:tenancy_v2`): a member who had server grants gets exactly
+  those servers' Sites, everyone else **All sites**. An empty Site list now means nothing, not everything;
+- then drops the old `site_grants` table (kv `schema:tenancy_v2_drop_site_grants`; only after the step above).
+  Rolling back to code from before tenancy v2 would recreate it empty, i.e. restricted members would see every
+  server: restore the dump instead of rolling back that far;
+- seeds the cameras registry from each server's last heartbeat.
+Check afterwards: `/healthz` says `"version": "0.2.0"`, Sites shows one Site per server, and a restricted member
+still sees only their servers.
+
+## Users and invites
+- Reset a password from the server (prompts twice; signs the user out everywhere):
+  `docker compose -f hub/docker-compose.yml exec hub python -m hub setpassword you@example.com`.
+- Add people with **Customer → Invites**: choose the role and All sites or the Sites they may see (optionally lock the
+  link to one email, add a label, set the expiry), copy the link and send it yourself; the hub sends no email. The
+  person opens `https://hub.axiomvision.ai/invite/<code>`, signs in or creates an account, and joins. Pending links
+  can be copied again or revoked. An admin limited to some Sites can only invite to those Sites.
+- Customer → Members changes a member's role or Sites, or removes them (their Site grants go with them).
+
 ## Checks
 | What | How |
 |---|---|
 | Certificate and login | https://hub.axiomvision.ai shows the padlock and the login page |
-| Sites online | Fleet page; `curl -s https://hub.axiomvision.ai/api/health` → `sites_online` |
+| Servers online | Sites page; `curl -s https://hub.axiomvision.ai/healthz` → `version`, `sites_online` (= servers with a live tunnel) |
 | Live video from a phone off Wi-Fi | tile plays; `chrome://webrtc-internals` shows a `relay` candidate (TURN) |
-| Shared AI | Organisation → Shared AI card says "served by the GPU at <site>"; lite sites write synopses |
+| Shared AI | Customer → AI & relay says "served by the GPU at <site>"; lite sites write synopses |
 | No inbound ports at sites | the router forwards nothing; `ss -tlnp` on a site shows 8080 bound to the LAN only |

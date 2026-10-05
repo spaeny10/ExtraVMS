@@ -1,6 +1,6 @@
 """A database from before Sites (locations) upgrades in place: upgrade() adds the columns, backfill() gives every
-server its own one-server Site, turns legacy server grants into Site grants, and seeds the cameras registry.
-Running both twice changes nothing (every hub start runs them)."""
+server its own one-server Site, turns legacy server grants into Site grants, then drops the legacy site_grants table,
+and seeds the cameras registry. Running both twice changes nothing (every hub start runs them)."""
 import sqlalchemy as sa
 
 from hub import db
@@ -79,6 +79,9 @@ def test_old_database_upgrades_and_backfills(tmp_path):
         assert cams[("s_a", "cam1")].name == "Yard" and cams[("s_a", "cam1")].stream_ready is True
         assert cams[("s_a", "cam1")].location_id == servers["s_a"].location_id and cams[("s_a", "cam1")].enabled is True
         assert c.execute(sa.select(db.kv.c.key).where(db.kv.c.key == db.TENANCY_V2)).first() is not None
+        # the legacy table is gone once its rows were migrated, and the drop is recorded so it never runs again
+        assert "site_grants" not in sa.inspect(c).get_table_names()
+        assert c.execute(sa.select(db.kv.c.value).where(db.kv.c.key == db.TENANCY_V2_DROP_SITE_GRANTS)).scalar()["existed"] is True
         # the new NOT NULL column has a database default (older code inserts memberships without it)
         c.execute(sa.text("INSERT INTO memberships (user_id, org_id, role) VALUES ('u_new', 'o_1', 'viewer')"))
         assert c.execute(sa.text("SELECT all_sites FROM memberships WHERE user_id = 'u_new'")).scalar() in (1, True)
@@ -101,3 +104,26 @@ def test_grants_migration_runs_once(tmp_path):
     with eng.connect() as c:
         assert c.execute(sa.select(db.memberships.c.all_sites).where(db.memberships.c.user_id == "u_limited")).scalar() is True
         assert c.execute(sa.select(sa.func.count()).select_from(db.location_grants)).scalar() == 0
+
+
+def test_site_grants_dropped_only_after_migration(tmp_path):
+    """A database whose grants were already migrated (a 0.1.x tenancy v2 hub) drops the leftover table on the next
+    start without re-reading it; a fresh database never had it and still records the step once."""
+    eng = _old_db(tmp_path / "migrated.db")
+    with eng.begin() as c:   # as a 0.1.x tenancy v2 hub left it: marker set, legacy table still there
+        c.execute(sa.text("INSERT INTO kv VALUES ('schema:tenancy_v2', '{\"at\": 1}')"))
+    db.metadata.create_all(eng)
+    db.upgrade(eng)
+    db.backfill(eng)
+    with eng.connect() as c:
+        assert "site_grants" not in sa.inspect(c).get_table_names()
+        assert c.execute(sa.select(sa.func.count()).select_from(db.location_grants)).scalar() == 0   # not re-migrated
+
+    fresh = sa.create_engine(f"sqlite:///{(tmp_path / 'fresh.db').as_posix()}", future=True)
+    db.metadata.create_all(fresh)
+    db.upgrade(fresh)
+    db.backfill(fresh)
+    db.backfill(fresh)
+    with fresh.connect() as c:
+        assert "site_grants" not in sa.inspect(c).get_table_names()
+        assert c.execute(sa.select(db.kv.c.value).where(db.kv.c.key == db.TENANCY_V2_DROP_SITE_GRANTS)).scalar()["existed"] is False

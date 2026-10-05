@@ -1,5 +1,5 @@
-"""Who sees which servers: the all_sites flag or exactly the granted Sites (no grants = nothing), the legacy
-/grants mapping, member removal and server removal cleaning up after themselves, push recipients."""
+"""Who sees which servers: the all_sites flag or exactly the granted Sites (no grants = nothing), member removal
+and server removal cleaning up after themselves, push recipients."""
 import asyncio
 import time
 
@@ -42,12 +42,12 @@ def test_all_sites_flag_and_grants(client, superuser):
 
     # a new member sees every Site by default
     m = next(x for x in root.get(f"/api/orgs/{oid}/members").json() if x["id"] == v["id"])
-    assert m["all_sites"] is True and m["location_ids"] == [] and m["sites"] == []
+    assert m["all_sites"] is True and m["location_ids"] == [] and "sites" not in m   # the legacy derived server list is gone
     assert _fleet_ids(viewer, oid) == ({a["id"], b["id"]}, {a["location_id"], b["location_id"]})
 
     # restricted to North's Site
     r = root.put(f"/api/orgs/{oid}/members/{v['id']}/access", json={"all_sites": False, "location_ids": [a["location_id"]]})
-    assert r.status_code == 200 and r.json() == {"all_sites": False, "location_ids": [a["location_id"]], "sites": [a["id"]]}
+    assert r.status_code == 200 and r.json() == {"all_sites": False, "location_ids": [a["location_id"]]}
     assert _fleet_ids(viewer, oid) == ({a["id"]}, {a["location_id"]})
     assert viewer.get(f"/s/{a['id']}/api/turn").status_code == 200
     assert viewer.get(f"/s/{b['id']}/api/turn").status_code == 403
@@ -71,25 +71,16 @@ def test_all_sites_flag_and_grants(client, superuser):
     assert viewer.put(f"/api/orgs/{oid}/members/{v['id']}/access", json={"all_sites": True}).status_code == 403
 
 
-def test_legacy_grants_map_to_sites(client, superuser):
+def test_remove_member_drops_grants(client, superuser):
     root = _login(client, superuser["email"], superuser["password"])
-    oid = root.post("/api/orgs", json={"name": "Legacy Co", "slug": "legacy-co"}).json()["id"]
-    a, b = server(oid, "One"), server(oid, "Two")
-    v = root.post(f"/api/orgs/{oid}/members", json={"email": "legacy@access.example", "role": "viewer", "password": "legacy-pass-123"}).json()
-    assert root.put(f"/api/orgs/{oid}/members/{v['id']}/grants", json={"site_ids": [b["id"]]}).json() == {"ok": True}
-    m = next(x for x in root.get(f"/api/orgs/{oid}/members").json() if x["id"] == v["id"])
-    assert m["all_sites"] is False and m["location_ids"] == [b["location_id"]] and m["sites"] == [b["id"]]
-    # the legacy table mirrors it, so older hub code would still restrict this member
-    assert {g["site_id"] for g in db.rows(sa.select(db.site_grants).where(db.site_grants.c.user_id == v["id"]))} == {b["id"]}
-    assert root.put(f"/api/orgs/{oid}/members/{v['id']}/grants", json={"site_ids": []}).status_code == 200
-    m = next(x for x in root.get(f"/api/orgs/{oid}/members").json() if x["id"] == v["id"])
-    assert m["all_sites"] is True and m["sites"] == []
-
-    # removing the member leaves no grants behind
+    oid = root.post("/api/orgs", json={"name": "Leaver Co", "slug": "leaver-co"}).json()["id"]
+    a = server(oid, "One")
+    v = root.post(f"/api/orgs/{oid}/members", json={"email": "leaver@access.example", "role": "viewer", "password": "leaver-pass-123"}).json()
+    # the legacy per-server /grants route went with the site_grants table (0.2.0): only /access sets Sites now
+    assert root.put(f"/api/orgs/{oid}/members/{v['id']}/grants", json={"site_ids": [a["id"]]}).status_code in (404, 405)
     root.put(f"/api/orgs/{oid}/members/{v['id']}/access", json={"all_sites": False, "location_ids": [a["location_id"]]})
     assert root.delete(f"/api/orgs/{oid}/members/{v['id']}").status_code == 200
     assert db.rows(sa.select(db.location_grants).where(db.location_grants.c.user_id == v["id"])) == []
-    assert db.rows(sa.select(db.site_grants).where(db.site_grants.c.user_id == v["id"])) == []
 
 
 def test_delete_server_cascades(client, superuser):
@@ -100,13 +91,11 @@ def test_delete_server_cascades(client, superuser):
     cameras.sync(kept, [{"id": "cam1", "name": "Door"}])
     db.insert(db.config_backups, {"site_id": gone["id"], "org_id": oid, "created_at": time.time(), "bytes": 2, "data": {}, "cameras": 1,
                                   "identities": 0, "site_version": None})
-    db.insert(db.site_grants, {"user_id": "u_someone", "site_id": gone["id"]})
     g = root.post(f"/api/orgs/{oid}/groups", json={"name": "Doors", "members": [{"site": gone["id"], "camera": "cam1"},
                                                                                {"site": kept["id"], "camera": "cam1"}]}).json()
     assert root.delete(f"/api/servers/{gone['id']}").status_code == 200   # the /api/servers alias of DELETE /api/sites/{id}
     assert cameras.for_server(gone["id"]) == [] and len(cameras.for_server(kept["id"])) == 1
     assert db.rows(sa.select(db.config_backups).where(db.config_backups.c.site_id == gone["id"])) == []
-    assert db.rows(sa.select(db.site_grants).where(db.site_grants.c.site_id == gone["id"])) == []
     assert root.get(f"/api/orgs/{oid}/groups").json()[0]["members"] == [{"site_id": kept["id"], "camera_id": "cam1"}]
     assert g["id"] and db.one(sa.select(db.sites).where(db.sites.c.id == gone["id"])) is None
 

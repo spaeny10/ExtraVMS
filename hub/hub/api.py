@@ -243,7 +243,7 @@ async def list_members(org_id: str, u: dict = Depends(user)):
         .join(db.memberships, db.memberships.c.user_id == db.users.c.id).where(db.memberships.c.org_id == org_id).order_by(db.users.c.email)
     members = db.rows(q)
     for m in members:
-        m.update(auth.access_of(org_id, m["id"]))   # all_sites, location_ids, and the legacy derived `sites`
+        m.update(auth.access_of(org_id, m["id"]))   # all_sites, location_ids
     return members
 
 
@@ -300,24 +300,6 @@ async def set_member_access(org_id: str, uid: str, body: AccessIn, u: dict = Dep
     _audit(u, org_id, None, f"member {target['email'] if target else uid} access: "
                             + ("all sites" if out["all_sites"] else f"{len(out['location_ids'])} site(s)"))
     return out
-
-
-class GrantsIn(BaseModel):
-    site_ids: list[str] = []   # empty = every site in the org
-
-
-@app.put("/api/orgs/{org_id}/members/{uid}/grants")
-async def set_grants(org_id: str, uid: str, body: GrantsIn, u: dict = Depends(user)):
-    """Legacy (server ids): mapped to the Sites those servers belong to; [] = all Sites. Use .../access."""
-    auth.require_role(u, org_id, "admin")
-    servers = db.rows(sa.select(db.sites).where(db.sites.c.org_id == org_id, db.sites.c.id.in_(body.site_ids or [""])))
-    locs = []
-    if servers:
-        with db.engine().begin() as c:
-            locs = list(dict.fromkeys(db.location_for_server(c, s) for s in servers))
-    auth.check_grant_scope(u, org_id, not servers, locs)   # [] meaning "everything" is exactly what a restricted admin can't grant
-    _set_access(org_id, uid, not servers, locs)   # as before: no (valid) server ids = everything
-    return {"ok": True}
 
 
 @app.delete("/api/orgs/{org_id}/members/{uid}")
@@ -645,7 +627,6 @@ async def revoke_site(site_id: str, u: dict = Depends(user)):
     auth.require_role(u, site["org_id"], "admin")
     await registry.push(site_id, {"t": "revoked", "reason": "removed at the hub"})
     with db.engine().begin() as c:
-        c.execute(sa.delete(db.site_grants).where(db.site_grants.c.site_id == site_id))
         c.execute(sa.delete(db.alerts).where(db.alerts.c.site_id == site_id))
         c.execute(sa.delete(db.config_backups).where(db.config_backups.c.site_id == site_id))
         cameras.delete_server(site_id, c)

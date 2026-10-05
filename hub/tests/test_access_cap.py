@@ -1,5 +1,5 @@
 """An admin can grant at most the Sites they can see: a Site-restricted admin (or owner) must not be able to hand
-out every Site, or Sites outside their own set, through invites, /access, adding members or the legacy /grants.
+out every Site, or Sites outside their own set, through invites, /access or adding members.
 Otherwise they could invite a fresh account with everything and sign in as it."""
 from hub import auth
 from test_access import _login, server
@@ -35,18 +35,15 @@ def test_restricted_admin_invites(client, superuser):
     assert adm.post(f"/api/orgs/{oid}/invites", json={"all_sites": False, "location_ids": ["l_nope"]}).status_code == 422
 
 
-def test_restricted_admin_access_and_grants(client, superuser):
+def test_restricted_admin_access(client, superuser):
     root, adm, oid, a, b, _, v = _setup(client, superuser, "cap-acc")
     url = f"/api/orgs/{oid}/members/{v['id']}"
     _denied(adm.put(f"{url}/access", json={"all_sites": True}))
     _denied(adm.put(f"{url}/access", json={"all_sites": False, "location_ids": [b["location_id"]]}))
-    _denied(adm.put(f"{url}/grants", json={"site_ids": []}))             # legacy: [] = every Site
-    _denied(adm.put(f"{url}/grants", json={"site_ids": [b["id"]]}))
     m = next(x for x in root.get(f"/api/orgs/{oid}/members").json() if x["id"] == v["id"])
     assert m["all_sites"] is False and m["location_ids"] == []           # nothing changed
     r = adm.put(f"{url}/access", json={"all_sites": False, "location_ids": [a["location_id"]]})
     assert r.status_code == 200 and r.json()["location_ids"] == [a["location_id"]]
-    assert adm.put(f"{url}/grants", json={"site_ids": [a["id"]]}).json() == {"ok": True}
 
 
 def test_restricted_admin_add_member(client, superuser):
@@ -80,5 +77,4 @@ def test_all_sites_admin_unchanged(client, superuser):
     free = _login(client, "adm@cap-free.example", "admin-pass-123")
     assert free.post(f"/api/orgs/{oid}/invites", json={}).status_code == 200
     assert free.put(f"/api/orgs/{oid}/members/{v['id']}/access", json={"all_sites": False, "location_ids": [b["location_id"]]}).status_code == 200
-    assert free.put(f"/api/orgs/{oid}/members/{v['id']}/grants", json={"site_ids": []}).json() == {"ok": True}
     assert free.post(f"/api/orgs/{oid}/members", json={"email": "x@cap-free.example", "password": "new-pass-1234"}).status_code == 200

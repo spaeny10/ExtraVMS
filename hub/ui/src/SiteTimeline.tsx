@@ -14,7 +14,7 @@ import { decodeCells, regions } from "@site/region";
 import { TimelineView, type TimelineCamera } from "@site/Timeline";
 import type { Org, Server, Site } from "./api";
 import { siteApi } from "./hubSource";
-import { defaultVisible, effectiveOffset, focusFor, journeyMembers, localLayoutStore, momentTarget, parseSiteTimelineQuery,
+import { defaultVisible, effectiveOffset, focusFor, fromLaneKeys, journeyMembers, localLayoutStore, momentTarget, parseSiteTimelineQuery,
   siteTimelineHref, withoutTimelineParams } from "./timelineLink";
 import "./siteTimeline.css";
 
@@ -115,18 +115,10 @@ export function SiteTimeline({ site, query }: { org: Org; site: Site; query: str
     history.replaceState(history.state, "", location.pathname + withoutTimelineParams(location.search) + dropHashLink(location.hash));
   }, []);
 
-  // EventDetail speaks in server-local camera ids and doesn't say which server it is showing; find the event's server
-  // among the lanes. A camera id used on several servers is settled by asking each of them for the event.
-  const camerasRef = useRef(cameras);
-  camerasRef.current = cameras;
+  // An event viewer's "Open in Timeline": TimelineView passes lane keys (camKey(server, camera)), which carry the server
   const openInTimeline = useCallback((e: TimelineTarget) => {
-    const cam = e.members?.[0]?.cam ?? e.camera_id;
-    const candidates = [...new Set(camerasRef.current.filter((c) => c.id === cam).map((c) => c.server!))];
-    if (candidates.length === 0) return;
-    if (candidates.length === 1 || !e.id) { focusOn(candidates[0], e); return; }
-    Promise.all(candidates.map((s) => siteApi(s).event(e.id)
-      .then((x) => (x.camera_id === e.camera_id && x.start_ts === e.start_ts ? s : null)).catch(() => null)))
-      .then((hits) => focusOn(hits.find((h): h is string => !!h) ?? candidates[0], e));
+    const hit = fromLaneKeys(e);
+    if (hit) focusOn(hit.server, hit.target);
   }, [focusOn]);
   const nav = useMemo(() => ({ openInTimeline }), [openInTimeline]);
 

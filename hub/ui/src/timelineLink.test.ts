@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { defaultVisible, effectiveOffset, focusFor, journeyMembers, layoutsStorageKey, localLayoutStore, momentTarget, parseLayouts,
+import { defaultVisible, effectiveOffset, focusFor, fromLaneKeys, journeyMembers, layoutsStorageKey, localLayoutStore, momentTarget, parseLayouts,
   parseSiteTimelineQuery, siteTimelineHref, withoutTimelineParams } from "./timelineLink";
 
 describe("siteTimelineHref", () => {
@@ -106,5 +106,17 @@ describe("localLayoutStore", () => {
   it("survives junk in storage", () => {
     expect(parseLayouts("not json")).toEqual([]);
     expect(parseLayouts('[{"id":1,"name":"ok","config":{}},{"id":"2"}]')).toHaveLength(1);
+  });
+});
+
+describe("fromLaneKeys", () => {
+  it("reads the server from the lane key and returns the server's own camera ids", () => {
+    const e = { id: 5, camera_id: "srvA/cam1", start_ts: 100, end_ts: 130 };
+    expect(fromLaneKeys(e)).toEqual({ server: "srvA", target: { ...e, camera_id: "cam1" } });
+    const j = { ...e, members: [{ id: 5, cam: "srvA/cam1", start: 100, end: 130 }, { id: 6, cam: "srvA/cam/2", start: 140, end: 150 }] };
+    expect(fromLaneKeys(j)?.target.members).toEqual([{ id: 5, cam: "cam1", start: 100, end: 130 }, { id: 6, cam: "cam/2", start: 140, end: 150 }]);
+  });
+  it("is null for a plain camera id (no server in the key)", () => {
+    expect(fromLaneKeys({ id: 5, camera_id: "cam1", start_ts: 100, end_ts: 130 })).toBeNull();
   });
 });

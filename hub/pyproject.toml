@@ -1,6 +1,6 @@
 [project]
 name = "axiom-vision-hub"
-version = "0.1.0"
+version = "0.2.0"
 description = "Axiom Vision fleet hub: one webpage for every site; sites dial out, nothing is port-forwarded."
 requires-python = ">=3.11"
 dependencies = [

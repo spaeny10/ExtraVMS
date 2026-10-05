@@ -9,8 +9,9 @@ Glossary (code name -> what the UI calls it):
                   group JSON means a server id.
   cameras         Camera: the hub's registry of (server_id, camera_id), synced from hello/heartbeats (cameras.py).
 Access: a membership's role plus `all_sites` (sees every Site of the customer) or, when false, only the Sites in
-`location_grants` (no grants = nothing). `site_grants` (per-server grants with "no grants = all") is legacy: read
-once by backfill() and mirrored by auth.set_access so a rollback to older code stays restricted.
+`location_grants` (no grants = nothing). The legacy `site_grants` table (per-server grants, "no grants = all") is
+not in this metadata any more: backfill() reads it once (when an older database first meets this code) and then
+drops it.
 Servers authenticate with a device token (hashed at rest). Alerts and the audit log are per org. Small,
 synchronous calls: a fleet of dozens of servers is a few writes a second.
 """
@@ -43,8 +44,6 @@ memberships = Table("memberships", metadata,
                     Column("user_id", String(24), primary_key=True), Column("org_id", String(24), primary_key=True),
                     Column("role", String(16), nullable=False),
                     Column("all_sites", Boolean, nullable=False, default=True, server_default=sa.text("true")))
-site_grants = Table("site_grants", metadata,
-                    Column("user_id", String(24), primary_key=True), Column("site_id", String(24), primary_key=True))
 sites = Table("sites", metadata,
               Column("id", String(24), primary_key=True), Column("org_id", String(24), nullable=False, index=True),
               Column("name", String(120), nullable=False), Column("location", String(200), nullable=False, default=""),
@@ -181,6 +180,8 @@ def upgrade(eng: Engine) -> None:
 
 
 TENANCY_V2 = "schema:tenancy_v2"
+# set once the legacy site_grants table is gone; the drop only ever runs after TENANCY_V2 has migrated its rows
+TENANCY_V2_DROP_SITE_GRANTS = "schema:tenancy_v2_drop_site_grants"
 
 
 def unique_location_name(c, org_id: str, name: str, exclude: str | None = None) -> str:
@@ -215,7 +216,9 @@ def backfill(eng: Engine) -> None:
     1. every server without a Site gets its own one-server Site, so the fleet looks exactly as before;
     2. once (kv schema:tenancy_v2): legacy per-server grants become Site grants with all_sites=false; everyone else
        gets all_sites=true (the old implicit "no grants = all" rule, made explicit);
-    3. the cameras registry is seeded from each server's last heartbeat summary (pairs it lacks only)."""
+    3. once (kv schema:tenancy_v2_drop_site_grants), after step 2 has committed: the legacy site_grants table is dropped;
+    4. the cameras registry is seeded from each server's last heartbeat summary (pairs it lacks only)."""
+    has_site_grants = "site_grants" in sa.inspect(eng).get_table_names()
     with eng.begin() as c:
         for s in c.execute(sa.select(sites).where(sites.c.location_id.is_(None)).order_by(sites.c.created_at)).mappings().all():
             location_for_server(c, dict(s))
@@ -223,7 +226,8 @@ def backfill(eng: Engine) -> None:
         if c.execute(sa.select(kv.c.key).where(kv.c.key == TENANCY_V2)).first() is None:
             server_loc = {r.id: (r.org_id, r.location_id) for r in c.execute(sa.select(sites.c.id, sites.c.org_id, sites.c.location_id))}
             granted: dict[str, set[str]] = {}
-            for g in c.execute(sa.select(site_grants)):
+            # raw SQL: the table left the metadata, and a database created by this code never had it
+            for g in c.execute(sa.text("SELECT user_id, site_id FROM site_grants")) if has_site_grants else ():
                 granted.setdefault(g.user_id, set()).add(g.site_id)
             for m in c.execute(sa.select(memberships.c.user_id, memberships.c.org_id)).all():
                 locs = {server_loc[sid][1] for sid in granted.get(m.user_id, ()) if sid in server_loc and server_loc[sid][0] == m.org_id}
@@ -235,6 +239,14 @@ def backfill(eng: Engine) -> None:
                                                                              location_grants.c.location_id == lid)).first() is None:
                         c.execute(location_grants.insert().values(user_id=m.user_id, location_id=lid))
             c.execute(kv.insert().values(key=TENANCY_V2, value={"at": time.time()}))
+    with eng.begin() as c:
+        # Separate transaction, and gated on the migration marker, so the rows are never dropped unread. Nothing reads
+        # or writes site_grants since 0.2.0; code before tenancy v2 would recreate it empty (= every server) on a rollback.
+        migrated = c.execute(sa.select(kv.c.key).where(kv.c.key == TENANCY_V2)).first() is not None
+        dropped = c.execute(sa.select(kv.c.key).where(kv.c.key == TENANCY_V2_DROP_SITE_GRANTS)).first() is not None
+        if migrated and not dropped:
+            c.execute(sa.text("DROP TABLE IF EXISTS site_grants"))
+            c.execute(kv.insert().values(key=TENANCY_V2_DROP_SITE_GRANTS, value={"at": time.time(), "existed": has_site_grants}))
     with eng.begin() as c:
         have = {(r.server_id, r.camera_id) for r in c.execute(sa.select(cameras.c.server_id, cameras.c.camera_id))}
         for s in c.execute(sa.select(sites.c.id, sites.c.org_id, sites.c.location_id, sites.c.summary, sites.c.last_seen_at)).all():

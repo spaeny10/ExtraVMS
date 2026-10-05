@@ -9,7 +9,7 @@
  */
 import type { Layout, LayoutConfig, NvrEvent } from "@site/api";
 import { parseTimelineHash, type FocusMember, type HashRegion, type TimelineFocus, type TimelineTarget } from "@site/nav";
-import { camKey } from "@site/playback";
+import { camKey, splitKey } from "@site/playback";
 import type { LayoutStore } from "@site/Timeline";
 
 export type SiteTimelineQuery = {
@@ -70,6 +70,18 @@ export function focusFor(server: string, e: TimelineTarget, offsetS = 0, nonce =
 }
 
 /** A journey's sightings as focus members (server-local camera ids), as App.tsx does. */
+/**
+ * The inverse for "Open in Timeline" from an event viewer inside the combined Timeline: TimelineView hands the
+ * opener lane keys (camKey(server, camera)), so the event's server is read from the key and the target is put back
+ * into that server's camera ids. null when the key names no server (not a combined-Timeline lane).
+ */
+export function fromLaneKeys(e: TimelineTarget): { server: string; target: TimelineTarget } | null {
+  const { server } = splitKey(e.members?.[0]?.cam ?? e.camera_id);
+  if (!server) return null;
+  const local = (k: string) => splitKey(k).id;
+  return { server, target: { ...e, camera_id: local(e.camera_id), ...(e.members ? { members: e.members.map((m) => ({ ...m, cam: local(m.cam) })) } : {}) } };
+}
+
 export const journeyMembers = (events: Pick<NvrEvent, "id" | "camera_id" | "start_ts" | "end_ts">[]): FocusMember[] =>
   events.map((x) => ({ id: x.id, cam: x.camera_id, start: x.start_ts, end: x.end_ts ?? x.start_ts }));
 

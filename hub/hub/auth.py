@@ -276,15 +276,13 @@ def can_see_server(uid: str, org_id: str, server: dict) -> bool:
 
 
 def set_access(org_id: str, uid: str, all_sites: bool, location_ids: list[str]) -> dict:
-    """Replace a member's Site access in one transaction. The customer's legacy site_grants for the user are
-    rewritten to the servers of the granted Sites, so older hub code (if ever rolled back) stays restricted.
+    """Replace a member's Site access in one transaction.
     LookupError: not a member. ValueError: a location id that isn't this customer's."""
     org_locs = {r["id"] for r in db.rows(sa.select(db.locations.c.id).where(db.locations.c.org_id == org_id))}
     wanted = list(dict.fromkeys(location_ids or []))
     bad = [lid for lid in wanted if lid not in org_locs]
     if bad:
         raise ValueError(f"unknown site {bad[0]}")
-    org_servers = db.rows(sa.select(db.sites.c.id, db.sites.c.location_id).where(db.sites.c.org_id == org_id))
     with db.engine().begin() as c:
         res = c.execute(sa.update(db.memberships).where(db.memberships.c.user_id == uid, db.memberships.c.org_id == org_id)
                         .values(all_sites=bool(all_sites)))
@@ -295,13 +293,6 @@ def set_access(org_id: str, uid: str, all_sites: bool, location_ids: list[str]) 
                                                           db.location_grants.c.location_id.in_(list(org_locs))))
         for lid in wanted:
             c.execute(db.location_grants.insert().values(user_id=uid, location_id=lid))
-        if org_servers:
-            c.execute(sa.delete(db.site_grants).where(db.site_grants.c.user_id == uid,
-                                                      db.site_grants.c.site_id.in_([s["id"] for s in org_servers])))
-        if not all_sites:
-            for s in org_servers:
-                if s["location_id"] in wanted:
-                    c.execute(db.site_grants.insert().values(user_id=uid, site_id=s["id"]))
     return access_of(org_id, uid)
 
 
@@ -327,20 +318,14 @@ def check_grant_scope(u: dict, org_id: str, all_sites: bool, location_ids: list[
 
 
 def access_of(org_id: str, uid: str) -> dict:
-    """{all_sites, location_ids, sites}; `sites` is the legacy view (server ids, [] = all) for the current UI."""
+    """{all_sites, location_ids}: every Site of the customer, or only these."""
     m = db.one(sa.select(db.memberships).where(db.memberships.c.user_id == uid, db.memberships.c.org_id == org_id))
     all_sites = bool(m and m.get("all_sites") is not False)
-    locs = sorted(granted_location_ids(uid, org_id))
-    servers = [] if all_sites else [r["id"] for r in db.rows(sa.select(db.sites.c.id).where(
-        db.sites.c.org_id == org_id, db.sites.c.location_id.in_(locs)).order_by(db.sites.c.name))] if locs else []
-    return {"all_sites": all_sites, "location_ids": locs, "sites": servers}
+    return {"all_sites": all_sites, "location_ids": sorted(granted_location_ids(uid, org_id))}
 
 
 def drop_access(org_id: str, uid: str, conn) -> None:
-    """A member leaves the customer: their Site grants (and legacy server grants) there go too."""
+    """A member leaves the customer: their Site grants there go too."""
     org_locs = [r["id"] for r in db.rows(sa.select(db.locations.c.id).where(db.locations.c.org_id == org_id))]
-    org_servers = [r["id"] for r in db.rows(sa.select(db.sites.c.id).where(db.sites.c.org_id == org_id))]
     if org_locs:
         conn.execute(sa.delete(db.location_grants).where(db.location_grants.c.user_id == uid, db.location_grants.c.location_id.in_(org_locs)))
-    if org_servers:
-        conn.execute(sa.delete(db.site_grants).where(db.site_grants.c.user_id == uid, db.site_grants.c.site_id.in_(org_servers)))

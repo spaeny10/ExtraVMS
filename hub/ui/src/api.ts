@@ -36,7 +36,11 @@ export type Camera = {
   server_id: string; server_name: string; camera_id: string; name: string; enabled: boolean; stream_ready: boolean; problems: string[] | null;
   bitrate_mbps: number | null; ptz: unknown; last_seen_at: number | null; missing_since: number | null; online: boolean; server_online?: boolean;
 };
-/** `sites` is the flat server list (kept until the cleanup step); `locations` are the Sites; `unassigned` = servers in no visible Site. */
+/**
+ * `sites` is the flat list of the customer's visible servers (Home's dashboard, the Sites page's event lookup and many
+ * hub tests read it, and it is the only list that includes retired servers); `locations` are the Sites with their
+ * servers; `unassigned` = servers in no visible Site.
+ */
 export type FleetOrg = { org: Org; sites: Server[]; open_alerts: number; retired?: number; locations?: Site[]; unassigned?: Server[] };
 export type Fleet = { orgs: FleetOrg[]; now: number; offline_after_s: number };
 /** Fleet actions (hub/hub/fleet_actions.py): an Ask-box instruction turned into a plan with a confirmation card (@site/ActionCard). */
@@ -53,7 +57,7 @@ export type ActionRecent = { id: number; ts: number; user_email: string | null; 
 export type ExecPlan = Exclude<ActionPlan, { action: "none" }>;
 export type ActionReference = { verbs: ActionVerb[]; safety: string[]; capacity: string[]; recent: ActionRecent[]; undo_hours: number };
 export type Alert = { id: number; org_id: string; site_id: string; site_name: string; kind: string; key: string; opened_at: number; closed_at: number | null; acked_by: string | null; detail: Record<string, unknown> } & LocationTag;
-export type Member = { id: string; email: string; role: string; totp_enabled: boolean; last_login_at: number | null; sites: string[]; all_sites: boolean; location_ids: string[] };
+export type Member = { id: string; email: string; role: string; totp_enabled: boolean; last_login_at: number | null; all_sites: boolean; location_ids: string[] };
 /** What a member may see: every Site of the customer, or only `location_ids` (no implicit "none = all"). */
 export type Access = { all_sites: boolean; location_ids: string[] };
 export type AuditRow = { id: number; ts: number; user_email: string | null; site_id: string | null; action: string; method: string | null; path: string | null; status: number | null; ip: string | null; undo_until?: number | null } & LocationTag;
@@ -121,7 +125,6 @@ export const api = {
   members: (org: string) => req<Member[]>(`/api/orgs/${org}/members`),
   addMember: (org: string, b: { email: string; role: string; password?: string } & Partial<Access>) => req(`/api/orgs/${org}/members`, json("POST", b)),
   removeMember: (org: string, uid: string) => req(`/api/orgs/${org}/members/${uid}`, { method: "DELETE" }),
-  setGrants: (org: string, uid: string, site_ids: string[]) => req(`/api/orgs/${org}/members/${uid}/grants`, json("PUT", { site_ids })),
   setAccess: (org: string, uid: string, b: Access) => req<Access>(`/api/orgs/${org}/members/${uid}/access`, json("PUT", b)),
   servers: (org: string) => req<Server[]>(`/api/orgs/${org}/sites`),
   claimPreview: (code: string) => req<ClaimPreview>(`/api/claims/${encodeURIComponent(code)}`),

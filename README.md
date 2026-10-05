@@ -106,7 +106,7 @@ models in `models/` and Ollama's model store.
   typical mistakes are caps and beanies read as hard hats and plain orange overalls read as vests.
 - The check runs on new events only; painting a zone does not re-check past footage.
 
-## Hailo-8 sites
+## Hailo-8 servers
 
 A lite site (no NVIDIA GPU) with a Hailo-8 M.2/PCIe accelerator runs YOLO verification on the Hailo; PPE, CLIP and
 re-ID stay on torch on the CPU (`settings.torch_device`).
@@ -132,12 +132,39 @@ from the Model Zoo release that matches it.
   (28 ms from 4K; 10 ms of it on the device), yolov8s 17 ms; on the CPU yolo11n 55-62 ms, yolo11s 150 ms. A whole
   6-frame `verify()` (decode included) 1.4 s on the Hailo vs 2.3 s with CPU yolo11n. Boxes match CPU yolo11s to ~0.005.
 
+## Hub: Customers, Sites, Servers, Cameras
+
+The hub (`hub/`, https://hub.axiomvision.ai) groups everything as **Customer › Site › Server › Camera**:
+
+- **Customer**: a company with its own users (code and API: `org`). A user has one role per customer
+  (owner, admin, operator, viewer) and picks the customer in the header.
+- **Site**: a physical place, e.g. "Austin HQ" (code: `locations`, `/api/locations/...`; UI: `/sites/<id>`). A Site
+  holds one or more servers and shows them as one: a combined Live grid, Timeline, Find and Alerts across its servers.
+- **Server**: one NVR box running this repo, with its own device token, tunnel and console at `/s/<server id>/`. For
+  historical reasons the hub's table, its `/api/sites/{id}` routes (alias `/api/servers/{id}`) and every `site_id` in
+  the agent protocol, dashboards and camera groups mean a *server*.
+- **Camera**: a camera on one server; the hub keeps a registry of them from the servers' heartbeats.
+
+**Who sees what**: each member has either **All sites** (every Site of the customer, including ones added later) or
+an explicit list of Sites; an empty list means nothing, never "everything". Set it under Customer → Members. An admin
+can only grant Sites they can see themselves.
+
+**Invites**: Customer → Invites makes a link with a role and All sites or a Site list (optionally locked to one email,
+with a label and an expiry). The hub emails nothing: copy the link and send it. Opening `/invite/<code>` signs the
+person in, or creates their account, and adds them; accepting never narrows an existing member's role or Sites.
+
+**Where things are**: Sites lists every Site with its servers and rollups; a Site's tabs are Live, Timeline, Find,
+Alerts, Servers and Settings. Customer → Sites creates, renames and deletes Sites; Customer → Servers enrols servers
+("Add server" with the claim code from the server's Settings → System → Cloud hub), retires and restores them; a
+server's panel (Site → Servers → the server) moves it to another Site. Customer → Actions (`/customer/actions`) is the
+Fleet actions reference page (below). Deployment and upgrades: `hub/DEPLOY.md`.
+
 ## Fleet actions
 
 The hub's Find page Ask box also takes instructions. Type one instead of a question and a confirmation card appears;
-nothing happens until Confirm. **Organisation → Fleet actions** (`/org/actions`, also linked from the Ask box as "What
-can I ask the hub to do?") lists every instruction with examples, what moves and what stays, the safety rules and the
-last 50 actions with Undo. That page, the planner's prompt and JSON schema, and the card's options are all generated
+nothing happens until Confirm. **Customer → Actions** (`/customer/actions`; old `/org/actions` links redirect; also
+linked from the Ask box as "What can I ask the hub to do?") lists every instruction with examples, what moves and what
+stays, the safety rules and the last 50 actions with Undo. That page, the planner's prompt and JSON schema, and the card's options are all generated
 from one registry, `VERBS` in `hub/hub/fleet_actions.py` (served at `GET /api/orgs/{org}/actions/reference`), so they
 cannot drift; a test parses every example on the page.
 
@@ -184,7 +211,7 @@ cannot drift; a test parses every example on the page.
   alerts (when their event was copied; camera-down alerts are closed since the stream is proven), and the source's
   saved Find views for that camera (added to the destination's views). The result lines say what was updated.
 - **Migrate** moves every enabled camera, then **retires** the source: hidden from Fleet, Home, Find, Ask, the digest
-  and alerts. Fleet → "Show retired" lists it, its page still opens, Organisation → Sites → Restore brings it back.
+  and alerts. Sites → "Show retired" lists it, its page still opens, Customer → Servers → Restore brings it back.
 - **Undo**: every executed action writes one Audit row ("fleet action: ...") with its outcome and a reverse plan
   (`detail.reverse`). For 24 hours the result lines, the Audit page and the Fleet actions page offer **Undo**
   (`POST /api/orgs/{org}/actions/undo/{audit_id}`): move the cameras back, restore the site, the previous retention,

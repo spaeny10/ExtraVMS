@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, fmtTime, localApi, type ApiResolver, type Camera, type KeptSpan, type Layout, type LayoutConfig, type Lock, type TimelineEvent, UNUSUAL_MIN } from "./api";
 import { ConfidenceSlider, loadNumber, saveNumber } from "./ConfidenceSlider";
 import { EventDetail } from "./EventDetail";
-import type { TimelineFocus } from "./nav";
+import { NavContext, useNav, type TimelineFocus, type TimelineTarget } from "./nav";
 import { LIVE_LAG, camKey, fmtClock, nowS, spanAt, splitKey, useLatestFrame, type Span } from "./playback";
 import { SyncTile, type TileStatus } from "./SyncPlayer";
 import { encodeCells, regionPass, regions, useRegions } from "./region";
@@ -199,6 +199,22 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
   const [hover, setHover] = useState<{ x: number; t: number; cam: string } | null>(null);
   const [message, setMessage] = useState("");
   const [open, setOpen] = useState<{ id: number; key: string } | null>(null);   // key = the lane (server) the event is on
+  // EventDetail's "Open in Timeline" speaks in its server's camera ids and can't say which server that is; the open
+  // event's lane knows, so hand the app's opener lane keys. On the server UI keys are ids, so nothing changes there;
+  // the hub's combined Timeline reads the server back out of the key (splitKey).
+  const outerNav = useNav();
+  const detailNav = useMemo(() => {
+    if (!open) return outerNav;
+    const server = serverOf(open.key);
+    return {
+      openInTimeline: (e: TimelineTarget) => outerNav.openInTimeline({
+        ...e, camera_id: keyFor(server, e.camera_id),
+        ...(e.members ? { members: e.members.map((m) => ({ ...m, cam: keyFor(server, m.cam) })) } : {}),
+      }),
+    };
+    // serverOf/keyFor are rebuilt each render from `cameras`
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, outerNav, cameras]);
   const [width, setWidth] = useState(1000);
   const [filter, setFilterState] = useState<Filter>(() => loadFilter(sk("timelineFilter")));
   const filterActive = JSON.stringify({ ...DEFAULT_FILTER, ...filter }) !== JSON.stringify(DEFAULT_FILTER);
@@ -1262,8 +1278,12 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
           title={filter.ppe ? "Showing PPE violations only · tap to show everything" : "Tap to show PPE violations only"}><i className="sw ppe" /> PPE violation</button>
         <span>👁 show/hide · 🔍 isolate (1–9, 0 = grid) · double-click a tile to isolate · scroll to zoom · drag to pan · drag the playhead to scrub · Space / ← → / + − / [ ] events · Shift+drag a lane to lock</span>
       </div>
-      {open !== null && <EventDetail id={open.id} site={apiFor(serverOf(open.key))} cameraName={(id) => camName(keyFor(serverOf(open.key), id))}
-        onClose={() => setOpen(null)} />}
+      {open !== null && (
+        <NavContext.Provider value={detailNav}>
+          <EventDetail id={open.id} site={apiFor(serverOf(open.key))} cameraName={(id) => camName(keyFor(serverOf(open.key), id))}
+            onClose={() => setOpen(null)} />
+        </NavContext.Provider>
+      )}
     </div>
   );
 }
