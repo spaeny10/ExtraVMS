@@ -138,13 +138,17 @@ def test_separate_data_volume_has_its_own_floor():
     reset()
     now = time.time()
     disk["shared"] = False
-    disk["data"] = {"total": 250, "base": 0}    # small SSD: auto floor 25 GB, target 25 + 12.5
+    disk["data"] = {"total": 250, "base": 0}    # separate (OS) disk: emergency floor 5 GB, target 5 + 12.5
     disk["rec"] = {"total": 8000, "base": 0}    # recordings disk has plenty of room
     ids = [make_event(now - 3 * 86400 + i, clip_gb=10, crops=0) for i in range(22)]   # 22 x 12 = 264 > 250
-    assert retention.data_floor() == (25.0, 37.5)
+    assert retention.data_floor() == (5.0, 17.5)
     retention.enforce_disk_floor(False, Counter(), now)
-    assert retention.data_free_gb() >= 37.5
+    assert retention.data_free_gb() >= 17.5
     assert not has_clip(ids[0]) and has_clip(ids[-1])
+    retention._update_alert()
+    # the pass stops at the hysteresis target, which is above 2x the emergency floor: no warning afterwards
+    assert not (retention.alert and retention.alert.get("kind") == "event_media"), "above 2x floor: no warning"
+    disk["data"]["base"] = disk["data"]["total"] - 8   # 8 GB free on a 250 GB OS disk: under 2x the 5 GB floor
     retention._update_alert()
     assert retention.alert and retention.alert["kind"] == "event_media", "under 2x floor: warn in Settings"
 

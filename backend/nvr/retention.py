@@ -67,8 +67,11 @@ def data_floor() -> tuple[float, float]:
         floor = float(settings.event_media_min_free_gb)
     elif same_volume():
         floor = float(keep.site_policy()["min_free_gb"])   # one disk, one floor
-    else:  # its own (usually small) SSD: the recordings disk's 200 GB floor would empty it of clips
-        floor = float(min(keep.DEFAULT_POLICY["min_free_gb"], max(10.0, total_gb * 0.10)))
+    else:
+        # A separate data volume is usually the OS drive, which legitimately runs with little free space; a
+        # "10 % of the disk" floor there deleted every clip on the desktop (Oct 5 2026: C: had 8 GB free of 1 TB).
+        # Event media is evidence, so this floor is only an emergency guard: 5 GB, up to 20 GB on big disks.
+        floor = float(min(20.0, max(5.0, total_gb * 0.02)))
     return floor, floor + total_gb * settings.disk_floor_hysteresis_pct / 100
 
 
