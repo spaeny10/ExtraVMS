@@ -22,6 +22,7 @@ import { ALL_CUSTOMERS } from "./hubAdmin";
 import { isSocUser, socLanding } from "./access";
 import { SocHeader } from "./soc/SocHeader";
 import { SocRouter } from "./soc/SocRouter";
+import { SocStreamProvider } from "./soc/useSocStream";
 
 /** Header nav: path, label, icon (phone tab bar), the pages that light it up, and (soc) shown to SOC staff only. */
 const NAV: { path: string; label: string; icon: string; pages: Page[]; soc?: boolean }[] = [
@@ -81,8 +82,10 @@ export default function App() {
     setAll(false); setOrg(id);
     if (page === "site" || page === "server") navigate("/sites");
   };
+  // one SOC socket and alarm ringer for the header and the page, only while a SOC page is open (leaving the console
+  // closes the socket and silences the alarm; the provider stays mounted so going back reconnects without a remount)
   return (
-    <>
+    <SocStreamProvider me={me} enabled={page === "soc" && soc}>
       <OfflineBanner />
       <header className="hub-top">
         <span className="brand"><img className="logo" src="/axiom.webp" alt="Axiom Vision" /></span>
@@ -107,7 +110,7 @@ export default function App() {
         <ThemeToggle />
         <button className="ghost small" onClick={async () => { await api.logout(); setMe(null); }}>Sign out</button>
       </header>
-      <main className="hub-page">
+      <main className={`hub-page ${page === "soc" ? "soc-wide" : ""}`}>
         {page === "home" && current && <HomePage org={current} me={me} />}
         {page === "sites" && all && <AllSitesPage onOpenCustomer={openCustomer} />}
         {page === "sites" && !all && current && <SitesPage org={current} me={me} />}
@@ -124,7 +127,7 @@ export default function App() {
       </main>
       <Toaster />
       <Dialogs />
-    </>
+    </SocStreamProvider>
   );
 }
 

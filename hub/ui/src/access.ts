@@ -22,7 +22,9 @@ export const canEditMonitoring = (org: Org | undefined, me: Me) => isAdmin(org, 
 export function socLanding(me: Me): string | null {
   const role = socRole(me);
   if (!role || me.user.is_super) return null;
-  if (me.orgs.some((o) => !o.soc)) return null;
+  // the hub's own verdict when it sends one; otherwise read it off the customer list
+  const socOnly = me.user.soc_only ?? !me.orgs.some((o) => o.member === true || (o.member === undefined && !o.soc));
+  if (!socOnly) return null;
   return role === "supervisor" ? "/soc/supervisor" : "/soc";
 }
 

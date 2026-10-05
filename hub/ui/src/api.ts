@@ -7,11 +7,17 @@ export type { CameraGroup, Dashboard, DashboardConfig, DashboardList, FleetEvent
 type LocationTag = { location_id?: string | null; location_name?: string | null };
 export type FleetMessage = ({ type: "event"; event: NvrEvent; site_id: string; site_name: string } | { type: "event_removed"; id: number; site_id: string; site_name: string } | { type: "site_online" | "site_offline"; site_id: string; site_name: string }) & LocationTag;
 
-/** `soc_role`: the hub-level SOC role (like is_super, not per customer); null/absent = not SOC staff. */
+/**
+ * `soc_role`: the hub-level SOC role (like is_super, not per customer); null/absent = not SOC staff.
+ * `soc_only` (newer hubs): SOC staff with no real customer membership, i.e. their landing page is the console.
+ */
 export type SocRole = "operator" | "supervisor";
-export type Me = { user: { id: string; email: string; totp_enabled: boolean; is_super: boolean; soc_role?: SocRole | null }; orgs: Org[]; active_org: string | null };
-/** `soc`: the customer is listed only because it has a SOC-monitored Site (no real membership). */
-export type Org = { id: string; name: string; slug: string; role: string; soc?: boolean };
+export type Me = { user: { id: string; email: string; totp_enabled: boolean; is_super: boolean; soc_role?: SocRole | null; soc_only?: boolean }; orgs: Org[]; active_org: string | null };
+/**
+ * `soc`: the customer is listed only because it has a SOC-monitored Site (no real membership). Newer hubs may send
+ * `member` (true = a real membership) alongside it.
+ */
+export type Org = { id: string; name: string; slug: string; role: string; soc?: boolean; member?: boolean };
 /**
  * Hierarchy: Customer (wire: org) › Site (wire: location, /api/locations) › Server (wire: site, /api/sites) › Camera.
  * `Server` is what the hub's tables call a "site": one NVR box, one token, one tunnel at /s/<id>/.

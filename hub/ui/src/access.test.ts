@@ -87,4 +87,10 @@ describe("SOC roles", () => {
     expect(socLanding(me({ is_super: true }))).toBeNull();
     expect(socLanding(me({}, []))).toBeNull();
   });
+  it("prefers the hub's soc_only, and reads Org.member when sent", () => {
+    expect(socLanding(me({ soc_role: "operator", soc_only: false }, [{ soc: true }]))).toBeNull();
+    expect(socLanding(me({ soc_role: "operator", soc_only: true }, [{}]))).toBe("/soc");
+    expect(socLanding(me({ soc_role: "operator" }, [{ soc: true, member: true }]))).toBeNull();
+    expect(socLanding(me({ soc_role: "operator" }, [{ soc: true, member: false }]))).toBe("/soc");
+  });
 });
