@@ -8,6 +8,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Dialogs, Icon, OfflineBanner, Toaster, confirmDialog, promptDialog, toast, useIsPhone } from "@site/ui";
 import { ThemeToggle } from "@site/ThemeToggle";
 import { AlertsPage } from "./AlertsPage";
+import { AllSitesPage } from "./AllSitesPage";
 import { CustomerPage } from "./customer/CustomerPage";
 import { UndoButton } from "./customer/FleetActionsPage";
 import { FindPage } from "./FindPage";
@@ -16,7 +17,8 @@ import { InvitePage } from "./InvitePage";
 import { type CustomerTab, type Page, go, matchRoute, navigate, usePath } from "./nav";
 import { SitePage } from "./SitePage";
 import { SitesPage } from "./SitesPage";
-import { type AuditRow, type Me, type Org, type PushInfo, api, fmtTime } from "./api";
+import { type AuditRow, type HubAdmin, type Me, type Org, type PushInfo, ago, api, fmtTime } from "./api";
+import { ALL_CUSTOMERS } from "./hubAdmin";
 
 /** Header nav: path, label, icon (phone tab bar), and the pages that light it up. */
 const NAV: { path: string; label: string; icon: string; pages: Page[] }[] = [
@@ -36,10 +38,18 @@ export default function App() {
   const [me, setMe] = useState<Me | null | undefined>(undefined);
   const [org, setOrgState] = useState<string>(() => localStorage.getItem("hubOrg") ?? "");
   const setOrg = useCallback((id: string) => { setOrgState(id); localStorage.setItem("hubOrg", id); }, []);
+  // "All customers" (hub administrators): a mode on top of the active customer rather than a fake org id, so the
+  // per-customer pages keep a real customer (the last one picked) and hubOrg never holds something reload() rejects
+  const [allMode, setAllState] = useState<boolean>(() => localStorage.getItem("hubAllCustomers") === "1");
+  const setAll = useCallback((on: boolean) => { setAllState(on); if (on) localStorage.setItem("hubAllCustomers", "1"); else localStorage.removeItem("hubAllCustomers"); }, []);
+  // opening a Site (or a customer's header) from All customers: that customer becomes the active one
+  const openCustomer = useCallback((id: string) => { setAll(false); setOrg(id); }, [setAll, setOrg]);
   const reload = useCallback(() => api.me().then((m) => { setMe(m); if (!m.orgs.some((o) => o.id === org)) setOrg(m.orgs[0]?.id ?? ""); }).catch(() => setMe(null)), [org, setOrg]);
   useEffect(() => { reload(); }, [reload]);
   // aliases and incomplete paths (/org/…, /sites/:id) are replaced by their canonical form, not pushed
   useEffect(() => { if (route.redirect) navigate(route.redirect + location.search + location.hash, true); }, [route.redirect]);
+  // inside a Site you're in exactly one customer (SitePage's onOrg switches to it if needed), so "all" ends there
+  useEffect(() => { if (allMode && (route.page === "site" || route.page === "server")) setAll(false); }, [allMode, route.page, setAll]);
   if (me === undefined) return null;
   // the invite page is public: it shows who invited you before any sign-in, and joins a signed-in account in one click
   if (route.page === "invite" && route.code) {
@@ -55,8 +65,13 @@ export default function App() {
   const orgs = me.orgs;
   const current = orgs.find((o) => o.id === org) ?? orgs[0];
   const page = route.page;
+  const all = allMode && me.user.is_super;   // a stored "all" from a hub admin since demoted is ignored
   // a Site belongs to one customer: switching customer while inside one goes back to the Sites list
-  const pickOrg = (id: string) => { setOrg(id); if (page === "site" || page === "server") navigate("/sites"); };
+  const pickOrg = (id: string) => {
+    if (id === ALL_CUSTOMERS) { setAll(true); navigate("/sites"); return; }
+    setAll(false); setOrg(id);
+    if (page === "site" || page === "server") navigate("/sites");
+  };
   return (
     <>
       <OfflineBanner />
@@ -68,9 +83,13 @@ export default function App() {
           </a>
         ))}</nav>
         <span className="spacer" />
-        {orgs.length > 1 && (
+        {(orgs.length > 1 || (me.user.is_super && orgs.length > 0)) && (
           <label className="customer-pick"><span className="muted small">Customer</span>
-            <select value={current?.id ?? ""} onChange={(e) => pickOrg(e.target.value)}>{orgs.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}</select>
+            {/* "All customers" is a Sites-list view: other pages work in one customer, so the picker names that one there */}
+            <select value={all && page === "sites" ? ALL_CUSTOMERS : current?.id ?? ""} onChange={(e) => pickOrg(e.target.value)}>
+              {me.user.is_super && <option value={ALL_CUSTOMERS}>All customers</option>}
+              {orgs.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+            </select>
           </label>
         )}
         {!phone && <span className="muted small">{me.user.email}</span>}
@@ -79,9 +98,10 @@ export default function App() {
       </header>
       <main className="hub-page">
         {page === "home" && current && <HomePage org={current} me={me} />}
-        {page === "sites" && current && <SitesPage org={current} me={me} />}
+        {page === "sites" && all && <AllSitesPage onOpenCustomer={openCustomer} />}
+        {page === "sites" && !all && current && <SitesPage org={current} me={me} />}
         {(page === "site" || page === "server") && current && route.siteId && (
-          <SitePage key={route.siteId} org={current} me={me} siteId={route.siteId} tab={route.tab ?? "live"} serverId={route.serverId} onOrg={setOrg} />
+          <SitePage key={route.siteId} org={current} me={me} siteId={route.siteId} tab={route.tab ?? "live"} serverId={route.serverId} onOrg={openCustomer} />
         )}
         {page === "alerts" && current && <AlertsPage org={current} />}
         {page === "find" && current && <FindPage org={current} />}
@@ -212,6 +232,7 @@ function AccountPage({ me, onChanged }: { me: Me; onChanged: () => void }) {
         )}
       </div>
       <PushCard />
+      {me.user.is_super && <HubAdminsBox me={me} onChanged={onChanged} />}
       <div className="card">
         <h3>Password</h3>
         <button className="ghost small" onClick={async () => {
@@ -221,5 +242,58 @@ function AccountPage({ me, onChanged }: { me: Me; onChanged: () => void }) {
         }}>Change password…</button>
       </div>
     </>
+  );
+}
+
+/**
+ * Hub administrators (users.is_super): owners of every customer, not listed among any customer's members. Granting
+ * needs an existing account; the hub refuses to remove the last one (409), and only hub admins see this box.
+ */
+// toast.error shows the server's `detail`: 404 says to invite the person first, 409 that they're the last admin
+function HubAdminsBox({ me, onChanged }: { me: Me; onChanged: () => void }) {
+  const [admins, setAdmins] = useState<HubAdmin[]>([]);
+  const [recent, setRecent] = useState<AuditRow[]>([]);
+  const [email, setEmail] = useState("");
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(() => {
+    api.hubAdmins().then(setAdmins).catch((e) => toast.error(e));
+    api.hubAudit(10).then(setRecent).catch(() => setRecent([]));
+  }, []);
+  useEffect(() => { load(); }, [load]);
+  const add = async () => {
+    setBusy(true);
+    try { const a = await api.addHubAdmin(email.trim()); setEmail(""); toast.success(`${a.email} is now a hub administrator`); load(); }
+    catch (e) { toast.error(e); } finally { setBusy(false); }
+  };
+  const remove = async (a: HubAdmin) => {
+    const self = a.id === me.user.id;
+    const msg = self ? "Stop being a hub administrator? You keep only the customers you're a member of." : `Remove ${a.email} as a hub administrator? They keep only the customers they're a member of.`;
+    if (!(await confirmDialog(msg, { danger: true, confirmLabel: "Remove" }))) return;
+    try { await api.removeHubAdmin(a.id); toast.success(`${a.email} is no longer a hub administrator`); if (self) onChanged(); else load(); }
+    catch (e) { toast.error(e); }
+  };
+  return (
+    <div className="card">
+      <h3>Hub administrators</h3>
+      <p className="muted small" style={{ marginTop: 0 }}>Owners of every customer on this hub: they see all Sites and manage everything, without being listed as members.</p>
+      <table className="hub-table">
+        <thead><tr><th>Email</th><th>2FA</th><th>Last sign-in</th><th /></tr></thead>
+        <tbody>{admins.map((a) => (
+          <tr key={a.id}><td>{a.email}{a.id === me.user.id ? <span className="muted small"> (you)</span> : null}</td><td>{a.totp_enabled ? "on" : "off"}</td>
+            <td>{a.last_login_at ? ago(a.last_login_at) : "never"}</td>
+            <td><button className="ghost small" onClick={() => remove(a)}>Remove</button></td></tr>))}
+        </tbody>
+      </table>
+      <form className="row" style={{ marginTop: 8 }} onSubmit={(e) => { e.preventDefault(); if (email.trim()) add(); }}>
+        <input type="email" placeholder="email of an existing account" value={email} onChange={(e) => setEmail(e.target.value)} />
+        <button type="submit" className="small" disabled={busy || !email.trim()}>Make hub administrator</button>
+      </form>
+      <p className="muted small">The person must already have an account; invite them to a customer first.</p>
+      {recent.length > 0 && (
+        <details className="small"><summary className="muted">Recent changes</summary>
+          <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>{recent.map((r) => <li key={r.id}>{fmtTime(r.ts)} · {r.user_email ?? "—"} · {r.action}</li>)}</ul>
+        </details>
+      )}
+    </div>
   );
 }

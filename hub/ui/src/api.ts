@@ -92,6 +92,10 @@ export type Invite = {
 export type InvitePreview = { org_name: string; role: string; all_sites: boolean; locations: { id: string; name: string }[]; email_hint: string; expires_at: number; label: string | null };
 export type InviteAccepted = { totp_required?: boolean; user?: Me["user"]; orgs?: Org[]; org_id?: string; role?: string } & Partial<Access>;
 export type Backup = { id: number; created_at: number; bytes: number; cameras: number; identities: number; site_version: string | null };
+/** A hub administrator (users.is_super): owner of every customer, managed under Account (hub admins only). */
+export type HubAdmin = { id: string; email: string; totp_enabled: boolean; last_login_at: number | null };
+/** /api/hub/sites: one customer's Sites (same rollups as /api/orgs/{org}/locations) for the "All customers" view. */
+export type HubSitesOrg = { org: { id: string; name: string }; locations: Site[]; unassigned: Server[] };
 export type PushInfo = { public_key: string; subscriptions: { endpoint: string; kinds: string[]; ua: string }[]; kinds: string[] };
 export type ClaimPreview = { code: string; hint: { hostname?: string; cameras?: { id: string; name: string }[]; version?: string }; agent_ip: string | null; waiting: boolean };
 
@@ -180,6 +184,11 @@ export const api = {
   pushInfo: () => req<PushInfo>("/api/push/vapid"),
   pushSubscribe: (subscription: unknown, kinds: string[]) => req("/api/push/subscribe", json("POST", { subscription, kinds })),
   pushUnsubscribe: (endpoint: string) => req("/api/push/unsubscribe", json("POST", { endpoint })),
+  hubAdmins: () => req<HubAdmin[]>("/api/hub/admins"),
+  addHubAdmin: (email: string) => req<HubAdmin>("/api/hub/admins", json("POST", { email })),
+  removeHubAdmin: (uid: string) => req(`/api/hub/admins/${encodeURIComponent(uid)}`, { method: "DELETE" }),
+  hubAudit: (limit = 20) => req<AuditRow[]>(`/api/hub/audit?${qs({ limit })}`),
+  hubSites: (include_retired?: boolean) => req<HubSitesOrg[]>(`/api/hub/sites?${qs({ include_retired: include_retired || undefined })}`),
   patchOrg: (org: string, b: { name?: string; ai_shared?: boolean }) => req<Org>(`/api/orgs/${org}`, json("PATCH", b)),
 };
 

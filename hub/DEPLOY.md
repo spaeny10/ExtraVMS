@@ -90,6 +90,13 @@ still sees only their servers.
   person opens `https://hub.axiomvision.ai/invite/<code>`, signs in or creates an account, and joins. Pending links
   can be copied again or revoked. An admin limited to some Sites can only invite to those Sites.
 - Customer → Members changes a member's role or Sites, or removes them (their Site grants go with them).
+- **Hub administrators** own every customer and see all Sites without being members (so Members never lists them,
+  unless they were also added as a member). A hub admin manages them under **Account → Hub administrators**: add by
+  the email of an existing account (invite the person to a customer first), remove with a confirm; the hub refuses to
+  remove the last one. From the server: `docker compose -f hub/docker-compose.yml exec hub python -m hub setsuper
+  someone@example.com` (add `--off` to revoke; also refused for the last one). Changes are audited hub-wide
+  (`GET /api/hub/audit`, "Recent changes" in that box), not in any customer's Audit. The header's Customer picker has
+  **All customers** for them: every customer's Site cards on one page, grouped by customer.
 
 ## Checks
 | What | How |

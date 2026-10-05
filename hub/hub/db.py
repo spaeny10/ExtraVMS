@@ -12,7 +12,8 @@ Access: a membership's role plus `all_sites` (sees every Site of the customer) o
 `location_grants` (no grants = nothing). The legacy `site_grants` table (per-server grants, "no grants = all") is
 not in this metadata any more: backfill() reads it once (when an older database first meets this code) and then
 drops it.
-Servers authenticate with a device token (hashed at rest). Alerts and the audit log are per org. Small,
+Servers authenticate with a device token (hashed at rest). Alerts and the audit log are per org (audit rows with
+org_id NULL are hub-level: hub administrators granted/revoked, read by /api/hub/audit). Small,
 synchronous calls: a fleet of dozens of servers is a few writes a second.
 """
 from __future__ import annotations

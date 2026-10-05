@@ -7,7 +7,7 @@ import { Icon, toast } from "@site/ui";
 import { type Fleet, type Me, type Member, type Org, type Server, type Site, api } from "../api";
 import { isAdmin } from "../access";
 import { GroupsBox } from "../Groups";
-import { type CustomerTab, navigate } from "../nav";
+import { type CustomerTab, go, navigate } from "../nav";
 import { ClaimBox } from "./ClaimBox";
 import { CreateOrgBox } from "./CreateOrgBox";
 import { FleetActionsPage } from "./FleetActionsPage";
@@ -62,6 +62,9 @@ export function CustomerPage({ org, me, tab, onChanged }: { org: Org; me: Me; ta
         </>
       )}
       {shown === "members" && <MembersBox org={org} members={members} sites={sites} onChanged={() => { load(); onChanged(); }} />}
+      {shown === "members" && me.user.is_super && (
+        <p className="muted small">Hub administrators (you included) see every customer without a membership, so they aren't listed here unless also added as a member; manage them under <a href="/account" onClick={go("/account")}>Account → Hub administrators</a>.</p>
+      )}
       {shown === "invites" && <InvitesBox org={org} me={me} sites={sites} />}
       {shown === "ai" && <SharedAiBox org={org} canEdit={org.role === "owner" || me.user.is_super} />}
       {shown === "actions" && <FleetActionsPage org={org} />}

@@ -50,11 +50,17 @@ export function SitesPage({ org, me }: { org: Org; me: Me }) {
   );
 }
 
-function SiteCard({ s, lastEvent, now }: { s: Site; lastEvent?: number; now: number }) {
+/**
+ * `onOpen` runs before the in-app navigation (the All customers page switches the active customer first);
+ * `noEvents` hides "Last event" where it isn't fetched (it fans out to every server, too much across all customers).
+ */
+export function SiteCard({ s, lastEvent, now, onOpen, noEvents }: { s: Site; lastEvent?: number; now: number; onOpen?: () => void; noEvents?: boolean }) {
   const href = siteHref(s.id);
   const down = s.servers_total > 0 && s.servers_online < s.servers_total;
+  const open = go(href);
   return (
-    <a className={`site-card ${s.servers_total && !s.servers_online ? "offline" : ""}`} href={href} onClick={go(href)}>
+    <a className={`site-card ${s.servers_total && !s.servers_online ? "offline" : ""}`} href={href}
+      onClick={(e) => { if (onOpen && e.button === 0 && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) onOpen(); open(e); }}>
       <div className="head">
         <strong>{s.name}</strong>
         <span className="spacer" />
@@ -64,7 +70,7 @@ function SiteCard({ s, lastEvent, now }: { s: Site; lastEvent?: number; now: num
       <div className="stats">
         <div><span>Servers</span> {ofTotal(s.servers_online, s.servers_total, "online")}</div>
         <div><span>Cameras</span> {ofTotal(s.cameras_online, s.cameras_total, "up")}</div>
-        <div><span>Last event</span> {lastEvent ? ago(lastEvent, now) : "—"}</div>
+        {!noEvents && <div><span>Last event</span> {lastEvent ? ago(lastEvent, now) : "—"}</div>}
         <div><span>Retired</span> {s.retired_servers || "—"}</div>
       </div>
       {down && <div className="alerts">{s.servers_total - s.servers_online} server{s.servers_total - s.servers_online > 1 ? "s" : ""} offline</div>}

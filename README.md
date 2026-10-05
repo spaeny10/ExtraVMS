@@ -149,6 +149,11 @@ The hub (`hub/`, https://hub.axiomvision.ai) groups everything as **Customer ›
 an explicit list of Sites; an empty list means nothing, never "everything". Set it under Customer → Members. An admin
 can only grant Sites they can see themselves.
 
+**Hub administrators** sit above customers: they own every customer, see every Site, and get an "All customers"
+choice in the Customer picker (all Site cards, grouped by customer). They aren't customer members, so Members lists
+don't show them. Manage them under Account → Hub administrators or with `python -m hub setsuper EMAIL [--off]`
+(`createsuper` makes a new one); the hub always keeps at least one.
+
 **Invites**: Customer → Invites makes a link with a role and All sites or a Site list (optionally locked to one email,
 with a label and an expiry). The hub emails nothing: copy the link and send it. Opening `/invite/<code>` signs the
 person in, or creates their account, and adds them; accepting never narrows an existing member's role or Sites.

@@ -1,6 +1,7 @@
 """python -m hub            serve the hub
    python -m hub createsuper EMAIL [--password PW]   create a hub administrator (or read HUB_ADMIN_PASSWORD)
    python -m hub setpassword EMAIL                   change a user's password (prompts twice; ends their sessions)
+   python -m hub setsuper EMAIL [--off]              make an existing user a hub administrator (--off: revoke)
    python -m hub createorg NAME SLUG                 create an organisation
 """
 from __future__ import annotations
@@ -22,6 +23,9 @@ def main() -> None:
     cs.add_argument("--password")
     sp = sub.add_parser("setpassword", help="set a user's password (prompts; signs them out everywhere)")
     sp.add_argument("email")
+    ss = sub.add_parser("setsuper", help="grant (or --off: revoke) hub administrator for an existing user")
+    ss.add_argument("email")
+    ss.add_argument("--off", action="store_true", help="revoke instead of grant")
     co = sub.add_parser("createorg")
     co.add_argument("name")
     co.add_argument("slug")
@@ -49,6 +53,18 @@ def main() -> None:
         except ValueError as e:
             sys.exit(str(e))
         print("password set for", u["email"], "- existing sessions ended")
+        return
+    if args.cmd == "setsuper":
+        from . import auth, db
+        db.engine()
+        try:
+            u, changed = auth.set_super(args.email, not args.off)
+        except (LookupError, ValueError) as e:
+            sys.exit(str(e))
+        if args.off:
+            print(f"{u['email']} is {'no longer' if changed else 'already not'} a hub administrator")
+        else:
+            print(f"{u['email']} is {'now' if changed else 'already'} a hub administrator")
         return
     if args.cmd == "createorg":
         import time

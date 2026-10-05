@@ -80,6 +80,50 @@ def public_user(u: dict) -> dict:
     return {"id": u["id"], "email": u["email"], "totp_enabled": bool(u["totp_enabled"]), "is_super": bool(u["is_super"])}
 
 
+# ---------------------------------------------------------------- hub administrators
+# users.is_super = hub administrator: owner of every customer (membership() below), never listed as a member.
+# The flag is read from the users row on every request, so granting or revoking takes effect at once without
+# touching anyone's sessions. Changes are audited with org_id NULL ("hub-level"): no customer's audit shows them,
+# GET /api/hub/audit does.
+
+LAST_ADMIN_MSG = "that would leave the hub without an administrator: make someone else one first"
+
+
+def hub_admins() -> list[dict]:
+    q = sa.select(db.users.c.id, db.users.c.email, db.users.c.totp_enabled, db.users.c.last_login_at) \
+        .where(db.users.c.is_super.is_(True)).order_by(db.users.c.email)
+    return [{**r, "totp_enabled": bool(r["totp_enabled"])} for r in db.rows(q)]
+
+
+def set_super(email: str, on: bool, actor: dict | None = None) -> tuple[dict, bool]:
+    """Grant (on) or revoke hub administrator for an existing user. Returns (user, changed); an unchanged flag writes
+    no audit row. LookupError: no such user. ValueError(LAST_ADMIN_MSG): revoking the last one, which would leave
+    nobody able to manage the hub except through the CLI. `actor` None = the command line."""
+    u = user_by_email(email)
+    if not u:
+        raise LookupError("no such user")
+    if bool(u["is_super"]) == on:
+        return u, False
+    with db.engine().begin() as c:
+        if not on:
+            # counted inside the transaction that writes, so two admins revoking each other can't both pass the check
+            n = c.execute(sa.select(sa.func.count()).select_from(db.users).where(db.users.c.is_super.is_(True))).scalar_one()
+            if n <= 1:
+                raise ValueError(LAST_ADMIN_MSG)
+        c.execute(sa.update(db.users).where(db.users.c.id == u["id"]).values(is_super=on))
+        c.execute(db.audit_log.insert().values(
+            ts=time.time(), user_id=actor["id"] if actor else None, user_email=actor["email"] if actor else "(command line)",
+            org_id=None, site_id=None, action=f"hub admin {'granted' if on else 'revoked'}: {u['email']}", method=None, path=None,
+            status=None, ip=None, detail={"target_user_id": u["id"]}))
+    u["is_super"] = on
+    return u, True
+
+
+def require_super(u: dict) -> None:
+    if not u.get("is_super"):
+        raise HTTPException(403, "hub administrators only")
+
+
 def totp_ok(u: dict, code: str | None) -> bool:
     if not u["totp_enabled"]:
         return True
@@ -150,6 +194,14 @@ def csrf_check(request: Request) -> None:
 def user_orgs(uid: str) -> list[dict]:
     q = sa.select(db.orgs, db.memberships.c.role).join(db.memberships, db.memberships.c.org_id == db.orgs.c.id).where(db.memberships.c.user_id == uid)
     return db.rows(q)
+
+
+def orgs_for(u: dict) -> list[dict]:
+    """The customers this user can act in, with their role: a hub administrator owns every customer (membership()),
+    so they get all of them, by name, whether or not they hold a membership row."""
+    if u.get("is_super"):
+        return [{**o, "role": "owner"} for o in db.rows(sa.select(db.orgs).order_by(db.orgs.c.name))]
+    return user_orgs(u["id"])
 
 
 def membership(u: dict, org_id: str) -> dict | None:

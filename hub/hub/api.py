@@ -99,7 +99,7 @@ async def login(body: LoginIn, request: Request, response: Response):
         raise HTTPException(401, "wrong code")
     sid = auth.new_session(u, request)
     auth.set_cookie(response, sid)
-    return {"user": auth.public_user(u), "orgs": auth.user_orgs(u["id"])}
+    return {"user": auth.public_user(u), "orgs": auth.orgs_for(u)}
 
 
 @app.post("/auth/logout")
@@ -116,7 +116,8 @@ async def me(request: Request):
     u = auth.current_user(request)
     if not u:
         raise HTTPException(401, "sign in")
-    return {"user": auth.public_user(u), "orgs": auth.user_orgs(u["id"]), "active_org": u["session"].get("org_id")}
+    # a hub administrator gets every customer (they own them all), so the Customer picker can switch into any of them
+    return {"user": auth.public_user(u), "orgs": auth.orgs_for(u), "active_org": u["session"].get("org_id")}
 
 
 class PasswordIn(BaseModel):
@@ -166,9 +167,7 @@ class OrgIn(BaseModel):
 
 @app.get("/api/orgs")
 async def list_orgs(u: dict = Depends(user)):
-    if u["is_super"]:
-        return [{**o, "role": "owner"} for o in db.rows(sa.select(db.orgs).order_by(db.orgs.c.name))]
-    return auth.user_orgs(u["id"])
+    return auth.orgs_for(u)
 
 
 @app.post("/api/orgs")
@@ -672,22 +671,29 @@ def _cards(servers: list[dict]) -> list[dict]:
 
 @app.get("/api/fleet")
 async def fleet(org: str | None = None, include_retired: bool = False, u: dict = Depends(user)):
-    orgs = auth.user_orgs(u["id"]) if not u["is_super"] else [{**o, "role": "owner"} for o in db.rows(sa.select(db.orgs).order_by(db.orgs.c.name))]
+    orgs = auth.orgs_for(u)
     if org:
         orgs = [o for o in orgs if o["id"] == org]
     out = []
     for o in orgs:
-        every = auth.visible_sites(u, o["id"], include_retired=True)
-        cards = _cards(every)
-        sites = [c for c in cards if include_retired or not c["retired_at"]]
-        locs = _location_rollups(auth.visible_locations(u, o["id"]), cards, include_retired)
-        known = {loc["id"] for loc in locs}
+        r = _org_rollup(u, o["id"], include_retired)
+        sites = r["sites"]
         out.append({"org": {"id": o["id"], "name": o["name"], "slug": o["slug"], "role": o["role"]}, "sites": sites,
                     "open_alerts": sum(s["open_alerts"] for s in sites if not s["retired_at"]),
-                    "retired": sum(1 for s in every if s.get("retired_at")),
-                    "locations": locs,
-                    "unassigned": [c for c in sites if c["location_id"] not in known]})   # servers with no (visible) Site
+                    "retired": r["retired"], "locations": r["locations"], "unassigned": r["unassigned"]})
     return {"orgs": out, "now": time.time(), "offline_after_s": settings.offline_after_s}
+
+
+def _org_rollup(u: dict, org_id: str, include_retired: bool = False) -> dict:
+    """One customer as `u` sees it: server cards (`sites`), Site rollups (`locations`), servers in no visible Site
+    (`unassigned`) and the retired count. Shared by /api/fleet and /api/hub/sites so the two never disagree."""
+    every = auth.visible_sites(u, org_id, include_retired=True)
+    cards = _cards(every)
+    sites = [c for c in cards if include_retired or not c["retired_at"]]
+    locs = _location_rollups(auth.visible_locations(u, org_id), cards, include_retired)
+    known = {loc["id"] for loc in locs}
+    return {"sites": sites, "locations": locs, "retired": sum(1 for s in every if s.get("retired_at")),
+            "unassigned": [c for c in sites if c["location_id"] not in known]}
 
 
 def _location_rollups(locs: list[dict], cards: list[dict], include_retired: bool = False) -> list[dict]:
@@ -922,6 +928,65 @@ async def audit(org: str, site: str | None = None, since: float | None = None, l
 def _audit(u: dict, org_id: str | None, site_id: str | None, action: str, detail: dict | None = None) -> None:
     db.insert(db.audit_log, {"ts": time.time(), "user_id": u["id"], "user_email": u["email"], "org_id": org_id, "site_id": site_id,
                              "action": action, "method": None, "path": None, "status": None, "ip": None, "detail": detail or {}})
+
+
+# ---------------------------------------------------------------- hub administrators (users.is_super)
+# Hub-wide, not per customer: every route here is for hub administrators only (403 otherwise). Granting needs an
+# existing account (invite the person to a customer first); the hub never creates a login from this screen.
+
+class HubAdminIn(BaseModel):
+    email: EmailStr
+
+
+@app.get("/api/hub/admins")
+async def list_hub_admins(u: dict = Depends(user)):
+    auth.require_super(u)
+    return auth.hub_admins()
+
+
+@app.post("/api/hub/admins")
+async def add_hub_admin(body: HubAdminIn, u: dict = Depends(user)):
+    auth.require_super(u)
+    try:
+        target, _ = auth.set_super(body.email, True, actor=u)
+    except LookupError:
+        raise HTTPException(404, "no account with that email: invite them to a customer (or create them) first")
+    return {"id": target["id"], "email": target["email"], "totp_enabled": bool(target["totp_enabled"]), "last_login_at": target["last_login_at"]}
+
+
+@app.delete("/api/hub/admins/{uid}")
+async def remove_hub_admin(uid: str, u: dict = Depends(user)):
+    auth.require_super(u)
+    target = auth.user_by_id(uid)
+    if not target or not target["is_super"]:
+        raise HTTPException(404, "not a hub administrator")
+    try:
+        auth.set_super(target["email"], False, actor=u)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    return {"ok": True}
+
+
+@app.get("/api/hub/audit")
+async def hub_audit(since: float | None = None, limit: int = Query(200, le=2000), u: dict = Depends(user)):
+    """Hub-level audit rows (org_id NULL: hub administrators granted/revoked). Per-customer rows stay on /api/audit."""
+    auth.require_super(u)
+    q = sa.select(db.audit_log).where(db.audit_log.c.org_id.is_(None)).order_by(db.audit_log.c.ts.desc()).limit(limit)
+    if since:
+        q = q.where(db.audit_log.c.ts >= since)
+    return db.rows(q)
+
+
+@app.get("/api/hub/sites")
+async def hub_sites(include_retired: bool = False, u: dict = Depends(user)):
+    """Every customer's Sites at once (the "All customers" view): [{org, locations, unassigned}], customers by name,
+    each with the same rollups as /api/orgs/{org}/locations."""
+    auth.require_super(u)
+    out = []
+    for o in auth.orgs_for(u):
+        r = _org_rollup(u, o["id"], include_retired)
+        out.append({"org": {"id": o["id"], "name": o["name"]}, "locations": r["locations"], "unassigned": r["unassigned"]})
+    return out
 
 
 # ---------------------------------------------------------------- fleet find / ask, digests, backups, push
