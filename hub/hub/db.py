@@ -198,7 +198,7 @@ incident_log = Table("incident_log", metadata,
                      Column("action", String(40), nullable=False), Column("detail", sa.JSON, nullable=True))
 soc_presence = Table("soc_presence", metadata,
                      Column("user_id", String(24), primary_key=True),
-                     Column("state", String(16), nullable=False),     # on_shift | break | away | off
+                     Column("state", String(16), nullable=False),     # soc.PRESENCE: available | engaged | break | offline
                      Column("since", Float, nullable=False), Column("last_seen_at", Float, nullable=False),
                      Column("incident_id", Integer, nullable=True))
 soc_reports = Table("soc_reports", metadata,

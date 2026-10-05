@@ -100,7 +100,7 @@ async def login(body: LoginIn, request: Request, response: Response):
         raise HTTPException(401, "wrong code")
     sid = auth.new_session(u, request)
     auth.set_cookie(response, sid)
-    return {"user": auth.public_user(u), "orgs": auth.orgs_for(u)}
+    return {"user": auth.me_user(u), "orgs": auth.orgs_for(u)}
 
 
 @app.post("/auth/logout")
@@ -118,7 +118,7 @@ async def me(request: Request):
     if not u:
         raise HTTPException(401, "sign in")
     # a hub administrator gets every customer (they own them all), so the Customer picker can switch into any of them
-    return {"user": auth.public_user(u), "orgs": auth.orgs_for(u), "active_org": u["session"].get("org_id")}
+    return {"user": auth.me_user(u), "orgs": auth.orgs_for(u), "active_org": u["session"].get("org_id")}
 
 
 class PasswordIn(BaseModel):
@@ -238,7 +238,7 @@ class MemberIn(BaseModel):
 
 @app.get("/api/orgs/{org_id}/members")
 async def list_members(org_id: str, u: dict = Depends(user)):
-    auth.require_role(u, org_id, "admin")
+    auth.require_customer_role(u, org_id, "admin")
     q = sa.select(db.users.c.id, db.users.c.email, db.users.c.totp_enabled, db.users.c.last_login_at, db.memberships.c.role) \
         .join(db.memberships, db.memberships.c.user_id == db.users.c.id).where(db.memberships.c.org_id == org_id).order_by(db.users.c.email)
     members = db.rows(q)
@@ -249,7 +249,7 @@ async def list_members(org_id: str, u: dict = Depends(user)):
 
 @app.post("/api/orgs/{org_id}/members")
 async def add_member(org_id: str, body: MemberIn, u: dict = Depends(user)):
-    role = auth.require_role(u, org_id, "admin")
+    role = auth.require_customer_role(u, org_id, "admin")
     if body.role == "owner" and role != "owner":
         raise HTTPException(403, "only an owner can add an owner")
     target = auth.user_by_email(body.email)
@@ -293,7 +293,7 @@ class AccessIn(BaseModel):
 @app.put("/api/orgs/{org_id}/members/{uid}/access")
 async def set_member_access(org_id: str, uid: str, body: AccessIn, u: dict = Depends(user)):
     """A member's Sites: every Site of the customer, or exactly these (none = nothing at all)."""
-    auth.require_role(u, org_id, "admin")
+    auth.require_customer_role(u, org_id, "admin")
     auth.check_grant_scope(u, org_id, body.all_sites, body.location_ids)
     out = _set_access(org_id, uid, body.all_sites, body.location_ids)
     target = auth.user_by_id(uid)
@@ -304,7 +304,7 @@ async def set_member_access(org_id: str, uid: str, body: AccessIn, u: dict = Dep
 
 @app.delete("/api/orgs/{org_id}/members/{uid}")
 async def remove_member(org_id: str, uid: str, u: dict = Depends(user)):
-    auth.require_role(u, org_id, "admin")
+    auth.require_customer_role(u, org_id, "admin")
     if uid == u["id"]:
         raise HTTPException(400, "remove yourself from another owner's account")
     with db.engine().begin() as c:
@@ -369,7 +369,7 @@ def _invite_out(inv: dict) -> dict:
 
 @app.post("/api/orgs/{org_id}/invites")
 async def create_invite(org_id: str, body: InviteIn, u: dict = Depends(user)):
-    role = auth.require_role(u, org_id, "admin")
+    role = auth.require_customer_role(u, org_id, "admin")
     if body.role == "owner" and role != "owner":
         raise HTTPException(403, "only an owner can invite an owner")
     email = body.email.strip().lower()
@@ -395,7 +395,7 @@ async def create_invite(org_id: str, body: InviteIn, u: dict = Depends(user)):
 @app.get("/api/orgs/{org_id}/invites")
 async def list_invites(org_id: str, u: dict = Depends(user)):
     """Pending invites (not accepted, not expired), newest first."""
-    auth.require_role(u, org_id, "admin")
+    auth.require_customer_role(u, org_id, "admin")
     rows = db.rows(sa.select(db.invites).where(db.invites.c.org_id == org_id, db.invites.c.accepted_at.is_(None),
                                                db.invites.c.expires_at >= time.time()).order_by(db.invites.c.expires_at.desc()))
     emails = {r["id"]: r["email"] for r in db.rows(sa.select(db.users.c.id, db.users.c.email).where(
@@ -405,7 +405,7 @@ async def list_invites(org_id: str, u: dict = Depends(user)):
 
 @app.delete("/api/orgs/{org_id}/invites/{code}")
 async def revoke_invite(org_id: str, code: str, u: dict = Depends(user)):
-    auth.require_role(u, org_id, "admin")
+    auth.require_customer_role(u, org_id, "admin")
     inv = db.one(sa.select(db.invites).where(db.invites.c.code == code, db.invites.c.org_id == org_id))
     if not inv:
         raise HTTPException(404, "no such invite")
@@ -705,6 +705,7 @@ def _location_rollups(locs: list[dict], cards: list[dict], include_retired: bool
         mine = [c for c in cards if c["location_id"] == loc["id"]]
         live = [c for c in mine if not c["retired_at"]]
         out.append({**{k: loc[k] for k in ("id", "org_id", "name", "address", "timezone", "notes", "created_at", "updated_at")},
+                    "monitored": bool(loc.get("monitored")),   # watched by the SOC (soc.py)
                     "servers_total": len(live), "servers_online": sum(1 for c in live if c["online"]),
                     "cameras_total": sum(c["cameras_total"] for c in live), "cameras_online": sum(c["cameras_online"] for c in live),
                     "open_alerts": sum(c["open_alerts"] for c in live), "retired_servers": len(mine) - len(live),
@@ -792,7 +793,7 @@ async def delete_location(location_id: str, move_to: str | None = None, u: dict 
     """Delete a Site. One that still has servers needs ?move_to=<another Site of the customer>; grants on the deleted
     Site are dropped, not carried over (moving servers must never widen who sees them)."""
     loc, _ = auth.location_access(u, location_id)
-    auth.require_role(u, loc["org_id"], "admin")
+    auth.require_customer_role(u, loc["org_id"], "admin")   # deleting a Site is customer management, not SOC config
     servers = db.rows(sa.select(db.sites.c.id).where(db.sites.c.location_id == location_id))
     target = None
     if servers:
@@ -916,7 +917,7 @@ async def ack_alert(alert_id: int, u: dict = Depends(user)):
 
 @app.get("/api/audit")
 async def audit(org: str, site: str | None = None, since: float | None = None, limit: int = Query(200, le=2000), u: dict = Depends(user)):
-    auth.require_role(u, org, "admin")
+    auth.require_customer_role(u, org, "admin")
     q = sa.select(db.audit_log).where(db.audit_log.c.org_id == org).order_by(db.audit_log.c.ts.desc()).limit(limit)
     if site:
         q = q.where(db.audit_log.c.site_id == site)

@@ -180,6 +180,37 @@ def set_soc_role(email: str, role: str | None, actor: dict | None = None) -> tup
     return u, True
 
 
+SOC_STAFF_MSG = "SOC staff cannot manage customer members"
+
+
+def real_membership(u: dict, org_id: str) -> dict | None:
+    """The memberships row alone, without the SOC widening (hub administrators: None unless they hold one)."""
+    return db.one(sa.select(db.memberships).where(db.memberships.c.user_id == u["id"], db.memberships.c.org_id == org_id))
+
+
+def require_customer_role(u: dict, org_id: str, needed: str) -> str:
+    """require_role for managing the customer itself: its members, invites, audit log, deleting its Sites. SOC
+    supervisors are widened to admin in monitored customers so they can configure monitoring, contacts, procedures
+    and servers, but that widening must not let them add people to (or read the audit of) a customer they serve:
+    only a real membership with the role counts there. Hub administrators are unaffected."""
+    role = require_role(u, org_id, needed)
+    m = membership(u, org_id)
+    if m and m.get("soc"):
+        row = real_membership(u, org_id)
+        if not row or not allows(row["role"], needed):
+            raise HTTPException(403, SOC_STAFF_MSG)
+        return row["role"]
+    return role
+
+
+def me_user(u: dict) -> dict:
+    """public_user plus soc_only: SOC staff with no real membership anywhere (the UI lands them on the SOC and
+    hides customer management)."""
+    out = public_user(u)
+    out["soc_only"] = bool(soc_level(u)) and not u.get("is_super") and not user_orgs(u["id"])
+    return out
+
+
 def _soc_membership(u: dict, org_id: str) -> dict | None:
     lvl = soc_level(u)
     if not lvl or not soc.org_monitored(org_id):
@@ -262,9 +293,11 @@ def user_orgs(uid: str) -> list[dict]:
 def orgs_for(u: dict) -> list[dict]:
     """The customers this user can act in, with their role: a hub administrator owns every customer (membership()),
     so they get all of them, by name, whether or not they hold a membership row."""
+    # `member`: a real membership row (false where only hub administration or the SOC brings the user in)
     if u.get("is_super"):
-        return [{**o, "role": "owner"} for o in db.rows(sa.select(db.orgs).order_by(db.orgs.c.name))]
-    out = user_orgs(u["id"])
+        real = {o["id"] for o in user_orgs(u["id"])}
+        return [{**o, "role": "owner", "member": o["id"] in real} for o in db.rows(sa.select(db.orgs).order_by(db.orgs.c.name))]
+    out = [{**o, "member": True} for o in user_orgs(u["id"])]
     if soc_level(u):
         # SOC staff also act in every customer with a monitored Site, at the wider of the two roles
         mine = {o["id"]: o for o in out}
@@ -279,7 +312,7 @@ def orgs_for(u: dict) -> list[dict]:
         extra = [oid for oid in soc.monitored_org_ids() if oid not in mine]
         if extra:
             for o in db.rows(sa.select(db.orgs).where(db.orgs.c.id.in_(extra)).order_by(db.orgs.c.name)):
-                out.append({**o, "role": _soc_membership(u, o["id"])["role"], "soc": True})
+                out.append({**o, "role": _soc_membership(u, o["id"])["role"], "soc": True, "member": False})
     return out
 
 

@@ -1,5 +1,6 @@
-"""SOC routes (stage 1): SOC staff management, per-Site monitoring and arming, contacts and procedures, and the
-dispositions catalogue. The incident queue, its socket and the escalation engine build on these in stage 2.
+"""SOC routes: SOC staff management, per-Site monitoring and arming, contacts and procedures, the dispositions
+catalogue (stage 1), and the incident queue, its socket and operator presence (stage 2). The incident engine itself
+is soc.py; these routes check who may act and translate soc.SocError into HTTP errors.
 
 Who may do what:
   /api/hub/soc/members                       hub administrators (like /api/hub/admins)
@@ -9,16 +10,20 @@ Who may do what:
   GET  /api/locations/{id}/contacts|procedures   anyone who can see the Site
   PUT  /api/locations/{id}/contacts|procedures   as monitoring PUT
   GET  /api/soc/dispositions                 SOC staff
+  /api/soc/incidents..., presence, overview, sites, sla (GET), ws     SOC staff (operator or supervisor)
+  takeover, verify, PUT /api/soc/sla           SOC supervisors (hub administrators count as supervisors)
+  GET  /api/locations/{id}/incidents         anyone who can see the Site (what the SOC did there)
 Every write is audited in the customer's audit log (SOC staff changes hub-level, org_id NULL).
 """
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import time
 from typing import Literal
 
 import sqlalchemy as sa
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from . import auth, db, soc
@@ -184,6 +189,11 @@ def _holiday_json(h: HolidayIn) -> dict:
 def _changed(location_id: str) -> None:
     registry.refresh_location(location_id)   # connections cache their Site row
     soc.invalidate()
+    loc = db.one(sa.select(db.locations).where(db.locations.c.id == location_id))
+    if loc:
+        # the SOC's Sites board and arming banners follow without polling
+        site = soc_site(loc)
+        soc.broadcast(soc.frame("arming", site=site, location_id=loc["id"], armed=site["armed"], reason=site["reason"]))
 
 
 @router.get("/api/locations/{location_id}/monitoring")
@@ -400,3 +410,401 @@ async def put_procedures(location_id: str, body: ProceduresIn, u: dict = Depends
 async def dispositions(u: dict = Depends(user)):
     auth.require_soc(u)
     return soc.dispositions_catalogue()
+
+
+# ================================================================ incidents (stage 2)
+# Every action route answers {"incident": <tagged row>, ...}; soc.SocError subclasses carry their HTTP status
+# (409 for a lost race, e.g. "already claimed by op@example.com 42 s ago").
+
+def _soc(fn, *args, **kw):
+    try:
+        return fn(*args, **kw)
+    except soc.SocError as e:
+        raise HTTPException(e.status, str(e))
+
+
+async def _soc_async(fn, *args, **kw):
+    try:
+        return await fn(*args, **kw)
+    except soc.SocError as e:
+        raise HTTPException(e.status, str(e))
+
+
+def _staff(u: dict, level: str = "operator") -> str:
+    return auth.require_soc(u, level)
+
+
+def _csv(v: str | None, allowed: tuple[str, ...], name: str) -> list[str] | None:
+    if not v:
+        return None
+    items = [x for x in v.split(",") if x]
+    bad = [x for x in items if x not in allowed]
+    if bad:
+        raise HTTPException(422, f"{name} is one of {', '.join(allowed)}")
+    return items
+
+
+@router.get("/api/soc/incidents")
+async def list_incidents(state: str | None = None, lane: str | None = None, org: str | None = None, location: str | None = None,
+                         since: float | None = None, limit: int = Query(200, ge=1, le=1000), u: dict = Depends(user)):
+    """The queue (default: every open incident), highest priority first, then oldest first. state: comma list."""
+    _staff(u)
+    lanes = _csv(lane, soc.LANES, "lane")
+    return soc.query(_csv(state, soc.STATES, "state") or soc.OPEN_STATES, lanes[0] if lanes and len(lanes) == 1 else None,
+                     org, location, since, limit)
+
+
+def _applies(proc: dict, priority: str) -> bool:
+    return not proc.get("priority") or soc.rank(priority) >= soc.rank(proc["priority"])
+
+
+def _procedures_with_progress(inc: dict, log_rows: list[dict]) -> list[dict]:
+    """The Site's procedures that apply at this priority, each step with its state derived from the log."""
+    prog = soc.sop_progress(log_rows)
+    out = []
+    for p in procedures_for(inc["location_id"]):
+        if not _applies(p, inc["priority"]):
+            continue
+        steps = [{**s, **(prog.get((p["id"], s["id"])) or {"done": False, "by": None, "at": None, "note": None})} for s in p["steps"] or []]
+        need = [s for s in steps if s.get("required")] or steps
+        out.append({**p, "steps": steps, "done_count": sum(1 for s in steps if s["done"]), "complete": all(s["done"] for s in need)})
+    return out
+
+
+@router.get("/api/soc/incidents/{iid}")
+async def incident_detail(iid: int, u: dict = Depends(user)):
+    _staff(u)
+    inc = _soc(soc.get, iid)
+    logs = soc.log_of(iid)[iid]
+    return {"incident": inc, "events": soc.events_of(iid), "log": logs, "contacts": contacts_for(inc["location_id"]),
+            "procedures": _procedures_with_progress(inc, logs), "calls": [r for r in logs if r["action"] == "call"]}
+
+
+class HandoffIn(BaseModel):
+    user_id: str = Field(min_length=1, max_length=24)
+
+
+class ResolveIn(BaseModel):
+    disposition: str = Field(min_length=1, max_length=32)
+    notes: str | None = Field(None, max_length=4000)
+
+
+class NoteIn(BaseModel):
+    text: str = Field(min_length=1, max_length=4000)
+
+
+class CallIn(BaseModel):
+    contact_id: int
+    outcome: Literal["spoke", "voicemail", "no_answer", "busy", "dispatched", "refused"]
+    notes: str | None = Field(None, max_length=2000)
+
+
+class SopIn(BaseModel):
+    procedure_id: int
+    step_id: str = Field(min_length=1, max_length=24)
+    done: bool = True
+    note: str | None = Field(None, max_length=2000)
+
+
+class RelayIn(BaseModel):
+    server_id: str = Field(min_length=1, max_length=24)
+    camera_id: str = Field(min_length=1, max_length=64)
+    on: bool
+
+
+class SweepIn(BaseModel):
+    location_id: str | None = None
+
+
+@router.post("/api/soc/incidents/sweep")
+async def sweep_incidents(body: SweepIn | None = None, u: dict = Depends(user)):
+    """Close the unclaimed quiet lane (optionally one Site) as swept."""
+    _staff(u)
+    ids = soc.sweep(u, body.location_id if body else None)
+    return {"swept": ids, "count": len(ids)}
+
+
+@router.post("/api/soc/incidents/{iid}/claim")
+async def claim_incident(iid: int, u: dict = Depends(user)):
+    _staff(u)
+    return {"incident": _soc(soc.claim, iid, u)}
+
+
+@router.post("/api/soc/incidents/{iid}/release")
+async def release_incident(iid: int, u: dict = Depends(user)):
+    return {"incident": _soc(soc.release, iid, u, _staff(u))}
+
+
+@router.post("/api/soc/incidents/{iid}/handoff")
+async def handoff_incident(iid: int, body: HandoffIn, u: dict = Depends(user)):
+    return {"incident": _soc(soc.handoff, iid, u, _staff(u), body.user_id)}
+
+
+@router.post("/api/soc/incidents/{iid}/takeover")
+async def takeover_incident(iid: int, u: dict = Depends(user)):
+    _staff(u, "supervisor")
+    return {"incident": _soc(soc.takeover, iid, u)}
+
+
+@router.post("/api/soc/incidents/{iid}/resolve")
+async def resolve_incident(iid: int, body: ResolveIn, u: dict = Depends(user)):
+    """Close (or send to four-eyes verification). False alarms are reported back to each event's server."""
+    inc = _soc(soc.resolve, iid, u, _staff(u), body.disposition, body.notes)
+    feedback = None
+    if body.disposition in soc.FEEDBACK_DISPOSITIONS:
+        feedback = await soc.send_feedback(iid, u, body.notes)
+        inc = soc.get(iid)
+    return {"incident": inc, "feedback": feedback}
+
+
+@router.post("/api/soc/incidents/{iid}/verify")
+async def verify_incident(iid: int, u: dict = Depends(user)):
+    _staff(u, "supervisor")
+    return {"incident": _soc(soc.verify, iid, u)}
+
+
+@router.post("/api/soc/incidents/{iid}/note")
+async def note_incident(iid: int, body: NoteIn, u: dict = Depends(user)):
+    _staff(u)
+    return {"incident": _soc(soc.note, iid, u, body.text)}
+
+
+@router.post("/api/soc/incidents/{iid}/promote")
+async def promote_incident(iid: int, u: dict = Depends(user)):
+    _staff(u)
+    return {"incident": _soc(soc.promote, iid, u)}
+
+
+@router.post("/api/soc/incidents/{iid}/calls")
+async def call_incident(iid: int, body: CallIn, u: dict = Depends(user)):
+    return {"incident": _soc(soc.log_call, iid, u, _staff(u), body.contact_id, body.outcome, body.notes)}
+
+
+@router.post("/api/soc/incidents/{iid}/sop")
+async def sop_incident(iid: int, body: SopIn, u: dict = Depends(user)):
+    lvl = _staff(u)
+    inc = _soc(soc.sop_tick, iid, u, lvl, body.procedure_id, body.step_id, body.done, body.note)
+    return {"incident": inc, "procedures": _procedures_with_progress(inc, soc.log_of(iid)[iid])}
+
+
+@router.post("/api/soc/incidents/{iid}/relay")
+async def relay_incident(iid: int, body: RelayIn, u: dict = Depends(user)):
+    """Deterrence: a camera relay at the incident's Site (the camera must be on one of its servers)."""
+    return await _soc_async(soc.relay, iid, u, _staff(u), body.server_id, body.camera_id, body.on)
+
+
+# ---------------------------------------------------------------- SLA
+
+class SlaRuleIn(BaseModel):
+    claim_s: int | None = Field(None, ge=1, le=86400)
+    resolve_s: int | None = Field(None, ge=1, le=86400)
+    lane: Literal["ring", "quiet"] | None = None
+
+
+class SlaIn(BaseModel):
+    high: SlaRuleIn | None = None
+    medium: SlaRuleIn | None = None
+    low: SlaRuleIn | None = None
+
+
+def _sla_out() -> dict:
+    return {"sla": soc.sla(), "defaults": soc.SLA}
+
+
+@router.get("/api/soc/sla")
+async def get_sla(u: dict = Depends(user)):
+    _staff(u)
+    return _sla_out()
+
+
+@router.put("/api/soc/sla")
+async def put_sla(body: SlaIn, u: dict = Depends(user)):
+    """Partial: per priority, only the fields sent change (claim_s / resolve_s null = no clock). New incidents use
+    it; open ones keep the clocks they started with."""
+    _staff(u, "supervisor")
+    row = db.one(sa.select(db.kv.c.value).where(db.kv.c.key == soc.SLA_KV))
+    over = dict(row["value"]) if row and isinstance(row["value"], dict) else {}
+    sent = body.model_dump(exclude_unset=True)
+    for p, rule in sent.items():
+        if rule is None:
+            over.pop(p, None)   # null priority: back to the defaults
+        else:
+            over[p] = {**(over.get(p) or {}), **rule}
+    with db.engine().begin() as c:
+        c.execute(sa.delete(db.kv).where(db.kv.c.key == soc.SLA_KV))
+        c.execute(db.kv.insert().values(key=soc.SLA_KV, value=over))
+    _audit(u, None, "soc sla updated", {"sent": sent, "override": over})
+    return _sla_out()
+
+
+# ---------------------------------------------------------------- presence, overview, Sites
+
+class PresenceIn(BaseModel):
+    status: Literal["available", "engaged", "break", "offline"]
+
+
+@router.get("/api/soc/presence")
+async def get_presence(u: dict = Depends(user)):
+    _staff(u)
+    return soc.roster()
+
+
+@router.put("/api/soc/presence")
+async def put_presence(body: PresenceIn, u: dict = Depends(user)):
+    """The workstation's status selector, and its 30 s heartbeat (resending the current status)."""
+    _staff(u)
+    cur = soc.presence_of(u["id"])
+    if cur and cur["status"] == body.status and cur["on_shift"]:
+        soc.touch_presence(u["id"])   # a heartbeat: no broadcast, `since` unchanged
+        return soc.presence_of(u["id"])
+    return _soc(soc.set_presence, u["id"], body.status)
+
+
+@router.get("/api/soc/overview")
+async def overview(u: dict = Depends(user)):
+    """Supervisor tiles: open incidents by state / lane / escalation level, SLA breaches, and each operator's load."""
+    _staff(u)
+    now = time.time()
+    t = db.incidents
+    rows = db.rows(sa.select(t.c.state, t.c.lane, t.c.escalation_level, t.c.claimed_by, t.c.resolved_by, t.c.sla_due_at,
+                             t.c.resolve_due_at, t.c.opened_at).where(t.c.state.in_(list(soc.OPEN_STATES))))
+    by_state = {s: 0 for s in soc.STATES}
+    by_lane = {lane: 0 for lane in soc.LANES}
+    by_esc: dict[str, int] = {}
+    for r in rows:
+        by_state[r["state"]] += 1
+        by_lane[r["lane"]] = by_lane.get(r["lane"], 0) + 1
+        by_esc[str(r["escalation_level"] or 0)] = by_esc.get(str(r["escalation_level"] or 0), 0) + 1
+    closed_24h = db.rows(sa.select(t.c.resolved_by, t.c.disposition).where(t.c.state == "closed", t.c.closed_at >= now - 86400))
+    by_state["closed"] = len(closed_24h)   # closed: the last 24 h, not all time
+    unclaimed = [r for r in rows if r["state"] == "new" and r["lane"] == "ring"]
+    ops = []
+    for e in soc.roster(now):
+        ops.append({**e, "claimed": sum(1 for r in rows if r["state"] == "claimed" and r["claimed_by"] == e["user_id"]),
+                    "pending_verify": sum(1 for r in rows if r["state"] == "pending_verify" and r["resolved_by"] == e["user_id"]),
+                    "resolved_24h": sum(1 for r in closed_24h if r["resolved_by"] == e["user_id"])})
+    snd, ring = soc.sound()
+    return {"now": now, "by_state": by_state, "by_lane": by_lane, "by_escalation": by_esc,
+            "breaches": {"claim": sum(1 for r in rows if r["state"] == "new" and r["sla_due_at"] and r["sla_due_at"] < now),
+                         "resolve": sum(1 for r in rows if r["state"] == "claimed" and r["resolve_due_at"] and r["resolve_due_at"] < now)},
+            "oldest_unclaimed_at": min((r["opened_at"] for r in unclaimed), default=None),
+            "ring_count": ring, "sound": snd, "operators": ops}
+
+
+def soc_site(loc: dict, counts: dict | None = None, orgs: dict | None = None, servers: list[dict] | None = None) -> dict:
+    """A monitored Site as the SOC's Sites board shows it (also the `site` of an `arming` frame)."""
+    now = time.time()
+    armed, reason = soc.armed_now(loc, now)
+    if orgs is None:
+        orgs = {r["id"]: r["name"] for r in db.rows(sa.select(db.orgs.c.id, db.orgs.c.name).where(db.orgs.c.id == loc["org_id"]))}
+    if counts is None:
+        t = db.incidents
+        counts = {(r["location_id"], r["state"], r["lane"]): r["n"] for r in db.rows(
+            sa.select(t.c.location_id, t.c.state, t.c.lane, sa.func.count().label("n")).where(
+                t.c.location_id == loc["id"], t.c.state.in_(list(soc.OPEN_STATES))).group_by(t.c.location_id, t.c.state, t.c.lane))}
+    if servers is None:
+        servers = db.rows(sa.select(db.sites.c.id, db.sites.c.online, db.sites.c.location_id).where(
+            db.sites.c.location_id == loc["id"], db.sites.c.retired_at.is_(None)))
+    mine = [s for s in servers if s["location_id"] == loc["id"]]
+    return {"id": loc["id"], "org_id": loc["org_id"], "org_name": orgs.get(loc["org_id"]), "name": loc["name"],
+            "timezone": loc.get("timezone"), "monitored": bool(loc.get("monitored")), "armed": armed, "reason": reason,
+            "next_change": soc.next_change(loc, now), "override": soc.active_override(loc, now),
+            "open_incidents": sum(n for (lid, _, _), n in counts.items() if lid == loc["id"]),
+            "ringing": counts.get((loc["id"], "new", "ring"), 0),
+            "servers_total": len(mine), "servers_online": sum(1 for s in mine if s["online"] and registry.get(s["id"]) is not None)}
+
+
+@router.get("/api/soc/sites")
+async def soc_sites(u: dict = Depends(user)):
+    """Every monitored Site across customers, with its armed state and open incidents."""
+    _staff(u)
+    locs = db.rows(sa.select(db.locations).where(db.locations.c.monitored.is_(True)))
+    if not locs:
+        return []
+    orgs = {r["id"]: r["name"] for r in db.rows(sa.select(db.orgs.c.id, db.orgs.c.name).where(db.orgs.c.id.in_(list({l["org_id"] for l in locs}))))}
+    t = db.incidents
+    counts = {(r["location_id"], r["state"], r["lane"]): r["n"] for r in db.rows(
+        sa.select(t.c.location_id, t.c.state, t.c.lane, sa.func.count().label("n")).where(t.c.state.in_(list(soc.OPEN_STATES)))
+        .group_by(t.c.location_id, t.c.state, t.c.lane))}
+    servers = db.rows(sa.select(db.sites.c.id, db.sites.c.online, db.sites.c.location_id).where(
+        db.sites.c.location_id.in_([l["id"] for l in locs]), db.sites.c.retired_at.is_(None)))
+    out = [soc_site(loc, counts, orgs, servers) for loc in locs]
+    return sorted(out, key=lambda s: ((s["org_name"] or "").casefold(), s["name"].casefold()))
+
+
+# ---------------------------------------------------------------- the SOC socket
+
+@router.websocket("/api/soc/ws")
+async def soc_ws(ws: WebSocket):
+    """Live queue for SOC staff: a `snapshot` frame (open incidents, roster), then incident_opened | incident_updated |
+    incident_event_added | incident_resolved | presence | arming. Every frame carries `sound` and `ring_count`.
+    Connecting sets the user available, the last tab closing sets them offline; the open socket keeps them on shift.
+    Client messages (any text) count as a heartbeat."""
+    u = auth.current_user(ws)  # type: ignore[arg-type]
+    if not u or not auth.soc_level(u):
+        await ws.close(code=4401 if not u else 4403)
+        return
+    await ws.accept()
+    q = soc.subscribe()
+    soc.socket_opened(u)
+
+    async def pump():
+        checked = time.time()
+        while True:
+            try:
+                msg = await asyncio.wait_for(q.get(), 30)
+            except asyncio.TimeoutError:
+                soc.touch_presence(u["id"])
+                msg = None
+            if time.time() - checked > 60:   # a revoked SOC role ends the feed within a minute
+                checked = time.time()
+                fresh = auth.user_by_id(u["id"])
+                if not auth.soc_level(fresh):
+                    await ws.close(code=4403)
+                    return
+            if msg is not None:
+                await ws.send_json(msg)
+
+    task = None
+    try:
+        await ws.send_json(soc.snapshot())
+        task = asyncio.create_task(pump())
+        while True:
+            m = await ws.receive()
+            if m["type"] == "websocket.disconnect":
+                break
+            soc.touch_presence(u["id"])
+    except (WebSocketDisconnect, RuntimeError):
+        pass
+    finally:
+        if task:
+            task.cancel()
+        soc.unsubscribe(q)
+        soc.socket_closed(u)
+
+
+# ---------------------------------------------------------------- customers: what the SOC did at their Site
+
+@router.get("/api/locations/{location_id}/incidents")
+async def location_incidents(location_id: str, since: float | None = None, limit: int = Query(50, ge=1, le=200),
+                             u: dict = Depends(user)):
+    """The Site's incidents, newest first, each with its log (the Site's Alerts tab). SOC staff appear as "SOC"
+    unless they are also members of this customer: a customer sees what was done, not who on the SOC rota did it."""
+    loc, _ = auth.location_access(u, location_id)
+    t = db.incidents
+    q = sa.select(t).where(t.c.location_id == location_id).order_by(t.c.opened_at.desc(), t.c.id.desc()).limit(limit)
+    if since is not None:
+        q = q.where(t.c.opened_at >= since)
+    rows = soc.tag(db.rows(q))
+    members = {r["user_id"] for r in db.rows(sa.select(db.memberships.c.user_id).where(db.memberships.c.org_id == loc["org_id"]))}
+    logs = soc.log_of([r["id"] for r in rows])
+
+    def who(uid, email):
+        return email if uid in members else ("SOC" if uid else None)
+    out = []
+    for r in rows:
+        r = {**r, **{f"{k}_email": who(r.get(k), r.get(f"{k}_email")) for k in soc.USER_FIELDS}}
+        r["log"] = [{"id": lr["id"], "ts": lr["ts"], "action": lr["action"], "by": who(lr["user_id"], lr["user_email"]),
+                     "detail": lr["detail"]} for lr in logs.get(r["id"], [])]
+        out.append(r)
+    return out

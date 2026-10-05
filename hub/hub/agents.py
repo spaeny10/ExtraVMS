@@ -16,7 +16,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from tunnelproto import CHUNK, WINDOW, Stream, chunk, decode, encode, split
 
-from . import alerts, cameras, db, turn
+from . import alerts, cameras, db, soc, turn
 from .config import settings
 
 log = logging.getLogger("hub.agents")
@@ -137,6 +137,14 @@ def _sync_cameras(site: dict, cams: list, disabled, source: str) -> None:
         log.exception("cameras registry sync for %s", site.get("id"))
 
 
+def _soc(conn: "AgentConn", fn, arg) -> None:
+    """Feed the SOC queue (soc.on_event / on_attention); SOC trouble must never break the tunnel or alerting."""
+    try:
+        fn(conn, arg)
+    except Exception:
+        log.exception("soc feed for %s", conn.site_id)
+
+
 class AgentRegistry:
     def __init__(self) -> None:
         self.by_site: dict[str, AgentConn] = {}
@@ -208,11 +216,13 @@ class AgentRegistry:
                     if isinstance(conn.summary.get("cameras"), list):   # an empty summary says nothing about cameras
                         _sync_cameras(conn.site, conn.summary["cameras"], conn.summary.get("disabled"), "heartbeat")
                     alerts.on_heartbeat(conn.site, conn.summary, skew)
+                    _soc(conn, soc.on_attention, conn.summary.get("attention"))
             elif t == "event":
                 msg = frame.get("msg") or {}
                 conn.broadcast(msg)
                 if conn.site:
                     alerts.on_event(conn.site, msg)
+                    _soc(conn, soc.on_event, msg)
                     self.broadcast_org(conn.site["org_id"], {**msg, **conn.tag()})
             elif t == "res":
                 s = conn.streams.get(frame["id"])

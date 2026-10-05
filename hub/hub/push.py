@@ -111,3 +111,61 @@ async def notify_alert(org_id: str, site: dict, kind: str, detail: dict) -> int:
         else:
             db.run(sa.delete(db.push_subscriptions).where(db.push_subscriptions.c.id == s["id"]))
     return sent
+
+
+# ---------------------------------------------------------------- SOC (soc.py)
+
+SOC_KIND = "soc"                 # pages to SOC staff: sent to every subscription they have (duty, not a preference)
+INCIDENT_KIND = "soc_incident"   # customers: "the SOC is handling an incident at your Site"
+
+
+def _incident_text(incident: dict) -> tuple[str, str]:
+    where = " · ".join(x for x in (incident.get("org_name"), incident.get("location_name")) if x) or "Site"
+    return f"{where}: {incident.get('priority', '')} priority incident".strip(), (incident.get("title") or "")[:180]
+
+
+async def _send(subs: list[dict], payload: dict) -> int:
+    sent = 0
+    for s in subs:
+        ok = await asyncio.to_thread(_send_one, s, payload)
+        if ok:
+            sent += 1
+        else:
+            db.run(sa.delete(db.push_subscriptions).where(db.push_subscriptions.c.id == s["id"]))
+    return sent
+
+
+async def notify_soc(incident: dict, audience: str = "operators") -> int:
+    """Page the SOC about an incident. operators: SOC staff on shift (soc.on_shift_ids); supervisors: SOC supervisors
+    and hub administrators, on shift or not (an escalation must reach someone). Returns pushes sent."""
+    from . import soc
+    if audience == "supervisors":
+        uids = {r["id"] for r in db.rows(sa.select(db.users.c.id).where(sa.or_(db.users.c.soc_role == "supervisor",
+                                                                                 db.users.c.is_super == True)))}  # noqa: E712
+    else:
+        uids = soc.on_shift_ids()
+    if not uids:
+        return 0
+    subs = db.rows(sa.select(db.push_subscriptions).where(db.push_subscriptions.c.user_id.in_(list(uids))))
+    title, body = _incident_text(incident)
+    payload = {"title": title, "body": body, "url": f"/soc/incidents/{incident['id']}", "kind": SOC_KIND, "incident_id": incident["id"],
+               "location_id": incident.get("location_id"), "priority": incident.get("priority"), "audience": audience}
+    return await _send(subs, payload)
+
+
+async def notify_incident_customers(incident: dict) -> int:
+    """Tell the customer the SOC has a high-priority incident open at their Site: real members who can see the Site
+    (not SOC staff widened in, not hub administrators: notify_soc covers them), on subscriptions that chose
+    high-priority events or SOC incidents. Only monitored Sites have incidents, so opting in is the Site's."""
+    org_id, lid = incident["org_id"], incident["location_id"]
+    members = db.rows(sa.select(db.memberships.c.user_id, db.memberships.c.all_sites).where(db.memberships.c.org_id == org_id))
+    uids = {m["user_id"] for m in members
+            if m["all_sites"] is not False or lid in auth.granted_location_ids(m["user_id"], org_id)}
+    if not uids:
+        return 0
+    subs = [s for s in db.rows(sa.select(db.push_subscriptions).where(db.push_subscriptions.c.user_id.in_(list(uids))))
+            if {"event_high", INCIDENT_KIND} & set(s["kinds"] or DEFAULT_KINDS)]
+    _, body = _incident_text(incident)
+    payload = {"title": f"{incident.get('location_name') or 'Your site'}: the SOC is reviewing a high-priority alarm", "body": body,
+               "url": f"/sites/{lid}/alerts", "kind": INCIDENT_KIND, "incident_id": incident["id"], "location_id": lid}
+    return await _send(subs, payload)
