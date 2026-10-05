@@ -132,10 +132,13 @@ def test_lan_without_token_is_unchanged():
 def test_accepts_header_cookie_and_query():
     tok = mint(role="operator", email="op@example.com")
     want = {"user": "op@example.com", "role": "operator", "site": SITE, "direct": "1", "hub_role": "operator"}
-    for kw in ({"headers": {"Authorization": f"Direct {tok}"}}, {"headers": {"Cookie": f"direct={tok}"}}):
+    # the cookie counts only on a cross-origin request from the hub page; same-origin it is ignored (tested below)
+    for kw in ({"headers": {"Authorization": f"Direct {tok}"}}, {"headers": {"Cookie": f"direct={tok}", "Origin": HUB}}):
         r = run(call("GET", "/api/_test/echo?a=1", **kw))
         assert r.status_code == 200, r.text
         assert {k: r.json()[k] for k in want} == want and r.json()["query"] == "a=1"
+    r = run(call("POST", "/api/_test/echo", headers={"Cookie": f"direct={tok}"}))
+    assert r.status_code != 403, "a valid direct cookie on the server's own (same-origin) UI must not make it read-only"
     r = run(call("GET", f"/api/_test/echo?a=1&direct={tok}&b=2"))
     assert r.status_code == 200 and {k: r.json()[k] for k in want} == want
     assert r.json()["query"] == "a=1&b=2"          # the token never reaches a handler (or uvicorn's access log)

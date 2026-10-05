@@ -221,6 +221,11 @@ async def hub_headers(request: Request, call_next):
         scope["nvr_handshake_token"] = request.query_params["token"]   # the route reads it here, not from the log
         _strip_query_param(scope, "token")
     token, where = direct.token_from(request.headers, request.cookies, request.query_params)
+    if where == "cookie" and not cors:
+        # The cookie is only meaningful for cross-origin requests from the hub page. A browser that used the hub
+        # earlier still carries it when it opens this server's OWN UI; honouring it there made the LAN UI
+        # read-only ("direct connection is read-only" on Ask, Oct 5 2026). Same-origin requests stay plain LAN.
+        token, where = None, None
     if where == "query":
         _strip_query_param(scope, "direct")   # routes never need it either
     claims = direct.verify(token) if token else None
