@@ -441,7 +441,8 @@ export function makeApi(base: string, opts: ApiOptions = {}) {
   return {
   base,
   // ---- URLs (media, frames, playback, WebRTC signalling, live socket)
-  media: (e: { id: number }, name: string) => u(`/api/events/${e.id}/media/${name}`),
+  /** an event's media file; `w` asks for a thumbnail of the snapshot at most that wide (cards, strips, covers) */
+  media: (e: { id: number }, name: string, w?: number) => u(`/api/events/${e.id}/media/${name}${w ? `?w=${w}` : ""}`),
   frameUrl: (camera: string, t: number, w = 960, exact = false) =>
     u(`/api/frame/${camera}?${qs({ t: t.toFixed(2), w, exact: exact ? "true" : undefined })}`),
   /** `quality` "sd" asks for the server's low-bitrate transcode (q=sd); omitted or "hd" = the recording as stored. */

@@ -87,10 +87,10 @@ export function EventDetail({ id: initialId, cameraName, onClose, site = api, va
         <div className={`modal-grid ${isPhone ? "phone" : ""}`}>
           {(!isPhone || tab === "clip") && <div>
             {e.clip ? (
-              <video ref={video} className="clip" src={site.media(e, "clip.mp4")} poster={e.snapshot ? site.media(e, "snapshot.jpg") : undefined} controls autoPlay muted />
+              <video ref={video} className="clip" src={site.media(e, "clip.mp4")} poster={e.snapshot ? site.media(e, "snapshot.jpg", 960) : undefined} controls autoPlay muted />
             ) : e.snapshot ? (
               <>
-                <img className="clip" src={site.media(e, "snapshot.jpg")} alt="" />
+                <img className="clip" src={site.media(e, "snapshot.jpg", 960)} alt="" />
                 {e.status !== "open" && e.status !== "pending" && (
                   <p className="muted small">The clip for this event has expired under the retention policy; only the snapshot remains.</p>
                 )}
@@ -156,7 +156,7 @@ function JourneySection({ e, site, cameraName, onShow, onOpenTimeline }: {
           return (
             <li key={m.id} className={m.id === e.id ? "current" : ""}>
               <button className="journey-thumb" onClick={() => m.id !== e.id && onShow(m.id)} title={m.id === e.id ? "This event" : "Show this sighting"}>
-                {m.snapshot ? <img src={site.media(m, "snapshot.jpg")} alt="" /> : <span className="thumb-empty">{m.camera_class}</span>}
+                {m.snapshot ? <img src={site.media(m, "snapshot.jpg", 320)} alt="" /> : <span className="thumb-empty">{m.camera_class}</span>}
               </button>
               <div className="journey-info">
                 <div><strong>{cameraName(m.camera_id)}</strong> <span className="muted small">{fmtTime(m.start_ts)}{m.start_ts > first ? ` · +${Math.round(m.start_ts - first)} s` : ""}</span></div>

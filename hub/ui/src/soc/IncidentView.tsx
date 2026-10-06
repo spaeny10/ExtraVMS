@@ -93,7 +93,7 @@ export function IncidentView({ me, detail, incident, now, actions, cmd, popout =
             {events.map((e) => (
               <button key={evKey(e)} role="option" aria-selected={sel ? evKey(e) === evKey(sel) : false} className={`soc-thumb ${sel && evKey(e) === evKey(sel) ? "active" : ""}`}
                 onClick={() => setSelKey(evKey(e))} title={`${e.camera_name} · ${new Date(e.ts * 1000).toLocaleTimeString()}`}>
-                <img src={mediaApi(e.server_id).media({ id: eventNum(e) }, "snapshot.jpg")} alt="" loading="lazy" onError={(x) => { (x.target as HTMLImageElement).style.visibility = "hidden"; }} />
+                <img src={mediaApi(e.server_id).media({ id: eventNum(e) }, "snapshot.jpg", 320)} alt="" loading="lazy" onError={(x) => { (x.target as HTMLImageElement).style.visibility = "hidden"; }} />
                 <span className="small">{e.camera_name} · {age(e.ts, now)}</span>
                 <span className={priorityClass(e.priority)} aria-label={`${priorityLabel(e.priority)} priority`}>{priorityLabel(e.priority)}</span>
               </button>
@@ -254,8 +254,8 @@ export function EventMedia({ ev, onDetails }: { ev: IncidentEvent; onDetails?: (
   return (
     <div className="soc-media-grid">
       <div className="soc-clip">
-        {e?.clip ? <video src={s.media(e, "clip.mp4")} poster={e.snapshot ? s.media(e, "snapshot.jpg") : undefined} controls autoPlay muted loop playsInline />
-          : e?.snapshot ? <img src={s.media(e, "snapshot.jpg")} alt={`Snapshot from ${ev.camera_name}`} />
+        {e?.clip ? <video src={s.media(e, "clip.mp4")} poster={e.snapshot ? s.media(e, "snapshot.jpg", 960) : undefined} controls autoPlay muted loop playsInline />
+          : e?.snapshot ? <img src={s.media(e, "snapshot.jpg", 960)} alt={`Snapshot from ${ev.camera_name}`} />
           : <div className="soc-clip-wait muted small">{failed ? `${ev.server_name} isn't answering; retrying…` : "Waiting for the clip…"}</div>}
         <div className="muted small">{ev.camera_name}{ev.server_name ? ` · ${ev.server_name}` : ""} · {new Date(ev.ts * 1000).toLocaleTimeString()}{e && !e.clip ? " · clip still being cut" : ""}</div>
       </div>

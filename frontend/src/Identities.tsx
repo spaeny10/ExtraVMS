@@ -80,7 +80,7 @@ export function IdentitiesView({ cameras, initialCamera = "", initialHours = 0 }
           return (
             <div key={c.key} className={`identity ${c.name ? "named" : ""}`}>
               <button className="identity-cover" onClick={() => setOpen(cover.id)} title="Open the clearest sighting">
-                {cover.snapshot ? <img src={media(cover, "snapshot.jpg")} alt="" loading="lazy" /> : <div className="thumb-empty">{kind}</div>}
+                {cover.snapshot ? <img src={media(cover, "snapshot.jpg", 480)} alt="" loading="lazy" /> : <div className="thumb-empty">{kind}</div>}
               </button>
               <div className="identity-body">
                 <div className="identity-head">

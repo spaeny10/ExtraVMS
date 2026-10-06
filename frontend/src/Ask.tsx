@@ -43,7 +43,7 @@ export function Cited({ text, refs, onEvent, site = api }: { text: string; refs?
           return (
             <button key={i} className="cite" onClick={() => onEvent(id)} title={`Event #${id} · ${r.camera} · ${fmtTime(r.start_ts)}`}>
               {r.label === "vehicle" ? "🚗" : "🧍"} {r.camera} {clock(r.start_ts)}
-              {r.snapshot && <img className="cite-preview" src={site.media({ id }, "snapshot.jpg")} alt="" loading="lazy" />}
+              {r.snapshot && <img className="cite-preview" src={site.media({ id }, "snapshot.jpg", 320)} alt="" loading="lazy" />}
             </button>
           );
         }

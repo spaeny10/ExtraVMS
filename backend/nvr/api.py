@@ -910,9 +910,41 @@ def _event_file(event_id: int, name: str) -> Path:
     return f
 
 
+THUMB_WIDTHS = (320, 480, 640, 960)   # the sizes a thumbnail may be asked for (w is rounded up to one of these)
+
+
+def _thumb_width(w: int) -> int:
+    return next((t for t in THUMB_WIDTHS if t >= w), THUMB_WIDTHS[-1])
+
+
+def _make_thumb(src: Path, dest: Path, width: int) -> None:
+    """Shrink a snapshot (2592x1520, ~1.2 MB) to `width` px wide (~30 KB) once; later requests read the file."""
+    from PIL import Image
+    with Image.open(src) as im:
+        im = im.convert("RGB")
+        if im.width > width:
+            im = im.resize((width, max(1, round(im.height * width / im.width))), Image.LANCZOS)
+        tmp = dest.with_suffix(".tmp")
+        im.save(tmp, "JPEG", quality=78, optimize=True)
+        tmp.replace(dest)
+
+
 @app.get("/api/events/{event_id}/media/{name}")
-async def event_media(event_id: int, name: str):
-    return FileResponse(_event_file(event_id, name), headers={"Cache-Control": "max-age=86400"})
+async def event_media(event_id: int, name: str, w: int | None = Query(None, ge=160, le=1280)):
+    """An event's clip, snapshot or crop. `w` (snapshot.jpg only): a thumbnail at most that wide, generated on first
+    request and kept beside the snapshot as thumb_<w>.jpg. Cards through the hub tunnel load ~30 KB instead of 1.2 MB."""
+    f = _event_file(event_id, name)
+    if w and name == "snapshot.jpg":
+        width = _thumb_width(w)
+        thumb = f.with_name(f"thumb_{width}.jpg")
+        if not thumb.exists():
+            try:
+                await asyncio.to_thread(_make_thumb, f, thumb, width)
+            except Exception as ex:  # a damaged snapshot: serve the original rather than fail the card
+                log.warning("thumbnail for event %s failed: %s", event_id, ex)
+                thumb = f
+        f = thumb
+    return FileResponse(f, headers={"Cache-Control": "max-age=86400"})
 
 
 @app.post("/api/events/{event_id}/reprocess")

@@ -54,7 +54,7 @@ export function EventCard({ e, cameraName, onOpen, site = api, siteName, focused
   return (
     <button className={`event-card ${e.status}${focused ? " focused" : ""}`} onClick={onOpen} data-event-id={e.id}>
       <div className="thumb">
-        {e.snapshot ? <img src={site.media(e, "snapshot.jpg")} loading="lazy" alt="" /> : <div className="thumb-empty">{e.camera_class}</div>}
+        {e.snapshot ? <img src={site.media(e, "snapshot.jpg", 480)} loading="lazy" alt="" /> : <div className="thumb-empty">{e.camera_class}</div>}
         <span className={`label-chip ${e.camera_class}`}>{e.yolo_class ?? e.camera_class}</span>
       </div>
       <div className="event-body">
