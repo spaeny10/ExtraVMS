@@ -80,7 +80,7 @@ def test_naming_and_recognition():
     r = identities.clusters("person", NOW - 7200)
     named = [c for c in r["clusters"] if c["name"]]
     assert len(named) == 1 and named[0]["name"] == "Alex" and named[0]["sightings"] == 5, named
-    # a brand-new sighting of A is recognised by name, B is not
+    # a brand-new sighting of A is recognized by name, B is not
     new_a = add("cam1", NOW - 10, vec=person_vec(A))
     assert "Alex" in (identities.identity_facts("person", new_a) or "")
     assert identities.identity_facts("person", ids_b[0]) is None
@@ -112,7 +112,7 @@ def test_watch_list_marks_matching_sightings():
 
 
 def test_vehicles_use_their_own_table():
-    D = identities.VEHICLE_DIM  # CLIP + colour histogram
+    D = identities.VEHICLE_DIM  # CLIP + color histogram
     v = unit(rng.normal(size=D))
     a = add("cam1", NOW - 900, cls="vehicle", vec=unit(v + rng.normal(0, 0.1 / np.sqrt(D), D)))
     b = add("cam1", NOW - 800, cls="vehicle", vec=unit(v + rng.normal(0, 0.1 / np.sqrt(D), D)))
@@ -128,7 +128,7 @@ def test_color_hist_separates_white_from_black():
     red = np.zeros((60, 120, 3), np.uint8); red[:, :, 2] = 200
     hw, hb, hr = identities.color_hist(white), identities.color_hist(black), identities.color_hist(red)
     assert hw @ hb < 0.2 and hw @ hr < 0.2
-    assert identities.color_hist(np.full((60, 120, 3), 225, np.uint8)) @ hw > 0.9  # same colour, slightly darker
+    assert identities.color_hist(np.full((60, 120, 3), 225, np.uint8)) @ hw > 0.9  # same color, slightly darker
 
 
 def test_second_outfit_becomes_a_new_look():

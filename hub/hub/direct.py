@@ -1,7 +1,7 @@
 """Direct-on-LAN media tokens.
 
 A browser on the same LAN as a server can fetch media straight from it instead of through the hub's tunnel.
-The hub authorises that with a short-lived token it mints here; the server checks it offline.
+The hub authorizes that with a short-lived token it mints here; the server checks it offline.
 
 Format:  base64url(payload_json) + "." + base64url(HMAC_SHA256(key, payload_b64_ascii))
          (base64url without "=" padding; the MAC covers the base64 text exactly as sent, so JSON key order
@@ -82,7 +82,7 @@ def verify(token: str, token_hash: str, site_id: str | None = None, now: float |
 
 
 def info(summary: dict | None) -> dict:
-    """What the server last reported about reaching it directly (heartbeat `summary.direct`), sanitised: only
+    """What the server last reported about reaching it directly (heartbeat `summary.direct`), sanitized: only
     http(s) URLs, so an odd value from a server can never become e.g. a javascript: link in the UI."""
     d = (summary or {}).get("direct") if isinstance(summary, dict) else None
     d = d if isinstance(d, dict) else {}

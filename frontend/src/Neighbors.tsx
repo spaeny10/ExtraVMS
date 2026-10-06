@@ -15,7 +15,7 @@ export function NeighborsEditor({ cameraId, cameras }: { cameraId: string; camer
     api.topology().then(setAll).catch(() => setAll([]));
     api.topologySuggestions().then(setSuggestions).catch(() => {});
   }, []);
-  if (!all) return <p className="muted small">Loading neighbours…</p>;
+  if (!all) return <p className="muted small">Loading neighbors…</p>;
 
   const mine = all.map((l, i) => ({ l, i })).filter(({ l }) => l.cam_a === cameraId || l.cam_b === cameraId);
   const others = cameras.filter((c) => c.id !== cameraId);
@@ -32,10 +32,10 @@ export function NeighborsEditor({ cameraId, cameras }: { cameraId: string; camer
     <div className="neighbors">
       <p className="muted small">
         Cameras someone can walk to from here, and how long it usually takes. When a person leaves one camera and a similar-looking
-        person appears on a neighbour inside that window, re-ID and Qwen check whether it's the same individual and link the two
+        person appears on a neighbor inside that window, re-ID and Qwen check whether it's the same individual and link the two
         events into a journey. Use a negative minimum if the views overlap.
       </p>
-      {mine.length === 0 && <p className="muted small">No neighbours yet.</p>}
+      {mine.length === 0 && <p className="muted small">No neighbors yet.</p>}
       {mine.map(({ l, i }) => {
         const other = l.cam_a === cameraId ? l.cam_b : l.cam_a;
         const outgoing = l.cam_a === cameraId;
@@ -57,10 +57,10 @@ export function NeighborsEditor({ cameraId, cameras }: { cameraId: string; camer
       <div className="row">
         {others.length > 0 && (
           <button className="ghost small" onClick={() => setAll([...all, { cam_a: cameraId, cam_b: others[0].id, min_s: 0, max_s: 60, one_way: false }])}>
-            Add neighbour
+            Add neighbor
           </button>
         )}
-        <button className="small" onClick={() => save(all)}>Save neighbours</button>
+        <button className="small" onClick={() => save(all)}>Save neighbors</button>
       </div>
       {pending.length > 0 && (
         <div className="suggestions">

@@ -71,7 +71,7 @@ def test_entry_rule():
     at_door = [{"name": "South Exterior Door", "from": NOW, "to": NOW + 0.6}]
     stranger = add(NOW - 100, p_in, at_door, rng.normal(size=512))
     b = policy.check(stranger)
-    assert b and b["kind"] == "entry" and "not a recognised person" in b["text"]
+    assert b and b["kind"] == "entry" and "not a recognized person" in b["text"]
     assert db.event(stranger)["priority"] == "high"
     known = add(NOW - 90, p_in, at_door, shawn)
     identities.name_cluster("person", "Shawn", [known])

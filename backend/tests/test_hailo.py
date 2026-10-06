@@ -21,7 +21,7 @@ FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "hailo_raw_c4704_6.js
 
 
 def _to_input(xyxyn, scale, px, py, w, h):
-    """Original normalised xyxy -> input pixels (what the model sees after letterbox)."""
+    """Original normalized xyxy -> input pixels (what the model sees after letterbox)."""
     b = np.asarray(xyxyn, dtype=np.float64).copy()
     b[:, [0, 2]] = b[:, [0, 2]] * w * scale + px
     b[:, [1, 3]] = b[:, [1, 3]] * h * scale + py
@@ -35,7 +35,7 @@ def test_letterbox_keeps_aspect_and_centres():
         assert out.shape == (640, 640, 3) and out.dtype == np.uint8
         nw, nh = round(w * scale), round(h * scale)
         assert max(nw, nh) == 640 and abs(scale - min(640 / h, 640 / w)) < 1e-9
-        # the picture sits in the middle, grey padding around it
+        # the picture sits in the middle, gray padding around it
         assert (out[int(py):int(py) + nh, int(px):int(px) + nw] == 200).all()
         assert abs(px - (640 - nw) / 2) <= 0.5 and abs(py - (640 - nh) / 2) <= 0.5
         if py >= 1:

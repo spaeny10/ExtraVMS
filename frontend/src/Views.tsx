@@ -94,10 +94,10 @@ export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: n
   const [scopedEvents, setScopedEvents] = useState<NvrEvent[]>([]);
   useEffect(() => {
     if (!scoped) { setScopedEvents([]); return; }
-    let cancelled = false;
+    let canceled = false;
     Promise.all(regionKey.split(",").map((camera) => api.events({ camera, status: "open,pending,verified", limit: 100 }).catch(() => [] as NvrEvent[])))
-      .then((lists) => { if (!cancelled) setScopedEvents(lists.flat()); });
-    return () => { cancelled = true; };
+      .then((lists) => { if (!canceled) setScopedEvents(lists.flat()); });
+    return () => { canceled = true; };
   }, [regionKey, scoped]);
   const pool = scoped
     ? [...new Map([...scopedEvents, ...recent].map((e) => [e.id, e])).values()].sort((a, b) => b.start_ts - a.start_ts)
@@ -377,7 +377,7 @@ export function CamerasView({ cameras, port, reload }: { cameras: Camera[]; port
                 ) : (
                   <p className="muted small">Save the camera first.</p>
                 )}
-                <h3 className="spaced">Neighbouring cameras</h3>
+                <h3 className="spaced">Neighboring cameras</h3>
                 {cameras.some((c) => c.id === edit.id) ? <NeighborsEditor cameraId={edit.id} cameras={cameras} /> : <p className="muted small">Save the camera first.</p>}
                 <h3 className="spaced">PTZ</h3>
                 {cameras.some((c) => c.id === edit.id) ? <PtzSettings camera={cameras.find((c) => c.id === edit.id)!} onChanged={reload} /> : <p className="muted small">Save the camera first.</p>}
@@ -450,10 +450,10 @@ function HubPanel() {
   const [url, setUrl] = useState<string | null>(null);
   const [urlErr, setUrlErr] = useState<string | null>(null);
   const load = () => api.hub().then(setH).catch(() => {});
-  // A different hub address un-enrols this server (its device token belongs to the old hub), so it shows a new
+  // A different hub address un-enrolls this server (its device token belongs to the old hub), so it shows a new
   // claim code and must be claimed again at the new hub.
   const saveUrl = async () => {
-    if (h?.enrolled && !(await confirmDialog("Changing the hub URL un-enrols this server; it must be claimed again at the new hub.", { confirmLabel: "Change and un-enrol", danger: true }))) return;
+    if (h?.enrolled && !(await confirmDialog("Changing the hub URL un-enrolls this server; it must be claimed again at the new hub.", { confirmLabel: "Change and un-enroll", danger: true }))) return;
     try {
       await api.setHub({ hub_url: url! });
       setUrl(null);
@@ -472,7 +472,7 @@ function HubPanel() {
     <Row label="Cloud hub" hint="One webpage for all your sites. The site dials out to the hub; no port forwarding. Enter the claim code at the hub under Add site."
       value={<><Status ok={h.connected} /> {state}</>}
       sub={h.last_error && !h.connected ? `Can't reach the hub yet · ${h.last_error}` : h.last_heartbeat ? `last heartbeat ${fmtTime(h.last_heartbeat)}${h.vlm_managed ? " · Qwen managed by the hub" : ""}` : undefined}
-      action={h.enrolled ? <button className="ghost small" onClick={async () => { if (await confirmDialog("Unenrol this site from the hub?", { confirmLabel: "Unenrol", danger: true })) { await api.setHub({ unenrol: true }); load(); } }}>Unenrol</button> : undefined}>
+      action={h.enrolled ? <button className="ghost small" onClick={async () => { if (await confirmDialog("Unenroll this site from the hub?", { confirmLabel: "Unenroll", danger: true })) { await api.setHub({ unenrol: true }); load(); } }}>Unenroll</button> : undefined}>
       {!h.enrolled && h.claim_code && (
         <div className="hub-claim">
           <div className="hub-code" title="Type this at the hub: Add site">{h.claim_code}</div>
@@ -483,7 +483,7 @@ function HubPanel() {
         <input value={url ?? h.hub_url} onChange={(e) => setUrl(e.target.value)} style={{ minWidth: 320 }} title="Hub address (wss://…/agent)" />
         <button className="ghost small" disabled={url == null || url === h.hub_url} onClick={saveUrl}>Save hub URL</button>
       </div>
-      <div className="muted small">Changing the hub URL un-enrols this server; it must be claimed again.</div>
+      <div className="muted small">Changing the hub URL un-enrolls this server; it must be claimed again.</div>
       {urlErr && <div className="small error">{urlErr}</div>}
     </Row>
   );

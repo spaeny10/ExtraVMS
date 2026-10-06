@@ -118,7 +118,7 @@ export function ZoneEditor({ camera, onClose, onSaved }: { camera: Camera; onClo
         <header className="modal-head">
           <div>
             <h2>Detection zones · {camera.name}</h2>
-            <span className="muted small">Objects count where they touch the ground (bottom-centre of the box). Masked areas never create events and are hidden from YOLO.</span>
+            <span className="muted small">Objects count where they touch the ground (bottom-center of the box). Masked areas never create events and are hidden from YOLO.</span>
           </div>
           <button className="ghost" onClick={onClose} aria-label="Close">✕</button>
         </header>

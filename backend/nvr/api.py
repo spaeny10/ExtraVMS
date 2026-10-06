@@ -213,12 +213,12 @@ async def _lan_request(request: Request, call_next, path: str, host: str | None,
 
 @app.middleware("http")
 async def hub_headers(request: Request, call_next):
-    """X-Hub-* headers identify the hub user behind a tunnelled request. Only the in-process tunnel may set
+    """X-Hub-* headers identify the hub user behind a tunneled request. Only the in-process tunnel may set
     them: strip them from anything that arrived over the network so they can't be forged on the LAN.
 
     Direct-on-LAN (direct.py): a LAN request carrying a hub-minted token (Authorization: Direct, ?direct= or the
-    `direct` cookie) gets the same x-hub-user/x-hub-role/x-hub-site headers a tunnelled one would, so role and
-    audit logic treat both alike, and is read-only apart from WHEP signalling. It never carries the tunnel marker
+    `direct` cookie) gets the same x-hub-user/x-hub-role/x-hub-site headers a tunneled one would, so role and
+    audit logic treat both alike, and is read-only apart from WHEP signaling. It never carries the tunnel marker
     (hub_agent.is_tunnel), so tunnel-only endpoints (_tunnel_only, ai_serve) still refuse it. A LAN request without a token is
     exactly as before (the site's own UI), except for the browser guards (lan_guard.py): an allowed Host name
     always, and for state-changing requests a same-origin page and a JSON body."""
@@ -250,7 +250,7 @@ async def hub_headers(request: Request, call_next):
     token, where = direct.token_from(request.headers, request.cookies, request.query_params)
     if where == "cookie" and not cors:
         # The cookie is only meaningful for cross-origin requests from the hub page. A browser that used the hub
-        # earlier still carries it when it opens this server's OWN UI; honouring it there made the LAN UI
+        # earlier still carries it when it opens this server's OWN UI; honoring it there made the LAN UI
         # read-only ("direct connection is read-only" on Ask, Oct 5 2026). Same-origin requests stay plain LAN.
         token, where = None, None
     if where == "query":
@@ -287,7 +287,7 @@ async def direct_probe():
 @app.get("/api/direct/handshake")
 async def direct_handshake(request: Request):
     """?token=<t>: exchange a hub-minted token for a `direct` cookie, so later requests from the hub page
-    (credentials: include) are authorised without the token in every URL. Browsers that block third-party
+    (credentials: include) are authorized without the token in every URL. Browsers that block third-party
     cookies keep using the header or ?direct= instead. (The middleware moves `token` out of the query string.)"""
     token = request.scope.get("nvr_handshake_token")
     claims = direct.verify(token)
@@ -493,8 +493,8 @@ async def turn_servers(request: Request):
 
 @app.put("/api/hub")
 async def hub_configure(body: HubIn):
-    """Change the hub address (a different address un-enrols this server: it must be claimed again at the new
-    hub; the old hub's device token is never sent anywhere else) or unenrol."""
+    """Change the hub address (a different address un-enrolls this server: it must be claimed again at the new
+    hub; the old hub's device token is never sent anywhere else) or unenroll."""
     try:
         await state.hub.configure(hub_url=body.hub_url, unenrol=body.unenrol)
     except ValueError as e:
@@ -636,7 +636,7 @@ class MoveIn(BaseModel):
 
 
 class RelativeIn(BaseModel):
-    dx: float = Field(0, ge=-0.5, le=0.5)   # click offset from the picture centre, fractions of the picture
+    dx: float = Field(0, ge=-0.5, le=0.5)   # click offset from the picture center, fractions of the picture
     dy: float = Field(0, ge=-0.5, le=0.5)
     zoom: float = Field(0, ge=-1, le=1)
 
@@ -1291,7 +1291,7 @@ async def put_topology(links: list[CameraLinkIn]):
     if any(l.cam_a not in known or l.cam_b not in known for l in links):
         raise HTTPException(400, "unknown camera")
     journeys.set_topology([l.model_dump() for l in links])
-    queued = await state.pipeline.relink(7)  # re-check recent person events against the new neighbours
+    queued = await state.pipeline.relink(7)  # re-check recent person events against the new neighbors
     return {"links": journeys.topology(), "relinking": queued}
 
 
@@ -1794,9 +1794,9 @@ async def _ffmpeg_stream(camera_id: str, cmd: list[str], on_close=None) -> Strea
     done = threading.Event()
 
     def finish() -> None:
-        """Kill ffmpeg now (a plain syscall, safe inside a cancelled scope) and reap it from a detached thread.
+        """Kill ffmpeg now (a plain syscall, safe inside a canceled scope) and reap it from a detached thread.
         Nothing here is awaited: when the browser drops the connection, Starlette cancels the response inside a
-        cancel scope where any further await is cancelled too, so an awaited cleanup could be skipped and ffmpeg
+        cancel scope where any further await is canceled too, so an awaited cleanup could be skipped and ffmpeg
         would sit blocked on a full pipe forever (seen on Hailo T1). Idempotent: also called by the finalizer."""
         if done.is_set():
             return
@@ -1837,7 +1837,7 @@ async def _ffmpeg_stream(camera_id: str, cmd: list[str], on_close=None) -> Strea
             finish()
 
     gen = body()
-    # a response cancelled before its body was ever iterated never enters the generator's finally: the
+    # a response canceled before its body was ever iterated never enters the generator's finally: the
     # finalizer still kills ffmpeg and frees the transcode slot when the generator is dropped
     weakref.finalize(gen, finish)
     return StreamingResponse(gen, media_type="video/mp4")
@@ -2139,7 +2139,7 @@ async def ws(sock: WebSocket):
         state.pipeline.subscribers.discard(q)
 
 
-# ---------------------------------------------------------------- live view signalling
+# ---------------------------------------------------------------- live view signaling
 
 @app.post("/api/whep/{path}")
 async def whep(path: str, request: Request):

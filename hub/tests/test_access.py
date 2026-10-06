@@ -17,7 +17,7 @@ def _login(client, email, password):
 
 
 def server(org_id: str, name: str, location_id: str | None = None) -> dict:
-    """A server row as enrolment would leave it (no tunnel needed), in its own one-server Site unless given one."""
+    """A server row as enrollment would leave it (no tunnel needed), in its own one-server Site unless given one."""
     s = {"id": db.new_id("s_"), "org_id": org_id, "name": name, "location": "", "token_hash": db.token_hash(db.new_token()),
          "token_prev_hash": None, "token_rotated_at": None, "created_at": time.time(), "last_seen_at": None, "online": False,
          "version": None, "summary": None, "clock_skew_s": None, "agent_ip": None, "hostname": None, "location_id": location_id}

@@ -1,6 +1,6 @@
 /**
  * The "how is video reaching me" chip per server (Site header, SOC incident header): green "Direct · LAN" when this
- * browser fetches the server's media straight from it, grey "via hub" otherwise. When the only thing in the way is
+ * browser fetches the server's media straight from it, gray "via hub" otherwise. When the only thing in the way is
  * (probably) the server's self-signed certificate, it offers to open the server's probe URL in a tab so the user can
  * accept it once; coming back to this window re-probes (direct.ts). "Don't offer again" is kept per server.
  */

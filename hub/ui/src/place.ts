@@ -131,7 +131,7 @@ export function pinStatus(s: { open_alerts: number; servers_total: number; serve
   if (s.servers_total === 0) return "empty";
   return s.servers_online < s.servers_total ? "offline" : "online";
 }
-/** CSS colour per status (the toolkit's tokens, with fallbacks for Leaflet's detached DOM). */
+/** CSS color per status (the toolkit's tokens, with fallbacks for Leaflet's detached DOM). */
 export const PIN_COLOUR: Record<PinStatus, string> = {
   alerts: "var(--bad, #ef4444)", offline: "var(--vehicle, #e0a020)", online: "var(--ok, #22c55e)", empty: "var(--muted, #8b96a3)",
 };

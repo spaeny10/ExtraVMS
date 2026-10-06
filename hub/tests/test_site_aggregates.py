@@ -1,5 +1,5 @@
 """Site-scoped aggregates: events, alerts, Find, Ask, backups and usage per Site (and ?location= on the org-wide
-routes) honour who sees which Site; the digest groups servers by Site; push titles say "Site · Server"."""
+routes) honor who sees which Site; the digest groups servers by Site; push titles say "Site · Server"."""
 import asyncio
 import json
 import time

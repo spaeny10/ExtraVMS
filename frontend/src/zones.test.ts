@@ -3,7 +3,7 @@ import { newZone, ppeBadge, ppeItemsText, retypeZone, togglePpeItem, zoneAllowed
 
 const SQ: [number, number][] = [[0, 0.5], [1, 0.5], [1, 1], [0, 1]];
 
-test("a new PPE zone requires both items and serialises like the backend expects", () => {
+test("a new PPE zone requires both items and serializes like the backend expects", () => {
   const z = newZone("ppe", [{ name: "PPE zone 1", type: "ppe", points: SQ }], SQ);
   expect(z).toEqual({ name: "PPE zone 2", type: "ppe", points: SQ, required: ["hard_hat", "vest"] });
   expect(JSON.parse(JSON.stringify(z)).required).toEqual(["hard_hat", "vest"]);

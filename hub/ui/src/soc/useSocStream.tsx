@@ -1,6 +1,6 @@
 /**
  * The SOC console's shared state: the queue as the SOC socket keeps it, the roster, my presence, the SLA policy and
- * the disposition catalogue, plus the alarm sound and the screen-reader announcements that follow from them.
+ * the disposition catalog, plus the alarm sound and the screen-reader announcements that follow from them.
  * App mounts one provider around the SOC pages (header and page both read it), so one socket and one ringer serve
  * the header's toggles and the workstation.
  *

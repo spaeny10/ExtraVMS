@@ -5,7 +5,7 @@ https://github.com/KaiyangZhou/deep-person-reid; Zhou et al., "Omni-Scale Featur
 Person Re-Identification", ICCV 2019). Only the weights file is downloaded; it is loaded with
 `weights_only=True` so it cannot execute code.
 
-`embed(crops)` returns an L2-normalised 512-d vector per person crop (BGR numpy images). Cosine
+`embed(crops)` returns an L2-normalized 512-d vector per person crop (BGR numpy images). Cosine
 similarity between two events' mean vectors estimates whether they show the same person.
 """
 from __future__ import annotations
@@ -173,7 +173,7 @@ class ReID:
 
     @torch.inference_mode()
     def embed(self, crops: list[np.ndarray]) -> np.ndarray | None:
-        """Mean L2-normalised embedding of BGR person crops, or None if there are none."""
+        """Mean L2-normalized embedding of BGR person crops, or None if there are none."""
         crops = [c for c in crops if c is not None and c.size and min(c.shape[:2]) >= 16]
         if not crops:
             return None

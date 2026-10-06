@@ -305,9 +305,10 @@ async def _shift_llm(d: dict) -> str | None:
     if not vlm_proxy.configured():
         return None
     messages = [
-        {"role": "system", "content": "You write the shift handover report for a video-alarm monitoring centre (SOC). Be factual and "
+        {"role": "system", "content": "You write the shift handover report for a video-alarm monitoring center (SOC). Be factual and "
                                       "brief: one summary sentence, then bullets for escalations, true alarms and anything still open, "
-                                      "then one line per operator. Use only the facts given; times are local. No preamble."},
+                                      "then one line per operator. Use only the facts given; times are local. No preamble. "
+                                      "Use American English spelling."},
         {"role": "user", "content": shift_plain(d)}]
     try:
         return await vlm_proxy.complete(messages, max_tokens=500, temperature=0.2)

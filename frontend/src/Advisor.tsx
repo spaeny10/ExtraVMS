@@ -14,7 +14,7 @@ export function Advisor({ onAsk }: { onAsk?: (q: string) => void }) {
   const [report, setReport] = useState<AdvisorReport | null>(null);
   const [busy, setBusy] = useState(false);
   const [showHidden, setShowHidden] = useState(false);
-  const [summarising, setSummarising] = useState(false);
+  const [summarizing, setSummarizing] = useState(false);
   // measurements first (a second or two), then Qwen's paragraph fills in when it arrives
   const run = async () => {
     setBusy(true);
@@ -23,10 +23,10 @@ export function Advisor({ onAsk }: { onAsk?: (q: string) => void }) {
       setReport(quick);
       setBusy(false);
       if (quick.findings.length) {
-        setSummarising(true);
+        setSummarizing(true);
         try { const full = await api.advisor(true); setReport((r) => r && { ...r, summary: full.summary }); }
         catch { /* the plain summary stays */ }
-        finally { setSummarising(false); }
+        finally { setSummarizing(false); }
       }
     } catch (e) { toast.error(e); setBusy(false); }
   };
@@ -62,7 +62,7 @@ export function Advisor({ onAsk }: { onAsk?: (q: string) => void }) {
           <div className={`adv-summary ${report.findings.length === 0 ? "ok" : ""}`}>
             <p>{report.summary.text}</p>
             <div className="muted small adv-meta">
-              {report.summary.model ? <span className="model-tag">{report.summary.model}</span> : summarising ? <span>✦ Qwen is writing its read…</span> : <span>plain summary</span>}
+              {report.summary.model ? <span className="model-tag">{report.summary.model}</span> : summarizing ? <span>✦ Qwen is writing its read…</span> : <span>plain summary</span>}
               <span> · {report.cameras} cameras</span>
               {report.facts.gb_per_day != null && <span> · {report.facts.gb_per_day} GB/day</span>}
               {report.facts.median_synopsis_s != null && <span> · synopses {report.facts.median_synopsis_s} s</span>}

@@ -79,7 +79,7 @@ describe("suggestion and marker → form fields", () => {
 });
 
 describe("pins and tiles", () => {
-  it("colours a pin by status: alerts, then offline, then online", () => {
+  it("colors a pin by status: alerts, then offline, then online", () => {
     expect(pinStatus({ open_alerts: 2, servers_total: 2, servers_online: 0 })).toBe("alerts");
     expect(pinStatus({ open_alerts: 0, servers_total: 2, servers_online: 1 })).toBe("offline");
     expect(pinStatus({ open_alerts: 0, servers_total: 2, servers_online: 2 })).toBe("online");

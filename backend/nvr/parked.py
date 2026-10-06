@@ -1,6 +1,6 @@
 """Parked vehicles: the camera's own analytics fire on shimmer, shadows or a flapping strap next to a parked machine,
 and the large, confident YOLO box around the machine then "confirms" every one of those detections (a small camera
-box is centre-inside the YOLO box). The result was a hundred verified "vehicle" events a day about a telehandler
+box is center-inside the YOLO box). The result was a hundred verified "vehicle" events a day about a telehandler
 that never moved.
 
 Two checks, both only for vehicle events (a person standing still is never "parked"):
@@ -25,7 +25,7 @@ VEHICLE_CLS = {1, 2, 3, 5, 7}   # bicycle, car, motorcycle, bus, truck (verifier
 MIN_FRAMES = 3                  # matched frames needed before "it didn't move" means anything
 MIN_SPAN_S = 2.0                # ...spread over at least this long
 SIZE_TOL = 0.1                  # YOLO box width/height may also vary by this share of its size (detector jitter)
-WANDER_MIN = 0.03               # camera track centre moved this far while the YOLO box stayed put
+WANDER_MIN = 0.03               # camera track center moved this far while the YOLO box stayed put
 MEMORY_IOU = 0.8                # a new static box is the remembered parked one
 PRESENT_IOU = 0.5               # a vehicle box still occupies the remembered spot
 MEMORY_SPAN_S = 600.0           # sightings must span this long before the spot is remembered
@@ -66,7 +66,7 @@ def _area(b) -> float:
     return max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
 
 
-def _centre(b) -> tuple[float, float]:
+def _center(b) -> tuple[float, float]:
     return (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
 
 
@@ -93,7 +93,7 @@ def static_box(detections: list, max_move: float | None = None) -> list | None:
     if len(matched) < MIN_FRAMES or matched[-1]["ts"] - matched[0]["ts"] < MIN_SPAN_S:
         return None
     boxes = [d["match"]["box"] for d in matched]
-    cx, cy = zip(*(_centre(b) for b in boxes))
+    cx, cy = zip(*(_center(b) for b in boxes))
     ws, hs = [b[2] - b[0] for b in boxes], [b[3] - b[1] for b in boxes]
     if _spread(cx) > max_move or _spread(cy) > max_move:
         return None
@@ -121,10 +121,10 @@ def judge(label: str, detections: list, path: list, entries: list | None = None,
     ratio = statistics.median(_area(d["cam_box"]) / max(_area(d["match"]["box"]), 1e-6) for d in matched)
     small = ratio < settings.parked_cam_box_ratio
     # the camera's box drifts about inside a vehicle that stays put (and isn't the vehicle's size)
-    centres = [_centre(p[1:5]) for p in path] or [_centre(d["cam_box"]) for d in matched]
+    centers = [_center(p[1:5]) for p in path] or [_center(d["cam_box"]) for d in matched]
     wander = (ratio < 2 * settings.parked_cam_box_ratio
-              and max(_spread([c[0] for c in centres]), _spread([c[1] for c in centres])) >= WANDER_MIN
-              and all(_inside(_centre(d["cam_box"]), ref) for d in matched))
+              and max(_spread([c[0] for c in centers]), _spread([c[1] for c in centers])) >= WANDER_MIN
+              and all(_inside(_center(d["cam_box"]), ref) for d in matched))
     if small or wander:
         return {"box": ref, "cls": cls, "via": "clip"}
     if any(iou(ref, e["box"]) >= MEMORY_IOU for e in active(entries or [], now)):

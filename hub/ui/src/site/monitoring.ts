@@ -68,7 +68,7 @@ export function fromWeek(week: Week): ArmWindow[] {
 
 /**
  * Canonical form of any window list: merge overlaps within each start day (overnight ones included), drop invalid
- * times, group days that share a window. Idempotent, so comparing normalised lists tells whether anything changed.
+ * times, group days that share a window. Idempotent, so comparing normalized lists tells whether anything changed.
  */
 export const normalizeWindows = (windows: ArmWindow[]): ArmWindow[] => fromWeek(toWeek(windows));
 

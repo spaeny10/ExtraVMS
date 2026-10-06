@@ -5,7 +5,7 @@ record which places the object walked into (areas_visited). "ppe" zones don't fi
 in one are checked for the hard hat / hi-vis vest it requires (ppe.py).
 
 One rule everywhere (tracker, YOLO verification, past-event masking, the UI preview):
-an object's point is the bottom-centre of its box (where it touches the ground). It is *allowed* if
+an object's point is the bottom-center of its box (where it touches the ground). It is *allowed* if
 (there are no include zones OR it is inside one) AND it is not inside any exclude zone. Exclude wins.
 """
 from __future__ import annotations
@@ -15,7 +15,7 @@ import re
 import cv2
 import numpy as np
 
-MASK_GREY = (114, 114, 114)  # YOLO's letterbox grey: reads as "nothing here"
+MASK_GRAY = (114, 114, 114)  # YOLO's letterbox gray: reads as "nothing here"
 
 
 def point_in_polygon(x: float, y: float, poly: list[list[float]]) -> bool:
@@ -30,7 +30,7 @@ def point_in_polygon(x: float, y: float, poly: list[list[float]]) -> bool:
 
 
 def dist_to_polygon(x: float, y: float, poly: list[list[float]]) -> float:
-    """0 inside, else the distance to the nearest edge (normalised units)."""
+    """0 inside, else the distance to the nearest edge (normalized units)."""
     if point_in_polygon(x, y, poly):
         return 0.0
     best = 9.0
@@ -82,7 +82,7 @@ def normalize(zones: list[dict] | None) -> list[dict]:
 
 
 def foot(box) -> tuple[float, float]:
-    """Bottom-centre of a (left, top, right, bottom) box."""
+    """Bottom-center of a (left, top, right, bottom) box."""
     return (box[0] + box[2]) / 2, box[3]
 
 
@@ -102,7 +102,7 @@ def path_allowed(path: list, zones: list[dict]) -> bool:
 
 
 def mask_frame(img: np.ndarray, zones: list[dict]) -> np.ndarray:
-    """Copy of img with disallowed areas painted grey, so a detector can't see them."""
+    """Copy of img with disallowed areas painted gray, so a detector can't see them."""
     if not zones:
         return img
     h, w = img.shape[:2]
@@ -112,10 +112,10 @@ def mask_frame(img: np.ndarray, zones: list[dict]) -> np.ndarray:
     if includes:
         keep = np.zeros((h, w), dtype=np.uint8)
         cv2.fillPoly(keep, [to_px(z["points"]) for z in includes], 255)
-        out[keep == 0] = MASK_GREY
+        out[keep == 0] = MASK_GRAY
     excludes = [to_px(z["points"]) for z in zones if z["type"] == "exclude"]
     if excludes:
-        cv2.fillPoly(out, excludes, MASK_GREY)
+        cv2.fillPoly(out, excludes, MASK_GRAY)
     return out
 
 

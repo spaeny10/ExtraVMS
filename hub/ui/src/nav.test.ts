@@ -142,7 +142,7 @@ describe("topNav", () => {
 });
 
 describe("fullBleed", () => {
-  it("Site pages and the SOC fill the window; lists and forms stay centred", () => {
+  it("Site pages and the SOC fill the window; lists and forms stay centered", () => {
     for (const p of ["/sites/l_1/live", "/sites/l_1/timeline", "/sites/l_1/servers/s_1", "/soc"]) expect(fullBleed(matchRoute(p).page)).toBe(true);
     for (const p of ["/", "/sites", "/find", "/alerts", "/customer", "/audit", "/account"]) expect(fullBleed(matchRoute(p).page)).toBe(false);
   });

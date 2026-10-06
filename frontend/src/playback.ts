@@ -24,7 +24,7 @@ export const HOLD_MAX_MS = { local: 3000, remote: 20000 } as const;
 
 /**
  * Should a tile whose shared clock is past its buffered video drop the chunk and fetch a new one at the clock?
- * Local: yes once more than AHEAD_SLACK_S past (today's behaviour). Remote: only when waiting is pointless — the
+ * Local: yes once more than AHEAD_SLACK_S past (today's behavior). Remote: only when waiting is pointless — the
  * user seeked (`jumped`), the clock is more than 2 chunk lengths past, or nothing has progressed for STALL_S;
  * otherwise the download is still arriving and a reload would only abort it and start over.
  * `pastChunkEnd`: the clock is already beyond this chunk, so any gap counts (the slack doesn't apply).
@@ -106,7 +106,7 @@ export type FrameShot = { url: string | null; t: number | null; cam: string };
 /** Preview frames from the recordings with at most one request in flight; the newest requested time wins. */
 export type FrameUrlFor = (cam: string, t: number, w?: number, exact?: boolean) => string;
 
-/** `frameUrlFor` maps the requested cam (a lane key on the hub) to a URL; it must be stable (memoised). */
+/** `frameUrlFor` maps the requested cam (a lane key on the hub) to a URL; it must be stable (memoized). */
 export function useLatestFrame(width: number, frameUrlFor: FrameUrlFor = frameUrl) {
   const [shot, setShot] = useState<FrameShot | null>(null);
   const wanted = useRef<{ cam: string; t: number; exact: boolean } | null>(null);

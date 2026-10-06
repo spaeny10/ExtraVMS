@@ -221,7 +221,7 @@ function useSiteActivity(site: Site, servers: Server[], source: DashboardSource,
 function SiteActivity({ site, servers, tiles, multi, activity: a }: { site: Site; servers: Server[]; tiles: Tile[]; multi: boolean; activity: Activity }) {
   const [open, setOpen] = useState<EventRef | null>(null);
   const names = useMemo(() => new Map(tiles.map((t) => [t.key, t.name])), [tiles]);
-  /** "Server · Camera" on a multi-server Site, as the tiles are labelled */
+  /** "Server · Camera" on a multi-server Site, as the tiles are labeled */
   const label = (key: string) => {
     const t = tiles.find((x) => x.key === key);
     const { server, id } = splitKey(key);

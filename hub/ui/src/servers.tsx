@@ -69,7 +69,7 @@ export function ServerActions({ s, admin, sites, onChanged }: { s: Server; admin
       {admin && <BackupsButton server={s} />}
       {admin && <button className="ghost small" title={s.retired_at ? "Show it in Sites, Home, Find and alerts again" : "Hide it from Sites, Home, Find and alerts (the server keeps running)"}
         onClick={async () => { if (s.retired_at || await confirmDialog(`Retire ${s.name}?`, { message: "It disappears from Sites, Home, Find, Ask and alerts. The server, its tunnel and its recordings are untouched; you can restore it under Customer → Servers.", confirmLabel: "Retire" })) await act(() => api.retireServer(s.id, !s.retired_at))(); }}>{s.retired_at ? "Restore" : "Retire"}</button>}
-      {admin && <button className="ghost small" onClick={async () => { if (await confirmDialog(`Remove ${s.name}?`, { message: "The server is told to unenrol; recordings stay on it.", confirmLabel: "Remove", danger: true })) await act(() => api.removeServer(s.id))(); }}>Remove</button>}
+      {admin && <button className="ghost small" onClick={async () => { if (await confirmDialog(`Remove ${s.name}?`, { message: "The server is told to unenroll; recordings stay on it.", confirmLabel: "Remove", danger: true })) await act(() => api.removeServer(s.id))(); }}>Remove</button>}
     </>
   );
 }
@@ -85,7 +85,7 @@ export function BackupsButton({ server }: { server: Server }) {
         <div className="modal-backdrop" onClick={() => setOpen(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 640 }}>
             <header className="modal-head"><h2>{server.name} · configuration backups</h2><button className="ghost" onClick={() => setOpen(false)} aria-label="Close">✕</button></header>
-            <p className="muted small">Cameras, zones, places, rules, PTZ, neighbours, named people/vehicles, layouts, retention and briefing settings — taken nightly, 30 kept. Camera passwords are not included. Recordings and events stay on the server.</p>
+            <p className="muted small">Cameras, zones, places, rules, PTZ, neighbors, named people/vehicles, layouts, retention and briefing settings — taken nightly, 30 kept. Camera passwords are not included. Recordings and events stay on the server.</p>
             <div className="row"><button className="ghost small" onClick={async () => { try { await api.backupNow(server.id); toast.success("Backup taken"); load(); } catch (e) { toast.error(e); } }}>Back up now</button></div>
             <table className="hub-table">
               <thead><tr><th>When</th><th>Size</th><th>Cameras</th><th>Identities</th><th>Version</th><th /></tr></thead>

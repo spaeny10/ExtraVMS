@@ -551,7 +551,7 @@ def check_rules(ctx: dict) -> list[Finding]:
             if missing:
                 out.append(Finding(key=f"rule:{c['id']}:{r.get('kind')}", area="rules", impact="high", camera_id=c["id"], camera=c["name"],
                                    title=f"{c['name']}: rule allows {', '.join(missing)}, who isn't named yet",
-                                   why="A site rule can only recognise names from People & vehicles. Until this name exists every match trips the rule.",
+                                   why="A site rule can only recognize names from People & vehicles. Until this name exists every match trips the rule.",
                                    effect="The rule stops flagging your own people or trucks.",
                                    steps=[f"Find → Grouped by who → name the {kind} '{missing[0]}'.", "Reprocess a recent flagged event to confirm."],
                                    fingerprint=",".join(missing)))
@@ -677,7 +677,7 @@ async def summarize(findings: list[Finding], n_cameras: int, use_ai: bool = True
         system = ("You are the resident engineer for a small camera security system. You get a JSON list of measured findings "
                   "about it. Write ONE short paragraph (3-5 sentences) for the owner: lead with what matters most and why, "
                   "mention the expected gain in plain terms, group small items together. No bullet points, no headings, no "
-                  "markdown, no invented facts beyond the findings.")
+                  "markdown, no invented facts beyond the findings. Use American English spelling.")
         text = json.dumps([{k: v for k, v in asdict(f).items() if k in ("impact", "title", "why", "effect")} for f in findings])
         r = await asyncio.wait_for(vlmroute.router.chat_json("assistant", system, text, [], {"type": "object", "properties": {"paragraph": {"type": "string"}}, "required": ["paragraph"]}, 220, 0.2, "chat"), 40)
         p = (r or {}).get("paragraph", "").strip()

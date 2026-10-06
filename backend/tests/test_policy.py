@@ -56,7 +56,7 @@ def test_camera_round_trip_and_prompt():
 def test_unknown_vehicle_towing_breaks_the_rule():
     e = add(NOW - 100, unit(rng.normal(size=D)), {"towing": True, "towed": "solar light tower"})
     broken = policy.check(e)
-    assert broken and broken["kind"] == "towing" and "not a recognised vehicle" in broken["text"]
+    assert broken and broken["kind"] == "towing" and "not a recognized vehicle" in broken["text"]
     ev = db.event(e)
     assert ev["policy"]["priority"] == "high"
     assert ev["priority"] == "high" and baseline.priority(ev, 0.0) == "high"  # stored, not just computable

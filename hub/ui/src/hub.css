@@ -8,7 +8,7 @@
 .hub-top nav a:hover { color: var(--text); }
 .hub-top nav a.active { background: var(--panel-2); color: var(--text); }
 .hub-top .spacer { flex: 1; }
-/* lists and forms read best in a centred column; Site pages and the SOC (nav.ts fullBleed) use the whole window with
+/* lists and forms read best in a centered column; Site pages and the SOC (nav.ts fullBleed) use the whole window with
    the server UI's own 16 px page padding, so a Site's Live grid gets the same tile sizes as the server's LiveView */
 .hub-page { padding: 16px; max-width: 1400px; margin: 0 auto; }
 .hub-page.wide { max-width: none; margin: 0; }
@@ -60,7 +60,7 @@
 .site-addr { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 28ch; }
 .site-chips { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .chip.warn { border-color: var(--bad); color: var(--bad); }
-/* Direct-on-LAN (DirectChip): green when media comes straight from the server, the plain grey chip otherwise */
+/* Direct-on-LAN (DirectChip): green when media comes straight from the server, the plain gray chip otherwise */
 .direct-chip { color: var(--muted); }
 /* the toolkit's .chip.on is the red "filter on" chip: reset its background, this "on" means healthy */
 .direct-chip.on { border-color: var(--ok); color: var(--ok); background: var(--panel-2); }
@@ -231,7 +231,7 @@
 .site-map .leaflet-bar a { background: var(--panel); color: var(--text); border-color: var(--border); }
 .site-map .leaflet-tooltip { background: var(--panel); color: var(--text); border-color: var(--border); box-shadow: none; }
 .site-map .leaflet-tooltip-top::before { border-top-color: var(--border); }
-/* a pin: a teardrop in the status colour with a dark ring, drawn in CSS (no marker images) */
+/* a pin: a teardrop in the status color with a dark ring, drawn in CSS (no marker images) */
 .map-pin { background: none; border: 0; }
 .map-pin-dot { --pin: var(--accent, #3b82f6); display: block; width: 18px; height: 18px; margin: 1px; border-radius: 50% 50% 50% 0; transform: rotate(-45deg);
   background: var(--pin); border: 2px solid #0b0f14; box-shadow: 0 1px 4px rgba(0, 0, 0, .5); }

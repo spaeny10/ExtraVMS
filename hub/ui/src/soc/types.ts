@@ -71,7 +71,7 @@ export const CALL_OUTCOMES: { id: CallOutcome; label: string }[] = [
   { id: "busy", label: "Busy" }, { id: "dispatched", label: "Dispatched" }, { id: "refused", label: "Refused" },
 ];
 
-/** The disposition catalogue (GET /api/soc/dispositions): three groups, each with a chord leader and digits. */
+/** The disposition catalog (GET /api/soc/dispositions): three groups, each with a chord leader and digits. */
 export type Disposition = { code: string; label: string; needs_notes: boolean; selectable: boolean; four_eyes: Priority[]; key: string | null };
 export type DispositionGroup = { id: "true_alarm" | "false_alarm" | "not_actionable" | string; label: string; key: string; dispositions: Disposition[] };
 export type Dispositions = { groups: DispositionGroup[] };

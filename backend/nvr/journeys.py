@@ -1,9 +1,9 @@
-"""Cross-camera journeys: link the same person across neighbouring cameras.
+"""Cross-camera journeys: link the same person across neighboring cameras.
 
-1. Topology (camera_links): which cameras neighbour each other and the walking-time window between them.
+1. Topology (camera_links): which cameras neighbor each other and the walking-time window between them.
 2. Each verified person event gets a re-ID appearance embedding (reid.py, stored in reid_vec).
-3. Candidate search: person events on a neighbouring camera inside the time window, in either direction,
-   whose re-ID similarity is at least REID_MIN_SIM; the best candidate per neighbour and direction is kept.
+3. Candidate search: person events on a neighboring camera inside the time window, in either direction,
+   whose re-ID similarity is at least REID_MIN_SIM; the best candidate per neighbor and direction is kept.
 4. Qwen confirms "same person?" from one crop of each; the verdict is stored so a pair is never asked twice.
 5. Confirmed links are joined (connected components) into a journey; after QUIET_S without changes Qwen
    writes one narrative for the whole journey, which is added to each member's search document.
@@ -29,7 +29,7 @@ from .db import db
 log = logging.getLogger("nvr.journeys")
 
 REID_MIN_SIM = 0.70       # measured on this site: same person ~0.8-0.9, different events median ~0.65
-REID_AUTO_SIM = 0.80      # at or above this re-ID alone confirms the link: Qwen is only asked about the grey zone
+REID_AUTO_SIM = 0.80      # at or above this re-ID alone confirms the link: Qwen is only asked about the gray zone
 NARRATIVE_MIN_S = 900     # a journey's narrative is rewritten at most this often while it keeps growing
 _last_narrative: dict[int, float] = {}
 SUGGEST_MIN_SIM = 0.78
@@ -81,17 +81,17 @@ def _person_events_between(cam: str, col: str, lo: float, hi: float) -> list[dic
 
 
 def candidates(event: dict) -> list[dict]:
-    """Best re-ID match per neighbouring camera and direction, inside the walking window."""
+    """Best re-ID match per neighboring camera and direction, inside the walking window."""
     vec = db.get_reid(event["id"])
     if vec is None:
         return []
     start, end = event["start_ts"], event["end_ts"] or event["start_ts"]
     found = []
     for src, dst, lo, hi in edges():
-        if src == event["camera_id"]:      # this event first, then the neighbour
+        if src == event["camera_id"]:      # this event first, then the neighbor
             rows = _person_events_between(dst, "start_ts", end + lo, end + hi)
             pairs = [(event["id"], r["id"], r["start_ts"] - end, r) for r in rows]
-        elif dst == event["camera_id"]:    # the neighbour first, then this event
+        elif dst == event["camera_id"]:    # the neighbor first, then this event
             rows = _person_events_between(src, "COALESCE(end_ts, start_ts)", start - hi, start - lo)
             pairs = [(r["id"], event["id"], start - r["end_ts"], r) for r in rows]
         else:

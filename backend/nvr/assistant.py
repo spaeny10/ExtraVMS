@@ -711,7 +711,7 @@ ANSWER_SYSTEM = (
     "question, say so plainly and say what was checked. Never invent events, times or counts. Footage matches only "
     "count if they say CHECKED: yes. If the only matches are marked EARLIER, say nothing matched in the period asked "
     "about and mention the most recent earlier one with its date. Counts are sightings, not different people. Cite only the few sightings that "
-    "support your answer (at most 5). Don't guess identities. Write plain sentences; don't repeat these instructions. "
+    "support your answer (at most 5). Don't guess identities. Write plain sentences in American English spelling; don't repeat these instructions. "
     "When a 'Period asked about' is given, open with that period and how many events the lookups found in it "
     "(for example 'Oct 2 18:00 to Oct 3 07:00: no events.'). A result marked BACKGROUND ONLY is a briefing that "
     "covers a different span: never present its times, people or activity as happening in the period asked about, "
@@ -810,7 +810,7 @@ BRIEFING_SYSTEM = (
     "one-line headline and 1-4 short bullets about what needs attention (high priority or unusual events, cameras "
     "offline, disk problems) and one bullet summing up the period in plain words. Activity counts, journeys, recording "
     "and disk status are listed separately below your bullets, so don't repeat those numbers. Cite events as [#id] "
-    "exactly as given. Only use the facts provided; if it was quiet, say so."
+    "exactly as given. Only use the facts provided; if it was quiet, say so. Use American English spelling."
 )
 
 

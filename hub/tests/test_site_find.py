@@ -13,7 +13,7 @@ from test_access import _login, server
 
 
 class FindConn:
-    """A server's /api/events and /api/search over a fixed list (id DESC like the server), honouring the paging
+    """A server's /api/events and /api/search over a fixed list (id DESC like the server), honoring the paging
     parameters, camera and priority sort; it remembers the queries it was sent."""
 
     def __init__(self, s: dict, events: list[dict]):

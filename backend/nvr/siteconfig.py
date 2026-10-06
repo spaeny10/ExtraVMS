@@ -1,7 +1,7 @@
 """Export / import of a site's configuration (not its recordings or events): cameras, zones, named places,
-site rules, PTZ settings, neighbour topology, named people/vehicles with their looks, timeline layouts,
+site rules, PTZ settings, neighbor topology, named people/vehicles with their looks, timeline layouts,
 retention and briefing settings. The fleet hub pulls this nightly; restoring a dead site is
-"install, enrol, import". Camera passwords are not exported: they're re-entered on restore.
+"install, enroll, import". Camera passwords are not exported: they're re-entered on restore.
 
 Fleet actions (hub/hub/fleet_actions.py) move cameras between sites with `handoff` (a partial export of some
 cameras WITH their passwords, served only down the hub tunnel; see api.config_handoff) and `merge_cameras`
@@ -131,7 +131,7 @@ def import_config(data: dict, replace_identities: bool = False) -> dict:
 
 def handoff(camera_ids: list[str] | None = None) -> dict:
     """A partial export for moving cameras to another site: the chosen cameras (all when None) WITH their
-    passwords, the neighbour links among them, and the named people/vehicles. Only ever served down the hub
+    passwords, the neighbor links among them, and the named people/vehicles. Only ever served down the hub
     tunnel (api.config_handoff checks); the hub passes it straight to the destination and never stores it."""
     cams = [c for c in db.cameras() if camera_ids is None or c["id"] in camera_ids]
     ids = {c["id"] for c in cams}

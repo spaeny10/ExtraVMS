@@ -21,7 +21,7 @@ describe("windows", () => {
     expect(mergeSpans([{ from: "06:00", to: "05:00" }, { from: "20:00", to: "08:00" }])).toEqual([{ from: "06:00", to: "06:00" }]);
     expect(mergeSpans([{ from: "25:00", to: "06:00" }])).toEqual([]);
   });
-  it("normalises: per-day merge, shared windows grouped, idempotent", () => {
+  it("normalizes: per-day merge, shared windows grouped, idempotent", () => {
     const n = normalizeWindows([{ dow: [0, 1], from: "22:00", to: "06:00" }, { dow: [1], from: "23:00", to: "01:00" }, { dow: [5, 6], from: "00:00", to: "00:00" }]);
     expect(n).toEqual([{ dow: [0, 1], from: "22:00", to: "06:00" }, { dow: [5, 6], from: "00:00", to: "00:00" }]);
     expect(normalizeWindows(n)).toEqual(n);

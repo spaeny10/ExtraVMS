@@ -1,4 +1,4 @@
-"""Shared AI: an OpenAI-compatible /v1/chat/completions the hub fronts for every site whose organisation
+"""Shared AI: an OpenAI-compatible /v1/chat/completions the hub fronts for every site whose organization
 has `ai_shared`.
 
 Two upstreams, chosen by settings:
@@ -7,7 +7,7 @@ Two upstreams, chosen by settings:
   * `vllm_url`: a vLLM/Ollama the hub reaches directly (the `ai` compose profile, RunPod, ...).
 
 Sites authenticate with their device token (the hub told them to use it as the API key in `welcome`), so
-usage is metered per site and organisation; the upstream key never leaves the hub. Streams are passed through
+usage is metered per site and organization; the upstream key never leaves the hub. Streams are passed through
 as they arrive; `stream_options.include_usage` is added so the final chunk carries token counts. Per-site and
 per-org concurrency caps return 429, which a site's own circuit breaker turns into "use the local model for a
 while".
@@ -81,7 +81,7 @@ def _site_for(request: Request) -> dict:
         raise HTTPException(401, "unknown device token")
     org = db.one(sa.select(db.orgs).where(db.orgs.c.id == site["org_id"]))
     if not org or not org.get("ai_shared"):
-        raise HTTPException(403, "shared AI is not enabled for this organisation")
+        raise HTTPException(403, "shared AI is not enabled for this organization")
     return site
 
 

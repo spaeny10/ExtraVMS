@@ -46,7 +46,7 @@ export function SitesPage({ org, me }: { org: Org; me: Me }) {
         <a className="link-btn" href="/alerts" onClick={go("/alerts")}>All alerts</a>
       </div>
       {sites.length === 0 && unassigned.length === 0 && (
-        <p className="muted">No sites yet. {isAdmin(org, me) ? <>Create one and enrol a server under <a href="/customer/sites" onClick={go("/customer/sites")}>Customer → Sites</a>.</> : "Ask an admin to add one."}</p>
+        <p className="muted">No sites yet. {isAdmin(org, me) ? <>Create one and enroll a server under <a href="/customer/sites" onClick={go("/customer/sites")}>Customer → Sites</a>.</> : "Ask an admin to add one."}</p>
       )}
       {mapView && sites.length > 0 ? <SitesMap sites={sites} />
         : <div className="site-grid">{sites.map((s) => <SiteCard key={s.id} s={s} lastEvent={lastEvent[s.id]} now={fleet.now} />)}</div>}
@@ -63,7 +63,7 @@ export function SitesPage({ org, me }: { org: Org; me: Me }) {
 
 const PIN_LABEL: Record<PinStatus, string> = { online: "All online", offline: "Server offline", alerts: "Open alerts", empty: "No servers" };
 
-/** Every Site of the customer as a pin coloured by status; a pin opens the Site's Live page. Unlocated Sites listed below. */
+/** Every Site of the customer as a pin colored by status; a pin opens the Site's Live page. Unlocated Sites listed below. */
 function SitesMap({ sites }: { sites: Site[] }) {
   const located = sites.filter((s): s is Site & { lat: number; lon: number } => hasPoint(s));
   const missing = sites.filter((s) => !hasPoint(s));

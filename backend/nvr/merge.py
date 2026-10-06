@@ -31,7 +31,7 @@ log = logging.getLogger("nvr.merge")
 OVERLAP_S = 2.5   # the tracker closes a track after `track_end_gap` quiet seconds: B may start slightly "before" A ended
 
 
-def _box_centre(p: list) -> tuple[float, float]:
+def _box_center(p: list) -> tuple[float, float]:
     _, l, t, r, b = p[:5]
     return ((l + r) / 2, (t + b) / 2)
 
@@ -58,13 +58,13 @@ def _first_box(path: list) -> list | None:
 
 
 def continuous(a_path: list, b_path: list, max_dist: float | None = None) -> bool:
-    """B's first box is where A's last box was (centres within max_dist, or overlapping)."""
+    """B's first box is where A's last box was (centers within max_dist, or overlapping)."""
     p, q = _last_box(a_path), _first_box(b_path)
     if p is None or q is None:
         return False
     if _overlap(p, q):
         return True
-    (x1, y1), (x2, y2) = _box_centre(p), _box_centre(q)
+    (x1, y1), (x2, y2) = _box_center(p), _box_center(q)
     return float(np.hypot(x2 - x1, y2 - y1)) <= (settings.merge_max_dist if max_dist is None else max_dist)
 
 
@@ -161,13 +161,13 @@ def gap_times(t0: float, t1: float) -> list[float]:
 
 
 def _near(box, ref) -> bool:
-    """box and ref (both [l, t, r, b]) are the same standing person: overlap enough, or one's centre in the other."""
+    """box and ref (both [l, t, r, b]) are the same standing person: overlap enough, or one's center in the other."""
     from .verifier import center_inside, iou
     return iou(box, ref) > GAP_IOU or center_inside(box, ref) or center_inside(ref, box)
 
 
 def frame_person_boxes(camera_id: str, t: float, zone_list: list[dict] | None, model) -> list[list[float]] | None:
-    """YOLO person boxes (normalised [l, t, r, b]) in the recorded frame at t, masked zones honoured as in
+    """YOLO person boxes (normalized [l, t, r, b]) in the recorded frame at t, masked zones honored as in
     `Verifier.verify`; None when there is no recording at t. Blocking: call on the GPU executor."""
     import cv2
     from . import frames

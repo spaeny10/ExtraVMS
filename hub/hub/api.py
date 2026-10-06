@@ -1,4 +1,4 @@
-"""The hub's FastAPI app: sign-in, organisations and members, site enrolment, the fleet, alerts, audit,
+"""The hub's FastAPI app: sign-in, organizations and members, site enrollment, the fleet, alerts, audit,
 the /agent tunnel endpoint, the per-site proxy, and the hub's own pages."""
 from __future__ import annotations
 
@@ -230,7 +230,7 @@ async def totp_disable(body: ReauthIn, u: dict = Depends(user)):
     return {"ok": True}
 
 
-# ---------------------------------------------------------------- organisations, members, invites
+# ---------------------------------------------------------------- organizations, members, invites
 
 class OrgIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
@@ -245,7 +245,7 @@ async def list_orgs(u: dict = Depends(user)):
 @app.post("/api/orgs")
 async def create_org(body: OrgIn, u: dict = Depends(user)):
     if not u["is_super"]:
-        raise HTTPException(403, "only a hub administrator creates organisations")
+        raise HTTPException(403, "only a hub administrator creates organizations")
     if db.one(sa.select(db.orgs).where(db.orgs.c.slug == body.slug)):
         raise HTTPException(409, "slug taken")
     o = {"id": db.new_id("o_"), "name": body.name, "slug": body.slug, "created_at": time.time(), "branding": None, "ai_shared": False}
@@ -351,7 +351,7 @@ def _set_access(org_id: str, uid: str, all_sites: bool, location_ids: list[str])
     try:
         return auth.set_access(org_id, uid, all_sites, location_ids)
     except LookupError:
-        raise HTTPException(404, "not a member of this organisation")
+        raise HTTPException(404, "not a member of this organization")
     except ValueError as e:
         raise HTTPException(422, str(e))
 
@@ -578,13 +578,13 @@ async def invite_accept(code: str, body: AcceptIn, request: Request, response: R
     return {"user": auth.public_user(target), "orgs": auth.user_orgs(target["id"]), "org_id": org_id, "role": role, **access}
 
 
-# ---------------------------------------------------------------- sites and enrolment
+# ---------------------------------------------------------------- sites and enrollment
 
 class ClaimIn(BaseModel):
     code: str = Field(min_length=8, max_length=9)
     name: str = Field(min_length=1, max_length=120)
     location: str = Field("", max_length=200)
-    location_id: str | None = Field(None, max_length=24)   # the Site to enrol into; None = a new one-server Site
+    location_id: str | None = Field(None, max_length=24)   # the Site to enroll into; None = a new one-server Site
 
 
 @app.get("/api/orgs/{org_id}/sites")
@@ -996,7 +996,7 @@ async def location_cameras(location_id: str, u: dict = Depends(user)):
     for cam in cameras.for_location(location_id):
         srv = servers.get(cam["server_id"])
         if srv is None:
-            continue   # retired server (or a stale denormalised row)
+            continue   # retired server (or a stale denormalized row)
         up = bool(srv["online"]) and srv["id"] in registry.by_site
         out.append({**cam, "server_name": srv["name"], "server_online": up,
                     "online": up and bool(cam["stream_ready"]) and bool(cam["enabled"]) and not cam["missing_since"]})
@@ -1328,7 +1328,7 @@ async def action_execute(org_id: str, body: ActionExecIn, u: dict = Depends(user
     else:
         raise HTTPException(422, "plan_id or plan required")
     if not auth.allows(role, _verb_role(p["action"])):
-        raise HTTPException(403, f"needs {_verb_role(p['action'])} in this organisation")
+        raise HTTPException(403, f"needs {_verb_role(p['action'])} in this organization")
     want = (p["card"] or {}).get("confirm_name")
     if want and " ".join(str(body.confirm_name or "").split()).casefold() != " ".join(want.split()).casefold():
         raise HTTPException(400, f'type the server name "{want}" to confirm')

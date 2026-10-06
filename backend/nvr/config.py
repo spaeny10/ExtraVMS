@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     mediamtx_api: str = "http://127.0.0.1:9997"
     mediamtx_playback: str = "http://127.0.0.1:9996"
     mediamtx_rtsp: str = "rtsp://127.0.0.1:8554"
-    mediamtx_webrtc_port: int = 8889            # WHEP signalling; localhost only, the NVR proxies it (/api/whep)
+    mediamtx_webrtc_port: int = 8889            # WHEP signaling; localhost only, the NVR proxies it (/api/whep)
     webrtc_media_port: int = 8189               # WebRTC video (UDP, TCP fallback): forward this port for remote live view
     webrtc_public_hosts: list[str] = []         # extra public IPs/hostnames to offer; the one in the browser's URL is added automatically
     # MediaMTX RTSP readers need the generated internal user/password (settings table `mediamtx_reader`);
@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     # Parked vehicles (parked.py): the camera's analytics fire on shimmer/shadows near a parked machine and the
     # big, confident YOLO box around it "confirms" every one. Such events are rejected (reason in detections.rejected).
     parked_suppress: bool = True            # reject vehicle events whose YOLO box sat still while the camera saw motion
-    parked_max_move: float = 0.02           # YOLO box centre (and size) may wander this much of the frame and still be parked
+    parked_max_move: float = 0.02           # YOLO box center (and size) may wander this much of the frame and still be parked
     parked_cam_box_ratio: float = 0.25      # camera box smaller than this share of the YOLO box: the motion is not the vehicle
     parked_memory_min_events: int = 3       # static sightings (over >= 10 min) before a spot is remembered as a parking place
 
@@ -83,7 +83,7 @@ class Settings(BaseSettings):
     # Back-to-back fragments of one visit on a camera merge into one event before Qwen describes it (merge.py)
     track_merge_gap: float = 10.0           # a fragment starting within this of the previous one may merge
     merge_max_seconds: float = 300.0        # never grow one event beyond this
-    merge_max_dist: float = 0.25            # normalised centre distance between the last and first boxes
+    merge_max_dist: float = 0.25            # normalized center distance between the last and first boxes
     merge_reid_min: float = 0.75            # people: appearance similarity needed when the camera gave a new track id
     merge_long_gap: float = 180.0           # people: gaps up to this merge too if YOLO sees them standing there throughout
     merge_gap_step_s: float = 5.0           # one recorded frame checked every this many seconds across such a gap
@@ -140,7 +140,7 @@ class Settings(BaseSettings):
     hub_allow_insecure: bool = False                   # NVR_HUB_ALLOW_INSECURE=1: allow a plain ws:// hub other than localhost (dev only)
 
     # Direct-on-LAN (direct.py): a browser that can reach this server on its LAN fetches live/playback/frames
-    # straight from it, authorised by a short-lived token the hub mints, instead of through the hub tunnel.
+    # straight from it, authorized by a short-lived token the hub mints, instead of through the hub tunnel.
     direct_enabled: bool = True
     https_port: int = 8443                  # the same app over HTTPS (self-signed cert in data_dir/tls) for those browsers
     # Low-bitrate playback (/api/playback?q=sd): concurrent 720p/700 kbps transcodes. 0 = auto: 4 with NVENC, 2 on CPU

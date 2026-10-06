@@ -65,7 +65,7 @@ export function WidgetSettings({ widget, source, onSave, onClose }: {
         <>
           <label className="field"><span>Source</span>
             <select value={p.source} onChange={(e) => set(e.target.value === "site" ? { source: "site", site: source.sites()[0]?.id ?? "" } : { source: "digest", site: undefined })}>
-              <option value="digest">Organisation digest (all sites)</option><option value="site">One site's daily briefing</option></select></label>
+              <option value="digest">Organization digest (all sites)</option><option value="site">One site's daily briefing</option></select></label>
           {p.source === "site" && <label className="field"><span>Site</span>
             <select value={p.site} onChange={(e) => set({ site: e.target.value })}>{source.sites().map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}</select></label>}
         </>

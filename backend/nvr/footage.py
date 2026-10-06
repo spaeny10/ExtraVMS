@@ -39,7 +39,7 @@ LIVE_LAG_S = 60.0       # stay this far behind live (parts are still being writt
 CHUNK_S = 120.0         # seconds of video per indexing step, per camera
 DECODE_WIDTH = 1280
 MOMENT_GAP_S = 20.0
-# tile 0 = whole frame; 1-4 = overlapping quadrants (x0, y0, x1, y1), normalised
+# tile 0 = whole frame; 1-4 = overlapping quadrants (x0, y0, x1, y1), normalized
 TILES = [(0.0, 0.0, 1.0, 1.0), (0.0, 0.0, 0.6, 0.6), (0.4, 0.0, 1.0, 0.6), (0.0, 0.4, 0.6, 1.0), (0.4, 0.4, 1.0, 1.0)]
 
 SCHEMA = f"""

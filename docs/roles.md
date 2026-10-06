@@ -5,7 +5,7 @@ Who can do what, across the hub (hub.axiomvision.ai) and the servers it manages.
 ## The hierarchy roles apply to
 
 ```
-Customer  (an organisation: "Jetstream Systems")
+Customer  (an organization: "Jetstream Systems")
 └── Site  (a place: "Main Facility", with an address, coordinates, time zone, contacts, SOC monitoring)
     └── Server  (one Axiom Vision box at that Site)
         └── Camera
@@ -17,7 +17,7 @@ A person holds **one role per Customer**, and that role covers every Server and 
 |---|---|---|
 | **Customer role** (viewer, operator, admin, owner) plus a **Site scope** | the Customer's Members list | the customer's own people |
 | **Hub administrator** | a flag on the user | Axiom Vision staff who run the hub |
-| **SOC role** (operator, supervisor) | a flag on the user | Axiom Vision's monitoring centre staff |
+| **SOC role** (operator, supervisor) | a flag on the user | Axiom Vision's monitoring center staff |
 
 A user can hold more than one. The widest applicable access wins for each action.
 
@@ -36,7 +36,7 @@ Roles nest: each one includes everything below it.
 
 **Act** adds the things an operator does during a shift: PTZ, relays and presets; marking events (feedback such as false alarm or wrong class, editing or regenerating a synopsis, locking an event, watching a person or vehicle, naming identities, reprocessing); saved Find views, layouts and dashboards; briefings on demand; arming or disarming a Site's SOC monitoring for a short period with a reason; running fleet actions that the server's own rules allow an operator to run.
 
-**Configure** adds server and Site setup: cameras, zones and named places, a PTZ camera's settings (such as its return-home timer), retention (including applying a system-optimiser suggestion, which can change it), topology, remote AI, backups and restores, site rules; claiming a new server into the Customer, moving it between Sites, rotating its token, retiring or deleting it; creating, editing and deleting Sites, including address, map pin and time zone; a Site's SOC monitoring schedule, contacts and procedures.
+**Configure** adds server and Site setup: cameras, zones and named places, a PTZ camera's settings (such as its return-home timer), retention (including applying a system-optimizer suggestion, which can change it), topology, remote AI, backups and restores, site rules; claiming a new server into the Customer, moving it between Sites, rotating its token, retiring or deleting it; creating, editing and deleting Sites, including address, map pin and time zone; a Site's SOC monitoring schedule, contacts and procedures.
 
 **Manage the Customer** is admin and above with a *real* membership (see the SOC note below): adding and removing members, setting each member's role and Site scope, creating invites, reading the Customer's audit log, and deleting a Site that still has servers.
 
@@ -54,7 +54,7 @@ Granting: Account › Hub administrators (type the email of an existing account)
 
 ## SOC roles
 
-The Security Operations Centre is one internal team. A Customer opts a Site into monitoring (Site › Settings › Monitoring, with an arming schedule, holidays and overrides). SOC staff only ever see Customers that have at least one monitored Site.
+The Security Operations Center is one internal team. A Customer opts a Site into monitoring (Site › Settings › Monitoring, with an arming schedule, holidays and overrides). SOC staff only ever see Customers that have at least one monitored Site.
 
 | SOC role | In the SOC workstation | In monitored Customers |
 |---|---|---|
@@ -76,7 +76,7 @@ Granting: there is no screen for this yet. A hub administrator runs `python -m h
 
 ## Where roles are enforced
 
-The hub checks the role on every request, including video and API calls it tunnels to a server: the server receives the signed user and role and applies the same table, and anything the hub does not recognise as read-only needs admin, so a new server feature is never accidentally open to viewers. Direct-on-LAN playback uses a short-lived token minted by the hub that carries the same role.
+The hub checks the role on every request, including video and API calls it tunnels to a server: the server receives the signed user and role and applies the same table, and anything the hub does not recognize as read-only needs admin, so a new server feature is never accidentally open to viewers. Direct-on-LAN playback uses a short-lived token minted by the hub that carries the same role.
 
 Two paths do not go through the hub:
 

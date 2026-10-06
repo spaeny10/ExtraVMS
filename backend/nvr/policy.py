@@ -5,7 +5,7 @@ Rule shapes (cameras.policies, JSON list):
   -> a vehicle Qwen saw towing / hitched to something, whose fingerprint does not match one of the *named*
      vehicles in `allowed` (People & vehicles), breaks the rule.
     {"kind": "entry", "area": "South Exterior Door", "allowed": ["Shawn"], "priority": "high"}
-  -> a person whose track starts at that named place (an exterior door) and who is not recognised as one of
+  -> a person whose track starts at that named place (an exterior door) and who is not recognized as one of
      the named people in `allowed` breaks the rule. Checked right after verification (no Qwen needed).
 
   -> PPE zones (zones of type "ppe", ppe.py) are site rules too: a person who stayed in one without the
@@ -43,7 +43,7 @@ def labels_needed(camera: dict | None) -> set[str]:
 
 
 def prompt_lines(camera: dict | None) -> str | None:
-    """The rules in plain words for Qwen's threat judgement."""
+    """The rules in plain words for Qwen's threat judgment."""
     out = []
     for r in rules(camera):
         allowed = ", ".join(f"'{n}'" for n in r.get("allowed") or []) or "no vehicle"
@@ -92,7 +92,7 @@ def check(event_id: int, camera: dict | None = None) -> dict | None:
             allowed = [a.lower() for a in r.get("allowed") or []]
             if name and name.lower() in allowed:
                 continue
-            who = f"recognised as '{name}', who is not on the list" if name else "not a recognised person"
+            who = f"recognized as '{name}', who is not on the list" if name else "not a recognized person"
             broken = {"kind": "entry", "priority": r.get("priority", "high"),
                       "text": f"Entered through {r.get('area')}: {who} (allowed: {', '.join(r.get('allowed') or []) or 'nobody'})"}
             break
@@ -102,7 +102,7 @@ def check(event_id: int, camera: dict | None = None) -> dict | None:
             allowed = [a.lower() for a in r.get("allowed") or []]
             if name and name.lower() in allowed:
                 continue
-            who = f"recognised as '{name}', which is not allowed" if name else "not a recognised vehicle"
+            who = f"recognized as '{name}', which is not allowed" if name else "not a recognized vehicle"
             towed = (e.get("synopsis_json") or {}).get("towed") or r.get("asset", "equipment")
             broken = {"kind": "towing", "priority": r.get("priority", "high"),
                       "text": f"Unknown vehicle towing a {towed}: {who} to tow a {r.get('asset', 'equipment')} "

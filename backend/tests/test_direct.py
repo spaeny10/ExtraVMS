@@ -175,7 +175,7 @@ def test_read_only():
                          ("POST", "/api/cameras"), ("PATCH", "/api/events/1/feedback"), ("POST", "/api/whepx/a")]:
         r = run(call(method, path, headers=auth, json={}))
         assert r.status_code == 403 and r.json()["detail"] == "direct connection is read-only; use the hub", (method, path)
-    # WHEP signalling passes the middleware: the route itself answers (400 for a bad path, before any network)
+    # WHEP signaling passes the middleware: the route itself answers (400 for a bad path, before any network)
     r = run(call("POST", "/api/whep/BAD!", headers=auth, content=b"v=0"))
     assert r.status_code == 400
     # what the hub's proxy hides is hidden on a direct connection too

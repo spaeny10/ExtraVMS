@@ -10,7 +10,7 @@ the server's address (DNS rebinding) and then read the answers. The middleware i
 * `from_other_site`: a state-changing request must come from this server's own pages (Origin / Referer
   same-origin; failing those, Sec-Fetch-Site same-origin or none). Scripts and tools that send none of these
   headers (curl, the installer) still work.
-* `body_type_problem`: state-changing /api requests carry JSON (or SDP for WHEP signalling). A page cannot
+* `body_type_problem`: state-changing /api requests carry JSON (or SDP for WHEP signaling). A page cannot
   send application/json cross-origin without a CORS preflight (which this server refuses), so the simple
   text/plain, form and no-content-type bodies a cross-site form or `fetch(no-cors)` can send are rejected.
 * `ws_allowed`: the same Host and Origin rules for WebSockets, which CORS does not cover at all.
@@ -116,7 +116,7 @@ def from_other_site(headers, host_header: str | None) -> bool:
 
 
 def body_type_problem(method: str, path: str, headers) -> str | None:
-    """Why this state-changing /api request's body is refused, or None. JSON only (SDP for WHEP signalling);
+    """Why this state-changing /api request's body is refused, or None. JSON only (SDP for WHEP signaling);
     a body without any Content-Type is refused too (FastAPI would parse it as JSON). No route takes form or
     multipart uploads (config import is JSON)."""
     if method in SAFE_METHODS or not path.startswith("/api/"):

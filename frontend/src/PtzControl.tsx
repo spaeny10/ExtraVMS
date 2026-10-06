@@ -44,7 +44,7 @@ const PAD_KEY = "ptzPad";
 
 /**
  * PTZ mode over a live picture. Control is by mouse/finger on the transparent drag surface (drag = pan/tilt,
- * click = centre, wheel = zoom). A translucent pill in the corner holds presets, relay, input and Done; the
+ * click = center, wheel = zoom). A translucent pill in the corner holds presets, relay, input and Done; the
  * on-picture pad (big translucent arrows + zoom) is optional, toggled from the pill and remembered.
  */
 export function PtzOverlay({ cam, videoRef, active, onDone, fallbackAspect = 2592 / 1520, site = api }: {
@@ -106,7 +106,7 @@ export function PtzOverlay({ cam, videoRef, active, onDone, fallbackAspect = 259
 
   return (
     <>
-      {panTilt && <div ref={surface} className="ptz-surface" tabIndex={0} title="Drag to pan/tilt · click to centre · wheel to zoom · arrow keys"
+      {panTilt && <div ref={surface} className="ptz-surface" tabIndex={0} title="Drag to pan/tilt · click to center · wheel to zoom · arrow keys"
         style={rect ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : undefined}
         onClick={stopAll} onDoubleClick={stopAll} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
         onPointerDown={(e) => {
@@ -238,7 +238,7 @@ export function PtzSettings({ camera, onChanged }: { camera: Camera; onChanged?:
   if (caps.pan_tilt === false) {
     return (
       <div className="ptz-settings">
-        <p className="muted small">Fixed camera with a motorised lens: zoom and focus only, no pan/tilt or presets, so the home-view rules don't apply.
+        <p className="muted small">Fixed camera with a motorized lens: zoom and focus only, no pan/tilt or presets, so the home-view rules don't apply.
           {s.relay ? ` Relay output (${s.relay.mode}).` : ""}{s.input ? " Digital input." : ""} Zoom, relay and input are on the tile's 🕹 button.</p>
         <div className="row">
           {s.relay && <label className="field"><span>Relay label</span>
@@ -284,7 +284,7 @@ export function PtzSettings({ camera, onChanged }: { camera: Camera; onChanged?:
       <div className="field"><span>Presets</span>
         {info.presets.map((p) => (
           <div key={p.token} className="preset-row">
-            <span>{p.is_home ? "★ " : ""}{p.name}{p.system ? <span className="muted small"> · camera</span> : !p.known ? <span className="muted small" title="Position not learned yet: go to it once and the NVR will recognise it"> · not learned</span> : null}</span>
+            <span>{p.is_home ? "★ " : ""}{p.name}{p.system ? <span className="muted small"> · camera</span> : !p.known ? <span className="muted small" title="Position not learned yet: go to it once and the NVR will recognize it"> · not learned</span> : null}</span>
             <span className="spacer" />
             <button className="linkish" disabled={busy} onClick={() => run(api.ptzGoto(camera.id, p.token, true))}>Go to</button>
             {!p.system && <button className="linkish" disabled={busy} onClick={async () => {

@@ -1,9 +1,9 @@
 """Which cells of a coarse grid an event's object walked through, for the "paint a region" filter.
 
-The frame is a 32 x 18 grid in normalised coordinates (cell = row*32 + col). For every path sample the cell
+The frame is a 32 x 18 grid in normalized coordinates (cell = row*32 + col). For every path sample the cell
 under the object's feet (zones.foot) counts, plus the cells under the middle half of the box's bottom edge
 (a wide vehicle stands on several columns), plus a straight line between consecutive foot cells when they are
-not neighbours and the samples are close in time (a fast object can't skip a painted cell).
+not neighbors and the samples are close in time (a fast object can't skip a painted cell).
 
 Stored per event as a 72-byte bitmap in base64url without padding (96 chars, bit i = byte i//8, LSB first),
 identical to frontend/src/region.ts, so the UI filters by a bytewise AND with the painted cells.

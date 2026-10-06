@@ -3,7 +3,7 @@ import { BriefingCard } from "../../Ask";
 import type { DashboardSource, SourceDigest } from "../source";
 import type { Widget } from "../types";
 
-/** The organisation digest, or one site's own daily briefing (through that site's API). */
+/** The organization digest, or one site's own daily briefing (through that site's API). */
 export function BriefingWidget({ widget: w, source }: { widget: Widget<"briefing">; source: DashboardSource }) {
   const p = w.props;
   if (p.source === "site") {

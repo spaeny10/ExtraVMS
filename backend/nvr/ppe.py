@@ -111,7 +111,7 @@ class Detector:
         return self._model
 
     def detect(self, images: list[np.ndarray]) -> list[list[dict]]:
-        """Per image: [{kind: (item, worn) | "person", conf, box (normalised l,t,r,b)}] for the classes we use."""
+        """Per image: [{kind: (item, worn) | "person", conf, box (normalized l,t,r,b)}] for the classes we use."""
         if not images:
             return []
         m = self._load()
@@ -190,7 +190,7 @@ SYSTEM = ("You check one person in workplace safety camera crops for protective 
           "person's head (bare, cap, beanie, hood, hard hat...), then whether it is a hard hat: a rigid plastic safety helmet "
           "with a brim or peak. A baseball cap, beanie, hood, turban or sun hat is NOT a hard hat; a hard hat held in the hand "
           "or hanging from a belt is NOT worn. Then describe the upper-body clothing and whether it is high-visibility: a "
-          "fluorescent yellow/orange/lime vest, jacket or shirt with reflective strips counts; plain coloured clothing, an "
+          "fluorescent yellow/orange/lime vest, jacket or shirt with reflective strips counts; plain colored clothing, an "
           "orange overall without reflective strips, or a vest carried in the hand does not. Answer unclear when the head or "
           "torso is hidden, cut off or too small to judge.")
 VLM_KEYS = {"hard_hat": "hard_hat", "vest": "hi_vis_vest"}

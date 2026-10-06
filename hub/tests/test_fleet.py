@@ -81,7 +81,7 @@ def hub_server():
 
 
 def _enrol(base, owner, org, agent_app, name, loop):
-    """Run a HubAgent for `agent_app` in `loop`, enrol it, return (agent, site)."""
+    """Run a HubAgent for `agent_app` in `loop`, enroll it, return (agent, site)."""
     from nvr import hub_agent
     from nvr.db import db as site_db
     site_db.set_setting("hub_url", base.replace("http://", "ws://") + "/agent")

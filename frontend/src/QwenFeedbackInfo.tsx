@@ -67,7 +67,7 @@ export function QwenFeedbackInfo() {
               <div>
                 <strong>Corrected synopses</strong> (event → Edit): the 3 most recent corrections on a camera are shown to
                 Qwen as examples ("the model wrote X, the operator corrected it to Y"), so it copies your style, detail
-                and threat judgement.
+                and threat judgment.
                 <div className="info-status">{stats ? `${stats.corrected} correction${stats.corrected === 1 ? "" : "s"} so far` : "…"}</div>
               </div>
             </div>
@@ -80,7 +80,7 @@ export function QwenFeedbackInfo() {
               <span className="info-icon">📦</span>
               <div>
                 👍/👎 with reasons, detection verdicts (correct / false alarm / wrong class), notes and corrections are saved
-                as a labelled dataset. <strong>Qwen doesn't read these yet.</strong> They can later be used to fine-tune Qwen
+                as a labeled dataset. <strong>Qwen doesn't read these yet.</strong> They can later be used to fine-tune Qwen
                 (a LoRA adapter) or YOLO offline. That's a separate, manual step, not automatic.
                 <div className="info-status">
                   {stats ? `👍 ${stats.up} · 👎 ${stats.down}` : "…"}
@@ -99,7 +99,7 @@ export function QwenFeedbackInfo() {
             </ul>
             <p className="muted small">Also: events you gave feedback on are kept past the continuous-recording window by retention.</p>
             <p className="muted small">
-              <strong>Cross-camera journeys:</strong> a re-ID model matches a person's appearance on neighbouring cameras, then Qwen
+              <strong>Cross-camera journeys:</strong> a re-ID model matches a person's appearance on neighboring cameras, then Qwen
               confirms the match. <em>Not the same person</em> on an event's journey splits it, and Qwen is never asked about that pair again.
             </p>
           </section>

@@ -3,7 +3,7 @@
  * keydown → chordReducer → run(command), and the help overlay renders the same KEYMAP the reducer obeys.
  *
  * Single keys act at once; `g` starts a go-to (g l live, g t timeline, g r respond, g d full details); a disposition
- * group key (t / f / n from the catalogue) starts a disposition chord finished by its digit (F·1 = false alarm…).
+ * group key (t / f / n from the catalog) starts a disposition chord finished by its digit (F·1 = false alarm…).
  * Leaders time out after 2.5 s. Chords that change the record (dispositions, SOP digits) refuse unless the incident is
  * claimed by me, so a stray key on someone else's incident does nothing but say why. None of these keys is one the
  * Timeline uses (space, arrows, + -, [ ], 0–9 inside the Timeline): the page ignores keys typed inside it.
@@ -22,7 +22,7 @@ export type ChordContext = {
   tab: "respond" | "resolve";
   hasIncident: boolean;
   claimedByMe: boolean;
-  /** from the dispositions catalogue */
+  /** from the dispositions catalog */
   groups: Pick<DispositionGroup, "key" | "dispositions" | "label">[];
 };
 
@@ -37,7 +37,7 @@ export type Command =
 
 export type ChordResult = { state: ChordState; command: Command | null; /** the page should preventDefault */ handled: boolean };
 
-/** What the help overlay lists (disposition chords are added from the catalogue). `aria` is aria-keyshortcuts syntax. */
+/** What the help overlay lists (disposition chords are added from the catalog). `aria` is aria-keyshortcuts syntax. */
 export const KEYMAP: { keys: string; aria: string; label: string; group: "Queue" | "Incident" | "Go to" | "Console" }[] = [
   { keys: "j / k", aria: "J K", label: "Next / previous incident in the queue", group: "Queue" },
   { keys: "Enter", aria: "Enter", label: "Open the highlighted incident", group: "Queue" },

@@ -1,6 +1,6 @@
 """Who may do what through the proxy. Roles nest: viewer < operator < admin < owner.
 
-viewer   watch: every GET, the live WebSocket, WHEP signalling, media, playback, frames
+viewer   watch: every GET, the live WebSocket, WHEP signaling, media, playback, frames
 operator act: PTZ / relay / presets, naming people and vehicles, feedback and synopsis edits, locks,
          Ask and clip chat, reprocess, briefings on demand
 admin    configure: cameras, zones, retention, topology, remote AI, backups, site rules

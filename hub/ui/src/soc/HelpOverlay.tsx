@@ -1,5 +1,5 @@
 /**
- * `?`: every shortcut, from the same KEYMAP the chord reducer obeys plus the disposition chords from the catalogue,
+ * `?`: every shortcut, from the same KEYMAP the chord reducer obeys plus the disposition chords from the catalog,
  * so the help can't drift from what the keys do. Focus moves into the dialog and back to where it was on close.
  */
 import { useEffect, useRef } from "react";

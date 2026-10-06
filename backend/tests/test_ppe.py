@@ -24,7 +24,7 @@ CAM = {"id": "cam1", "name": "Site gate", "host": "10.0.0.5", "onvif_port": 80, 
        "main_path": "/main", "sub_path": "/sub", "enabled": 1, "zones": [YARD], "retention_days": None, "scene_notes": "",
        "retention_policy": None, "policies": []}
 db.upsert_camera(CAM)
-PERSON = [0.4, 0.4, 0.5, 0.8]   # normalised person box; feet at y=0.8, inside the Yard
+PERSON = [0.4, 0.4, 0.5, 0.8]   # normalized person box; feet at y=0.8, inside the Yard
 
 
 def walk(start, secs, inside=True, step=0.5):

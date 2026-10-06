@@ -13,11 +13,11 @@ export type ToolbarProps = {
   onPublish: (shared: boolean) => void; onSetDefault: () => void;
 };
 
-/** Dashboard picker and edit controls, modelled on the Timeline's layout bar. */
+/** Dashboard picker and edit controls, modeled on the Timeline's layout bar. */
 export function DashboardToolbar(p: ToolbarProps) {
   return (
     <div className="dash-toolbar">
-      <select value={p.currentId ?? ""} onChange={(e) => p.onSelect(e.target.value || null)} title="Dashboards: yours and the organisation's shared ones">
+      <select value={p.currentId ?? ""} onChange={(e) => p.onSelect(e.target.value || null)} title="Dashboards: yours and the organization's shared ones">
         <option value="">Default (generated)</option>
         {p.list.map((d) => <option key={d.id} value={d.id}>{d.name}{d.shared ? " · shared" : ""}</option>)}
       </select>
@@ -36,7 +36,7 @@ export function DashboardToolbar(p: ToolbarProps) {
       {p.currentId && p.canEdit && !p.dirty && <button className="ghost small" onClick={p.onRename}>Rename</button>}
       {p.currentId && p.canEdit && !p.dirty && <button className="ghost small" onClick={p.onDelete}>Delete</button>}
       {p.currentId && p.canPublish && !p.dirty && (
-        <button className="ghost small" onClick={() => p.onPublish(!p.currentShared)} title={p.currentShared ? "Make this your private dashboard again" : "Share with everyone in the organisation (read-only for them)"}>
+        <button className="ghost small" onClick={() => p.onPublish(!p.currentShared)} title={p.currentShared ? "Make this your private dashboard again" : "Share with everyone in the organization (read-only for them)"}>
           {p.currentShared ? "Unpublish" : "Publish to org"}
         </button>
       )}

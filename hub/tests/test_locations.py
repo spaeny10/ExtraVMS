@@ -60,7 +60,7 @@ def test_location_crud_and_moves(client, superuser):
 
 
 def _pending_claim(code: str) -> None:
-    """A server waiting to be enrolled: the claims row plus a parked connection (enrol tolerates a dummy)."""
+    """A server waiting to be enrolled: the claims row plus a parked connection (enroll tolerates a dummy)."""
     db.insert(db.claims, {"code": code, "hint": {"hostname": "box", "cameras": [], "version": "1.0"}, "agent_ip": "10.0.0.9",
                           "first_seen_at": time.time(), "expires_at": time.time() + 900, "consumed_site_id": None})
     agents.registry.pending[code] = SimpleNamespace()

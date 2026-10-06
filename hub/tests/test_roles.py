@@ -17,7 +17,7 @@ def test_role_table_reads_right():
     assert required_role("PUT", "/api/find/views") == "operator"          # Find saved views
     assert required_role("GET", "/api/events/summary") == "viewer"
     assert required_role("POST", "/api/some/new/thing") == "admin"     # unknown writes need admin
-    # the system optimiser: hiding a suggestion is an operator's call, applying one changes configuration
+    # the system optimizer: hiding a suggestion is an operator's call, applying one changes configuration
     assert required_role("POST", "/api/advisor/dismiss") == "operator"
     assert required_role("POST", "/api/advisor/undismiss") == "operator"
     assert required_role("POST", "/api/advisor/apply") == "admin"

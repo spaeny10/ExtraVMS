@@ -38,7 +38,7 @@ cd frontend; npm run build    # production build served by the backend
 | `backend/nvr/mediamtx.py` | Generates `runtime/mediamtx.yml` from the camera table, supervises MediaMTX, playback API |
 | `backend/nvr/ingest.py` | Metadata RTP reader (via MediaMTX) and ONVIF PullPoint event puller, one thread each per camera |
 | `backend/nvr/tracker.py` | Camera ObjectId tracks become events; zone filter; rule events attached |
-| `backend/nvr/verifier.py` | Clip → frames at track timestamps → YOLO → IoU/centre match with the camera boxes |
+| `backend/nvr/verifier.py` | Clip → frames at track timestamps → YOLO → IoU/center match with the camera boxes |
 | `backend/nvr/synopsis.py` | Dedicated `ollama serve` on :11435 pinned to GPU 1; Qwen JSON synopsis; embeddings |
 | `backend/nvr/pipeline.py` | Queues and workers; crash recovery |
 | `backend/nvr/retention.py` | Per-camera max age plus free-space floor for recordings; separate retention for event clips |
@@ -159,7 +159,7 @@ with a label and an expiry). The hub emails nothing: copy the link and send it. 
 person in, or creates their account, and adds them; accepting never narrows an existing member's role or Sites.
 
 **Where things are**: Sites lists every Site with its servers and rollups; a Site's tabs are Live, Timeline, Find,
-Alerts, Servers and Settings. Customer → Sites creates, renames and deletes Sites; Customer → Servers enrols servers
+Alerts, Servers and Settings. Customer → Sites creates, renames and deletes Sites; Customer → Servers enrolls servers
 ("Add server" with the claim code from the server's Settings → System → Cloud hub), retires and restores them; a
 server's panel (Site → Servers → the server) moves it to another Site. Customer → Actions (`/customer/actions`) is the
 Fleet actions reference page (below). Deployment and upgrades: `hub/DEPLOY.md`.

@@ -355,7 +355,7 @@ class AgentRegistry:
             if conn.site and conn.site["org_id"] == org["id"]:
                 await conn.send({"t": "vlm", "vlm": self.vlm_config(org, conn.token, conn.site_id)})
 
-    # ---- enrolment from the UI
+    # ---- enrollment from the UI
     async def enrol(self, code: str, site: dict, token: str) -> bool:
         """Hand the device token to the parked connection (if it's still there) and close it."""
         conn = self.pending.pop(code.upper(), None)

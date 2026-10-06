@@ -1,5 +1,5 @@
 """SOC routes: SOC staff management, per-Site monitoring and arming, contacts and procedures, the dispositions
-catalogue (stage 1), and the incident queue, its socket and operator presence (stage 2). The incident engine itself
+catalog (stage 1), and the incident queue, its socket and operator presence (stage 2). The incident engine itself
 is soc.py; these routes check who may act and translate soc.SocError into HTTP errors.
 
 Who may do what:

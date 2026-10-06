@@ -6,7 +6,7 @@ and the hub sends HTTP requests which are answered by calling this process's own
 no loopback socket, streaming bodies (Ask NDJSON, fMP4 playback) flow chunk by chunk under the credit window
 of tunnelproto, and a hub-side abort cancels the request task.
 
-Enrolment: an unenrolled site connects with `Authorization: Claim <code>` and shows the code on Settings →
+Enrollment: an unenrolled site connects with `Authorization: Claim <code>` and shows the code on Settings →
 System; when the owner enters it at the hub, the hub answers `enrolled` with a device token, which is stored
 in the settings table and used as `Authorization: Bearer` from then on. The hub also pushes shared-AI
 (`vlm`) and TURN configuration, which are applied at runtime and remembered.
@@ -39,7 +39,7 @@ CLAIM_TTL_S = 15 * 60
 # remote-VLM settings the operator pinned in .env (captured before the hub ever assigns them at runtime)
 _ENV_PINNED = frozenset(settings.model_fields_set) & {"remote_vlm_url", "remote_vlm_key", "remote_vlm_model"}
 CLAIM_ALPHABET = string.ascii_uppercase.replace("O", "").replace("I", "") + "23456789"
-IN_PROCESS_CLIENT = ("hub", 0)   # scope["client"] of a tunnelled request: for logs only, NOT proof of the tunnel
+IN_PROCESS_CLIENT = ("hub", 0)   # scope["client"] of a tunneled request: for logs only, NOT proof of the tunnel
 # Proof that a request came down the tunnel: a private object in the ASGI scope. scope["client"] can be spoofed
 # (uvicorn rewrites it from X-Forwarded-For when proxy headers are on), but no network request can put an
 # object of ours into its scope, so every tunnel-only check uses is_tunnel(), never the client tuple.
@@ -116,7 +116,7 @@ class HubAgent:
             if c and self._ws is not None and self._parked_code == c["code"]:
                 # The hub has this connection parked under this code: keep showing (and extending) the same code
                 # while it stays connected. Rotating it here left the page showing a code the hub had never seen,
-                # so "Enrol server" stayed disabled (2026-10-06, IS-400BX-001).
+                # so "Enroll server" stayed disabled (2026-10-06, IS-400BX-001).
                 c = {**c, "expires": time.time() + CLAIM_TTL_S}
             else:
                 c = new_claim()
@@ -132,7 +132,7 @@ class HubAgent:
                 "vlm_managed": bool(db.get_setting("hub_vlm"))}
 
     async def configure(self, hub_url: str | None = None, unenrol: bool = False) -> None:
-        """Set the hub address and/or unenrol. A NEW address always unenrols: the device token, site id, shared-AI
+        """Set the hub address and/or unenroll. A NEW address always unenrolls: the device token, site id, shared-AI
         and TURN settings belong to the hub that issued them and must never be sent to (or used with) another
         one, so the site shows a fresh claim code and has to be claimed at the new hub. ValueError on a bad URL."""
         if hub_url is not None:
@@ -272,7 +272,7 @@ class HubAgent:
             await self._send({"t": "rotated"})
             await self.reconnect()
         elif t == "revoked":
-            log.warning("hub: enrolment revoked (%s)", m.get("reason", ""))
+            log.warning("hub: enrollment revoked (%s)", m.get("reason", ""))
             await self.configure(unenrol=True)
         elif t == "vlm":
             db.set_setting("hub_vlm", m.get("vlm"))

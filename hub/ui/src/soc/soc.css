@@ -63,7 +63,7 @@ kbd, .soc-kbd { display: inline-block; font: 600 11px/1.4 ui-monospace, SFMono-R
 .soc-quiet { margin-top: 14px; }
 .soc-quiet > summary { cursor: pointer; padding: 4px 0; }
 
-/* SLA pill: tone by colour AND text (the pill always says left/over; breach adds ⚠) */
+/* SLA pill: tone by color AND text (the pill always says left/over; breach adds ⚠) */
 .soc-sla { font: 600 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 0 7px; border-radius: 99px; border: 1px solid var(--border); white-space: nowrap; }
 .soc-sla.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 50%, transparent); }
 .soc-sla.warn { color: #fff; background: var(--t-medium); border-color: var(--t-medium); }
@@ -173,7 +173,7 @@ kbd, .soc-kbd { display: inline-block; font: 600 11px/1.4 ui-monospace, SFMono-R
 .soc-tile { display: grid; gap: 2px; padding: 10px 12px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); }
 .soc-tile-value { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .soc-tile-name { font-size: 12px; color: var(--muted); }
-/* red when something is past its SLA; the ⚠ in the name says it without colour */
+/* red when something is past its SLA; the ⚠ in the name says it without color */
 .soc-tile.hot { background: color-mix(in srgb, var(--t-high) 22%, var(--panel)); border-color: var(--t-high); }
 .soc-tile.hot .soc-tile-name { color: var(--text); font-weight: 600; }
 .soc-tiles.small .soc-tile-value { font-size: 18px; }

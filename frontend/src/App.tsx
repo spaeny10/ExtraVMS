@@ -137,7 +137,7 @@ export default function App() {
     };
   }, [loadCameras]);
   // Back to the hub: through the hub it is this origin (this server's Site, when the hub said which); on the
-  // site itself, the address the site dialled into
+  // site itself, the address the site dialed into
   const hubHref = BASE ? (hub?.location_id ? `/sites/${encodeURIComponent(hub.location_id)}/servers` : "/") : hub?.enrolled ? hub.hub_url.replace(/^ws(s?):\/\//, "http$1://").replace(/\/agent\/?$/, "/") : null;
 
   const online = cameras.filter((c) => c.status?.stream_ready).length;

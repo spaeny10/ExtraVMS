@@ -30,7 +30,7 @@ def test_areas_never_filter():
     assert zones.allowed(hallway, zl) and zones.allowed((0.7, 0.4), zl)
     assert zones.path_allowed([[0, *box(0.45, 0.7), 0.9]], zl)
     img = np.full((90, 160, 3), 200, np.uint8)
-    assert (zones.mask_frame(img, zl) == img).all()          # nothing greyed out for YOLO
+    assert (zones.mask_frame(img, zl) == img).all()          # nothing grayed out for YOLO
     # mixed with a real mask: the mask still applies, areas still don't
     zl = zones.normalize([DOOR, MASK])
     assert not zones.allowed((0.5, 0.9), zl) and zones.allowed((0.45, 0.7), zl)

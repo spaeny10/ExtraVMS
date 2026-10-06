@@ -3,14 +3,14 @@
 Providers:
   * OpenStreetMap Nominatim (HUB_GEOCODER_URL points at a self-hosted Nominatim or any endpoint that speaks its /search
     and /reverse jsonv2 API; HUB_GEOCODER_KEY, when set, is sent as `key=` for hosted ones that want it). Its usage
-    policy, honoured here: an identifying User-Agent and at most one request a second for the whole hub (an asyncio
+    policy, honored here: an identifying User-Agent and at most one request a second for the whole hub (an asyncio
     lock plus a sleep between calls). OSM often misses US rural/highway addresses as people write them ("10187 SW US
     HWY 54"), so an empty answer is retried with rewritten forms (nominatim_variants: "US-54", "Highway", no
     direction before a highway, no ZIP).
   * The US Census Bureau geocoder (free, no key; HUB_CENSUS_URL, "off" disables it), which resolves US street
     addresses as typed. Asked first for anything that looks like a US street address (us_street_first), otherwise as
     a fallback for street addresses. No published rate limit; kept to a few requests a second.
-The first provider with an answer wins; results are cached in kv by normalised query for 30 days, so the same address
+The first provider with an answer wins; results are cached in kv by normalized query for 30 days, so the same address
 is never asked twice. Every failure degrades to [] / None: a Site page never 500s because a geocoder is down.
 
 Time zones come from the coordinates offline (timezonefinder), never from a provider.
@@ -400,7 +400,7 @@ def provider_order(q: str) -> list[str]:
 
 
 async def search(q: str, limit: int = 5) -> list[dict]:
-    """Up to `limit` candidates for a free-text address (cached by normalised query). The first provider (see
+    """Up to `limit` candidates for a free-text address (cached by normalized query). The first provider (see
     provider_order) with an answer wins."""
     nq = normalise(q)
     if len(nq) < 3:

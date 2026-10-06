@@ -15,7 +15,7 @@ describe("edgeFade", () => {
 });
 
 describe("centreTab", () => {
-  it("centres a tab past the right edge", () => {
+  it("centers a tab past the right edge", () => {
     // strip 355 wide, 520 of tabs; a 90 px tab 400 px from the visible left edge
     expect(centreTab(0, 355, 520, 400, 90)).toBe(165);       // clamped: can't scroll past the end
     expect(centreTab(0, 355, 520, 250, 80)).toBe(113);

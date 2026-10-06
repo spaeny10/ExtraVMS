@@ -8,12 +8,12 @@ HailoRT and the HEF). HailoYOLO then answers
     model.predict(images, imgsz=, conf=, device=, verbose=, classes=)
         -> [result.boxes.xyxyn / .cls / .conf]   one per image, each an ndarray (so .tolist() works)
 
-with boxes normalised to the ORIGINAL image: frames are letterboxed to the HEF's fixed input (imgsz is ignored),
+with boxes normalized to the ORIGINAL image: frames are letterboxed to the HEF's fixed input (imgsz is ignored),
 run one at a time, and the boxes mapped back. The Model Zoo HEFs end in Hailo's on-chip NMS, whose output
 (HAILO_NMS_BY_CLASS, float32) is parsed here; a HEF with a plain decoded head ([cx, cy, w, h, class scores...]
 rows) goes through numpy NMS instead.
 
-The device and the configured model stay open for the life of the object; calls are serialised with a lock (the
+The device and the configured model stay open for the life of the object; calls are serialized with a lock (the
 verifier runs everything on one executor thread anyway). Only the parsing/geometry is importable without the
 hardware: hailo_platform is imported in HailoYOLO.__init__.
 """
@@ -39,7 +39,7 @@ COCO_NAMES = ["person", "bicycle", "car", "motorcycle", "airplane", "bus", "trai
               "scissors", "teddy bear", "hair drier", "toothbrush"]
 NAMES = dict(enumerate(COCO_NAMES))
 
-PAD_VALUE = 114          # ultralytics' letterbox grey
+PAD_VALUE = 114          # ultralytics' letterbox gray
 NMS_SCORE_FLOOR = 0.1    # on-chip NMS keeps everything above this; predict(conf=) filters further
 NMS_IOU = 0.7            # ultralytics' default IoU for NMS
 MAX_DET = 300            # ultralytics' default max detections per image
@@ -48,7 +48,7 @@ MAX_DET = 300            # ultralytics' default max detections per image
 # ---------------------------------------------------------------- geometry
 
 def letterbox(img: np.ndarray, size: tuple[int, int]) -> tuple[np.ndarray, float, float, float]:
-    """Resize keeping the aspect ratio and pad to size=(h, w) with grey, centred (as ultralytics does).
+    """Resize keeping the aspect ratio and pad to size=(h, w) with gray, centered (as ultralytics does).
     Returns (padded image, scale, pad_x, pad_y): input pixel = original pixel * scale + pad."""
     h, w = img.shape[:2]
     th, tw = size
@@ -63,7 +63,7 @@ def letterbox(img: np.ndarray, size: tuple[int, int]) -> tuple[np.ndarray, float
 
 
 def unletterbox(xyxy_in: np.ndarray, scale: float, pad_x: float, pad_y: float, orig_w: int, orig_h: int) -> np.ndarray:
-    """Boxes in input pixels (N, 4 x1 y1 x2 y2) -> normalised x1 y1 x2 y2 of the original image, clipped to [0, 1]."""
+    """Boxes in input pixels (N, 4 x1 y1 x2 y2) -> normalized x1 y1 x2 y2 of the original image, clipped to [0, 1]."""
     b = np.asarray(xyxy_in, dtype=np.float32).reshape(-1, 4).copy()
     b[:, [0, 2]] = (b[:, [0, 2]] - pad_x) / scale / orig_w
     b[:, [1, 3]] = (b[:, [1, 3]] - pad_y) / scale / orig_h
@@ -74,7 +74,7 @@ def unletterbox(xyxy_in: np.ndarray, scale: float, pad_x: float, pad_y: float, o
 
 def parse_nms_by_class(raw: np.ndarray, num_classes: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Hailo HAILO_NMS_BY_CLASS float32 buffer for one frame: for each class, a count followed by that many
-    [y_min, x_min, y_max, x_max, score] (normalised to the model input). Returns (yxyx (N, 4), score (N,), cls (N,))."""
+    [y_min, x_min, y_max, x_max, score] (normalized to the model input). Returns (yxyx (N, 4), score (N,), cls (N,))."""
     flat = np.asarray(raw, dtype=np.float32).reshape(-1)
     boxes, scores, classes = [], [], []
     off = 0
@@ -168,7 +168,7 @@ def to_result(xyxy_in: np.ndarray, score: np.ndarray, cls: np.ndarray, scale: fl
 
 def frame_result(raw: np.ndarray, kind: str, num_classes: int, input_hw: tuple[int, int], scale: float, pad_x: float,
                  pad_y: float, orig_shape: tuple[int, int], conf: float, classes) -> Result:
-    """One frame's raw device output -> Result. kind: "nms_by_class" (normalised yxyx) or "dense" (input pixels)."""
+    """One frame's raw device output -> Result. kind: "nms_by_class" (normalized yxyx) or "dense" (input pixels)."""
     ih, iw = input_hw
     if kind == "nms_by_class":
         yxyx, score, cls = parse_nms_by_class(raw, num_classes)

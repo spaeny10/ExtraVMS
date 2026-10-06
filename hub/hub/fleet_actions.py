@@ -73,7 +73,7 @@ _COPY_HISTORY = {"key": "copy_history", "label": "Copy event history",
 _SKIP_STREAM = {"key": "skip_stream_check", "label": "Skip the stream check", "default": False,
                 "title": "Move even if the destination cannot pull the stream yet (e.g. the camera is offline at the source too)"}
 _MOVE_MOVES = ["Each camera with its password, zones, named places and site rules",
-               "Neighbour links between the moved cameras",
+               "Neighbor links between the moved cameras",
                "Named people and vehicles, with their re-ID / vehicle fingerprints (merged by name; names the destination knows are kept)",
                "What the source learned about each camera: the \"what's normal\" baseline, parked-spot memory and operator synopsis corrections",
                "Hub dashboard widgets, camera groups and open alerts that point at the camera, and the source's saved Find views for it",
@@ -180,7 +180,7 @@ MOVES = ("move_cameras", "migrate_site")
 
 SAFETY = [
     "Nothing happens until Confirm on the card. Plans expire after 10 minutes and run once.",
-    "Only an admin of the organisation can confirm (lock_footage: operator). Anyone in the org may see a card.",
+    "Only an admin of the organization can confirm (lock_footage: operator). Anyone in the org may see a card.",
     "Migrate and Retire also need the source server's name typed into the card.",
     "Questions (\"how many people today?\") are never actions: they go to the sites' assistants as before.",
     "Names are matched against the org's real Sites, servers and cameras; a Site with several servers is asked about "
@@ -246,7 +246,7 @@ class ActionError(Exception):
 
 
 def reference(u: dict, org_id: str, is_admin: bool) -> dict:
-    """The reference page's content (hub UI → Organisation → Fleet actions): every verb from VERBS, the safety
+    """The reference page's content (hub UI → Organization → Fleet actions): every verb from VERBS, the safety
     rules, the capacity notes and (for admins) the last 50 fleet actions with whether Undo is still possible."""
     verbs = [{"action": k, **{f: v.get(f) for f in ("title", "role", "confirm_name", "examples", "moves", "stays", "undo")},
               "options": [o["label"] for o in v.get("options") or []], "inputs": [i["label"] for i in v.get("inputs") or []]}
@@ -1003,7 +1003,7 @@ async def preview(p: dict, u: dict) -> dict:
             links = await _get(src_conn, u, "/api/topology")
             n = sum(1 for l in links if l.get("cam_a") in ids and l.get("cam_b") in ids) if isinstance(links, list) else 0
             if n:
-                moves.append(f"{_plural(n, 'neighbour link')} between the moved cameras")
+                moves.append(f"{_plural(n, 'neighbor link')} between the moved cameras")
         if cams:
             moves.append(f"Named people and vehicles with their fingerprints, merged into {dst['name']} by name (names it already knows are kept)")
             moves.append(f"What {src['name']} learned about each camera: its \"what's normal\" baseline, parked-spot memory and operator corrections")

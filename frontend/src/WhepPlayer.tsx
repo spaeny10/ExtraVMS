@@ -48,7 +48,7 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
 
   useEffect(() => {
     let pc: RTCPeerConnection | null = null;
-    let cancelled = false;
+    let canceled = false;
     let retryTimer: number | undefined;
     let noFramesTimer: number | undefined;
     setSize("");
@@ -78,7 +78,7 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
           noFramesTimer = window.setTimeout(async () => {
             const stats = pc ? [...(await pc.getStats()).values()] : [];
             const inbound = stats.find((s) => s.type === "inbound-rtp" && s.kind === "video") as { framesDecoded?: number } | undefined;
-            if (!cancelled && inbound && !inbound.framesDecoded) unsupported.current?.();
+            if (!canceled && inbound && !inbound.framesDecoded) unsupported.current?.();
           }, 8000);
         }
         if (["failed", "disconnected"].includes(pc.connectionState)) retry();
@@ -96,7 +96,7 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
             }
           };
         });
-        // same-origin signalling via the NVR (works over HTTPS); media flows directly from MediaMTX
+        // same-origin signaling via the NVR (works over HTTPS); media flows directly from MediaMTX
         const r = await fetch(site.whepUrl(path), {
           method: "POST",
           headers: { "Content-Type": "application/sdp" },
@@ -106,13 +106,13 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
           const text = await r.text();
           // MediaMTX rejects offers that lack the track's codec ("codecs not supported by client").
           if (r.status === 400 && /codec/i.test(text) && unsupported.current) {
-            cancelled = true;
+            canceled = true;
             unsupported.current();
             return;
           }
           throw new Error(`WHEP ${r.status}`);
         }
-        if (cancelled) return;
+        if (canceled) return;
         await pc.setRemoteDescription({ type: "answer", sdp: await r.text() });
       } catch {
         retry();
@@ -120,9 +120,9 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
     };
 
     const retry = () => {
-      if (cancelled) return;
+      if (canceled) return;
       setState("error");
-      if (++failures.current >= 2 && fallback.current) { cancelled = true; pc?.close(); fallback.current(); return; }
+      if (++failures.current >= 2 && fallback.current) { canceled = true; pc?.close(); fallback.current(); return; }
       pc?.close();
       pc = null;
       clearTimeout(retryTimer);
@@ -131,7 +131,7 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
 
     start();
     return () => {
-      cancelled = true;
+      canceled = true;
       clearTimeout(retryTimer);
       clearTimeout(noFramesTimer);
       pc?.close();

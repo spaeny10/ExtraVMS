@@ -440,7 +440,7 @@ export function makeApi(base: string, opts: ApiOptions = {}) {
   };
   return {
   base,
-  // ---- URLs (media, frames, playback, WebRTC signalling, live socket)
+  // ---- URLs (media, frames, playback, WebRTC signaling, live socket)
   /** an event's media file; `w` asks for a thumbnail of the snapshot at most that wide (cards, strips, covers) */
   media: (e: { id: number }, name: string, w?: number) => u(`/api/events/${e.id}/media/${name}${w ? `?w=${w}` : ""}`),
   frameUrl: (camera: string, t: number, w = 960, exact = false) =>

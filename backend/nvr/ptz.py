@@ -4,8 +4,8 @@ Analytics on a PTZ camera only make sense at one view: the operator marks a pres
 named places, painted regions and the learned baseline apply there. Events while the camera is turned away
 are still recorded and verified, but tagged with the preset they were captured at (or "away").
 
-"Where is it": preset positions reported by GetPresets are in degrees while GetStatus is normalised, so they
-can't be compared. Instead, after each GotoPreset completes we capture the normalised position into
+"Where is it": preset positions reported by GetPresets are in degrees while GetStatus is normalized, so they
+can't be compared. Instead, after each GotoPreset completes we capture the normalized position into
 ptz_config.preset_pos[token]; the live position within POS_TOL of a stored one means "at that preset".
 
 Move protocol: the UI re-sends ContinuousMove (camera timeout PT2S) every 0.5 s while a control is held and
@@ -27,7 +27,7 @@ from .onvif_soap import Onvif, OnvifError, find, find_all, text
 
 log = logging.getLogger("nvr.ptz")
 
-POS_TOL = 0.02          # normalised pan/tilt/zoom distance that still counts as "at" a preset
+POS_TOL = 0.02          # normalized pan/tilt/zoom distance that still counts as "at" a preset
 MOVE_TIMEOUT = "PT2S"   # the camera keeps moving this long per ContinuousMove; the UI re-sends every 0.5 s
 WATCHDOG_S = 3.0        # no re-send for this long -> Stop (lost pointerup / tab closed)
 POLL_S = 5.0            # GetStatus cadence
@@ -81,7 +81,7 @@ def should_return_home(*, at_home: bool, moving: bool, last_command_at: float | 
 
 
 def relative_for_click(dx: float, dy: float, zoom: float | None) -> tuple[float, float]:
-    """Pan/tilt translation for a click dx,dy from the picture centre (fractions of the content rect,
+    """Pan/tilt translation for a click dx,dy from the picture center (fractions of the content rect,
     right/down positive). The gain shrinks with zoom (a click near the edge means a smaller angle when
     zoomed in); ONVIF tilt is up-positive so dy is flipped. Tune the sign here if a camera pans the wrong way."""
     z = min(max(float(zoom or 0.0), 0.0), 1.0)
@@ -247,7 +247,7 @@ class PtzCamera:
             cfgs = self.onvif.call(self._url("ptz"), "<tptz:GetConfigurations/>")
             caps["default_timeout_s"] = soap.parse_duration(text(cfgs, "DefaultPTZTimeout"))
             presets = parse_presets(self.onvif.call(self._url("ptz"), f"<tptz:GetPresets><tptz:ProfileToken>{escape(profile)}</tptz:ProfileToken></tptz:GetPresets>"))
-            # A fixed camera with a motorised lens also answers the PTZ service (zoom + focus only). Without pan/tilt
+            # A fixed camera with a motorized lens also answers the PTZ service (zoom + focus only). Without pan/tilt
             # or presets there is nothing to steer: no PTZ mode, no home view, never "away".
             caps["pan_tilt"] = bool(caps["continuous"] or caps["relative"] or caps["absolute"] or presets)
             relays, inputs = [], []

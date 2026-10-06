@@ -99,7 +99,7 @@ class HailoSupervisor:
         try:
             self._use_hailo(self.hailo_factory())
         except Exception as e:
-            log.error("Hailo YOLO failed to initialise: %s; falling back to the CPU", _reason(e))
+            log.error("Hailo YOLO failed to initialize: %s; falling back to the CPU", _reason(e))
             self._fall_back(_reason(e))
 
     # ---- the ultralytics surface

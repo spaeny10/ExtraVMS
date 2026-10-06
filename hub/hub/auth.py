@@ -404,7 +404,7 @@ def role_in(u: dict, org_id: str) -> str | None:
 def require_role(u: dict, org_id: str, needed: str) -> str:
     role = role_in(u, org_id)
     if not role or not allows(role, needed):
-        raise HTTPException(403, f"needs {needed} in this organisation")
+        raise HTTPException(403, f"needs {needed} in this organization")
     return role
 
 
@@ -491,7 +491,7 @@ def site_access(u: dict, site_id: str) -> tuple[dict, str]:
         raise HTTPException(404, "unknown site")
     m = membership(u, s["org_id"])
     if not m:
-        raise HTTPException(403, "not a member of this site's organisation")
+        raise HTTPException(403, "not a member of this site's organization")
     if not _sees(u, m, s["org_id"], s.get("location_id")):
         raise HTTPException(403, "not granted this site")
     return s, m["role"]
@@ -507,7 +507,7 @@ def location_access(u: dict, location_id: str) -> tuple[dict, str]:
         raise HTTPException(404, "unknown site")
     m = membership(u, loc["org_id"])
     if not m:
-        raise HTTPException(403, "not a member of this site's organisation")
+        raise HTTPException(403, "not a member of this site's organization")
     if not _sees(u, m, loc["org_id"], loc["id"]):
         raise HTTPException(403, "not granted this site")
     return loc, m["role"]
@@ -562,7 +562,7 @@ def check_grant_scope(u: dict, org_id: str, all_sites: bool, location_ids: list[
     narrowed, so the admin knows the grant didn't happen as asked."""
     m = membership(u, org_id)
     if not m:
-        raise HTTPException(403, "not a member of this organisation")
+        raise HTTPException(403, "not a member of this organization")
     if m["all_sites"]:
         return
     if all_sites:

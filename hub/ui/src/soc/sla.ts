@@ -1,7 +1,7 @@
 /**
  * SLA timers, pure (sla.test.ts). Unclaimed incidents count down to the claim deadline (sla_due_at), claimed ones to
  * the resolve deadline (resolve_due_at). Tones are by the fraction of the window left so a 60 s high-priority claim
- * and a 20 min medium-priority resolve turn amber at the same point of their lives. Every tone has text too: colour is
+ * and a 20 min medium-priority resolve turn amber at the same point of their lives. Every tone has text too: color is
  * never the only signal (the pill's text and aria-label say it).
  */
 import type { Incident, Priority, SlaPolicy } from "./types";
@@ -47,6 +47,6 @@ export function slaFor(i: Pick<Incident, "state" | "priority" | "sla_due_at" | "
 }
 
 export const PRIORITY_LABEL: Record<string, string> = { high: "High", medium: "Medium", low: "Low" };
-/** The site toolkit's threat colours (styles.css .badge.threat-*), so priority reads the same as on event cards. */
+/** The site toolkit's threat colors (styles.css .badge.threat-*), so priority reads the same as on event cards. */
 export const priorityClass = (p: string) => `badge threat-${p in PRIORITY_LABEL ? p : "none"}`;
 export const priorityLabel = (p: string) => PRIORITY_LABEL[p] ?? p;

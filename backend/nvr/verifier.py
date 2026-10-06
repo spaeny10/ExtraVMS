@@ -69,7 +69,7 @@ def _matches(cam_box, boxes: list, allowed: set) -> tuple[dict | None, float]:
     return match, match_iou
 
 
-def _centre(b) -> tuple[float, float]:
+def _center(b) -> tuple[float, float]:
     return (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
 
 
@@ -100,7 +100,7 @@ def best_shift(path: list, frames_boxes: list[tuple[float, list]], allowed: set)
             m, m_iou = _matches(cb, boxes, allowed) if cb is not None else (None, 0.0)
             if m is not None:
                 hits, overlap = hits + 1, overlap + m_iou
-                pairs.append((_centre(cb), _centre(m["box"])))
+                pairs.append((_center(cb), _center(m["box"])))
         if hits >= 2 and not _moves_together(pairs):
             continue
         # most matching frames first; among those, the tightest overlap is the real clock offset
@@ -122,7 +122,7 @@ def chain_boxes(start_box, frames_boxes: list[tuple[float, list]], allowed: set)
         for b in boxes:
             if b["cls_id"] not in allowed:
                 continue
-            (px, py), (bx, by) = _centre(prev), _centre(b["box"])
+            (px, py), (bx, by) = _center(prev), _center(b["box"])
             near = ((px - bx) ** 2 + (py - by) ** 2) ** 0.5 < 0.12 * (1 + abs(prev[3] - prev[1]))
             score = iou(prev, b["box"]) + (0.5 if near else 0.0)
             if (score >= 0.2 or near) and score > best_score:
@@ -320,7 +320,7 @@ class Verifier:
 
         ts_list = [s[0] for s in samples if s[0] in frames]
         has_pre = pre_t is not None and pre_t in frames and pre_t not in ts_list
-        # YOLO only sees allowed areas: masked regions are painted grey before inference.
+        # YOLO only sees allowed areas: masked regions are painted gray before inference.
         results = self._predict([zones.mask_frame(frames[t], zone_list) for t in ts_list + ([pre_t] if has_pre else [])])
         names = self.model.names
         pre_boxes = None

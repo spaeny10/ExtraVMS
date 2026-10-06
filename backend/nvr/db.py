@@ -16,8 +16,8 @@ from .config import settings
 EMBED_DIM = 768  # nomic-embed-text
 REID_DIM = 512   # OSNet person re-ID
 CLIP_DIM = 512   # OpenCLIP ViT-B-16 (footage index)
-COLOR_DIM = 48   # HSV colour histogram (identities.color_hist)
-VEHICLE_DIM = CLIP_DIM + COLOR_DIM   # vehicle fingerprint: weighted CLIP of the tight crop + colour
+COLOR_DIM = 48   # HSV color histogram (identities.color_hist)
+VEHICLE_DIM = CLIP_DIM + COLOR_DIM   # vehicle fingerprint: weighted CLIP of the tight crop + color
 
 # Vector search relevance: nomic embeddings are unit length, so L2 distance ~0.7 is a strong match and
 # ~1.0 is unrelated (measured: "Person working" -> person synopses 0.71-0.85, label-only vehicle docs 1.01).
@@ -138,7 +138,7 @@ CREATE TABLE IF NOT EXISTS dashboards (
     updated_at REAL NOT NULL
 );
 
--- Cross-camera journeys: which cameras neighbour each other, and how long the walk takes.
+-- Cross-camera journeys: which cameras neighbor each other, and how long the walk takes.
 CREATE TABLE IF NOT EXISTS camera_links (
     cam_a   TEXT NOT NULL,
     cam_b   TEXT NOT NULL,
@@ -353,7 +353,7 @@ class Database:
             self._connect(path)
             self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
-        # vehicle fingerprints changed width (CLIP only -> CLIP + colour): drop the old table, the backfill refills it
+        # vehicle fingerprints changed width (CLIP only -> CLIP + color): drop the old table, the backfill refills it
         old = self.conn.execute("SELECT sql FROM sqlite_master WHERE name='vehicle_vec'").fetchone()
         if old and f"float[{VEHICLE_DIM}]" not in old[0]:
             self.conn.execute("DROP TABLE vehicle_vec")
@@ -566,7 +566,7 @@ class Database:
                label: str | None = None, min_yolo: float = 0, offset: int = 0, **filters) -> list[dict]:
         """Hybrid search: reciprocal-rank fusion of FTS5 keyword and vector results.
 
-        Vector kNN always returns its k nearest neighbours, however unrelated, so vector hits are kept only
+        Vector kNN always returns its k nearest neighbors, however unrelated, so vector hits are kept only
         when they are close in absolute terms (unit vectors: L2 < VEC_MAX_DIST) and relative to the best hit.
         """
         scores: dict[int, float] = {}

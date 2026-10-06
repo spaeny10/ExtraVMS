@@ -3,7 +3,7 @@
 The baseline is built from the last HISTORY_DAYS of verified events (false alarms excluded), per
 (camera, label):
 - time: for each local hour on weekdays / weekend days, on how many observed days that label appeared;
-- place: a GX x GY grid of where tracks go (box bottom-centre, i.e. roughly where they stand), as the
+- place: a GX x GY grid of where tracks go (box bottom-center, i.e. roughly where they stand), as the
   fraction of events that touched each cell;
 - dwell: the sorted visit durations.
 
@@ -54,7 +54,7 @@ def _daytype(d: dt.date) -> int:
 
 
 def _cells(path: list) -> set[tuple[int, int]]:
-    """Grid cells a track touched, using each box's bottom-centre (normalised coordinates)."""
+    """Grid cells a track touched, using each box's bottom-center (normalized coordinates)."""
     out = set()
     for p in path or []:
         cx, bottom = (p[1] + p[3]) / 2, p[4]

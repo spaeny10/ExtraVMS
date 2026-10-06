@@ -1,15 +1,15 @@
 """Who was on site: group repeated sightings of the same person or vehicle, and let the operator name them.
 
 People are matched by their re-ID fingerprint (reid.py, stored per event in reid_vec); vehicles by a CLIP
-image embedding of their tight crops joined with a colour histogram (stored in vehicle_vec). CLIP alone groups
-vehicles by shape and setting ("pickup in this yard"): a white and a black pickup scored 0.90. The colour part
+image embedding of their tight crops joined with a color histogram (stored in vehicle_vec). CLIP alone groups
+vehicles by shape and setting ("pickup in this yard"): a white and a black pickup scored 0.90. The color part
 pulls them apart while the same truck in different light still matches. Sightings in a time window are joined by
 average-link clustering; confirmed cross-camera journeys always count as the same person.
 
 Named identities ("Shawn", "UPS truck") hold one or more *looks*: a centroid per outfit / appearance
 (identity_looks). A sighting matches the identity if it is close to any look. Naming a cluster averages it into
 the nearest look when it resembles one, otherwise it becomes a new look: the same person in a different shirt
-on another day is recognised once you have named them in that shirt. Person re-ID sees clothing and build,
+on another day is recognized once you have named them in that shirt. Person re-ID sees clothing and build,
 not faces, so each outfit has to be taught once.
 """
 from __future__ import annotations
@@ -27,7 +27,7 @@ from .db import COLOR_DIM, VEHICLE_DIM, db
 log = logging.getLogger("nvr.identities")
 
 # same-identity thresholds (cosine). Person: measured on this site, same person 0.8-0.9, different median ~0.65.
-# Vehicle: 0.7*CLIP(tight crop) + 0.3*colour, measured on this site: same truck twice 0.885, two white trucks of the
+# Vehicle: 0.7*CLIP(tight crop) + 0.3*color, measured on this site: same truck twice 0.885, two white trucks of the
 # same fleet 0.89, white vs black pickup 0.81, white pickup vs white van 0.77.
 GROUP_SIM = {"person": 0.76, "vehicle": 0.86}
 NAME_SIM = {"person": 0.85, "vehicle": 0.87}   # conservative: a wrong name is worse than a missing one (indoor re-ID: different people reach ~0.82)
@@ -41,7 +41,7 @@ CARD_KEYS = ("id", "camera_id", "start_ts", "end_ts", "snapshot", "synopsis", "p
 
 # ---------------------------------------------------------------- vehicle fingerprints (CLIP)
 
-CLIP_W, COLOR_W = 0.7, 0.3   # the fingerprint's dot product = CLIP_W*cos(CLIP) + COLOR_W*cos(colour)
+CLIP_W, COLOR_W = 0.7, 0.3   # the fingerprint's dot product = CLIP_W*cos(CLIP) + COLOR_W*cos(color)
 
 
 def _padded_window(box):
@@ -101,8 +101,8 @@ def vehicle_crops(event_id: int, tight: bool = True) -> list[np.ndarray]:
 
 
 def color_hist(bgr: np.ndarray) -> np.ndarray:
-    """48-d colour signature of a vehicle crop: hue x 2 saturation levels for coloured pixels (32) and a
-    brightness histogram for grey/white/black pixels (16). Taken from the central 80% so background matters less."""
+    """48-d color signature of a vehicle crop: hue x 2 saturation levels for colored pixels (32) and a
+    brightness histogram for gray/white/black pixels (16). Taken from the central 80% so background matters less."""
     import cv2
     h, w = bgr.shape[:2]
     core = bgr[int(h * 0.1):max(int(h * 0.9), int(h * 0.1) + 1), int(w * 0.1):max(int(w * 0.9), int(w * 0.1) + 1)]

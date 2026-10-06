@@ -1,5 +1,5 @@
 /**
- * The centre of the workstation: one incident. Header (customer › Site, priority, SLA timer, state, escalation,
+ * The center of the workstation: one incident. Header (customer › Site, priority, SLA timer, state, escalation,
  * claimer), the claim bar, the triggering clip and snapshot with a strip of every event in the incident, the event's
  * synopsis and why it matters, live video of the Site with the incident's cameras first, the Site's Timeline
  * deep-linked to the selected event, deterrence (relay), and the log.

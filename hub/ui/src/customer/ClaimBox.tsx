@@ -1,6 +1,6 @@
 /**
- * Customer → Add server: enrol a waiting server by its claim code into an existing Site, or into a new one. The new
- * Site is created only on Enrol (with a server waiting), then picked, so a failed claim retried doesn't create it twice.
+ * Customer → Add server: enroll a waiting server by its claim code into an existing Site, or into a new one. The new
+ * Site is created only on Enroll (with a server waiting), then picked, so a failed claim retried doesn't create it twice.
  */
 import { useEffect, useState } from "react";
 import { toast } from "@site/ui";
@@ -54,7 +54,7 @@ export function ClaimBox({ org, sites, onDone, initialSite }: { org: Org; sites:
         </label>
         {isNew && <label className="field"><span>New site name</span><input value={newSite.name} maxLength={120} onChange={(e) => setNewSite({ ...newSite, name: e.target.value })} placeholder="e.g. Austin HQ" /></label>}
         {isNew && <label className="field"><span>Address</span><input value={newSite.address} maxLength={200} onChange={(e) => setNewSite({ ...newSite, address: e.target.value })} placeholder="address or city" /></label>}
-        <button disabled={!ready} onClick={enrol}>Enrol server</button>
+        <button disabled={!ready} onClick={enrol}>Enroll server</button>
       </div>
       {preview && (
         <div className="hint-box">

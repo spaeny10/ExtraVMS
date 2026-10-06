@@ -120,7 +120,7 @@ function ServersTab({ site, admin, onChanged }: { site: Site; admin: boolean; on
   const [sites, setSites] = useState<Site[]>([]);
   useEffect(() => { if (admin) api.locations(site.org_id).then(setSites).catch(() => setSites([])); }, [admin, site.org_id]);
   const now = Date.now() / 1000;
-  if (site.servers.length === 0) return <p className="muted">No servers in this site yet.{admin ? <> Enrol one under <a href="/customer/servers" onClick={go("/customer/servers")}>Customer → Servers</a>.</> : ""}</p>;
+  if (site.servers.length === 0) return <p className="muted">No servers in this site yet.{admin ? <> Enroll one under <a href="/customer/servers" onClick={go("/customer/servers")}>Customer → Servers</a>.</> : ""}</p>;
   return (
     <div className="site-grid">
       {site.servers.map((s) => (

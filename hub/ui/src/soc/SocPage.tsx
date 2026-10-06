@@ -32,7 +32,7 @@ function loadFilters(): QueueFilters {
 }
 const incidentParam = () => { const n = Number(new URLSearchParams(location.search).get("incident")); return Number.isFinite(n) && n > 0 ? n : null; };
 
-/** The false-alarm disposition code from the catalogue (the sweep's "False alarm" button), "false_alarm" if absent. */
+/** The false-alarm disposition code from the catalog (the sweep's "False alarm" button), "false_alarm" if absent. */
 export const falseAlarmCode = (groups: DispositionGroup[]) =>
   groups.find((g) => g.id === "false_alarm")?.dispositions.find((d) => d.selectable)?.code ?? "false_alarm";
 

@@ -39,7 +39,7 @@ export function IdentitiesView({ cameras, initialCamera = "", initialHours = 0 }
     if (!naming?.name.trim()) return;
     try {
       await api.nameIdentity({ kind, name: naming.name, notes: naming.notes, event_ids: c.events.map((e) => e.id) });
-      toast.success(`Named "${naming.name.trim()}" · will be recognised from now on`);
+      toast.success(`Named "${naming.name.trim()}" · will be recognized from now on`);
       setNaming(null);
       load();
     } catch (e) { toast.error(e); }
@@ -68,8 +68,8 @@ export function IdentitiesView({ cameras, initialCamera = "", initialHours = 0 }
         {r && <span className="muted small">{r.clusters.length} {kind === "person" ? "people" : "vehicles"} from {r.sightings} sightings</span>}
       </div>
       <p className="muted small">
-        Sightings are matched by appearance{kind === "person" ? " (clothing, build) and confirmed cross-camera journeys" : " (colour, shape)"}, so the same
-        {kind === "person" ? " person" : " vehicle"} in different clothes or lighting may appear twice. Name one and it will be recognised next time.
+        Sightings are matched by appearance{kind === "person" ? " (clothing, build) and confirmed cross-camera journeys" : " (color, shape)"}, so the same
+        {kind === "person" ? " person" : " vehicle"} in different clothes or lighting may appear twice. Name one and it will be recognized next time.
       </p>
       {err && <div className="error">{err}</div>}
       {r && r.clusters.length === 0 && <div className="empty">No verified {kind === "person" ? "people" : "vehicles"} in this period.</div>}
@@ -85,7 +85,7 @@ export function IdentitiesView({ cameras, initialCamera = "", initialHours = 0 }
               <div className="identity-body">
                 <div className="identity-head">
                   <strong>{c.name ?? (kind === "person" ? `Person ${c.key.slice(1)}` : `Vehicle ${c.key.slice(1)}`)}</strong>
-                  {c.name && <span className="badge journey-badge" title={`Recognised (similarity ${c.name_sim})`}>known</span>}
+                  {c.name && <span className="badge journey-badge" title={`Recognized (similarity ${c.name_sim})`}>known</span>}
                   {c.watch && <span className="badge threat-medium" title="On the watch list">👁 watched</span>}
                   {c.priority !== "none" && <span className={`badge threat-${c.priority}`}>{c.priority}</span>}
                   {c.unusual && <span className="badge unusual-badge">⚠ Unusual</span>}

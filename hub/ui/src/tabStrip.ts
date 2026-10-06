@@ -15,7 +15,7 @@ export function edgeFade(scrollLeft: number, clientWidth: number, scrollWidth: n
 export const fadeClass = (f: EdgeFade) => [f.left ? "fade-l" : "", f.right ? "fade-r" : ""].filter(Boolean).join(" ");
 
 /**
- * The strip's scrollLeft that centres a tab (clamped to what the strip can scroll). `tabLeft` is the tab's offset from
+ * The strip's scrollLeft that centers a tab (clamped to what the strip can scroll). `tabLeft` is the tab's offset from
  * the strip's visible left edge (getBoundingClientRect difference), so it already includes the current scroll.
  */
 export function centreTab(scrollLeft: number, clientWidth: number, scrollWidth: number, tabLeft: number, tabWidth: number): number {

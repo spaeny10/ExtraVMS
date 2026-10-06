@@ -137,7 +137,7 @@ function NoteBox({ incident: i, actions, enabled }: { incident: Incident; action
 export const needsFourEyes = (d: Pick<Disposition, "four_eyes">, priority: string) => d.four_eyes.includes(priority as never);
 
 /**
- * Dispositions in the catalogue's three groups, each button labelled with its chord (F·1…). A chord picks one: one
+ * Dispositions in the catalog's three groups, each button labeled with its chord (F·1…). A chord picks one: one
  * that needs no notes resolves at once, one that does waits here with the notes box focused. Auto-advance (default
  * on) selects the next ringing incident afterwards.
  */

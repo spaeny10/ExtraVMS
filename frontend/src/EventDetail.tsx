@@ -15,7 +15,7 @@ const THREATS: Threat[] = ["none", "low", "medium", "high"];
 /**
  * `site` = the API of the server the event lives on (the hub passes one per server; default: this server).
  * `variant` "drawer" docks the viewer to the right edge at full height (the hub's SOC workstation opens it beside the
- * incident it is working on, so the queue stays visible); the default "modal" is the centred dialog every page uses.
+ * incident it is working on, so the queue stays visible); the default "modal" is the centered dialog every page uses.
  */
 export function EventDetail({ id: initialId, cameraName, onClose, site = api, variant = "modal" }: {
   id: number; cameraName: (id: string) => string; onClose: () => void; site?: SiteApi; variant?: "modal" | "drawer";
@@ -128,7 +128,7 @@ export function EventDetail({ id: initialId, cameraName, onClose, site = api, va
   );
 }
 
-/** Cross-camera journey: the same person seen on neighbouring cameras (re-ID + Qwen confirmed). */
+/** Cross-camera journey: the same person seen on neighboring cameras (re-ID + Qwen confirmed). */
 function JourneySection({ e, site, cameraName, onShow, onOpenTimeline }: {
   e: NvrEvent; site: SiteApi; cameraName: (id: string) => string; onShow: (id: number) => void;
   onOpenTimeline: (members: { id: number; cam: string; start: number; end: number }[]) => void;
@@ -220,7 +220,7 @@ function WatchControl({ e, site, onChange }: { e: NvrEvent; site: SiteApi; onCha
       {open && (
         <form className="watch-form" onSubmit={start}>
           {ident
-            ? <span>Recognised as <strong>{ident.name}</strong>.</span>
+            ? <span>Recognized as <strong>{ident.name}</strong>.</span>
             : <><input autoFocus list="known-names-watch" placeholder={isPerson ? "Name (pick a known name to add this look to them)" : "Name, e.g. white van"} value={name} onChange={(ev) => setName(ev.target.value)} />
                 <datalist id="known-names-watch">{known.map((n) => <option key={n.id} value={n.name} />)}</datalist></>}
           <input placeholder="Why (optional, shown with each sighting)" value={note} onChange={(ev) => setNote(ev.target.value)} />

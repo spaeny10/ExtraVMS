@@ -2,7 +2,7 @@
  * Find / Ask across the customer's servers (/find). A Site's own Find tab is SiteFind (the server UI's Find over the
  * Site's servers); `site` here still scopes this page to one Site.
  * Results are server events shown with the server UI's EventCard (media fetched through that server's tunnel) and
- * labelled "Site · Server · Camera" (whereLabel). A click opens the event viewer in place (clip, synopsis, feedback), as
+ * labeled "Site · Server · Camera" (whereLabel). A click opens the event viewer in place (clip, synopsis, feedback), as
  * the server's own Find does; the viewer's "Open in Timeline" goes on to the Site's combined Timeline. Each card also
  * keeps a link to the same moment on the server's own console; footage moments (no event to show) open the Timeline.
  */

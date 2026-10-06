@@ -59,7 +59,7 @@ describe("go prefix", () => {
 });
 
 describe("disposition chords", () => {
-  it("leader + digit from the catalogue", () => {
+  it("leader + digit from the catalog", () => {
     expect(run(["f", "1"]).out).toEqual([{ type: "disposition", code: "false_alarm" }]);
     expect(run(["f", "2"]).out).toEqual([{ type: "disposition", code: "nuisance" }]);
     expect(run(["t", "1"]).out).toEqual([{ type: "disposition", code: "true_alarm_dispatched" }]);

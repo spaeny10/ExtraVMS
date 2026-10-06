@@ -3,7 +3,7 @@
    python -m hub setpassword EMAIL                   change a user's password (prompts twice; ends their sessions)
    python -m hub setsuper EMAIL [--off]              make an existing user a hub administrator (--off: revoke)
    python -m hub setsoc EMAIL operator|supervisor|off   give an existing user a SOC role (off: remove it)
-   python -m hub createorg NAME SLUG                 create an organisation
+   python -m hub createorg NAME SLUG                 create an organization
    python -m hub geocode [--force]                   locate Sites that have an address but no coordinates (1 request/s)
 """
 from __future__ import annotations
@@ -107,7 +107,7 @@ def main() -> None:
             if not u:
                 sys.exit("no such user")
             db.insert(db.memberships, {"user_id": u["id"], "org_id": o["id"], "role": "owner"})
-        print("created organisation", o["id"], o["slug"])
+        print("created organization", o["id"], o["slug"])
         return
 
     import uvicorn

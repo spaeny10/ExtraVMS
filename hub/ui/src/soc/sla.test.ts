@@ -54,7 +54,7 @@ describe("slaFor", () => {
   });
 });
 
-it("priority badge classes reuse the threat colours", () => {
+it("priority badge classes reuse the threat colors", () => {
   expect(priorityClass("high")).toBe("badge threat-high");
   expect(priorityClass("weird")).toBe("badge threat-none");
   expect(priorityLabel("medium")).toBe("Medium");

@@ -84,7 +84,7 @@ location_grants = Table("location_grants", metadata,
 cameras = Table("cameras", metadata,
                 Column("server_id", String(24), primary_key=True), Column("camera_id", String(64), primary_key=True),
                 Column("org_id", String(24), nullable=False, index=True),
-                Column("location_id", String(24), nullable=True, index=True),   # denormalised from the server (cameras.relocate)
+                Column("location_id", String(24), nullable=True, index=True),   # denormalized from the server (cameras.relocate)
                 Column("name", String(120), nullable=False, default=""), Column("enabled", Boolean, nullable=False, default=True),
                 Column("stream_ready", Boolean, nullable=True), Column("problems", sa.JSON, nullable=True),
                 Column("bitrate_mbps", Float, nullable=True), Column("ptz", sa.JSON, nullable=True),

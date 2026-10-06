@@ -1,5 +1,5 @@
-"""Organisation digest: one morning note per org built from every site's own briefing and open alerts.
-With the shared model configured it is summarised by vLLM; without it the site headlines are listed.
+"""Organization digest: one morning note per org built from every site's own briefing and open alerts.
+With the shared model configured it is summarized by vLLM; without it the site headlines are listed.
 Servers are grouped by Site (location): a Site with one server reads exactly as before (one line, named after the
 server); a Site with several gets a header line with its servers under it."""
 from __future__ import annotations
@@ -93,7 +93,7 @@ def _facts(parts: list[dict]) -> str:
     return "\n\n".join(blocks)
 
 
-async def _summarise(org_name: str, parts: list[dict]) -> str | None:
+async def _summarize(org_name: str, parts: list[dict]) -> str | None:
     if not vlm_proxy.configured():
         return None
     facts = _facts(parts)
@@ -101,8 +101,8 @@ async def _summarise(org_name: str, parts: list[dict]) -> str | None:
         {"role": "system", "content": "You write the morning digest for a security operator who runs several sites. Be factual and brief: "
                                       "5-8 bullets, the important things first (offline sites, cameras down, site-rule breaks, unusual events), "
                                       "then a one-line note per quiet site. Use the site names given; a site listed with several servers is one place, "
-                                      "so name a server as 'Site · Server'. No preamble."},
-        {"role": "user", "content": f"Organisation: {org_name}\n\n{facts}"}]
+                                      "so name a server as 'Site · Server'. No preamble. Use American English spelling."},
+        {"role": "user", "content": f"Organization: {org_name}\n\n{facts}"}]
     try:
         return await vlm_proxy.complete(messages, max_tokens=500, temperature=0.2)   # direct vLLM or a site's tunnel
     except Exception as e:
@@ -113,7 +113,7 @@ async def _summarise(org_name: str, parts: list[dict]) -> str | None:
 async def generate(org_id: str) -> dict:
     org = db.one(sa.select(db.orgs).where(db.orgs.c.id == org_id))
     data = await collect(org_id)
-    text = await _summarise(org["name"] if org else org_id, data["sites"]) or _plain(data["sites"])
+    text = await _summarize(org["name"] if org else org_id, data["sites"]) or _plain(data["sites"])
     row = {"org_id": org_id, "day": dt.date.today().isoformat(), "created_at": time.time(), "text": text, "data": data,
            "model": settings.vllm_model if vlm_proxy.configured() else None}
     db.insert(db.digests, row)

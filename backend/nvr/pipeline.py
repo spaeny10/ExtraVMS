@@ -242,7 +242,7 @@ class Pipeline:
         else:
             self.record_areas(event_id)
             await self.check_ppe(event_id)          # hard hat / hi-vis vest in a PPE zone (before the rules: it is one)
-            policy.check(event_id, self.cameras.get(e["camera_id"]))  # e.g. an unrecognised person entering by an exterior door
+            policy.check(event_id, self.cameras.get(e["camera_id"]))  # e.g. an unrecognized person entering by an exterior door
             a = baseline.apply(event_id) or {}
         if a.get("reasons"):
             log.info("event %s unusual %.2f: %s", event_id, a["score"], "; ".join(a["reasons"]))

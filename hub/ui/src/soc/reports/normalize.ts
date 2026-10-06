@@ -61,7 +61,7 @@ export function normFalseAlarms(r: unknown): FalseAlarms & { totals: ReturnType<
 
 /**
  * The count breakdowns of a report's data as lines: every object of numbers at the top or one level down
- * ({by_priority: {high: 2}}, {calls: {by_outcome: {...}}}), labelled by its key ("By priority", "Calls · by outcome").
+ * ({by_priority: {high: 2}}, {calls: {by_outcome: {...}}}), labeled by its key ("By priority", "Calls · by outcome").
  */
 export function breakdowns(data: Raw | null | undefined, labelOf: (k: string) => string): { key: string; label: string; parts: [string, number][] }[] {
   const out: { key: string; label: string; parts: [string, number][] }[] = [];

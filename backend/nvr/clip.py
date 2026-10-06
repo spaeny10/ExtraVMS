@@ -44,13 +44,13 @@ class Clip:
         self.lock = threading.Lock()
 
     def _prep(self, bgr: np.ndarray) -> np.ndarray:
-        # Squash to 224x224 rather than centre-crop: a crop would cut off the edges of the view.
+        # Squash to 224x224 rather than center-crop: a crop would cut off the edges of the view.
         rgb = cv2.cvtColor(cv2.resize(bgr, (SIZE, SIZE), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2RGB)
         return ((rgb.astype(np.float32) / 255 - self.mean) / self.std).transpose(2, 0, 1)
 
     @torch.inference_mode()
     def embed_images(self, images: list[np.ndarray]) -> np.ndarray:
-        """BGR images -> (n, 512) float32, L2-normalised."""
+        """BGR images -> (n, 512) float32, L2-normalized."""
         if not images:
             return np.zeros((0, DIM), np.float32)
         x = torch.from_numpy(np.stack([self._prep(i) for i in images])).to(self.device)

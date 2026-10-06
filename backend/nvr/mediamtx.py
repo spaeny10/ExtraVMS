@@ -145,7 +145,7 @@ def build_config(cameras: list[dict]) -> dict:
         "rtsp": True, "rtspTransports": ["tcp"], "rtspAddress": ":8554",
         "rtmp": False, "srt": False, "moq": False,
         "hls": False,  # unused: live view is WebRTC, recordings are fMP4 through the NVR
-        "webrtc": True, "webrtcAddress": f"127.0.0.1:{settings.mediamtx_webrtc_port}",  # signalling via /api/whep
+        "webrtc": True, "webrtcAddress": f"127.0.0.1:{settings.mediamtx_webrtc_port}",  # signaling via /api/whep
         # The video itself: fixed ports so a router can forward them for remote live view. The public address is
         # added to each answer by the NVR (api.whep) from the hostname the browser used.
         "webrtcLocalUDPAddress": f":{settings.webrtc_media_port}",

@@ -1,4 +1,4 @@
-"""Security fixes of the site server: SPA path traversal, hub URL change un-enrols, browser guards (Host allow-list,
+"""Security fixes of the site server: SPA path traversal, hub URL change un-enrolls, browser guards (Host allow-list,
 cross-site writes, body types, WebSocket origin), the unforgeable tunnel marker, TURN credentials, camera
 path validation and the MediaMTX reader password. No MediaMTX, models or network needed (one test starts a
 uvicorn listener on 127.0.0.1).
@@ -52,7 +52,7 @@ def call(method, url, **kw):
 
 def raw_get(path: str, headers: dict | None = None) -> tuple[int, bytes, dict]:
     """GET with exactly this (already percent-decoded, as uvicorn passes it) scope path: no client-side URL
-    normalisation in the way."""
+    normalization in the way."""
     hdrs = [(b"host", HOST.encode())] + [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()]
     scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "GET", "scheme": "http",
              "path": path, "raw_path": path.encode("latin-1", "replace"), "query_string": b"", "root_path": "",
@@ -94,7 +94,7 @@ def test_spa_traversal_is_404():
 
 
 def test_spa_over_http_client_too():
-    # the same through a real client (it percent-encodes / normalises as it likes): never a repo file
+    # the same through a real client (it percent-encodes / normalizes as it likes): never a repo file
     readme = (ROOT / "README.md").read_bytes()[:200]
     for url in ("/..%2F..%2FREADME.md", "/%2E%2E%2F%2E%2E%2FREADME.md", "/..%5C..%5CREADME.md", "/C:%2FWindows%2Fwin.ini",
                 "/%2F%2Fetc%2Fpasswd", "/api/..%2F..%2F..%2FREADME.md", "/..%2F..%2Fdata%2Fnvr.db"):

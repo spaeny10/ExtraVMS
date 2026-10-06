@@ -88,7 +88,7 @@ def disabled_ids(server_id: str) -> set[str]:
 
 
 def relocate(server_id: str, location_id: str | None, conn=None) -> None:
-    """The server moved to another Site: its cameras' denormalised location follows."""
+    """The server moved to another Site: its cameras' denormalized location follows."""
     stmt = sa.update(db.cameras).where(db.cameras.c.server_id == server_id).values(location_id=location_id)
     if conn is not None:
         conn.execute(stmt)

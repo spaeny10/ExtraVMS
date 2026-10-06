@@ -153,7 +153,7 @@ export type Monitoring = MonitoringConfig & {
   arm_override: ArmOverride | null; override_active?: boolean; armed: boolean; reason: ArmReason | string; next_change: { at: number; armed: boolean } | null;
   timezone?: string | null; now?: number; can_configure?: boolean; can_arm?: boolean;
 };
-/** Blank optional fields travel as null (the hub stores NULL); the editor works on "" and normalises on load. */
+/** Blank optional fields travel as null (the hub stores NULL); the editor works on "" and normalizes on load. */
 export type SiteContact = { id?: number; order: number; name: string; role: string | null; phone: string | null; email: string | null; notify_on_open: boolean; notes: string | null };
 /** Step ids are kept by the hub (SOP ticks in incident logs refer to them); a step sent without one gets "s<n>". */
 export type ProcedureStep = { id?: string; text: string; required: boolean };

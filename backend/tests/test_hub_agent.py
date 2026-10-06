@@ -1,4 +1,4 @@
-"""Site agent against a fake hub: claim/enrol handshake, in-process request bridge (incremental streaming,
+"""Site agent against a fake hub: claim/enroll handshake, in-process request bridge (incremental streaming,
 abort), event forwarding, heartbeat, reconnect.
 
 Run: ..\\.venv\\Scripts\\python.exe tests\\test_hub_agent.py   (from backend/)
@@ -194,7 +194,7 @@ async def _run():
                     break
             assert agent.connected and hub.auth[-1] == "Bearer device-token-1"
 
-            # 8. unenrol clears the token and shows a claim code again
+            # 8. unenroll clears the token and shows a claim code again
             hub.enrol_on_claim = False
             await agent.configure(unenrol=True)
             await asyncio.sleep(0.3)
@@ -217,7 +217,7 @@ def test_agent_end_to_end():
 
 
 def test_claim_code_stays_put_while_parked():
-    """The page's claim code must be the one the hub has the connection parked under (else Enrol stays disabled)."""
+    """The page's claim code must be the one the hub has the connection parked under (else Enroll stays disabled)."""
     db.set_setting("hub_token", None)
     db.set_setting("hub_claim", None)
     agent = hub_agent.HubAgent(None, SimpleNamespace())

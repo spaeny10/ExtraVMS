@@ -1,4 +1,4 @@
-"""End to end: a site agent (the real nvr.hub_agent) enrols against the hub running under uvicorn, the fleet
+"""End to end: a site agent (the real nvr.hub_agent) enrolls against the hub running under uvicorn, the fleet
 shows it, requests are proxied with roles enforced, streaming works, and going offline raises an alert."""
 import asyncio
 import json

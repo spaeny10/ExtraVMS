@@ -1,4 +1,4 @@
-/** Find views: built-in presets per role, saved views, the default view, URL (de)serialisation and the
+/** Find views: built-in presets per role, saved views, the default view, URL (de)serialization and the
  * client-side filter check for live events. Pure functions (no DOM) so they are unit-tested in findViews.test.ts. */
 import { UNUSUAL_MIN, type Camera, type NvrEvent, type SavedFindView } from "./api";
 

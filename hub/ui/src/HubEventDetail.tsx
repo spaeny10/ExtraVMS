@@ -2,7 +2,7 @@
  * The server UI's event viewer (clip, synopsis, lock / watch / feedback / Ask) opened in place on a hub page, for one
  * server's event: what a click on an event does in the server's own UI. Actions go to the event's server through its
  * tunnel; media too, unless this browser reaches the server on its LAN (mediaApi, direct.ts). The viewer's "Open in Timeline" is the one way from here to the Site's Timeline, so
- * this provides the NavContext it calls (timelineTargetHref). Centred dialog on desktop, docked drawer on a phone.
+ * this provides the NavContext it calls (timelineTargetHref). Centered dialog on desktop, docked drawer on a phone.
  */
 import { useEffect, useMemo, useState } from "react";
 import { EventDetail } from "@site/EventDetail";

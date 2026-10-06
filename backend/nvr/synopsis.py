@@ -48,7 +48,7 @@ SYSTEM = (
     "medium = suspicious (loitering, checking doors/cars, face concealed at night), high = clear criminal or dangerous act. "
     "A 'Location (confirmed by the NVR)' line says where the object really is and overrides general scene notes "
     "about background traffic. For vehicles set towing=true only when the vehicle is pulling or hitched to a trailer "
-    "or equipment (and name it in towed); parked trailers nearby do not count."
+    "or equipment (and name it in towed); parked trailers nearby do not count. Use American English spelling."
 )
 
 
@@ -162,7 +162,7 @@ def event_facts(event: dict, camera: dict) -> str:
     if track:  # first/last position, so "came in through the South door" isn't left to guesswork
         lines.append(track)
     reasons = (event.get("anomaly_json") or {}).get("reasons")
-    if reasons:  # learned baseline for this camera; lets the threat judgement account for what's normal here
+    if reasons:  # learned baseline for this camera; lets the threat judgment account for what's normal here
         lines.append("Unusual for this camera: " + "; ".join(reasons))
     ppe_line = ppe_fact(event)
     if ppe_line:  # the PPE check (detector + Qwen on doubt) already decided: the synopsis must agree
@@ -179,7 +179,7 @@ def build_prompt(event: dict, camera: dict, examples: list[dict]) -> str:
     shots = ""
     if examples:
         shots = ("\nThe operator corrected these earlier synopses from this camera. Follow the corrected style, "
-                 "detail level and threat judgement:\n")
+                 "detail level and threat judgment:\n")
         for ex in examples:
             shots += f"- Model wrote: {ex['original']}\n  Operator corrected to: {ex['corrected']}\n"
     return event_facts(event, camera) + shots + "\nWrite the synopsis of this event as JSON."
@@ -308,7 +308,8 @@ CHAT_SYSTEM = (
     "Answer from what is visible in the frames. Be concrete and brief. Say clearly when something is not visible "
     "or uncertain, and if another moment of the clip would answer the question, say which time to look at. "
     "Do not guess identities. You cannot take actions: you can't watch for anyone, set reminders or send alerts. "
-    "If asked to, say so plainly and point to the 'Watch this person' button in this event's details, which does it for real."
+    "If asked to, say so plainly and point to the 'Watch this person' button in this event's details, which does it for real. "
+    "Use American English spelling."
 )
 
 
@@ -461,7 +462,7 @@ async def footage_match(image: bytes, query: str) -> dict:
 async def same_person(image_a: bytes, image_b: bytes, facts: str) -> dict:
     """Ask Qwen whether two person crops (different cameras) show the same individual."""
     system = ("You compare two images of people captured by different security cameras a short time apart. "
-              "Decide whether they show the SAME individual. Judge only visible, stable evidence: clothing colours "
+              "Decide whether they show the SAME individual. Judge only visible, stable evidence: clothing colors "
               "and types, footwear, build, hair/headwear, carried items. Lighting and angle differ between cameras; "
               "don't be misled by that. If the evidence is weak or ambiguous, say not the same or use low confidence.")
     return await _chat_json(system, facts + "\nImage 1 is from the first camera, image 2 from the second. Answer as JSON.",
@@ -478,7 +479,7 @@ async def journey_narrative(visits: list[dict], images: list[bytes]) -> dict:
         lines.append(f"Visit {i}: '{v['camera']}' at {v['time']}, about {v['duration_s']:.0f} s{gap}. Notes: {desc}")
     system = ("One person was matched by appearance across several security cameras. Using the camera names as places, "
               "tell what they did in each place and where they went. Do NOT repeat the notes or describe clothing or scenery; "
-              "write short action phrases. Be factual; don't guess identity or intent.")
+              "write short action phrases. Be factual; don't guess identity or intent. Use American English spelling.")
     text = ("\n".join(lines) + f"\nOne image per visit is attached, in order. Give exactly {len(visits)} actions "
             f"(one per visit, at most 8 words each), exactly {len(visits)} settings (indoors/outdoors per visit, from the image) "
             "and one 'overall' sentence about the movement between places. Answer as JSON.")

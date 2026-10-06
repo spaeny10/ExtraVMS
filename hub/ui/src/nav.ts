@@ -70,8 +70,8 @@ export function topNav(page: Page, socUser: boolean): TopNavItem[] {
 }
 
 /**
- * Pages laid out full-bleed like the server's own UI (no centred column): a Site's tabs (the Live grid and Timeline
- * want every pixel) and the SOC console. Lists and forms (Sites, Customer, Audit, Account…) stay centred.
+ * Pages laid out full-bleed like the server's own UI (no centered column): a Site's tabs (the Live grid and Timeline
+ * want every pixel) and the SOC console. Lists and forms (Sites, Customer, Audit, Account…) stay centered.
  */
 export const fullBleed = (page: Page) => inSite(page) || page === "soc";
 

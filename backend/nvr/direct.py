@@ -1,7 +1,7 @@
 """Direct-on-LAN: a browser that can reach this server on its own LAN fetches media straight from it instead of
 through the hub tunnel (which is capped by the site's upload, ~18 Mbit/s here).
 
-The hub authorises that with a short-lived token it mints (hub/hub/direct.py); this module checks it offline:
+The hub authorizes that with a short-lived token it mints (hub/hub/direct.py); this module checks it offline:
 
     token   = b64url(payload_json) + "." + b64url(HMAC_SHA256(key, payload_b64_ascii))   (b64url without "=" padding)
     payload = {"sid": hub site id, "uid": user id, "email": str, "role": viewer|operator|admin|owner, "exp": unix}
