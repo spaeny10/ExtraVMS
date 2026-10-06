@@ -3,6 +3,19 @@ import type { Access, Me, Org, Server, Site, SocRole } from "./api";
 
 export const isAdmin = (org: Org | undefined, me: Me) => me.user.is_super || org?.role === "admin" || org?.role === "owner";
 
+/**
+ * May spend CoverageMap units (look a Site up again, check an address): hub administrators; on the paid plan also the
+ * customer's admins and owners with a real membership (a customer listed only through the SOC does not count). The hub
+ * enforces the same (api.py _coverage_can_fetch); this only decides whether to offer the button.
+ */
+export function canCheckCoverage(me: Me, org: Org | undefined): boolean {
+  if (!me.coverage?.enabled || !me.coverage.visible) return false;
+  if (me.user.is_super) return true;
+  if (me.coverage.plan !== "paid" || !org) return false;
+  const real = org.member === true || (org.member === undefined && !org.soc);
+  return real && (org.role === "admin" || org.role === "owner");
+}
+
 /** The user's SOC role. Hub administrators count as supervisors (the hub's soc_level does the same). */
 export const socRole = (me: Me): SocRole | null => (me.user.is_super ? "supervisor" : me.user.soc_role ?? null);
 export const isSocUser = (me: Me) => socRole(me) !== null;

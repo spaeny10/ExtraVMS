@@ -298,3 +298,66 @@
   .cap-row { grid-template-columns: 1fr; gap: 2px; }
   .peplink table th { width: auto; }
 }
+
+/* ---- cellular coverage (site/CoverageCard.tsx, site/CoverageExtras.tsx, coverage.ts; hub coverage.py) */
+.cov-card { scroll-margin-top: 70px; }
+.cov-eval { margin: 8px 0; padding: 6px 10px; border: 1px dashed var(--vehicle); border-radius: 6px; color: var(--text); background: var(--panel-2, transparent); }
+.cov-error { color: var(--bad); margin: 6px 0; }
+.cov-need { margin: 8px 0 4px; }
+.cov-carrier { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin-top: 8px; }
+.cov-carrier.best { border-color: var(--ok); }
+.cov-carrier-head { gap: 8px; margin-bottom: 2px; }
+.chip.cov-best { border-color: var(--ok); color: var(--ok); }
+.cov-row { display: grid; grid-template-columns: 92px minmax(170px, 1.1fr) minmax(170px, 1fr) minmax(190px, 1.2fr) auto; gap: 6px 12px; align-items: center;
+  padding: 6px 0; border-top: 1px solid var(--border); }
+.cov-carrier-head + .cov-row { border-top: 0; }
+.cov-tech { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; }
+.cov-cell { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.cov-fit { justify-self: end; }
+.cov-score { display: flex; align-items: center; gap: 8px; }
+.cov-bar { flex: 1; max-width: 160px; height: 8px; border-radius: 4px; background: var(--panel-2, var(--border)); overflow: hidden; }
+.cov-bar > span { display: block; height: 100%; background: var(--muted); }
+.cov-bar.good > span { background: var(--ok); }
+.cov-bar.fair > span { background: var(--vehicle); }
+.cov-bar.poor > span { background: var(--bad); }
+.sig-band { font-weight: 600; }
+.sig-band.excellent, .sig-band.good { color: var(--ok); }
+.sig-band.fair { color: var(--vehicle); }
+.sig-band.poor { color: var(--bad); }
+.sig-band.none { color: var(--muted); }
+.chip.src-measured { border-color: var(--ok); color: var(--ok); }
+.chip.src-estimated { color: var(--muted); }
+.chip.fit-chip { white-space: nowrap; }
+.chip.fit-fits { border-color: var(--ok); color: var(--ok); }
+.chip.fit-tight { border-color: var(--vehicle); color: var(--vehicle); }
+.chip.fit-wont_fit { border-color: var(--bad); color: var(--bad); }
+.chip.fit-unknown { color: var(--muted); }
+.cov-foot { margin: 8px 0 0; }
+.cov-source { margin: 4px 0 0; }
+.chip.cov-chip { text-decoration: none; white-space: nowrap; }
+.chip.cov-chip.eval { border-style: dashed; }
+/* map rings: colors from the theme (CSS beats Leaflet's stroke/fill attributes) */
+.cov-ring { stroke: var(--muted); fill: var(--muted); }
+.cov-ring.good { stroke: var(--ok); fill: var(--ok); }
+.cov-ring.fair { stroke: var(--vehicle); fill: var(--vehicle); }
+.cov-ring.poor { stroke: var(--bad); fill: var(--bad); }
+.cov-rings { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; }
+.cov-rings select { padding: 2px 6px; }
+.cov-legend { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; color: var(--muted); }
+.cov-key { display: inline-block; width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--muted); }
+.cov-key.good { border-color: var(--ok); }
+.cov-key.fair { border-color: var(--vehicle); }
+.cov-key.poor { border-color: var(--bad); }
+.cov-check { margin-top: 10px; }
+.cov-check-result { margin-top: 6px; }
+.cov-check-result .row { gap: 8px; flex-wrap: wrap; }
+.cov-cams { width: 3.5em; }
+.cov-check-table td { vertical-align: middle; }
+.cov-usage .bad { color: var(--bad); }
+@media (max-width: 700px) {
+  .cov-row { grid-template-columns: 1fr auto; }
+  .cov-tech { flex-direction: row; align-items: center; }
+  .cov-cell { grid-column: 1 / -1; }
+  .cov-fit { grid-row: 1; grid-column: 2; }
+  .cov-bar { max-width: none; }
+}

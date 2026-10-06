@@ -5,13 +5,15 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import { Icon, confirmDialog, promptDialog, toast } from "@site/ui";
-import { type Camera, type Me, type Org, type Server, type Site, ago, api, fmtTime } from "./api";
-import { canEditMonitoring, isAdmin, isSocUser, ofTotal } from "./access";
+import { type Camera, type Me, type Org, type Server, type Site, type SiteCoverage, ago, api, fmtTime } from "./api";
+import { canCheckCoverage, canEditMonitoring, isAdmin, isSocUser, ofTotal } from "./access";
 import { Breadcrumbs } from "./Breadcrumbs";
 import { DirectChips } from "./DirectChip";
 import { SETTINGS_SECTIONS, SITE_TABS, type SettingsSection, type SiteTab, consoleHref, go, navigate, serverHref, settingsHref, siteHref } from "./nav";
 import { AddressBox } from "./site/AddressBox";
 import { CentralBox } from "./site/CentralBox";
+import { COVERAGE_ANCHOR, CoverageCard } from "./site/CoverageCard";
+import { bestCarrier, chipText } from "./coverage";
 import { siteBandwidth, uploadLine } from "./central";
 import { ContactsBox } from "./site/ContactsBox";
 import { MonitoringBox } from "./site/MonitoringBox";
@@ -39,10 +41,29 @@ export function useSite(siteId: string) {
   return { site, error, reload };
 }
 
+/**
+ * The Site's cellular coverage (hub coverage.py) when this user sees coverage at all (me.coverage.visible; trial = hub
+ * administrators only). Loaded once per Site page and again when the Site's point changes; shared by the header chip,
+ * the Servers tab card and the Settings map's rings.
+ */
+function useCoverage(site: Site | null, me: Me) {
+  const on = !!me.coverage?.visible && !!site;
+  const [cov, setCov] = useState<SiteCoverage | null>(null);
+  const key = site ? `${site.id}|${site.lat ?? ""}|${site.lon ?? ""}|${site.address}` : "";
+  useEffect(() => {
+    if (!on || !site) { setCov(null); return; }
+    let live = true;
+    api.coverage(site.id).then((c) => { if (live) setCov(c); }).catch(() => { if (live) setCov(null); });
+    return () => { live = false; };
+  }, [on, key]); // eslint-disable-line react-hooks/exhaustive-deps
+  return { cov, setCov };
+}
+
 export function SitePage({ org, me, siteId, tab, section = "general", serverId, onOrg }: {
   org: Org; me: Me; siteId: string; tab: string; section?: SettingsSection; serverId?: string; onOrg: (id: string) => void;
 }) {
   const { site, error, reload } = useSite(siteId);
+  const { cov, setCov } = useCoverage(site, me);
   // phones: the six tabs scroll sideways, the current one kept in view (tabStrip.ts, hub.css .scroll-tabs)
   const strip = useTabStrip(tab);
   // a link into another customer's Site switches the header's Customer picker to it
@@ -55,7 +76,7 @@ export function SitePage({ org, me, siteId, tab, section = "general", serverId, 
   const server = serverId ? site.servers.find((s) => s.id === serverId) : undefined;
   return (
     <>
-      <SiteHeader org={siteOrg} site={site} server={server} servers={active} admin={admin} onChanged={reload} />
+      <SiteHeader org={siteOrg} site={site} server={server} servers={active} admin={admin} onChanged={reload} cov={cov} />
       {/* styled like the server UI's top nav (plain buttons, the current one raised) so a Site reads like a server */}
       <div ref={strip.ref} className={`site-tabs ${strip.className}`} role="tablist">
         {SITE_TABS.map((t) => (
@@ -69,8 +90,8 @@ export function SitePage({ org, me, siteId, tab, section = "general", serverId, 
         : tab === "timeline" ? <SiteTimeline org={siteOrg} site={site} query={location.search} />
         : tab === "find" ? <SiteFind org={siteOrg} site={site} />
         : tab === "alerts" ? <><SiteIncidents site={site} /><SiteAlerts org={siteOrg} site={site} /></>
-        : tab === "servers" ? <ServersTab site={site} admin={admin} onChanged={reload} />
-        : <SettingsSections site={site} org={siteOrg} me={me} section={section} admin={admin} onChanged={reload} />}
+        : tab === "servers" ? <ServersTab site={site} admin={admin} onChanged={reload} cov={cov} setCov={setCov} />
+        : <SettingsSections site={site} org={siteOrg} me={me} section={section} admin={admin} onChanged={reload} cov={cov} />}
     </>
   );
 }
@@ -79,8 +100,8 @@ export function SitePage({ org, me, siteId, tab, section = "general", serverId, 
  * One row: "Customer › Site" as the title (the customer links back to its Sites list), the rollup chips, the ⋯ menu.
  * It replaces a crumb line, a title block and a chip row, so the Live grid starts where the server UI's does.
  */
-function SiteHeader({ org, site, server, servers, admin, onChanged }: {
-  org: Org; site: Site; server?: Server; servers: Server[]; admin: boolean; onChanged: () => void;
+function SiteHeader({ org, site, server, servers, admin, onChanged, cov }: {
+  org: Org; site: Site; server?: Server; servers: Server[]; admin: boolean; onChanged: () => void; cov: SiteCoverage | null;
 }) {
   const [menu, setMenu] = useState(false);
   const save = async (b: { name?: string; address?: string }) => { try { await api.updateLocation(site.id, b); onChanged(); } catch (e) { toast.error(e); } };
@@ -98,6 +119,7 @@ function SiteHeader({ org, site, server, servers, admin, onChanged }: {
         <span className={`chip ${site.cameras_online < site.cameras_total ? "warn" : ""}`}>Cameras {ofTotal(site.cameras_online, site.cameras_total, "up")}</span>
         {site.open_alerts > 0 && <span className="chip warn">⚠ {site.open_alerts} open alert{site.open_alerts > 1 ? "s" : ""}</span>}
         <DirectChips servers={servers} />
+        <CoverageChip site={site} cov={cov} />
       </div>
       <span className="spacer" />
       <div className="menu-anchor">
@@ -118,7 +140,25 @@ function SiteHeader({ org, site, server, servers, admin, onChanged }: {
   );
 }
 
-function ServersTab({ site, admin, onChanged }: { site: Site; admin: boolean; onChanged: () => void }) {
+/** "📶 VZW 8.6": the best carrier's overall score, linking to the Servers tab's coverage card. */
+function CoverageChip({ site, cov }: { site: Site; cov: SiteCoverage | null }) {
+  const text = chipText(cov?.data);
+  const best = bestCarrier(cov?.data);
+  if (!cov || !text || !best) return null;
+  const open = (e: React.MouseEvent) => {
+    e.preventDefault();
+    navigate(siteHref(site.id, "servers"));
+    setTimeout(() => document.getElementById(COVERAGE_ANCHOR)?.scrollIntoView({ behavior: "smooth", block: "start" }), 120);
+  };
+  return (
+    <a className={`chip cov-chip ${cov.evaluation ? "eval" : ""}`} href={siteHref(site.id, "servers")} onClick={open}
+      title={`Cellular: best here ${best.name} ${best.technology.toUpperCase()}, overall ${best.score.toFixed(1)} of 10 (CoverageMap)${cov.evaluation ? " · evaluation only, hub administrators" : ""}`}>
+      {text}
+    </a>
+  );
+}
+
+function ServersTab({ site, admin, onChanged, cov, setCov }: { site: Site; admin: boolean; onChanged: () => void; cov: SiteCoverage | null; setCov: (c: SiteCoverage) => void }) {
   const [sites, setSites] = useState<Site[]>([]);
   useEffect(() => { if (admin) api.locations(site.org_id).then(setSites).catch(() => setSites([])); }, [admin, site.org_id]);
   const now = Date.now() / 1000;
@@ -127,6 +167,7 @@ function ServersTab({ site, admin, onChanged }: { site: Site; admin: boolean; on
   return (
     <>
       {admin && <CentralBox site={site} onChanged={onChanged} />}
+      {cov && <CoverageCard site={site} cov={cov} onChanged={setCov} />}
       {upload && <p className="small site-upload">{upload}</p>}
       {site.servers.length === 0 ? <p className="muted">No servers in this site yet.{admin ? <> Enroll one under <a href="/customer/servers" onClick={go("/customer/servers")}>Customer → Servers</a>.</> : ""}</p> : (
         <div className="site-grid">
@@ -148,7 +189,7 @@ const SECTION_LABEL: Record<SettingsSection, string> = { general: "General", mon
  * editor, Contacts and Procedures are for customer admins and SOC supervisors (canEditMonitoring). Arm/disarm now is
  * for customer operators and up, and SOC staff. A section someone may not open falls back to General.
  */
-function SettingsSections({ site, org, me, section, admin, onChanged }: { site: Site; org: Org; me: Me; section: SettingsSection; admin: boolean; onChanged: () => void }) {
+function SettingsSections({ site, org, me, section, admin, onChanged, cov }: { site: Site; org: Org; me: Me; section: SettingsSection; admin: boolean; onChanged: () => void; cov: SiteCoverage | null }) {
   const editor = canEditMonitoring(org, me);
   const canArm = editor || isSocUser(me) || org.role === "operator";
   const allowed = SETTINGS_SECTIONS.filter((s) => editor || s === "general" || s === "monitoring");
@@ -161,7 +202,7 @@ function SettingsSections({ site, org, me, section, admin, onChanged }: { site: 
           <button key={s} role="tab" aria-selected={cur === s} className={cur === s ? "active" : ""} onClick={() => navigate(settingsHref(site.id, s))}>{SECTION_LABEL[s]}</button>
         ))}
       </div>
-      {cur === "general" ? <SettingsTab site={site} admin={admin} onChanged={onChanged} />
+      {cur === "general" ? <SettingsTab site={site} admin={admin} onChanged={onChanged} me={me} org={org} cov={cov} />
         : cur === "monitoring" ? <MonitoringBox key={site.id} site={site} canEdit={editor} canArm={canArm} />
         : cur === "contacts" ? <ContactsBox key={site.id} site={site} />
         : <ProceduresBox key={site.id} site={site} />}
@@ -177,7 +218,7 @@ const formOf = (site: Site): SettingsForm => ({
   lat: site.lat ?? null, lon: site.lon ?? null, address_parts: site.address_parts ?? null, source: site.geocode_source ?? null, autoTz: null,
 });
 
-function SettingsTab({ site, admin, onChanged }: { site: Site; admin: boolean; onChanged: () => void }) {
+function SettingsTab({ site, admin, onChanged, me, org, cov }: { site: Site; admin: boolean; onChanged: () => void; me: Me; org: Org; cov: SiteCoverage | null }) {
   const [f, setF] = useState<SettingsForm>(() => formOf(site));
   useEffect(() => { setF(formOf(site)); }, [site.id]); // eslint-disable-line react-hooks/exhaustive-deps
   // a time zone that is exactly the one at the saved point counts as "set by the address": a new pick may replace it
@@ -205,7 +246,9 @@ function SettingsTab({ site, admin, onChanged }: { site: Site; admin: boolean; o
   return (
     <div className="card site-settings">
       <label className="field"><span>Name</span><input value={f.name} disabled={!admin} maxLength={120} onChange={(e) => setF({ ...f, name: e.target.value })} /></label>
-      <AddressBox f={f} setF={(p) => setF((x) => ({ ...x, ...p }))} editable={admin} name={f.name || site.name} />
+      <AddressBox f={f} setF={(p) => setF((x) => ({ ...x, ...p }))} editable={admin} name={f.name || site.name}
+        coverage={cov?.data && cov.basis === "point" && site.lat != null && site.lon != null ? { data: cov.data, lat: site.lat, lon: site.lon } : null}
+        check={canCheckCoverage(me, org) ? { orgId: site.org_id, cost: me.coverage?.cost_per_lookup ?? 4, evaluation: !!me.coverage?.evaluation } : null} />
       <label className="field"><span>Time zone</span><input value={f.timezone} disabled={!admin} list="tz-list" placeholder="e.g. America/Chicago (set from the address)" onChange={(e) => setF({ ...f, timezone: e.target.value })} /></label>
       <datalist id="tz-list">{ZONES.map((z) => <option key={z} value={z} />)}</datalist>
       <label className="field"><span>Notes</span><textarea value={f.notes} disabled={!admin} maxLength={2000} rows={4} onChange={(e) => setF({ ...f, notes: e.target.value })} /></label>

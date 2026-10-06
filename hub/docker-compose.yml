@@ -57,6 +57,13 @@ services:
       HUB_CENTRAL_VLM_URL: ${HUB_CENTRAL_VLM_URL:-http://vllm:8000/v1}
       HUB_DATACENTER_IP: ${HUB_DATACENTER_IP:-}
       HUB_FUSIONHUB_ADDRESS: ${HUB_FUSIONHUB_ADDRESS:-}
+      # Cellular coverage per Site (CoverageMap); empty key = off. See .env.example.
+      HUB_COVERAGEMAP_KEY: ${HUB_COVERAGEMAP_KEY:-}
+      HUB_COVERAGEMAP_PLAN: ${HUB_COVERAGEMAP_PLAN:-trial}
+      HUB_COVERAGEMAP_URL: ${HUB_COVERAGEMAP_URL:-https://enterprise.coveragemap.com/api/v1}
+      HUB_COVERAGEMAP_REFRESH_DAYS: ${HUB_COVERAGEMAP_REFRESH_DAYS:-30}
+      HUB_COVERAGEMAP_MONTHLY_UNITS: ${HUB_COVERAGEMAP_MONTHLY_UNITS:-400}
+      HUB_COVERAGEMAP_DATASETS: ${HUB_COVERAGEMAP_DATASETS:-summary,fcc-coverage,speed-tests}
     depends_on:
       postgres: { condition: service_healthy }
     expose: ["8000"]

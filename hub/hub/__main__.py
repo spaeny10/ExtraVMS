@@ -5,6 +5,8 @@
    python -m hub setsoc EMAIL operator|supervisor|off   give an existing user a SOC role (off: remove it)
    python -m hub createorg NAME SLUG                 create an organization
    python -m hub geocode [--force]                   locate Sites that have an address but no coordinates (1 request/s)
+   python -m hub coverage purge                      delete all stored CoverageMap data and usage (when unsubscribing)
+   python -m hub coverage usage                      CoverageMap units used this month against the budget
 """
 from __future__ import annotations
 
@@ -33,6 +35,8 @@ def main() -> None:
     sc.add_argument("role", choices=["operator", "supervisor", "off"])
     gc = sub.add_parser("geocode", help="locate Sites that have an address but no coordinates (as the hub does at start)")
     gc.add_argument("--force", action="store_true", help="also retry addresses that failed in the last 24 h")
+    cv = sub.add_parser("coverage", help="cellular coverage (CoverageMap): purge stored data, show usage")
+    cv.add_argument("action", choices=["purge", "usage"])
     co = sub.add_parser("createorg")
     co.add_argument("name")
     co.add_argument("slug")
@@ -92,6 +96,19 @@ def main() -> None:
         st = asyncio.run(geocode.backfill(force=args.force))
         print(f"located {st['located']}, not found or not trustworthy {st['failed']}, skipped {st['skipped']} (failed in the last 24 h; --force retries)"
               + (f", cleared {st['cleared']} untrustworthy earlier pin(s)" if st.get("cleared") else ""))
+        return
+    if args.cmd == "coverage":
+        from . import coverage, db
+        db.engine()
+        if args.action == "purge":
+            n = coverage.purge()
+            print(f"deleted CoverageMap data for {n['sites']} site(s), {n['usage_months']} month(s) of usage and {n['checks']} cached address check(s)")
+            if coverage.enabled():
+                print("HUB_COVERAGEMAP_KEY is still set: the hub will look Sites up again. Empty it (and restart) once the subscription ends.")
+            return
+        r = coverage.usage_report()
+        print(f"CoverageMap {'on, plan ' + r['plan'] if r['enabled'] else 'off (HUB_COVERAGEMAP_KEY empty)'}; {r['month']}: {r['units']} unit(s) in "
+              f"{r['calls']} call(s), budget {r['budget'] or 'none'}; stored data for {r['stored_sites']} site(s)")
         return
     if args.cmd == "createorg":
         import time

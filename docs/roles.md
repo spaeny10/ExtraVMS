@@ -54,6 +54,8 @@ Granting: Account › Hub administrators (type the email of an existing account)
 
 Central recording is theirs alone: the Hosts page (datacenter hosts, their tokens), and on a Site's Servers tab adding, resizing or removing the Site's central recording instance. A Site's admins (Customer admins or owners who can see that Site) may read its central recording state and the Peplink settings sheet, to set up the site's router; nobody else sees it. Host outages (`host_offline`) notify hub administrators only.
 
+Cellular coverage (CoverageMap: carrier scores, FCC signal and coverage, nearby speed tests, and whether the upload carries the Site's cameras) depends on the hub's plan. On the **trial** plan it is evaluation only: hub administrators alone see it or look anything up, marked "Evaluation only", and no customer ever sees it. On the **paid** plan everyone who can see a Site sees its coverage (Servers tab, the 📶 chip in the Site header, the rings on its map); looking a Site up again, or checking an address before a Site exists (Settings › General), costs units and is for hub administrators and the Site's admins (a real customer membership). Data looked up during the trial stays hidden from customers until it has been looked up again on the paid plan. The monthly unit budget and its alert (`coverage_budget`) are for hub administrators only (Account › CoverageMap).
+
 ## SOC roles
 
 The Security Operations Center is one internal team. A Customer opts a Site into monitoring (Site › Settings › Monitoring, with an arming schedule, holidays and overrides). SOC staff only ever see Customers that have at least one monitored Site.

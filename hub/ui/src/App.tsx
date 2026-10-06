@@ -18,7 +18,7 @@ import { InvitePage } from "./InvitePage";
 import { type CustomerTab, fullBleed, go, matchRoute, navigate, topNav, usePath } from "./nav";
 import { SitePage } from "./SitePage";
 import { SitesPage } from "./SitesPage";
-import { type AuditRow, type HubAdmin, type Me, type Org, type PushInfo, ago, api, fmtTime } from "./api";
+import { type AuditRow, type CoverageUsage, type HubAdmin, type Me, type Org, type PushInfo, ago, api, fmtTime } from "./api";
 import { ALL_CUSTOMERS } from "./hubAdmin";
 import { KIND_LABEL } from "./labels";
 import { isSocUser, socLanding } from "./access";
@@ -156,8 +156,8 @@ function Login({ onDone }: { onDone: () => void }) {
 
 function PushCard() {
   const [info, setInfo] = useState<PushInfo | null>(null);
-  // hub push.DEFAULT_KINDS (host_offline only ever reaches hub administrators)
-  const [kinds, setKinds] = useState<string[]>(["offline", "event_policy", "event_watched", "event_high", "site_link_down", "host_offline"]);
+  // hub push.DEFAULT_KINDS (host_offline and coverage_budget only ever reach hub administrators)
+  const [kinds, setKinds] = useState<string[]>(["offline", "event_policy", "event_watched", "event_high", "site_link_down", "host_offline", "coverage_budget"]);
   const load = () => api.pushInfo().then(setInfo).catch(() => setInfo(null));
   useEffect(() => { load(); }, []);
   const supported = "serviceWorker" in navigator && "PushManager" in window && window.isSecureContext;
@@ -284,6 +284,7 @@ function AccountPage({ me, onChanged }: { me: Me; onChanged: () => void }) {
       </div>
       <PushCard />
       {me.user.is_super && <HubAdminsBox me={me} onChanged={onChanged} />}
+      {me.user.is_super && <CoverageUsageBox />}
       <div className="card">
         <h3>Password</h3>
         <button className="ghost small" onClick={async () => {
@@ -344,6 +345,43 @@ function HubAdminsBox({ me, onChanged }: { me: Me; onChanged: () => void }) {
         <details className="small"><summary className="muted">Recent changes</summary>
           <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>{recent.map((r) => <li key={r.id}>{fmtTime(r.ts)} · {r.user_email ?? "—"} · {r.action}</li>)}</ul>
         </details>
+      )}
+    </div>
+  );
+}
+
+/**
+ * CoverageMap (cellular coverage per Site, hub coverage.py), hub administrators: the plan, units used this month against
+ * the budget (HUB_COVERAGEMAP_MONTHLY_UNITS), recent months, and how many Sites have stored data. Hidden while the
+ * feature is off and nothing is stored; with the key off but data stored it says how to delete it.
+ */
+function CoverageUsageBox() {
+  const [u, setU] = useState<CoverageUsage | null>(null);
+  useEffect(() => { api.hubCoverage().then(setU).catch(() => setU(null)); }, []);
+  if (!u || (!u.enabled && u.stored_sites === 0)) return null;
+  const pct = u.budget ? Math.min(100, Math.round((u.units / u.budget) * 100)) : null;
+  return (
+    <div className="card cov-usage">
+      <h3>CoverageMap <span className="muted small">cellular coverage per Site</span></h3>
+      {!u.enabled ? (
+        <p className="small">Off (HUB_COVERAGEMAP_KEY is empty), but data for {u.stored_sites} Site{u.stored_sites === 1 ? "" : "s"} is still stored. Once the subscription has ended, delete it on the hub server: <code>python -m hub coverage purge</code></p>
+      ) : (
+        <>
+          <p className="small" style={{ marginTop: 0 }}>
+            Plan: <strong>{u.plan === "paid" ? "Paid" : "Trial"}</strong>
+            {u.plan === "trial" && <span className="muted"> · evaluation only: hub administrators see coverage, customers never do</span>}
+          </p>
+          <div className="small">This month ({u.month}): <strong>{u.units}</strong>{u.budget ? ` of ${u.budget}` : ""} units · {u.calls} call{u.calls === 1 ? "" : "s"}
+            {u.remaining != null && <span className="muted"> · {u.remaining} left</span>}{!u.budget && <span className="muted"> · no cap</span>}</div>
+          {pct != null && <span className={`cap-bar ${pct >= 100 ? "hot" : pct >= 80 ? "warm" : ""}`} style={{ display: "block", margin: "6px 0" }}><span style={{ width: `${pct}%` }} /></span>}
+          {u.budget_reached && <p className="small bad">Budget reached: automatic refreshes stopped until next month; manual lookups are refused. Raise HUB_COVERAGEMAP_MONTHLY_UNITS to continue.</p>}
+          <p className="muted small">Stored for {u.stored_sites} Site{u.stored_sites === 1 ? "" : "s"} · refreshed every {u.refresh_days} days · a lookup costs up to {u.cost_per_lookup} units ({u.datasets.join(", ")})</p>
+          {u.history.length > 1 && (
+            <details className="small"><summary className="muted">Earlier months</summary>
+              <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>{u.history.map((h) => <li key={h.month}>{h.month}: {h.units} units · {h.calls} calls</li>)}</ul>
+            </details>
+          )}
+        </>
       )}
     </div>
   );

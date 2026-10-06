@@ -7,6 +7,8 @@ export const KIND_LABEL: Record<string, string> = {
   site_link_down: "Site link down",
   // hub administrators only: a central recording host stopped heartbeating
   host_offline: "Central host offline",
+  // hub administrators only: the CoverageMap monthly unit budget is used up (automatic coverage refreshes stopped)
+  coverage_budget: "Coverage budget reached",
 };
 
 /**

@@ -19,7 +19,7 @@ from pydantic import BaseModel, EmailStr, Field
 from . import __version__, alerts, auth, backups, cameras, dashboards, db, digest, direct, fleet_actions, proxy, push, soc_api, turn, vlm_proxy
 from . import fleet as fleet_mod
 from . import find as find_mod
-from . import geocode, hosts, security, soc, soc_reports
+from . import coverage, geocode, hosts, security, soc, soc_reports
 from fastapi.responses import StreamingResponse
 from .agents import registry
 from .config import settings
@@ -40,6 +40,8 @@ async def lifespan(app: FastAPI):
                   asyncio.create_task(soc_reports.shift_loop(), name="soc-reports")]
     if settings.geocode_backfill:
         tasks.append(asyncio.create_task(geocode.backfill_once_at_start(), name="geocode-backfill"))   # once per start, 1 request/s
+    if coverage.enabled():
+        tasks.append(asyncio.create_task(coverage.daily_loop(), name="coverage"))   # CoverageMap refresh, inside the monthly budget
     task = tasks[0]
     log.info("hub %s up on http://%s:%s (%s)", __version__, settings.host, settings.port, settings.public_url)
     yield
@@ -137,7 +139,8 @@ async def me(request: Request):
         raise HTTPException(401, "sign in")
     # a hub administrator gets every customer (they own them all), so the Customer picker can switch into any of them
     return {"user": auth.me_user(u), "orgs": auth.orgs_for(u), "active_org": u["session"].get("org_id"),
-            "map": geocode.map_config()}   # the hub UI's Site maps
+            "map": geocode.map_config(),   # the hub UI's Site maps
+            "coverage": coverage.me_info(u)}   # cellular coverage (CoverageMap): off, or the plan and whether this user sees it
 
 
 class PasswordIn(BaseModel):
@@ -925,6 +928,8 @@ async def update_location(location_id: str, body: LocationPatch, u: dict = Depen
         _audit(u, loc["org_id"], None, f"site updated: {vals.get('name', loc['name'])}", {"location_id": location_id})
         if "address" in vals and (vals["address"] or "").strip() and vals.get("lat", loc.get("lat")) is None:
             geocode.locate_soon(location_id)
+        if {"lat", "lon", "address"} & set(vals):
+            coverage.location_moved(location_id)   # its stored cellular coverage describes the old place: look again soon
     return await get_location(location_id, False, u)
 
 
@@ -983,6 +988,7 @@ async def delete_location(location_id: str, move_to: str | None = None, u: dict 
         c.execute(sa.delete(db.location_contacts).where(db.location_contacts.c.location_id == location_id))
         c.execute(sa.delete(db.location_procedures).where(db.location_procedures.c.location_id == location_id))
         find_mod.drop_views(c, location_id)
+        c.execute(sa.delete(db.site_coverage).where(db.site_coverage.c.location_id == location_id))   # describes this place only
         c.execute(sa.delete(db.locations).where(db.locations.c.id == location_id))
     for srv in servers:
         registry.refresh(srv["id"])
@@ -1435,6 +1441,123 @@ async def location_central_delete(location_id: str, ci_id: str, purge: bool = Fa
     except hosts.HostError as e:
         raise HTTPException(502, f"{e} (remove anyway to forget it at the hub)")
     return hosts.instances(db.central_instances.c.id == ci_id, include_deleted=True)[0]
+
+
+# ---------------------------------------------------------------- cellular coverage (coverage.py, CoverageMap)
+# Plan trial (evaluation only): hub administrators alone see or fetch anything. Plan paid: whoever sees a Site sees its
+# coverage; fetching (it costs units) is for hub administrators and the Site's admins (a real customer membership).
+# Trial-era rows are never shown to customers (coverage.shown_to). Everything 404s while HUB_COVERAGEMAP_KEY is empty.
+
+def _coverage_on() -> None:
+    if not coverage.enabled():
+        raise HTTPException(404, "cellular coverage is not configured on this hub")
+
+
+def _coverage_visible(u: dict) -> None:
+    if not coverage.visible_to(u):
+        raise HTTPException(403, "cellular coverage is in evaluation: hub administrators only")
+
+
+def _coverage_can_fetch(u: dict, org_id: str) -> bool:
+    if u.get("is_super"):
+        return True
+    if coverage.plan() != "paid":
+        return False
+    try:
+        auth.require_customer_role(u, org_id, "admin")
+    except HTTPException:
+        return False
+    return True
+
+
+def _coverage_failed(e: Exception) -> HTTPException:
+    """A lookup that did not happen, as the HTTP error the UI shows (budget 409, rate 429, the vendor's refusal or an
+    outage 502 with its messages, a place it could not look up 422)."""
+    if isinstance(e, coverage.BudgetError):
+        return HTTPException(409, str(e))
+    if isinstance(e, RuntimeError) and e.args and e.args[0] == "rate":
+        wait = int(e.args[1]) if len(e.args) > 1 else 600
+        return HTTPException(429, f"looked up moments ago: try again in {max(1, round(wait / 60))} min", headers={"Retry-After": str(wait)})
+    if isinstance(e, coverage.CoverageError):
+        if e.location:
+            return HTTPException(422, f"CoverageMap could not look up this place: {e}")
+        return HTTPException(502, f"{e}" + (" (the previous data is kept)" if e.network else ""))
+    if isinstance(e, LookupError):
+        return HTTPException(409, str(e).strip("'\""))
+    raise e
+
+
+def _coverage_payload(u: dict, loc: dict) -> dict:
+    servers = db.rows(sa.select(db.sites).where(db.sites.c.location_id == loc["id"], db.sites.c.retired_at.is_(None)))
+    return coverage.site_payload(u, loc, servers, cameras.for_location(loc["id"]), _coverage_can_fetch(u, loc["org_id"]))
+
+
+@app.get("/api/locations/{location_id}/coverage")
+async def location_coverage(location_id: str, u: dict = Depends(user)):
+    """The Site's cellular coverage: carriers best first, LTE and 5G, scores, FCC signal and coverage, speed tests, and
+    each one's fit for the cameras' upload. `data` null = not looked up yet (or evaluation-era data hidden from you)."""
+    _coverage_on()
+    loc, _ = auth.location_access(u, location_id)
+    _coverage_visible(u)
+    return _coverage_payload(u, loc)
+
+
+@app.post("/api/locations/{location_id}/coverage/refresh")
+async def location_coverage_refresh(location_id: str, u: dict = Depends(user)):
+    """Look the Site up again now (costs up to refresh_cost units; once per Site per 10 minutes; inside the budget)."""
+    _coverage_on()
+    loc, _ = auth.location_access(u, location_id)
+    _coverage_visible(u)
+    if not _coverage_can_fetch(u, loc["org_id"]):
+        raise HTTPException(403, "only hub administrators and this site's admins can refresh its cellular coverage")
+    try:
+        r = await coverage.refresh_location(location_id)
+    except (coverage.BudgetError, coverage.CoverageError, RuntimeError, LookupError) as e:
+        raise _coverage_failed(e) from None
+    _audit(u, loc["org_id"], None, f"cellular coverage refreshed: {loc['name']} ({r['units']} unit{'s' if r['units'] != 1 else ''})",
+           {"location_id": location_id, "units": r["units"]})
+    return _coverage_payload(u, loc)
+
+
+class CoverageCheckIn(BaseModel):
+    lat: float | None = Field(None, ge=-90, le=90)
+    lon: float | None = Field(None, ge=-180, le=180)
+    address: str | None = Field(None, max_length=256)
+    org_id: str | None = Field(None, max_length=24)   # the customer the check is for (required unless a hub administrator)
+
+
+@app.post("/api/coverage/check")
+async def coverage_check(body: CoverageCheckIn, u: dict = Depends(user)):
+    """Cellular coverage at a place that is not a Site yet (an address being set up): not stored against any Site,
+    cached by the point (4 decimals) or the address for REFRESH_DAYS. Hub administrators and customer admins."""
+    _coverage_on()
+    _coverage_visible(u)
+    if (body.lat is None) != (body.lon is None):
+        raise HTTPException(422, "lat and lon go together")
+    if body.lat is None and not (body.address or "").strip():
+        raise HTTPException(422, "give a point (lat, lon) or an address")
+    if not u.get("is_super"):
+        if not body.org_id:
+            raise HTTPException(403, "name the customer (org_id) this check is for")
+        auth.require_customer_role(u, body.org_id, "admin")
+    try:
+        r = await coverage.check(body.lat, body.lon, body.address if body.lat is None else None, u["id"])
+    except (coverage.BudgetError, coverage.CoverageError, RuntimeError) as e:
+        raise _coverage_failed(e) from None
+    if not r["cached"]:
+        where = f"{body.lat:.4f},{body.lon:.4f}" if body.lat is not None else "an address"
+        _audit(u, body.org_id, None, f"cellular coverage checked at {where} ({r['units']} unit{'s' if r['units'] != 1 else ''})",
+               {"units": r["units"]})
+    need = coverage.camera_need([])
+    return {**r, "evaluation": coverage.plan() == "trial", "need": need, "fits": coverage.fits_for(r["data"], need["mbps"]),
+            "cost": coverage.max_units_per_location(), "source": coverage.SOURCE_LINE}
+
+
+@app.get("/api/hub/coverage")
+async def hub_coverage(u: dict = Depends(user)):
+    """CoverageMap usage this month against the budget, the plan, recent months, how many Sites have stored data."""
+    auth.require_super(u)
+    return coverage.usage_report()
 
 
 # ---------------------------------------------------------------- fleet find / ask, digests, backups, push

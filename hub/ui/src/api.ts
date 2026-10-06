@@ -15,7 +15,11 @@ export type FleetMessage = ({ type: "event"; event: NvrEvent; site_id: string; s
 export type SocRole = "operator" | "supervisor";
 export type Me = { user: { id: string; email: string; totp_enabled: boolean; is_super: boolean; soc_role?: SocRole | null; soc_only?: boolean }; orgs: Org[]; active_org: string | null;
   /** the hub's map tiles (HUB_MAP_TILES; newer hubs) */
-  map?: MapConfig };
+  map?: MapConfig;
+  /** cellular coverage (CoverageMap; newer hubs): off, or the plan and whether this user sees it anywhere */
+  coverage?: CoverageInfo };
+/** `visible`: this user sees coverage at all (trial: hub administrators only); `cost_per_lookup`: worst-case units of one lookup. */
+export type CoverageInfo = { enabled: boolean; plan: "trial" | "paid" | null; visible: boolean; evaluation: boolean; cost_per_lookup: number };
 /**
  * `soc`: the customer is listed only because it has a SOC-monitored Site (no real membership). Newer hubs may send
  * `member` (true = a real membership) alongside it.
@@ -76,6 +80,35 @@ export type DirectInfo = { available: boolean; urls: { url: string; local?: bool
 // (direct.candidates also accepts bare URL strings in `urls`: that is how the server's own heartbeat lists LAN URLs)
 /** POST /api/servers/{id}/direct-token: a short-lived token the server accepts for read-only + WHEP requests. */
 export type DirectToken = DirectInfo & { token: string; exp: number; role: string };
+// ---- Cellular coverage (hub/hub/coverage.py, the CoverageMap API), normalized per carrier and technology
+/** One speed-test metric at the nearest radius with successful tests ("closest" = the closest tested area, up to 10 km). */
+export type CoverageMetric = { radius: "0.5km" | "1km" | "2km" | "closest"; med: number | null; min: number | null; avg: number | null; max: number | null;
+  count: number; failed: number; accuracy: string | null; distance_km?: number | null };
+export type CoverageEntry = {
+  technology: string; technology_name: string | null;
+  summary: { overall: number | null; performance: number | null; coverage: number | null; reliability: number | null; is_fully_covered: boolean; source: "measured" | "estimated" | string | null; accuracy: string | null } | null;
+  /** FCC signal (dBm) at the point and averaged within 0.5/1/2 km; coverage = the covered share of each radius (0..1) */
+  fcc: { signal: { point: number | null; r05: number | null; r1: number | null; r2: number | null }; coverage: { r05: number | null; r1: number | null; r2: number | null } } | null;
+  speed: { download: CoverageMetric | null; upload: CoverageMetric | null; latency: CoverageMetric | null } | null;
+};
+export type CoverageCarrier = { code: string; name: string; best: number | null; best_technology: string | null; tech: Record<string, CoverageEntry> };
+export type CoverageData = { latitude: number | null; longitude: number | null; address?: string | null; confidence?: string | null; error?: string | null; carriers: CoverageCarrier[] };
+/** What the Site's cameras push up the link (Mbit/s): measured per camera where the server reports it, else assumed. */
+export type CameraNeed = { mbps: number; cameras: number; measured: number; assumed: number; typical: boolean };
+export type FitKind = "fits" | "tight" | "wont_fit" | "unknown";
+export type UploadFit = { fit: FitKind; ratio: number | null; reason: string };
+/** GET /api/locations/{id}/coverage. `data` null: not looked up yet, or (`hidden`) evaluation-era data customers may not see. */
+export type SiteCoverage = {
+  enabled: boolean; plan: "trial" | "paid"; evaluation: boolean; location_id: string; data: CoverageData | null; fetched_at: number | null;
+  units: number | null; plan_at_fetch: string | null; basis: "point" | "address" | null; information: string[]; hidden: boolean;
+  stale: boolean; stale_reason: string | null; error: string | null; attempted_at: number | null; can_refresh: boolean; refresh_cost: number;
+  refresh_wait_s: number | null; locatable: boolean; need: CameraNeed; fits: Record<string, Record<string, UploadFit>>; source: string;
+};
+export type CoverageCheck = { cached: boolean; fetched_at: number; units: number; data: CoverageData; evaluation: boolean; need: CameraNeed;
+  fits: Record<string, Record<string, UploadFit>>; cost: number; source: string };
+export type CoverageUsage = { enabled: boolean; plan: "trial" | "paid" | null; budget: number; month: string; units: number; calls: number; remaining: number | null;
+  budget_reached: boolean; alert_open: boolean; history: { month: string; units: number; calls: number }[]; stored_sites: number; datasets: string[];
+  refresh_days: number; cost_per_lookup: number };
 /** A Site (wire: location) with its rollup and its servers' cards. Retired servers are counted (retired_servers) but left out of `servers` unless asked for. */
 export type Site = {
   id: string; org_id: string; name: string; address: string; timezone: string | null; notes: string | null; created_at: number; updated_at: number;
@@ -335,6 +368,10 @@ export const api = {
   removeCentral: (loc: string, ci: string, o: { purge?: boolean; force?: boolean } = {}) =>
     req<CentralInstance>(`/api/locations/${loc}/central/${ci}?${qs({ purge: o.purge || undefined, force: o.force || undefined })}`, { method: "DELETE" }),
   // SOC monitoring per Site: config for customer admins and SOC supervisors, arm/disarm now for operators of either side
+  coverage: (loc: string) => req<SiteCoverage>(`/api/locations/${loc}/coverage`),
+  refreshCoverage: (loc: string) => req<SiteCoverage>(`/api/locations/${loc}/coverage/refresh`, { method: "POST" }),
+  coverageCheck: (b: { lat?: number; lon?: number; address?: string; org_id?: string }) => req<CoverageCheck>("/api/coverage/check", json("POST", b)),
+  hubCoverage: () => req<CoverageUsage>("/api/hub/coverage"),
   monitoring: (loc: string) => req<Monitoring>(`/api/locations/${loc}/monitoring`),
   setMonitoring: (loc: string, b: MonitoringConfig) => req<Monitoring>(`/api/locations/${loc}/monitoring`, json("PUT", b)),
   /** `until` epoch seconds, at most 24 h ahead (the hub refuses more); a reason is required. */

@@ -9,13 +9,15 @@ import sqlalchemy as sa
 from . import cameras, db
 
 KINDS = ("offline", "camera_down", "disk", "clock", "detector_fallback", "detector_stalled", "vlm_fallback_active", "event_high", "event_policy", "event_watched",
-         "site_link_down", "host_offline")
+         "site_link_down", "host_offline", "coverage_budget")
 # site_link_down  the server's heartbeat says every camera is unreachable at once (summary.site_link_down): the link to
 #                 the Site (SpeedFusion tunnel, port forwards, the BR1's cellular uplink) is probably down. One alert for
 #                 the server instead of one camera_down per camera; cameras flagged link_down raise no camera_down.
 # host_offline    a central recording host (hosts.py) stopped heartbeating. Hub-level: org_id hosts.HUB_ORG, site_id =
 #                 the host id; only hub administrators are notified (HUB_KINDS).
-HUB_KINDS = ("host_offline",)
+# coverage_budget the CoverageMap monthly unit budget (HUB_COVERAGEMAP_MONTHLY_UNITS) is used up: automatic coverage
+#                 refreshes stopped until next month. Hub-level (org hosts.HUB_ORG, site_id "coverage", key = the month).
+HUB_KINDS = ("host_offline", "coverage_budget")
 # Server detector health, from the heartbeat's `health_alerts` list (backend nvr/detector.py): open while listed.
 #   detector_fallback  the Hailo accelerator is missing or failing; YOLO runs on the CPU (or nothing can detect)
 #   vlm_fallback_active  the main local Qwen (e.g. the 27B) is down and the fallback model (the 9B) is answering

@@ -251,6 +251,21 @@ central_enroll_tokens = Table("central_enroll_tokens", metadata,
                               Column("created_at", Float, nullable=False), Column("expires_at", Float, nullable=False),
                               Column("used_at", Float, nullable=True), Column("server_id", String(24), nullable=True))
 
+# ---- Cellular coverage (coverage.py): the CoverageMap API's answer for each Site (normalized + raw), and the units used
+# per calendar month (budget). `python -m hub coverage purge` deletes both (and the address-check cache in kv,
+# keys "coverage:..."): required once the CoverageMap subscription ends.
+site_coverage = Table("site_coverage", metadata,
+                      Column("location_id", String(24), primary_key=True),
+                      Column("fetched_at", Float, nullable=True),          # last successful lookup (NULL: only failed attempts)
+                      Column("lat", Float, nullable=True), Column("lon", Float, nullable=True),   # where it was looked up
+                      Column("data", sa.JSON, nullable=True),              # {normalized, raw, basis, address, datasets, information}
+                      Column("units", Integer, nullable=False, default=0),  # units that lookup cost
+                      Column("plan_at_fetch", String(8), nullable=True),    # trial | paid: trial data is never shown to customers
+                      Column("attempted_at", Float, nullable=True), Column("error", Text, nullable=True))   # the last attempt
+coverage_usage = Table("coverage_usage", metadata,
+                       Column("month", String(7), primary_key=True),       # YYYY-MM (UTC)
+                       Column("units", Integer, nullable=False, default=0), Column("calls", Integer, nullable=False, default=0))
+
 _engine: Engine | None = None
 
 

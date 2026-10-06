@@ -85,6 +85,14 @@ class Settings(BaseSettings):
     host_create_timeout_s: float = 600.0      # create_instance may pull images and set up quotas: minutes
     host_command_timeout_s: float = 120.0     # every other host command
 
+    # Cellular coverage per Site (coverage.py): the CoverageMap API (FCC coverage, crowdsourced speed tests, summary scores)
+    coveragemap_key: str = ""                 # empty = the feature is off everywhere (stored data is kept: `python -m hub coverage purge`)
+    coveragemap_plan: str = "trial"           # trial = evaluation only (hub administrators see it) | paid = customers see their Sites'
+    coveragemap_url: str = "https://enterprise.coveragemap.com/api/v1"
+    coveragemap_refresh_days: int = 30        # stored data older than this is refetched (also: the Site moved > 100 m)
+    coveragemap_monthly_units: int = 400      # budget cap per calendar month (UTC); 0 = no cap
+    coveragemap_datasets: str = "summary,fcc-coverage,speed-tests"
+
 settings = Settings()
 if not settings.secret:
     settings.secret = secrets.token_urlsafe(32)

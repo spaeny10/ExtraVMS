@@ -4,17 +4,28 @@
  * still what the previous lookup put there, the time zone. "Locate" looks up the text as typed. Below, a map with a
  * draggable pin (moving it changes the point and the time zone the same way, with Undo), the coordinates with a copy
  * button, and links out to Google and Apple Maps. Saving is the Settings card's Save.
+ * Cellular coverage (when the hub has it and this user sees it): rings on the map around the saved point (CoverageExtras
+ * RingsControl), and "Check cellular coverage" at the picked point for those who may spend units on it.
  */
 import { useEffect, useRef, useState } from "react";
 import { toast } from "@site/ui";
-import { api } from "../api";
+import { type CoverageData, api } from "../api";
 import { SiteMap } from "../map/LazyMap";
 import { type GeoHit, type PlaceForm, appleMapsHref, applyDrag, applyHit, fmtCoord, googleMapsHref } from "../place";
+import { CoverageCheckBox, type RingChoice, RingsControl, ringsOf } from "./CoverageExtras";
+
+/** Coverage looked up at `lat, lon` (the saved point): rings only while the form's pin is still there. */
+export type AddressCoverage = { data: CoverageData; lat: number; lon: number };
+/** May spend units on a check at the picked point (hub POST /api/coverage/check). */
+export type AddressCheck = { orgId: string; cost: number; evaluation: boolean };
 
 const MIN_CHARS = 4;
 const DEBOUNCE_MS = 400;
 
-export function AddressBox({ f, setF, editable, name }: { f: PlaceForm; setF: (f: PlaceForm) => void; editable: boolean; name: string }) {
+export function AddressBox({ f, setF, editable, name, coverage, check }: {
+  f: PlaceForm; setF: (f: PlaceForm) => void; editable: boolean; name: string; coverage?: AddressCoverage | null; check?: AddressCheck | null;
+}) {
+  const [ring, setRing] = useState<RingChoice>({ on: false, carrier: "", tech: "lte" });
   const [hits, setHits] = useState<GeoHit[]>([]);
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(-1);
@@ -73,6 +84,8 @@ export function AddressBox({ f, setF, editable, name }: { f: PlaceForm; setF: (f
     try { await navigator.clipboard.writeText(fmtCoord(f.lat, f.lon)); toast.success("Coordinates copied"); } catch { toast.info(fmtCoord(f.lat, f.lon)); }
   };
   const located = f.lat != null && f.lon != null;
+  const atLookup = !!coverage && located && Math.abs(f.lat! - coverage.lat) < 1e-5 && Math.abs(f.lon! - coverage.lon) < 1e-5;
+  const rings = atLookup ? ringsOf(coverage!.data, ring) : undefined;
 
   return (
     <div className="address-box">
@@ -103,7 +116,9 @@ export function AddressBox({ f, setF, editable, name }: { f: PlaceForm; setF: (f
       {tzNote && <p className="muted small address-note">🕒 {tzNote}{f.timezone ? `: ${f.timezone}` : ""}</p>}
       {located ? (
         <>
-          <SiteMap pins={[{ id: "site", lat: f.lat!, lon: f.lon!, title: name }]} height={260} draggable={editable} onDrag={drag} label={`Map of ${name}`} />
+          <SiteMap pins={[{ id: "site", lat: f.lat!, lon: f.lon!, title: name }]} height={260} draggable={editable} onDrag={drag} label={`Map of ${name}`}
+            rings={rings?.map((r) => ({ radius_m: r.radius_m, cls: r.cls, label: r.label }))} />
+          {atLookup && <RingsControl data={coverage!.data} choice={ring} setChoice={setRing} />}
           {undo && (
             <p className="small address-note">Marker moved from the address. <button className="linkish" onClick={() => { setF(undo); setUndo(null); setTzNote(null); }}>Undo</button></p>
           )}
@@ -116,6 +131,7 @@ export function AddressBox({ f, setF, editable, name }: { f: PlaceForm; setF: (f
             <a href={appleMapsHref(f.lat!, f.lon!, name)} target="_blank" rel="noopener noreferrer">Open in Apple Maps ↗</a>
           </div>
           {editable && <p className="muted small address-note">Drag the pin to the entrance responders should use.</p>}
+          {check && <CoverageCheckBox lat={f.lat!} lon={f.lon!} orgId={check.orgId} cost={check.cost} evaluation={check.evaluation} />}
         </>
       ) : (
         <p className="muted small address-note">Not on the map yet{editable ? ": pick a suggestion or press Locate." : "."}</p>
