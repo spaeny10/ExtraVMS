@@ -5,6 +5,7 @@ import asyncio
 import base64
 import datetime as dt
 import logging
+import os
 import re
 import secrets
 import urllib.parse
@@ -107,6 +108,26 @@ def auth_users() -> list[dict]:
         {"user": "any", "pass": "", "ips": LOCAL_IPS,
          "permissions": [{"action": "publish"}, {"action": "api"}, {"action": "metrics"}, {"action": "playback"}]},
     ]
+
+
+def atomic_write(path, text: str) -> None:
+    """Replace `path` with `text` in one step (temp file in the same directory + os.replace), so a reader watching the
+    file (MediaMTX's config hot reload) never sees it empty or half written."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    with open(tmp, "w", encoding="utf-8", newline="") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    for attempt in range(10):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:   # Windows: the reader has the file open this instant; it closes it right away
+            if attempt == 9:
+                tmp.unlink(missing_ok=True)
+                raise
+            import time
+            time.sleep(0.05)
 
 
 def camera_url(cam: dict, path: str) -> str:
@@ -218,7 +239,10 @@ class MediaMTX:
         settings.recordings_dir.mkdir(parents=True, exist_ok=True)
         text = yaml.safe_dump(build_config(cameras), sort_keys=False)
         if not self.config_path.exists() or self.config_path.read_text() != text:
-            self.config_path.write_text(text)  # MediaMTX hot-reloads on change
+            # MediaMTX hot-reloads on change. Write a temp file and swap it in: an in-place write_text truncates first,
+            # and a reload that caught the empty file ran MediaMTX on its defaults (no API, no recording, no camera
+            # paths) until the next restart (Qwenbot, 2026-10-06, ~6 min of recording lost).
+            atomic_write(self.config_path, text)
             log.info("wrote %s (%d cameras)", self.config_path, len(cameras))
 
     async def run(self) -> None:
