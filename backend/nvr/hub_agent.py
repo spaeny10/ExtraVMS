@@ -99,6 +99,7 @@ class HubAgent:
         self.last_heartbeat: float | None = None
         self.streams: dict[int, Stream] = {}
         self._ws = None
+        self._parked_code: str | None = None   # the claim code this open connection presented to the hub (unenrolled)
         self._tasks: list[asyncio.Task] = []
         self._send_lock = asyncio.Lock()
         self._last_summary_at = time.time()
@@ -112,7 +113,13 @@ class HubAgent:
             return None
         c = db.get_setting("hub_claim")
         if not c or c["expires"] < time.time() + 60:
-            c = new_claim()
+            if c and self._ws is not None and self._parked_code == c["code"]:
+                # The hub has this connection parked under this code: keep showing (and extending) the same code
+                # while it stays connected. Rotating it here left the page showing a code the hub had never seen,
+                # so "Enrol server" stayed disabled (2026-10-06, IS-400BX-001).
+                c = {**c, "expires": time.time() + CLAIM_TTL_S}
+            else:
+                c = new_claim()
             db.set_setting("hub_claim", c)
         return c
 
@@ -177,8 +184,11 @@ class HubAgent:
     def _auth_header(self) -> str:
         token = db.get_setting("hub_token")
         if token:
+            self._parked_code = None
             return f"Bearer {token}"
-        return f"Claim {self.claim()['code']}"
+        code = self.claim()["code"]
+        self._parked_code = code
+        return f"Claim {code}"
 
     async def _session(self) -> None:
         url = self.hub_url()
@@ -205,6 +215,7 @@ class HubAgent:
                     await self._on_message(decode(msg))
             finally:
                 self._ws = None
+                self._parked_code = None
                 self.connected = False
                 for t in self._tasks:
                     t.cancel()

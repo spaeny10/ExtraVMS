@@ -216,6 +216,24 @@ def test_agent_end_to_end():
     asyncio.run(_run())
 
 
+def test_claim_code_stays_put_while_parked():
+    """The page's claim code must be the one the hub has the connection parked under (else Enrol stays disabled)."""
+    db.set_setting("hub_token", None)
+    db.set_setting("hub_claim", None)
+    agent = hub_agent.HubAgent(None, SimpleNamespace())
+    agent.enrolled = False
+    header = agent._auth_header()                       # what the hub sees when the session opens
+    code = header.split(" ", 1)[1]
+    agent._ws = object()                                # the session is open (parked at the hub)
+    c = db.get_setting("hub_claim")
+    db.set_setting("hub_claim", {**c, "expires": time.time() + 10})   # about to expire
+    assert agent.claim()["code"] == code                # extended, not rotated
+    assert agent.claim()["expires"] > time.time() + 60
+    agent._ws, agent._parked_code = None, None          # disconnected: an expiring code may rotate again
+    db.set_setting("hub_claim", {**db.get_setting("hub_claim"), "expires": time.time() + 10})
+    assert agent.claim()["code"] != code
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
