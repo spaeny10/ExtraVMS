@@ -1290,11 +1290,13 @@ async def fleet_ask(body: FleetAskIn, u: dict = Depends(user)):
 
 class ActionPlanIn(BaseModel):
     text: str = Field(min_length=1, max_length=500)
+    # where the plan was made: only "actions_page" (Customer › Actions) plans can be executed (fleet_actions.gate)
+    origin: str | None = Field(None, max_length=40)
 
 
 class ActionExecIn(BaseModel):
     plan_id: str | None = Field(None, max_length=40)
-    plan: dict | None = None    # or the fields themselves: {action, source_site, target_site, cameras, days, new_name, ...}
+    plan: dict | None = None    # no longer accepted (refused and logged): fleet actions run only from Actions-page plans
     confirm_name: str | None = Field(None, max_length=200)   # migrate / retire: the source site's name, typed on the card
     options: dict | None = None  # the card's ticks: {copy_history, skip_stream_check}
     camera: dict | None = None   # add_camera: password, username, paths, ports. Forwarded to the site, never stored or logged
@@ -1306,64 +1308,63 @@ def _verb_role(action: str) -> str:
 
 @app.post("/api/orgs/{org_id}/actions/plan")
 async def action_plan(org_id: str, body: ActionPlanIn, u: dict = Depends(user)):
-    """Is this Ask text a fleet instruction? {"action": "none"} if not; else the plan and its confirmation card.
-    No side effects. Anyone in the org may see a card; only admins (operators for lock_footage) can confirm it."""
+    """Is this text a fleet instruction? {"action": "none"} if not; else the plan and its confirmation card, with
+    `parser` ("ai" / "rules"). No side effects, not logged. Anyone in the org may see a card; only admins (operators
+    for lock_footage) can confirm it, and only a plan made with origin "actions_page" by the same user."""
     role = auth.require_role(u, org_id, "viewer")
-    out = await fleet_actions.plan_for(u, org_id, body.text)
+    origin = body.origin if body.origin == fleet_actions.ORIGIN else None
+    out = await fleet_actions.plan_for(u, org_id, body.text, origin)
     return out | {"allowed": auth.allows(role, _verb_role(out["action"]))} if out["action"] != "none" else out
 
 
 @app.post("/api/orgs/{org_id}/actions/execute")
 async def action_execute(org_id: str, body: ActionExecIn, u: dict = Depends(user)):
-    role = auth.require_role(u, org_id, "operator")
-    if body.plan_id:
-        p = fleet_actions.get(body.plan_id, org_id)
-        if p is None:
-            raise HTTPException(404, "that plan expired (plans last 10 minutes); ask again")
-    elif body.plan:
-        try:
-            p = await fleet_actions.build(u, org_id, fleet_actions.from_fields(body.plan), f"(api) {body.plan.get('action')}", "api")
-        except fleet_actions.ActionError as e:
-            raise HTTPException(422, str(e))
-    else:
-        raise HTTPException(422, "plan_id or plan required")
-    if not auth.allows(role, _verb_role(p["action"])):
-        raise HTTPException(403, f"needs {_verb_role(p['action'])} in this organization")
-    want = (p["card"] or {}).get("confirm_name")
-    if want and " ".join(str(body.confirm_name or "").split()).casefold() != " ".join(want.split()).casefold():
-        raise HTTPException(400, f'type the server name "{want}" to confirm')
+    """Run a confirmed plan. Every attempt is written to the audit log: done, failed (why) or refused (why: not made
+    on the Actions page, someone else's plan, expired or already run, role, Site scope, typed name, busy server,
+    rate limit). See fleet_actions.gate."""
+    role = auth.require_role(u, org_id, "viewer")   # members only; the verb's own role is checked (and logged) in gate
     try:
-        return await fleet_actions.execute(p, u, {"options": body.options or {}, "camera": body.camera})
-    except fleet_actions.ActionError as e:
-        raise HTTPException(409, str(e))
+        try:
+            p = fleet_actions.gate(u, org_id, role, body.plan_id, explicit=body.plan is not None, confirm_name=body.confirm_name)
+        except fleet_actions.Refused as e:
+            raise HTTPException(e.status, e.message)
+        try:
+            return await fleet_actions.execute(p, u, {"options": body.options or {}, "camera": body.camera})
+        except fleet_actions.ActionError as e:
+            fleet_actions.refuse(u, org_id, 409, str(e), p)
+            raise HTTPException(409, str(e))
     finally:
         body.camera = None
 
 
 @app.post("/api/orgs/{org_id}/actions/undo/{audit_id}")
 async def action_undo(org_id: str, audit_id: int, u: dict = Depends(user)):
-    """Run the reverse plan stored with a fleet action's audit row (within 24 h, once)."""
-    auth.require_role(u, org_id, "admin")
+    """Run the reverse plan stored with a fleet action's audit row (within 24 h, once). Admins may undo any action
+    they can see; operators their own (a footage lock). Every attempt is logged."""
+    role = auth.require_role(u, org_id, "operator")
     see = auth.scope_filter(u, org_id)
     if see is not None:
         row = db.one(sa.select(db.audit_log.c.site_id, db.audit_log.c.detail).where(db.audit_log.c.id == audit_id, db.audit_log.c.org_id == org_id))
         if not row or not see(row):
             raise HTTPException(404, "no such fleet action")
     try:
-        return await fleet_actions.undo(u, org_id, audit_id)
+        return await fleet_actions.undo(u, org_id, audit_id, role)
     except LookupError:
         raise HTTPException(404, "no such fleet action")
+    except fleet_actions.Refused as e:
+        raise HTTPException(e.status, e.message)
     except fleet_actions.ActionError as e:
         raise HTTPException(409, str(e))
 
 
 @app.get("/api/orgs/{org_id}/actions/reference")
 async def action_reference(org_id: str, u: dict = Depends(user)):
-    """Every instruction the hub understands (from fleet_actions.VERBS), the safety rules, and the last 50 actions (admins)."""
+    """Every instruction the hub understands (from fleet_actions.VERBS), the safety rules, and the Action log: the
+    customer's last 50 fleet actions for admins, the user's own for everyone else, narrowed to their Site scope."""
     role = auth.require_role(u, org_id, "viewer")
-    out = fleet_actions.reference(u, org_id, auth.allows(role, "admin"))
+    out = fleet_actions.reference(u, org_id, role)
     see = auth.scope_filter(u, org_id)
-    if see is not None and out["recent"]:   # a Site-restricted admin: only actions on servers they can see
+    if see is not None and out["recent"]:   # a Site-restricted member: only actions on servers they can see
         tags = {r["id"]: r for r in db.rows(sa.select(db.audit_log.c.id, db.audit_log.c.site_id, db.audit_log.c.detail)
                                              .where(db.audit_log.c.id.in_([x["id"] for x in out["recent"]])))}
         out["recent"] = [r for r in out["recent"] if see(tags.get(r["id"]) or {})]

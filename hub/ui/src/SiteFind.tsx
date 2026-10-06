@@ -7,9 +7,11 @@
  *  - saved views per Site on the hub (/find-views; operators and up save them), the starred default per Site in this
  *    browser;
  *  - media through mediaApi(server) (direct on the LAN when possible), a click opens HubEventDetail in place;
- *  - Ask is the hub's: every server's assistant answers, instructions get the action card (fleetAskPanel).
+ *  - Ask is the hub's: every server's assistant answers (questions only); an instruction is not planned here, a note
+ *    links to Customer › Actions with it prefilled (fleetAskPanel).
  * Per-server features are hidden in this cut: identities (grouped by who), footage look-alike search, the compliance
- * summary strip and the server assistant's threads / plans.
+ * summary strip and the server assistant's threads / plans (features.assistant false: FindView never calls the
+ * server's /api/assistant/plan or /execute from here).
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Camera as ServerCam, NvrEvent, ParsedQuery } from "@site/api";
@@ -23,7 +25,6 @@ import { FleetAskResults, useFleetAsk } from "./fleetAskPanel";
 import { useWhere } from "./FindPage";
 import { HubEventDetail } from "./HubEventDetail";
 import { mediaApi, siteApi } from "./hubSource";
-import { go } from "./nav";
 import { hubEventKey, hubFindParams, newerAcross, siteFindCameras, siteFindHandoff } from "./siteFindData";
 
 const CAMERA_REFRESH_MS = 60000;
@@ -107,19 +108,13 @@ export function SiteFind({ org, site }: { org: Org; site: Site }) {
   const { label } = useWhere(org, site);
   const fa = useFleetAsk(org, label, site.id);
   const [handoff] = useState(() => siteFindHandoff(location.search) ?? undefined);
+  const [lastAsk, setLastAsk] = useState("");
   const ask: ExternalAsk = {
-    run: (text) => { void fa.ask(text); },
+    run: (text) => { setLastAsk(text); void fa.ask(text); },
     busy: fa.asking,
     label: "Ask this site",
-    title: "Every server's assistant answers from its own footage. Instructions such as \"Migrate Ironsight to Hailo T1\" show a confirmation card instead (Shift+Enter, or end with ?)",
-    panel: (
-      <>
-        <FleetAskResults org={org} answers={fa.answers} action={fa.action} onCloseAction={() => fa.setAction(null)} />
-        {(fa.action || Object.keys(fa.answers).length > 0) && (
-          <p className="small" style={{ margin: 0 }}><a href="/customer/actions" onClick={go("/customer/actions")}>What can I ask the hub to do?</a></p>
-        )}
-      </>
-    ),
+    title: "Every server's assistant answers from its own footage (Shift+Enter, or end with ?). Instructions such as \"Quiet alerts tonight\" run from Customer › Actions",
+    panel: <FleetAskResults answers={fa.answers} instruction={fa.instruction} onAskAnyway={() => void fa.ask(lastAsk, true)} />,
   };
 
   const offline = servers.filter((s) => !s.online);

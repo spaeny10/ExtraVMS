@@ -11,6 +11,7 @@ import type { NvrEvent } from "@site/api";
 import { EventCard } from "@site/Events";
 import { toast } from "@site/ui";
 import { type FleetSearch, type Org, type ServerTag, type Site, api, fmtTime } from "./api";
+import { ACTIONS_PATH } from "./customer/fleetActions";
 import { FleetAskResults, useFleetAsk } from "./fleetAskPanel";
 import { type EventRef } from "./eventOpen";
 import { HubEventDetail } from "./HubEventDetail";
@@ -70,10 +71,10 @@ export function FindPage({ org, site }: { org: Org; site?: Site }) {
     if (fromUrl.current) { fromUrl.current = false; history.replaceState(null, "", location.pathname); ask(); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  const ask = async () => {
+  const ask = async (anyway = false) => {
     if (!q.trim()) return;
     setRes(null);
-    await fa.ask(q);
+    await fa.ask(q, anyway);
   };
   /** The event viewer in place; its "Open in Timeline" knows the Site (or falls back to the server's console). */
   const openEvent = (e: FleetSearch["events"][number]) => setOpen({ server: serverOf(e), id: e.id, location: e.location_id ?? (site && site.id) });
@@ -84,13 +85,13 @@ export function FindPage({ org, site }: { org: Org; site?: Site }) {
         <input style={{ flex: 1, minWidth: 260 }} value={q} onChange={(e) => setQ(e.target.value)}
           placeholder={`Search ${site ? "this site" : "every server"}: "white pickup truck", "person at the back door last night"…`} />
         <button type="submit" disabled={busy || !q.trim()}>{busy ? "Searching…" : "Search"}</button>
-        <button type="button" className="ghost" disabled={fa.asking || !q.trim()} onClick={ask}
-          title="Every server's assistant answers from its own footage. Instructions such as &quot;Migrate Ironsight to Hailo T1&quot; show a confirmation card instead">
+        <button type="button" className="ghost" disabled={fa.asking || !q.trim()} onClick={() => ask()}
+          title="Every server's assistant answers from its own footage. Instructions such as &quot;Migrate Ironsight to Hailo T1&quot; run from Customer › Actions">
           ✦ {site ? "Ask this site" : "Ask all servers"}
         </button>
       </form>
-      <p className="small" style={{ margin: "4px 0 0" }}><a href="/customer/actions" onClick={go("/customer/actions")}>What can I ask the hub to do?</a></p>
-      <FleetAskResults org={org} answers={fa.answers} action={fa.action} onCloseAction={() => fa.setAction(null)} />
+      <p className="muted small" style={{ margin: "4px 0 0" }}>Ask answers questions. To move cameras, quiet alerts or lock footage, use <a href={ACTIONS_PATH} onClick={go(ACTIONS_PATH)}>Customer › Actions</a>.</p>
+      <FleetAskResults answers={fa.answers} instruction={fa.instruction} onAskAnyway={() => ask(true)} />
       {res && (
         <>
           <p className="muted small">{res.sites.map((s) => `${label(s)}: ${s.events} events, ${s.footage} moments${s.error ? ` (${s.error})` : ""}`).join(" · ")}{res.offline.length ? ` · offline: ${res.offline.join(", ")}` : ""}</p>

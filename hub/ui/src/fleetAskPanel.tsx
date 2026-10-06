@@ -1,13 +1,14 @@
 /**
- * The hub's Ask: every server's assistant answers from its own footage (fleetAsk), side by side; text that reads as a
- * hub instruction ("Migrate Ironsight to Hailo T1") gets the action card (planAction / FleetActionCard) instead.
+ * The hub's Ask: every server's assistant answers from its own footage (fleetAsk), side by side. Questions only:
+ * fleet instructions ("Migrate Ironsight to Hailo T1") are planned and run on Customer › Actions, so text that reads
+ * as one (looksLikeInstruction) is not asked or planned here; a note links to the Actions page with it prefilled.
  * Used by the customer-wide Find (FindPage) and a Site's Find tab (SiteFind, scoped to the Site).
  */
 import { useState } from "react";
 import { toast } from "@site/ui";
-import { type ExecPlan, type Org, type ServerTag, fleetAsk } from "./api";
-import { FleetActionCard, planAction } from "./customer/FleetActionsPage";
-import { consoleHref } from "./nav";
+import { type Org, type ServerTag, fleetAsk } from "./api";
+import { actionsHref, looksLikeInstruction } from "./customer/fleetActions";
+import { consoleHref, go } from "./nav";
 
 export type AskAnswer = { name: string; text: string; error?: string; done?: boolean };
 
@@ -15,16 +16,16 @@ export type AskAnswer = { name: string; text: string; error?: string; done?: boo
 export function useFleetAsk(org: Org, label: (t: ServerTag) => string, scope?: string) {
   const [answers, setAnswers] = useState<Record<string, AskAnswer>>({});
   const [asking, setAsking] = useState(false);
-  const [action, setAction] = useState<ExecPlan | null>(null);
-  const reset = () => { setAnswers({}); setAction(null); };
-  const ask = async (text: string) => {
+  /** the instruction that was typed into Ask (shown as a note linking to Customer › Actions) */
+  const [instruction, setInstruction] = useState<string | null>(null);
+  const reset = () => { setAnswers({}); setInstruction(null); };
+  /** `anyway`: ask the servers even though it reads as an instruction (the note's "Ask anyway") */
+  const ask = async (text: string, anyway = false) => {
     const q = text.trim();
     if (!q) return;
-    setAsking(true); setAnswers({}); setAction(null);
-    // an instruction gets a confirmation card instead of going to the servers; if the planner fails the question is
-    // simply asked as before
-    const plan = await planAction(org, q);
-    if (plan) { setAction(plan); setAsking(false); return; }
+    setAnswers({}); setInstruction(null);
+    if (!anyway && looksLikeInstruction(q)) { setInstruction(q); return; }
+    setAsking(true);
     try {
       await fleetAsk(org.id, q, (c) => {
         const tag = c as unknown as ServerTag & { site?: string };
@@ -46,16 +47,27 @@ export function useFleetAsk(org: Org, label: (t: ServerTag) => string, scope?: s
       }, scope);
     } catch (e) { toast.error(e); } finally { setAsking(false); }
   };
-  return { answers, asking, action, setAction, reset, ask };
+  return { answers, asking, instruction, reset, ask };
 }
 
-/** The action card and the per-server answer cards. */
-export function FleetAskResults({ org, answers, action, onCloseAction }: {
-  org: Org; answers: Record<string, AskAnswer>; action: ExecPlan | null; onCloseAction: () => void;
+/** "That looks like an instruction" with the link to the Actions page (prefilled, nothing run). */
+export function InstructionNote({ text, onAskAnyway }: { text: string; onAskAnyway?: () => void }) {
+  const href = actionsHref(text);
+  return (
+    <p className="small instruction-note" role="status">
+      That looks like an instruction. Instructions run from <a href={href} onClick={go(href)}>Customer › Actions</a>.
+      {onAskAnyway && <> <button type="button" className="ghost small" onClick={onAskAnyway}>Ask anyway</button></>}
+    </p>
+  );
+}
+
+/** The per-server answer cards, or the note that sends an instruction to Customer › Actions. */
+export function FleetAskResults({ answers, instruction, onAskAnyway }: {
+  answers: Record<string, AskAnswer>; instruction?: string | null; onAskAnyway?: () => void;
 }) {
   return (
     <>
-      {action && <FleetActionCard org={org} plan={action} onClose={onCloseAction} />}
+      {instruction && <InstructionNote text={instruction} onAskAnyway={onAskAnyway} />}
       {Object.keys(answers).length > 0 && (
         <div className="site-grid" style={{ marginTop: 12 }}>
           {Object.entries(answers).map(([id, a]) => (

@@ -166,10 +166,13 @@ Fleet actions reference page (below). Deployment and upgrades: `hub/DEPLOY.md`.
 
 ## Fleet actions
 
-The hub's Find page Ask box also takes instructions. Type one instead of a question and a confirmation card appears;
-nothing happens until Confirm. **Customer → Actions** (`/customer/actions`; old `/org/actions` links redirect; also
-linked from the Ask box as "What can I ask the hub to do?") lists every instruction with examples, what moves and what
-stays, the safety rules and the last 50 actions with Undo. That page, the planner's prompt and JSON schema, and the card's options are all generated
+Instructions are typed, planned and confirmed **only on Customer → Actions** (`/customer/actions`; old `/org/actions`
+links redirect). Find's Ask box answers questions only: text that reads as an instruction gets a link to the Actions
+page with the text filled in, and the Site Alerts tab's "Quiet alerts…" opens the Actions page the same way. Nothing
+is planned or run until the user presses Plan and then Confirm on that page. The page has the instruction box (with
+clickable examples from the reference), the confirmation card, the **action log** (admins: the customer's last 50
+actions within their Sites; operators and viewers: their own) with Undo, a one-line-per-action reference, and "How
+it's kept safe". That page, the planner's prompt and JSON schema, and the card's options are all generated
 from one registry, `VERBS` in `hub/hub/fleet_actions.py` (served at `GET /api/orgs/{org}/actions/reference`), so they
 cannot drift; a test parses every example on the page.
 
@@ -185,11 +188,13 @@ cannot drift; a test parses every example on the page.
 | lock_footage | "Lock Side Yard footage 3-4 pm today" | operator |
 | quiet_alerts | "Quiet alerts tonight", "Mute alerts at Hailo T1 for 2 hours" | admin |
 
-- **Reading the text**: questions ("how many people today?") are never actions and go to the sites as before. An
+- **Reading the text**: questions ("how many people today?") are never actions. An
   instruction goes to the shared AI with a strict JSON schema and the org's real site and camera names, or to a rule
   parser for every verb when the shared AI is not configured. Names are matched on the hub. A name that doesn't
   match, an unclear reading, or a site that is offline puts a question or blocker on the card and leaves Confirm
   disabled. Times ("3-4 pm today", "until 7am") are read in the site's time zone (`tz_offset_s` in `/api/system`).
+  The card says whether the AI or the rule parser read the sentence, and notes when an action touches a Site the SOC
+  monitors (arming, contacts and procedures stay with the Site; a warning if it would leave the Site with no server).
 - **The card** lists what moves, what stays, **capacity after** (the destination's total Mbps; about how many days of
   continuous footage fit: free disk plus its continuous footage, minus the free-space floor, at that rate, against
   its retention policy; detection device, current YOLO ms per frame and camera count) and warnings (over 60 Mbps, CPU
@@ -223,10 +228,21 @@ cannot drift; a test parses every example on the page.
   name or labels, remove the added camera or the lock, turn alerts back on. Copied history stays where it was copied.
 - **Quiet alerts** keeps event alerts (high priority, broken rules, watched people) and their push notifications
   from opening until the given time (hub `kv` entry `alerts_mute:<org>`); health alerts still open.
-- API: `POST /api/orgs/{org}/actions/plan {"text"}` returns `{"action":"none"}` or a plan with its card (no side
-  effects; plans last 10 minutes). `POST /api/orgs/{org}/actions/execute {"plan_id", "confirm_name"?, "options"?,
-  "camera"?}`. Instead of a `plan_id` you can send `{"plan": {"action", "source_site", "target_site", "cameras", "days",
-  "new_name", "host", "labels", "label_mode", "time_from", "time_to", "day", "until", "copy_history"}}`.
+- **Safeguards** at execute time, on the hub (not only in the UI): the plan must come from the Actions page
+  (`origin: "actions_page"`) and be executed by the same user who planned it; it runs once and within 10 minutes; the
+  user's role and Site access are checked again for every server it touches; one fleet action at a time per server
+  (409 when busy); at most 10 executes and undos per user per 10 minutes (429); migrate and retire need the server's
+  name typed. Undo: admins any action they can see, operators their own (e.g. a footage lock), within 24 hours.
+- **Log**: every execute and undo attempt writes one Audit row (`method "ACTION"`, `action "fleet action: …"`) with
+  `detail.outcome` done / failed / refused and the reason, the servers and Site, the parser, and for undoable actions
+  the reverse plan; undo rows carry `undo_of` and the original row records who undid it and when. Refusal rows are
+  capped at 30 per user per 10 minutes. Passwords never reach a row.
+- API: `POST /api/orgs/{org}/actions/plan {"text", "origin": "actions_page"}` returns `{"action":"none"}` or a plan
+  with its card and `parser` ("ai" or "rules"); no side effects; plans last 10 minutes.
+  `POST /api/orgs/{org}/actions/execute {"plan_id", "confirm_name"?, "options"?, "camera"?}`: only a `plan_id` made by
+  the same user on the Actions page is accepted (an explicit `{"plan": {...}}` body is refused with 403).
+  `POST /api/orgs/{org}/actions/undo/{audit_id}`. `GET /api/orgs/{org}/actions/reference` includes the log rows and
+  `log_scope` ("all" or "own").
 - Camera stream settings (fps, bitrate) are not pushed to cameras: there is no ONVIF endpoint for that yet.
 
 **On one site**: the site's own Find → Ask takes rename_camera, set_retention, set_synopsis_labels and lock_footage

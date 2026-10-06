@@ -256,11 +256,16 @@ def rules_only(monkeypatch):
     monkeypatch.setattr(fleet_actions.vlm_proxy, "configured", lambda: False)
     monkeypatch.setattr(fleet_actions, "STREAM_CHECK_S", 1.0)
     monkeypatch.setattr(fleet_actions, "STREAM_POLL_S", 0.05)
+    monkeypatch.setattr(fleet_actions, "RATE_N", 1000)
     fleet_actions._cameras_cache.clear()
+    fleet_actions._busy.clear()
+    fleet_actions._runs.clear()
+    fleet_actions._refusals.clear()
 
 
-def plan(f, text, client=None):
-    r = (client or f.owner).post(f"/api/orgs/{f.org['id']}/actions/plan", json={"text": text})
+def plan(f, text, client=None, origin="actions_page"):
+    """Plans as the Customer › Actions page makes them (origin "actions_page"); origin=None is any other caller."""
+    r = (client or f.owner).post(f"/api/orgs/{f.org['id']}/actions/plan", json={"text": text, **({"origin": origin} if origin else {})})
     assert r.status_code == 200, r.text
     return r.json()
 
@@ -348,9 +353,10 @@ def test_set_retention_and_rename(fleet):
     assert r.status_code == 200 and r.json()["ok"], r.text
     assert fleet.apps["Qwenbot"].st["days"] == 7 and "7 days" in r.json()["lines"][0]
     assert execute(fleet, p["id"]).status_code == 404   # a plan runs once
-    # an explicit plan through the API, no Ask text
+    # an explicit plan through the API (no plan from the Actions page) is refused, and logged
     r = fleet.owner.post(f"/api/orgs/{fleet.org['id']}/actions/execute", json={"plan": {"action": "set_retention", "source_site": "qwenbot", "days": 9}})
-    assert r.status_code == 200 and fleet.apps["Qwenbot"].st["days"] == 9
+    assert r.status_code == 403 and fleet.apps["Qwenbot"].st["days"] == 7
+    assert _last_action(fleet)["detail"]["outcome"] == "refused"
     p = plan(fleet, "Rename cam3 on Hailo T1 to Loading Dock")
     assert p["cameras"][0]["id"] == "cam3" and p["card"]["can_execute"]
     assert execute(fleet, p["id"]).json()["ok"]
@@ -371,7 +377,7 @@ def test_move_one_camera(fleet, caplog):
     assert q["cameras"]["cam2"]["password"] == PW_LOT and q["cameras"]["cam2"]["name"] == "Back Lot"
     assert src["cameras"]["cam2"]["enabled"] == 0 and src["moved_to"] == {"cam2": "Qwenbot"}
     assert src["handoff_calls"][-1] == ("hub", 0)
-    row = db.one(sa.select(db.audit_log).where(db.audit_log.c.org_id == fleet.org["id"], db.audit_log.c.action.like("fleet action: Move%")))
+    row = db.one(sa.select(db.audit_log).where(db.audit_log.c.org_id == fleet.org["id"], db.audit_log.c.action.like("fleet action: Move%"), db.audit_log.c.status == 200))
     assert row["status"] == 200 and row["detail"]["cameras"] == [{"id": "cam2", "name": "Back Lot", "new_id": "cam2"}]
     assert PW_LOT not in json.dumps(row) and PW_LOT not in caplog.text and PW_LOT not in r.text
     # moving it back would land on a site that already has that address: the card says so
@@ -423,6 +429,11 @@ def test_retire_site(fleet):
 
 
 # ---------------------------------------------------------------- v2: references, learned state, history, stream check, undo, new verbs
+
+def _last_action(f):
+    return db.one(sa.select(db.audit_log).where(db.audit_log.c.org_id == f.org["id"], db.audit_log.c.method == "ACTION")
+                  .order_by(db.audit_log.c.id.desc()).limit(1))
+
 
 def _audit(f, audit_id):
     return db.one(sa.select(db.audit_log).where(db.audit_log.c.id == audit_id))
@@ -655,7 +666,11 @@ def test_reference_lists_every_verb(fleet):
     recent = ref["recent"]
     assert 0 < len(recent) <= 50 and all(x["action"].startswith("fleet action:") for x in recent)
     assert any(x["undo_until"] for x in recent) and any(x["undo_until"] is None for x in recent)
-    assert fleet.viewer.get(f"/api/orgs/{fleet.org['id']}/actions/reference").json()["recent"] == []
+    assert ref["log_scope"] == "all" and any(x["outcome"] == "refused" for x in recent)
+    # a viewer's log: only their own attempts (the refused Confirm in test_viewer_cannot_execute)
+    mine = fleet.viewer.get(f"/api/orgs/{fleet.org['id']}/actions/reference").json()
+    assert mine["log_scope"] == "own" and mine["recent"] and all(x["user_email"] == "viewer@actions.example" for x in mine["recent"])
+    assert all(not x["can_undo"] for x in mine["recent"])
 
 
 def test_sites_with_several_servers(fleet, monkeypatch):
@@ -702,3 +717,207 @@ def test_sites_with_several_servers(fleet, monkeypatch):
     finally:
         db.run(sa.update(db.sites).where(db.sites.c.id.in_([delta, echo, qwen])).values(location_id=None))
         db.run(sa.delete(db.locations).where(db.locations.c.id.in_([hq, main])))
+
+
+# ---------------------------------------------------------------- instructions run only from Customer › Actions
+
+def _member(f, email, role):
+    uid = f.owner.post(f"/api/orgs/{f.org['id']}/members", json={"email": email, "role": role, "password": "member password 1"}).json()["id"]
+    c = httpx.Client(base_url=f.base, timeout=30)
+    assert c.post("/auth/login", json={"email": email, "password": "member password 1"}).status_code == 200
+    return uid, c
+
+
+def _set_role(f, uid, role):
+    db.run(sa.update(db.memberships).where(db.memberships.c.user_id == uid, db.memberships.c.org_id == f.org["id"]).values(role=role))
+
+
+def _action_count():
+    return len(db.rows(sa.select(db.audit_log.c.id).where(db.audit_log.c.method == "ACTION")))
+
+
+def test_fleet_ask_never_plans(fleet, monkeypatch):
+    """Find's Ask (POST /api/fleet/ask) only asks the servers' assistants: an instruction is never planned or run."""
+    async def boom(*a, **k):
+        raise AssertionError("the fleet Ask must not plan actions")
+    monkeypatch.setattr(fleet_actions, "plan_for", boom)
+    monkeypatch.setattr(fleet_actions, "build", boom)
+    before, rows = set(fleet_actions._plans), _action_count()
+    with fleet.owner.stream("POST", "/api/fleet/ask", json={"org": fleet.org["id"], "message": "Migrate Ironsight to Hailo T1"}) as resp:
+        assert resp.status_code == 200
+        lines = [json.loads(x) for x in resp.iter_lines() if x.strip()]
+    assert lines and lines[-1]["type"] == "done" and not any(x.get("type") == "plan" for x in lines)
+    assert set(fleet_actions._plans) == before and _action_count() == rows
+    assert _site_row(fleet, "Ironsight")["retired_at"] is None
+
+
+def test_execute_needs_an_actions_page_plan_by_the_same_user(fleet):
+    e = fleet.apps["Echo"].st
+    days = e["days"]
+    # a plan made anywhere else (no origin) has a card but cannot run
+    p = plan(fleet, "Set Echo to 6 days of recording", origin=None)
+    assert p["card"]["can_execute"] and p["parser"] == "rules"
+    r = execute(fleet, p["id"])
+    assert r.status_code == 403 and "Customer › Actions" in r.json()["detail"] and e["days"] == days
+    row = _last_action(fleet)
+    assert row["status"] == 403 and row["detail"]["outcome"] == "refused" and "Customer › Actions" in row["detail"]["reason"]
+    assert row["detail"]["plan"] == p["id"] and row["detail"]["servers"] == ["Echo"] and row["user_email"] == "root@example.com"
+    # someone else's plan
+    uid, admin2 = _member(fleet, "admin2@actions.example", "admin")
+    p = plan(fleet, "Set Echo to 6 days of recording")
+    r = execute(fleet, p["id"], client=admin2)
+    assert r.status_code == 403 and "someone else" in r.json()["detail"] and e["days"] == days
+    assert _last_action(fleet)["user_email"] == "admin2@actions.example" and _last_action(fleet)["detail"]["outcome"] == "refused"
+    # the role is checked again at Confirm: planned as admin, demoted before pressing it
+    p = plan(fleet, "Set Echo to 6 days of recording", client=admin2)
+    assert p["allowed"] is True
+    _set_role(fleet, uid, "viewer")
+    try:
+        r = execute(fleet, p["id"], client=admin2)
+        assert r.status_code == 403 and "needs admin" in r.json()["detail"] and e["days"] == days
+        assert _last_action(fleet)["detail"]["reason"] == "needs admin in this organization"
+    finally:
+        _set_role(fleet, uid, "admin")
+    # the owner's own Actions-page plan runs, once; the second try is refused and logged as "already ran"
+    p = plan(fleet, "Set Echo to 6 days of recording")
+    r = execute(fleet, p["id"])
+    assert r.status_code == 200 and r.json()["ok"] and e["days"] == 6
+    done = _audit(fleet, r.json()["audit_id"])
+    assert done["detail"]["outcome"] == "done" and done["detail"]["origin"] == "actions_page" and done["detail"]["reverse"]
+    r = execute(fleet, p["id"])
+    assert r.status_code == 404 and "already ran" in r.json()["detail"] and "already ran" in _last_action(fleet)["detail"]["reason"]
+    # an expired plan says so
+    p = plan(fleet, "Set Echo to 7 days of recording")
+    fleet_actions._plans[p["id"]]["expires_at"] = time.time() - 1
+    r = execute(fleet, p["id"])
+    assert r.status_code == 404 and "expired" in r.json()["detail"] and _last_action(fleet)["detail"]["outcome"] == "refused"
+    # a wrong typed name is refused and logged
+    p = plan(fleet, "Retire Echo")
+    assert execute(fleet, p["id"], confirm_name="Ech").status_code == 400
+    assert 'type the server name "Echo"' in _last_action(fleet)["detail"]["reason"] and _site_row(fleet, "Echo")["retired_at"] is None
+    assert fleet.owner.post(f"/api/orgs/{fleet.org['id']}/actions/undo/{done['id']}").json()["ok"] and e["days"] == days
+
+
+def test_execute_rechecks_site_scope(fleet):
+    org, echo, qwen = fleet.org["id"], fleet.sites["Echo"], fleet.sites["Qwenbot"]
+    t = time.time()
+    north, south = db.new_id("l_"), db.new_id("l_")
+    for lid, name in ((north, "North"), (south, "South")):
+        db.insert(db.locations, {"id": lid, "org_id": org, "name": name, "address": "", "timezone": None, "notes": None, "created_at": t, "updated_at": t})
+    db.run(sa.update(db.sites).where(db.sites.c.id == echo).values(location_id=north))
+    db.run(sa.update(db.sites).where(db.sites.c.id == qwen).values(location_id=south))
+    uid, radm = _member(fleet, "radm@actions.example", "admin")
+    try:
+        assert fleet.owner.put(f"/api/orgs/{org}/members/{uid}/access", json={"all_sites": False, "location_ids": [north]}).status_code == 200
+        # servers outside their Sites do not resolve at plan time
+        p = plan(fleet, "Set Qwenbot to 9 days of recording", client=radm)
+        assert not p["card"]["can_execute"] and p["site"] is None
+        # nor may they quiet the whole customer
+        p = plan(fleet, "Quiet alerts for 2 hours", client=radm)
+        r = execute(fleet, p["id"], client=radm)
+        assert r.status_code == 403 and "every Site" in r.json()["detail"] and fleet_actions.current_mute(org) is None
+        # planned while granted North, executed after the grant moved to South: refused at Confirm
+        p = plan(fleet, "Set Echo to 8 days of recording", client=radm)
+        assert p["card"]["can_execute"]
+        assert fleet.owner.put(f"/api/orgs/{org}/members/{uid}/access", json={"all_sites": False, "location_ids": [south]}).status_code == 200
+        r = execute(fleet, p["id"], client=radm)
+        assert r.status_code == 403 and "access to Echo" in r.json()["detail"] and fleet.apps["Echo"].st["days"] != 8
+        row = _last_action(fleet)
+        assert row["detail"]["outcome"] == "refused" and row["site_id"] == echo and row["detail"]["location_id"] == north
+    finally:
+        db.run(sa.update(db.sites).where(db.sites.c.id.in_([echo, qwen])).values(location_id=None))
+        db.run(sa.delete(db.location_grants).where(db.location_grants.c.user_id == uid))
+        db.run(sa.delete(db.locations).where(db.locations.c.id.in_([north, south])))
+
+
+def test_one_action_per_server_and_rate_limit(fleet, monkeypatch):
+    echo = fleet.sites["Echo"]
+    e = fleet.apps["Echo"].st
+    days = e["days"]
+    p = plan(fleet, "Set Echo to 4 days of recording")
+    fleet_actions._busy[echo] = "p_other"
+    r = execute(fleet, p["id"])
+    assert r.status_code == 409 and r.json()["detail"] == "Echo is busy with another action" and e["days"] == days
+    assert _last_action(fleet)["detail"]["outcome"] == "refused" and _last_action(fleet)["status"] == 409
+    del fleet_actions._busy[echo]
+    r = execute(fleet, p["id"])           # a refusal does not use the plan up
+    assert r.status_code == 200 and r.json()["ok"] and e["days"] == 4 and not fleet_actions._busy
+    # the rate limit (patched to 2 per window): the third action in the window is refused
+    monkeypatch.setattr(fleet_actions, "RATE_N", 2)
+    fleet_actions._runs.clear()
+    assert execute(fleet, plan(fleet, "Set Echo to 5 days of recording")["id"]).status_code == 200
+    assert execute(fleet, plan(fleet, "Set Echo to 6 days of recording")["id"]).status_code == 200
+    r = execute(fleet, plan(fleet, "Set Echo to 7 days of recording")["id"])
+    assert r.status_code == 429 and "at most 2 in 10 minutes" in r.json()["detail"] and e["days"] == 6
+    assert _last_action(fleet)["status"] == 429
+    fleet_actions._runs.clear()
+    assert execute(fleet, plan(fleet, f"Set Echo to {days} days of recording")["id"]).json()["ok"] and e["days"] == days
+
+
+def test_failed_execution_is_logged(fleet):
+    p = plan(fleet, "Add 10.5.0.77 to Echo as Spare Two")
+    r = execute(fleet, p["id"])       # no password typed: the site refuses
+    assert r.status_code == 200 and not r.json()["ok"]
+    row = _audit(fleet, r.json()["audit_id"])
+    assert row["status"] == 500 and row["detail"]["outcome"] == "failed" and "password" in row["detail"]["reason"]
+    assert "reverse" not in row["detail"] and fleet_actions.undo_until(row) is None
+    log_row = next(x for x in fleet.owner.get(f"/api/orgs/{fleet.org['id']}/actions/reference").json()["recent"] if x["id"] == row["id"])
+    assert log_row["outcome"] == "failed" and "password" in log_row["reason"] and log_row["servers"] == ["Echo"] and not log_row["can_undo"]
+
+
+def test_operator_sees_and_undoes_only_their_own(fleet):
+    org = fleet.org["id"]
+    uid, op = _member(fleet, "operator@actions.example", "operator")
+    e = fleet.apps["Echo"].st
+    p = plan(fleet, "Lock Lobby footage 1-2 pm yesterday", client=op)
+    assert p["allowed"] and p["parser"] == "rules"
+    r = execute(fleet, p["id"], client=op)
+    assert r.status_code == 200 and r.json()["ok"], r.text
+    mine = op.get(f"/api/orgs/{org}/actions/reference").json()
+    assert mine["log_scope"] == "own" and [x["user_email"] for x in mine["recent"]] == ["operator@actions.example"]
+    assert mine["recent"][0]["can_undo"] and mine["recent"][0]["outcome"] == "done"
+    # an operator cannot run an admin verb (refused and logged in their own log), nor undo someone else's action
+    p2 = plan(fleet, "Set Echo to 3 days of recording", client=op)
+    assert p2["allowed"] is False and execute(fleet, p2["id"], client=op).status_code == 403
+    owners = fleet.owner.get(f"/api/orgs/{org}/actions/reference").json()["recent"]
+    theirs = next(x for x in owners if x["can_undo"] and x["user_email"] == "root@example.com")
+    assert op.post(f"/api/orgs/{org}/actions/undo/{theirs['id']}").status_code == 403
+    mine = op.get(f"/api/orgs/{org}/actions/reference").json()["recent"]
+    assert {x["outcome"] for x in mine} == {"done", "refused"} and all(x["user_email"] == "operator@actions.example" for x in mine)
+    # their own lock they can undo; the original shows who undid it, the undo row points back to it
+    r2 = op.post(f"/api/orgs/{org}/actions/undo/{r.json()['audit_id']}")
+    assert r2.status_code == 200 and r2.json()["ok"] and not e["locks"]
+    orig = _audit(fleet, r.json()["audit_id"])
+    assert orig["detail"]["undone_by"] == "operator@actions.example" and orig["detail"]["undo_attempts"][-1]["ok"]
+    assert _audit(fleet, r2.json()["audit_id"])["detail"]["undo_of"] == orig["id"]
+    # an undo that can no longer run is refused and logged too
+    assert op.post(f"/api/orgs/{org}/actions/undo/{orig['id']}").status_code == 409
+    last = _last_action(fleet)
+    assert last["detail"]["outcome"] == "refused" and last["detail"]["undo_of"] == orig["id"] and last["action"].startswith("fleet action: Undo:")
+
+
+def test_monitored_site_notes(fleet):
+    org, echo, delta = fleet.org["id"], fleet.sites["Echo"], fleet.sites["Delta"]
+    t = time.time()
+    lid = db.new_id("l_")
+    db.insert(db.locations, {"id": lid, "org_id": org, "name": "Harbor", "address": "", "timezone": None, "notes": None,
+                             "created_at": t, "updated_at": t, "monitored": True})
+    db.run(sa.update(db.sites).where(db.sites.c.id == echo).values(location_id=lid))
+    note = "Harbor is monitored by the SOC; arming, contacts and procedures stay with the Site."
+    try:
+        p = plan(fleet, "Quiet alerts at Echo for 2 hours")
+        assert note in p["card"]["stays"], p["card"]
+        p = plan(fleet, "Retire Echo")
+        assert note in p["card"]["stays"] and any("Harbor is monitored by the SOC and would be left with no cameras" in w for w in p["card"]["warnings"])
+        p = plan(fleet, "Migrate Echo to Delta")
+        assert note in p["card"]["stays"] and any("left with no cameras" in w for w in p["card"]["warnings"])
+        # a second server at the Site: retiring one is no longer a warning
+        db.run(sa.update(db.sites).where(db.sites.c.id == delta).values(location_id=lid))
+        p = plan(fleet, "Retire Delta")
+        assert note in p["card"]["stays"] and not any("no cameras" in w for w in p["card"]["warnings"])
+        # not monitored: no note
+        db.run(sa.update(db.locations).where(db.locations.c.id == lid).values(monitored=False))
+        assert not any("SOC" in s for s in plan(fleet, "Retire Delta")["card"]["stays"])
+    finally:
+        db.run(sa.update(db.sites).where(db.sites.c.id.in_([echo, delta])).values(location_id=None))
+        db.run(sa.delete(db.locations).where(db.locations.c.id == lid))

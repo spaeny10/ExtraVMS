@@ -71,7 +71,7 @@ export type Camera = {
  */
 export type FleetOrg = { org: Org; sites: Server[]; open_alerts: number; retired?: number; locations?: Site[]; unassigned?: Server[] };
 export type Fleet = { orgs: FleetOrg[]; now: number; offline_after_s: number };
-/** Fleet actions (hub/hub/fleet_actions.py): an Ask-box instruction turned into a plan with a confirmation card (@site/ActionCard). */
+/** Fleet actions (hub/hub/fleet_actions.py): an instruction typed on Customer › Actions turned into a plan with a confirmation card (@site/ActionCard). */
 export type { ActionCardData, ActionExtras, ActionResult };
 export type ActionSiteRef = { id: string; name: string; online: boolean };
 export type ActionPlan = { action: "none" } | (ActionPlanCore & {
@@ -80,10 +80,16 @@ export type ActionPlan = { action: "none" } | (ActionPlanCore & {
   days: number | null; new_name: string | null; needs: string[]; expires_at: number; options: Record<string, boolean>;
 });
 export type ActionVerb = { action: string; title: string; role: string; confirm_name: boolean; examples: string[]; moves: string[]; stays: string[]; undo: string; options: string[]; inputs: string[] };
-export type ActionRecent = { id: number; ts: number; user_email: string | null; action: string; status: number | null; lines: string[]; undo_until: number | null };
-/** A plan that is an action (the Ask box shows its confirmation card). */
+/** One Action log line: outcome done / failed / refused (with the reason); `can_undo` when this user may undo it now. */
+export type ActionRecent = {
+  id: number; ts: number; user_email: string | null; action: string; status: number | null; lines: string[]; undo_until: number | null;
+  outcome?: "done" | "failed" | "refused"; reason?: string | null; servers?: string[]; location?: string | null; can_undo?: boolean;
+  undone_at?: number | null; undone_by?: string | null; undo_of?: number | null;
+};
+/** A plan that is an action (Customer › Actions shows its confirmation card). */
 export type ExecPlan = Exclude<ActionPlan, { action: "none" }>;
-export type ActionReference = { verbs: ActionVerb[]; safety: string[]; capacity: string[]; recent: ActionRecent[]; undo_hours: number };
+/** `log_scope`: "all" (admins: the customer's last 50 actions) or "own" (everyone else: their own). */
+export type ActionReference = { verbs: ActionVerb[]; safety: string[]; capacity: string[]; recent: ActionRecent[]; undo_hours: number; log_scope?: "all" | "own" };
 export type Alert = { id: number; org_id: string; site_id: string; site_name: string; kind: string; key: string; opened_at: number; closed_at: number | null; acked_by: string | null; detail: Record<string, unknown> } & LocationTag;
 export type Member = { id: string; email: string; role: string; totp_enabled: boolean; last_login_at: number | null; all_sites: boolean; location_ids: string[] };
 /** What a member may see: every Site of the customer, or only `location_ids` (no implicit "none = all"). */
@@ -200,7 +206,8 @@ export const api = {
   fleet: (org?: string, include_retired?: boolean) => seen(req<Fleet>(`/api/fleet?${qs({ org, include_retired: include_retired || undefined })}`),
     (f) => f.orgs.flatMap((o) => [...o.sites, ...(o.locations ?? []).flatMap((l) => l.servers), ...(o.unassigned ?? [])])),
   retireServer: (id: string, retired: boolean) => req<Server>(`/api/sites/${id}/retire`, json("POST", { retired })),
-  actionPlan: (org: string, text: string) => req<ActionPlan>(`/api/orgs/${org}/actions/plan`, json("POST", { text })),
+  /** Only the Actions page plans; it sends origin "actions_page", the one origin the hub will execute. */
+  actionPlan: (org: string, text: string) => req<ActionPlan>(`/api/orgs/${org}/actions/plan`, json("POST", { text, origin: "actions_page" })),
   /** extras.inputs carries a new camera's password: sent in this one call, never stored. */
   actionExecute: (org: string, plan_id: string, x?: ActionExtras) =>
     req<ActionResult>(`/api/orgs/${org}/actions/execute`, json("POST", { plan_id, confirm_name: x?.confirm_name || undefined, options: x?.options, camera: x && Object.keys(x.inputs).length ? x.inputs : undefined })),

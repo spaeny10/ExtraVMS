@@ -43,8 +43,6 @@
 .card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 12px; }
 @media (max-width: 767px) { .site-grid { grid-template-columns: 1fr; } .hub-top { flex-wrap: wrap; } }
 .site-card.retired { opacity: .6; }
-.verb-card h3 { margin: 0 0 4px; }
-.verb-card .examples li { font-style: italic; }
 .verb-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 @media (max-width: 767px) { .verb-cols { grid-template-columns: 1fr; } }
 
@@ -255,3 +253,19 @@
 .map-legend-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; vertical-align: -1px; }
 .not-located a { color: var(--accent); }
 @media (max-width: 767px) { .address-row { flex-wrap: wrap; } .address-input { flex: 1 1 100%; } .address-row > button { flex: 1; } .coord-row .spacer { display: none; } }
+
+/* Customer › Actions: the instruction box, the Action log, one line per action (expandable), clickable examples */
+.actions-box .actions-input { display: flex; gap: 8px; align-items: flex-start; margin-top: 4px; }
+.actions-box textarea { flex: 1; min-width: 0; resize: vertical; font: inherit; }
+@media (max-width: 700px) { .actions-box .actions-input { flex-direction: column; align-items: stretch; } }
+.instruction-note { margin: 6px 0 0; padding: 6px 10px; border-left: 3px solid var(--vehicle); background: var(--panel-2); }
+.fleet-action .parser-line { margin: 10px 0 -6px; }
+.action-log td.outcome { overflow-wrap: anywhere; }
+.action-log tr.outcome-refused td.outcome, .action-log tr.outcome-failed td.outcome { color: var(--bad); }
+.verb-row { border-top: 1px solid var(--border); padding: 6px 0; }
+.verb-row:first-of-type { border-top: 0; }
+.verb-row > summary { cursor: pointer; overflow-wrap: anywhere; }
+.verb-row .verb-body { padding: 6px 0 4px 16px; }
+.example-chip { background: none; border: 0; padding: 0; color: var(--accent); font: inherit; font-style: italic; cursor: pointer; text-align: left; }
+.example-chip:hover { text-decoration: underline; }
+.verb-row.safety { margin-top: 6px; }

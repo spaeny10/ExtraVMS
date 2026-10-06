@@ -2,16 +2,16 @@
  * Alerts across the customer, or (with `site`) one Site's servers. Event alerts open the event viewer in place (clip,
  * synopsis, feedback) as the server's own UI does; the row's href stays the Site's Timeline for middle-click, the
  * viewer's "Open in Timeline" goes there too, and ↗ is the server's console. Server alerts open the server's panel.
- * SiteAlerts is the Site page's Alerts tab: the list, a "Quiet alerts" fleet action and that Site's part of the digest.
+ * SiteAlerts is the Site page's Alerts tab: the list, a "Quiet alerts…" link to Customer › Actions and that Site's part of the digest.
  */
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "@site/ui";
-import { type Alert, type ExecPlan, type Org, type Site, ago, api, fmtTime } from "./api";
-import { FleetActionCard, planAction } from "./customer/FleetActionsPage";
+import { type Alert, type Org, type Site, ago, api, fmtTime } from "./api";
+import { actionsHref } from "./customer/fleetActions";
 import { type EventRef, alertEvent, cameraNameFor } from "./eventOpen";
 import { HubEventDetail, useCameraNames } from "./HubEventDetail";
 import { KIND_LABEL } from "./labels";
-import { consoleHref, consoleTimelineHref, go, inPlace, serverHref } from "./nav";
+import { consoleHref, consoleTimelineHref, go, inPlace, navigate, serverHref } from "./nav";
 import { DigestCard } from "./SitesPage";
 import { siteTimelineHref } from "./timelineLink";
 
@@ -77,25 +77,18 @@ export function AlertsPage({ org, site }: { org: Org; site?: Site }) {
   );
 }
 
-/** The Site page's Alerts tab. "Quiet alerts" goes through the fleet-actions planner so it gets the same card, role check and Undo. */
+/**
+ * The Site page's Alerts tab. "Quiet alerts…" opens Customer › Actions with the instruction prefilled (fleet actions
+ * are planned and run only there: same card, role check, audit and Undo); nothing is planned until Plan is pressed.
+ */
 export function SiteAlerts({ org, site }: { org: Org; site: Site }) {
-  const [plan, setPlan] = useState<ExecPlan | null>(null);
-  const [busy, setBusy] = useState(false);
-  const quiet = async () => {
-    setBusy(true);
-    try {
-      const p = await planAction(org, `Quiet alerts at ${site.name} for 2 hours`);
-      if (p) setPlan(p);
-      else toast.error("The hub couldn't plan that. Try Find → Ask, e.g. \"Quiet alerts at this site for 2 hours\".");
-    } finally { setBusy(false); }
-  };
+  const quiet = actionsHref(`Quiet alerts at ${site.name} for 2 hours`);
   return (
     <>
       <div className="row" style={{ marginBottom: 8 }}>
         <span className="spacer" style={{ flex: 1 }} />
-        <button className="ghost small" disabled={busy} onClick={quiet}>{busy ? "Planning…" : `Quiet alerts at ${site.name}…`}</button>
+        <button className="ghost small" onClick={() => navigate(quiet)} title="Opens Customer › Actions with this instruction filled in">Quiet alerts…</button>
       </div>
-      {plan && <FleetActionCard org={org} plan={plan} onClose={() => setPlan(null)} />}
       <AlertsPage org={org} site={site} />
       <DigestCard org={org} site={site} />
     </>

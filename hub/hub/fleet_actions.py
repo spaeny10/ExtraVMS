@@ -1,6 +1,7 @@
 """Fleet actions: an operator types "Migrate Ironsight to Hailo T1", "Move the front door camera from Ironsight to
 Qwenbot", "Add 192.168.105.19 to Hailo T1 as Front Door", "Lock Side Yard footage 3-4 pm today" or "Quiet alerts
-tonight" into the Ask box, and the hub carries it out across sites (which cannot talk to each other).
+tonight" into the instruction box on Customer › Actions (the only place instructions are planned and run; Find's Ask
+box answers questions only), and the hub carries it out across sites (which cannot talk to each other).
 
   VERBS                    the single registry of what the hub can be asked to do: the planner's prompt and JSON
                            schema, the confirmation card's options, the reference page (GET .../actions/reference)
@@ -9,8 +10,12 @@ tonight" into the Ask box, and the hub carries it out across sites (which cannot
                            which sites and cameras (names resolved server-side against the org's real sites and
                            cameras), and a confirmation card: what moves, what stays, capacity after, warnings,
                            open questions.
-  execute(plan, u, extras) only after Confirm (admin; migrate/retire also need the site's name typed): does it,
-                           writes one audit_log row with a reverse plan that `undo(audit_id)` can run for 24 h.
+  gate(...)                every execute attempt: the plan must come from the Actions page (origin), be the
+                           executor's own, unexpired and unused; role and Site scope are re-checked, the typed
+                           name compared and the per-user rate limit applied. Each refusal writes an audit row.
+  execute(plan, u, extras) only after Confirm (admin; migrate/retire also need the site's name typed): one action
+                           at a time per server, then one audit_log row with the outcome and a reverse plan that
+                           `undo(audit_id)` can run for 24 h.
 
 Parsing: the shared AI (vlm_proxy.complete with a strict JSON schema, prompted with the org's site and camera
 names) when configured, else a small rule parser for every verb. A plan with unresolved names, an unsure reading,
@@ -59,6 +64,10 @@ CPU_CAMERA_WARN = 4
 NEW_CAMERA_MBPS = 4.0        # assumed bitrate of a camera that is not streaming yet (add_camera)
 MAX_LOCK_S = 7 * 86400
 MAX_QUIET_S = 7 * 86400
+ORIGIN = "actions_page"      # the only place a plan that can be executed is made (Customer › Actions)
+GONE_TTL_S = 3600            # how long a used / expired plan is remembered, so a late Confirm is refused with the reason
+RATE_N, RATE_S = 10, 600     # fleet actions (executes and undos) per user per window
+REFUSED_LOG_N = 30           # refused attempts written to the audit log per user per window (the rest are refused silently)
 FILE_BATCH_BYTES = 4 * 1024 * 1024
 HANDOFF_HDR = {"x-hub-internal": "handoff"}
 CAMERA_FIELDS = ("id", "name", "host", "onvif_port", "rtsp_port", "username", "main_path", "sub_path", "enabled", "zones",
@@ -179,16 +188,26 @@ ALL_ACTIONS = tuple(VERBS)
 MOVES = ("move_cameras", "migrate_site")
 
 SAFETY = [
+    "Instructions are planned and run only on Customer › Actions. Find's Ask box answers questions; an instruction typed "
+    "there is not planned, it links here instead.",
     "Nothing happens until Confirm on the card. Plans expire after 10 minutes and run once.",
-    "Only an admin of the organization can confirm (lock_footage: operator). Anyone in the org may see a card.",
+    "A plan runs only for the person who made it, and only if it was made on this page (the hub refuses anything else).",
+    "Only an admin of the organization can confirm (lock_footage: operator). Anyone in the org may see a card. "
+    "The role is checked again when you press Confirm, not only when the card is made.",
+    "Your Site access is checked again at Confirm for every server the action touches; a Site-restricted admin "
+    "cannot act on servers outside their Sites (and cannot quiet alerts for the whole customer).",
     "Migrate and Retire also need the source server's name typed into the card.",
+    "One fleet action at a time per server: a second one touching a busy server is refused until the first finishes.",
+    f"At most {RATE_N} fleet actions (and undos) per person per {RATE_S // 60} minutes.",
+    "Quiet alerts and footage locks last at most 7 days.",
     "Questions (\"how many people today?\") are never actions: they go to the sites' assistants as before.",
     "Names are matched against the org's real Sites, servers and cameras; a Site with several servers is asked about "
     "for server-level actions; anything unclear becomes a question on the card.",
     "Camera passwords go server to server through the hub in one call; they are never stored, logged or audited. "
     "A new camera's password is typed into the card and sent only with Confirm.",
     "A move first proves the destination can pull each stream (up to 60 s); if not, it is rolled back and the source is untouched.",
-    "Every executed action writes one Audit row with its outcome. Undo is offered for 24 hours on the result and on the Audit row.",
+    "Every attempt writes one Audit row with its outcome (done, failed and why, refused and why), and so does every Undo. "
+    "Undo is offered for 24 hours on the result, in the Action log and on the Audit row; operators may undo their own actions.",
 ]
 CAPACITY = [
     "The card shows the destination after the action: total Mbps, about how many days of continuous footage fit "
@@ -237,27 +256,61 @@ Sites, their servers and cameras ([id]):
 """)
 
 _plans: dict[str, dict] = {}
+_gone: dict[str, dict] = {}                 # plan id -> {"plan", "why": "used" | "expired", "at"}
 _cameras_cache: dict[str, tuple[float, list[dict]]] = {}
-_exec_lock = asyncio.Lock()
+_busy: dict[str, str] = {}                  # server id (or "mute:<org>") -> the plan running on it
+_runs: dict[str, list[float]] = {}          # user id -> when their recent fleet actions ran (rate limit)
+_refusals: dict[str, list[float]] = {}      # user id -> when their recent refusals were logged
 
 
 class ActionError(Exception):
     pass
 
 
-def reference(u: dict, org_id: str, is_admin: bool) -> dict:
-    """The reference page's content (hub UI → Organization → Fleet actions): every verb from VERBS, the safety
-    rules, the capacity notes and (for admins) the last 50 fleet actions with whether Undo is still possible."""
+def outcome_of(row: dict) -> str:
+    """done / failed / refused for an ACTION audit row (rows written before `outcome` existed: by status)."""
+    d = row.get("detail") or {}
+    if d.get("outcome"):
+        return d["outcome"]
+    return "done" if row.get("status") == 200 else "failed"
+
+
+def may_undo(row: dict, u: dict, role: str | None) -> bool:
+    """Undo is open to admins, and to the person who ran the action when their role covers its verb (an operator's lock)."""
+    d = row.get("detail") or {}
+    verb = VERBS.get(d.get("action") or "", {})
+    if not role or not auth.allows(role, verb.get("role", "admin")):
+        return False
+    return auth.allows(role, "admin") or row.get("user_id") == u["id"]
+
+
+def log_row(row: dict, u: dict, role: str | None) -> dict:
+    """One Action log line (Customer › Actions)."""
+    d = row.get("detail") or {}
+    servers = d.get("servers") or [x for x in (d.get("source"), d.get("target"), d.get("site")) if x]
+    until = undo_until(row)
+    return {"id": row["id"], "ts": row["ts"], "user_email": row["user_email"], "action": row["action"], "status": row["status"],
+            "outcome": outcome_of(row), "reason": d.get("reason") or d.get("error"), "lines": d.get("result") or [],
+            "servers": list(dict.fromkeys(servers)), "location": d.get("location"), "undo_until": until,
+            "can_undo": bool(until) and may_undo(row, u, role), "undone_at": d.get("undone_at"), "undone_by": d.get("undone_by"),
+            "undo_of": d.get("undo_of")}
+
+
+def reference(u: dict, org_id: str, role: str | None) -> dict:
+    """The reference page's content (hub UI → Customer → Actions): every verb from VERBS, the safety rules, the
+    capacity notes and the Action log: for admins the customer's last 50 fleet actions, for everyone else their own
+    (an operator can undo the footage they locked). The caller narrows it to the user's Site scope."""
     verbs = [{"action": k, **{f: v.get(f) for f in ("title", "role", "confirm_name", "examples", "moves", "stays", "undo")},
               "options": [o["label"] for o in v.get("options") or []], "inputs": [i["label"] for i in v.get("inputs") or []]}
              for k, v in VERBS.items() if not v.get("internal")]
-    recent = []
-    if is_admin:
-        rows = db.rows(sa.select(db.audit_log).where(db.audit_log.c.org_id == org_id, db.audit_log.c.method == "ACTION")
-                       .order_by(db.audit_log.c.ts.desc()).limit(50))
-        recent = [{"id": r["id"], "ts": r["ts"], "user_email": r["user_email"], "action": r["action"], "status": r["status"],
-                   "lines": (r["detail"] or {}).get("result") or [], "undo_until": undo_until(r)} for r in rows]
-    return {"verbs": verbs, "safety": SAFETY, "capacity": CAPACITY, "recent": recent, "undo_hours": UNDO_TTL_S // 3600}
+    is_admin = bool(role) and auth.allows(role, "admin")
+    q = sa.select(db.audit_log).where(db.audit_log.c.org_id == org_id, db.audit_log.c.method == "ACTION")
+    if not is_admin:
+        q = q.where(db.audit_log.c.user_id == u["id"])
+    rows = db.rows(q.order_by(db.audit_log.c.ts.desc(), db.audit_log.c.id.desc()).limit(50))
+    recent = [log_row(r, u, role) for r in rows]
+    return {"verbs": verbs, "safety": SAFETY, "capacity": CAPACITY, "recent": recent, "undo_hours": UNDO_TTL_S // 3600,
+            "log_scope": "all" if is_admin else "own"}
 
 
 # ---------------------------------------------------------------- talking to sites
@@ -1146,6 +1199,10 @@ async def preview(p: dict, u: dict) -> dict:
             warnings.append(f"Alerts are already quiet until {_fmt_local(prev['until'], off)}: this replaces that.")
     elif a == "unquiet_alerts":
         moves.append("Event alerts open again" + (" (the previous quiet period is restored)" if p.get("previous") else ""))
+    if a in SOC_NOTE_ACTIONS and p.get("org_id"):
+        n, w = soc_notes(p)
+        stays += n
+        warnings += w
     card = {"title": summary(p), "moves": moves, "stays": stays, "warnings": warnings, "blockers": blockers,
             "needs": p["needs"], "can_execute": not p["needs"] and not blockers, "capacity": cap_lines, "capacity_data": cap,
             "confirm_name": (p.get("source") or p.get("site") or {}).get("name") if verb.get("confirm_name") else None,
@@ -1154,12 +1211,60 @@ async def preview(p: dict, u: dict) -> dict:
     return card
 
 
+SOC_NOTE_ACTIONS = ("move_cameras", "migrate_site", "retire_site", "quiet_alerts", "set_synopsis_labels")
+
+
+def touched(p: dict) -> tuple[list[dict], bool]:
+    """(the servers a plan acts on, whether it acts on the whole customer: quiet alerts with no Site named)."""
+    refs: dict[str, dict] = {}
+    for k in ("source", "target", "site"):
+        if p.get(k):
+            refs.setdefault(p[k]["id"], p[k])
+    for r in (p.get("location") or {}).get("servers") or []:
+        refs.setdefault(r["id"], r)
+    return list(refs.values()), p["action"] in ("quiet_alerts", "unquiet_alerts") and not refs
+
+
+def _server_rows(ids: list[str]) -> dict[str, dict]:
+    if not ids:
+        return {}
+    return {r["id"]: r for r in db.rows(sa.select(db.sites.c.id, db.sites.c.name, db.sites.c.location_id).where(db.sites.c.id.in_(ids)))}
+
+
+def soc_notes(p: dict) -> tuple[list[str], list[str]]:
+    """Card notes for an action at a SOC-monitored Site: (notes, warnings). Monitoring belongs to the Site, so it stays;
+    a retire or migrate that leaves a monitored Site with no active server is a warning."""
+    refs, org_wide = touched(p)
+    rows = _server_rows([r["id"] for r in refs])
+    lq = sa.select(db.locations.c.id, db.locations.c.name).where(db.locations.c.org_id == p["org_id"], db.locations.c.monitored.is_(True))
+    if not org_wide:
+        lids = [r["location_id"] for r in rows.values() if r.get("location_id")]
+        if not lids:
+            return [], []
+        lq = lq.where(db.locations.c.id.in_(lids))
+    monitored = {r["id"]: r["name"] for r in db.rows(lq.order_by(db.locations.c.name))}
+    notes = [f"{name} is monitored by the SOC; arming, contacts and procedures stay with the Site." for name in monitored.values()]
+    warnings = []
+    leaving = p.get("source") if p["action"] == "migrate_site" else p.get("site") if p["action"] == "retire_site" else None
+    lid = rows.get(leaving["id"], {}).get("location_id") if leaving else None
+    if lid in monitored:
+        dst = rows.get((p.get("target") or {}).get("id") or "") or {}
+        others = db.rows(sa.select(db.sites.c.id).where(db.sites.c.location_id == lid, db.sites.c.retired_at.is_(None),
+                                                         db.sites.c.id != leaving["id"]))
+        if not others and dst.get("location_id") != lid:
+            warnings.append(f"{monitored[lid]} is monitored by the SOC and would be left with no cameras: the SOC sees nothing there "
+                            "until a server is added there, or monitoring is turned off for that Site.")
+    return notes, warnings
+
+
 # ---------------------------------------------------------------- plans
 
 def _sweep() -> None:
     now = time.time()
     for k in [k for k, v in _plans.items() if v["expires_at"] < now]:
-        del _plans[k]
+        _gone[k] = {"plan": _plans.pop(k), "why": "expired", "at": now}
+    for k in [k for k, v in _gone.items() if v["at"] + GONE_TTL_S < now]:
+        del _gone[k]
 
 
 def public(p: dict) -> dict:
@@ -1171,10 +1276,11 @@ def public(p: dict) -> dict:
             "options": p["options"]}
 
 
-async def build(u: dict, org_id: str, parsed: dict, text: str, parser: str, index: list[dict] | None = None) -> dict:
+async def build(u: dict, org_id: str, parsed: dict, text: str, parser: str, index: list[dict] | None = None,
+                origin: str | None = None) -> dict:
     index = index if index is not None else await _index(u, org_id)
     p = _resolve({**EMPTY, **parsed}, index, org_id)
-    p.update(id=db.new_id("p_"), org_id=org_id, user_id=u["id"], text=text[:500], parser=parser,
+    p.update(id=db.new_id("p_"), org_id=org_id, user_id=u["id"], text=text[:500], parser=parser, origin=origin,
              confidence=parsed.get("confidence") or "low", created_at=time.time(), expires_at=time.time() + PLAN_TTL_S)
     if p["confidence"] != "high" and not p["needs"]:
         p["needs"].append(f'I read this as "{summary(p)}" but I am not sure. Say it plainly to confirm, '
@@ -1185,8 +1291,10 @@ async def build(u: dict, org_id: str, parsed: dict, text: str, parser: str, inde
     return p
 
 
-async def plan_for(u: dict, org_id: str, text: str) -> dict:
-    """{"action": "none"} for anything that isn't an instruction (the Ask box then asks the sites as before)."""
+async def plan_for(u: dict, org_id: str, text: str, origin: str | None = None) -> dict:
+    """{"action": "none"} for anything that isn't an instruction. `origin` is recorded with the plan: only plans made
+    on the Actions page (ORIGIN) can be executed (gate). `parser` on the plan says who read the sentence: "ai" (the
+    shared AI) or "rules" (the rule parser, when the AI is not configured or not answering)."""
     cleaned, maybe = _clean(text)
     if not maybe:
         return {"action": "none"}
@@ -1196,7 +1304,7 @@ async def plan_for(u: dict, org_id: str, text: str) -> dict:
         parsed, parser = parse_rules(cleaned), "rules"
     if not parsed or parsed["action"] == "none":
         return {"action": "none"}
-    return public(await build(u, org_id, parsed, text, parser, index))
+    return public(await build(u, org_id, parsed, text, parser, index, origin))
 
 
 def get(plan_id: str, org_id: str) -> dict | None:
@@ -1677,7 +1785,8 @@ async def _run(p: dict, u: dict, lines: list[str], detail: dict, extras: dict) -
         _set_mute(p["org_id"], mute)
         lines.append(f"Event alerts are quiet {_quiet_where(p)} until {time.strftime('%a %H:%M', time.localtime(until))} (hub time)")
         detail.update(until=until, site=loc["name"] if loc else (p.get("site") or {}).get("name"))
-        detail["reverse"] = [{"action": "unquiet_alerts", "previous": prev}]
+        detail["reverse"] = [{"action": "unquiet_alerts", "previous": prev,
+                              "source_site": loc["id"] if loc else (p.get("site") or {}).get("id") or ""}]
     elif a == "unquiet_alerts":
         prev = p.get("previous")
         _set_mute(p["org_id"], prev if isinstance(prev, dict) and float(prev.get("until") or 0) > time.time() else None)
@@ -1700,26 +1809,171 @@ def undo_until(row: dict) -> float | None:
     d = row.get("detail") or {}
     if row.get("method") != "ACTION" or row.get("status") != 200 or not d.get("reverse") or d.get("undone_at"):
         return None
+    if d.get("outcome") not in (None, "done"):
+        return None
     until = float(row["ts"]) + UNDO_TTL_S
     return until if until > time.time() else None
 
 
+# ---------------------------------------------------------------- the audit row: one per attempt, whatever happened
+# Shape (audit_log columns as for every row; the rest inside `detail`, so the Audit page and the Action log read it):
+#   method "ACTION", action "fleet action: <summary>" ("fleet action: Undo: <summary>" for an undo),
+#   status 200 done / 500 failed / the HTTP status of a refusal (400, 403, 404, 409, 429),
+#   site_id: the main server (source or site), detail.location_id: its Site (or the quieted Site),
+#   detail: {outcome: done|failed|refused, reason (failed/refused), plan, action, text, origin, parser,
+#            servers: [names], server_ids, location (Site name), source/target/site (names), options,
+#            result: [lines], reverse: [steps] (done and undoable only), undo_of: audit id (an undo's row),
+#            undone_at / undone_by / undo_audit (set on the original when an undo succeeds),
+#            undo_attempts: [{ts, by, ok, audit_id}] (every undo attempt, on the original)}
+# Passwords never reach a row: they live in `extras` only, never in the plan.
+
+def _where(p: dict | None) -> dict:
+    """servers, server_ids, site_id, location_id, location for a plan's audit row."""
+    if not p:
+        return {}
+    refs, org_wide = touched(p)
+    rows = _server_rows([r["id"] for r in refs])
+    main = p.get("source") or p.get("site") or (refs[0] if refs else None)
+    loc = p.get("location")
+    lid = loc["id"] if loc else (rows.get(main["id"]) or {}).get("location_id") if main else None
+    lname = loc["name"] if loc else None
+    if lid and not lname:
+        r = db.one(sa.select(db.locations.c.name).where(db.locations.c.id == lid))
+        lname = r["name"] if r else None
+    return {"servers": [r["name"] for r in refs] or (["every server"] if org_wide else []), "server_ids": [r["id"] for r in refs],
+            "site_id": main["id"] if main else None, "location_id": lid, "location": lname}
+
+
+def _write_row(u: dict, org_id: str, p: dict | None, status: int, detail: dict, undo_of: int | None = None, summary_text: str | None = None) -> int:
+    w = _where(p)
+    site_id = w.pop("site_id", None)
+    if p:
+        detail = {"plan": p["id"], "action": p["action"], "text": p.get("text"), "origin": p.get("origin"), "parser": p.get("parser"),
+                  "options": p.get("options"), **{k: (p[k] or {}).get("name") for k in ("source", "target", "site") if p.get(k)}, **w, **detail}
+    if undo_of:
+        detail["undo_of"] = undo_of
+    what = summary_text or (summary(p) if p else "(unknown plan)")
+    row = {"ts": time.time(), "user_id": u["id"], "user_email": u["email"], "org_id": org_id, "site_id": site_id,
+           "action": f"fleet action: {'Undo: ' if undo_of else ''}{what}"[:200], "method": "ACTION", "path": None, "status": status,
+           "ip": None, "detail": detail}
+    return _insert_audit(row)
+
+
+class Refused(Exception):
+    """An execute or undo attempt the hub will not run (written to the audit log with the reason)."""
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status, self.message = status, message
+
+
+class Busy(ActionError):
+    pass
+
+
+def _recent(bucket: dict[str, list[float]], uid: str, window: float) -> list[float]:
+    now = time.time()
+    xs = [t for t in bucket.get(uid, []) if t > now - window]
+    bucket[uid] = xs
+    return xs
+
+
+def refuse(u: dict, org_id: str, status: int, reason: str, p: dict | None = None, undo_of: int | None = None,
+           summary_text: str | None = None) -> Refused:
+    """Log a refused attempt (capped per user, so a stuck button cannot flood the log) and return the exception to raise."""
+    xs = _recent(_refusals, u["id"], RATE_S)
+    if len(xs) < REFUSED_LOG_N:
+        xs.append(time.time())
+        _write_row(u, org_id, p, status, {"outcome": "refused", "reason": reason, "result": [f"Refused: {reason}"]}, undo_of, summary_text)
+    log.info("fleet action refused for %s: %s", u["email"], reason)
+    return Refused(status, reason)
+
+
+def out_of_scope(u: dict, org_id: str, p: dict) -> str | None:
+    """Why this user may not act on every server the plan touches (Site scope, checked again at execute), or None."""
+    refs, org_wide = touched(p)
+    if org_wide:
+        return None if auth.scope_filter(u, org_id) is None else "Only members with access to every Site can quiet alerts for the whole customer."
+    visible = {s["id"] for s in auth.visible_sites(u, org_id, include_retired=True)}
+    outside = [r["name"] for r in refs if r["id"] not in visible]
+    return f"You don't have access to {', '.join(outside)}." if outside else None
+
+
+def _rate_ok(u: dict) -> str | None:
+    xs = _recent(_runs, u["id"], RATE_S)
+    if len(xs) >= RATE_N:
+        wait = max(1, int((xs[0] + RATE_S - time.time() + 59) // 60))
+        return f"Too many fleet actions: at most {RATE_N} in {RATE_S // 60} minutes. Try again in {wait} min."
+    return None
+
+
+def take_rate(u: dict, org_id: str, p: dict | None = None, undo_of: int | None = None, summary_text: str | None = None) -> None:
+    why = _rate_ok(u)
+    if why:
+        raise refuse(u, org_id, 429, why, p, undo_of, summary_text)
+    _runs.setdefault(u["id"], []).append(time.time())
+
+
+def gate(u: dict, org_id: str, role: str, plan_id: str | None, explicit: bool = False, confirm_name: str | None = None) -> dict:
+    """Every execute attempt passes here. Returns the plan, or raises Refused (already in the audit log):
+    a plan from the Actions page (origin) made by this same user, still there (10 min, once), a role that covers the
+    verb now, every server it touches inside the user's Site scope now, the typed server name, the rate limit."""
+    if not plan_id:
+        if explicit:
+            raise refuse(u, org_id, 403, "Fleet actions run only from a plan made on Customer › Actions.")
+        raise Refused(422, "plan_id required")
+    p = get(plan_id, org_id)
+    if p is None:
+        g = _gone.get(plan_id)
+        if g and g["plan"]["org_id"] == org_id:
+            why = "That plan already ran; plan it again." if g["why"] == "used" else "That plan expired (plans last 10 minutes); plan it again."
+            raise refuse(u, org_id, 404, why, g["plan"])
+        raise refuse(u, org_id, 404, "No such plan (plans last 10 minutes); plan it again.", summary_text=f"(plan {plan_id[:40]})")
+    if p.get("origin") != ORIGIN:
+        raise refuse(u, org_id, 403, "This plan was not made on Customer › Actions; instructions run only from there.", p)
+    if p.get("user_id") != u["id"]:
+        raise refuse(u, org_id, 403, "This plan was made by someone else; plan it yourself on Customer › Actions.", p)
+    need = VERBS.get(p["action"], {}).get("role", "admin")
+    if not auth.allows(role, need):
+        raise refuse(u, org_id, 403, f"needs {need} in this organization", p)
+    why = out_of_scope(u, org_id, p)
+    if why:
+        raise refuse(u, org_id, 403, why, p)
+    want = (p.get("card") or {}).get("confirm_name")
+    if want and " ".join(str(confirm_name or "").split()).casefold() != " ".join(want.split()).casefold():
+        raise refuse(u, org_id, 400, f'type the server name "{want}" to confirm', p)
+    take_rate(u, org_id, p)
+    return p
+
+
+def _busy_keys(p: dict) -> dict[str, str]:
+    refs, _ = touched(p)
+    keys = {r["id"]: r["name"] for r in refs}
+    if p["action"] in ("quiet_alerts", "unquiet_alerts"):
+        keys[f"mute:{p['org_id']}"] = "Alert quieting for this customer"
+    return keys
+
+
 async def execute(p: dict, u: dict, extras: dict | None = None, undo_of: int | None = None) -> dict:
     """Carry out a confirmed plan. Returns {"ok", "lines", "summary", "audit_id", "undo_until"}; one audit_log row
-    either way (never any secret). `extras`: the card's options and add_camera fields (password: sent on, never kept)."""
+    either way (never any secret). `extras`: the card's options and add_camera fields (password: sent on, never kept).
+    One action at a time per server: Busy (an ActionError) when a server it touches is in the middle of another;
+    ActionError when the card can no longer be carried out. The caller logs those as refused."""
     extras = extras or {}
     for k, v in (extras.get("options") or {}).items():
         if k in ("copy_history", "skip_stream_check") and isinstance(v, bool):
             p["options"][k] = v
-    async with _exec_lock:
+    keys = _busy_keys(p)
+    for k, name in keys.items():
+        if k in _busy:
+            raise Busy(f"{name} is busy with another action")
+    for k in keys:
+        _busy[k] = p["id"]
+    try:
         card = await preview(p, u)          # sites may have gone offline since the card was shown
         if not card["can_execute"]:
             raise ActionError("; ".join(card["needs"] + card["blockers"]) or "this plan cannot be carried out")
         lines: list[str] = []
-        detail: dict = {"plan": p["id"], "action": p["action"], "text": p["text"], "options": p["options"],
-                        **{k: (p[k] or {}).get("name") for k in ("source", "target", "site") if p.get(k)}}
-        if undo_of:
-            detail["undo_of"] = undo_of
+        detail: dict = {}
         ok, error = True, None
         try:
             await _run(p, u, lines, detail, extras)
@@ -1731,51 +1985,72 @@ async def execute(p: dict, u: dict, extras: dict | None = None, undo_of: int | N
             extras.pop("camera", None)
         if error:
             lines.append(f"Failed: {error}")
-            detail["error"] = error
+            detail["reason"] = detail["error"] = error
             detail.pop("reverse", None)
         if undo_of:
             detail.pop("reverse", None)   # an undo is not itself undone from the card; do the action again instead
-        detail["result"] = lines
-        row = {"ts": time.time(), "user_id": u["id"], "user_email": u["email"], "org_id": p["org_id"],
-               "site_id": (p.get("source") or p.get("site") or {}).get("id"), "action": f"fleet action: {'Undo: ' if undo_of else ''}{summary(p)}"[:200],
-               "method": "ACTION", "path": None, "status": 200 if ok else 500, "ip": None, "detail": detail}
-        audit_id = _insert_audit(row)
+        detail.update(outcome="done" if ok else "failed", result=lines)
+        audit_id = _write_row(u, p["org_id"], p, 200 if ok else 500, detail, undo_of)
         log.info("fleet action by %s: %s -> %s", u["email"], summary(p), "done" if ok else error)
         _plans.pop(p["id"], None)
-        return {"ok": ok, "lines": lines, "summary": summary(p), "audit_id": audit_id, "undo_until": undo_until({**row, "id": audit_id})}
+        _gone[p["id"]] = {"plan": p, "why": "used", "at": time.time()}
+        row = {"ts": time.time(), "method": "ACTION", "status": 200 if ok else 500, "detail": detail, "id": audit_id}
+        return {"ok": ok, "lines": lines, "summary": summary(p), "audit_id": audit_id, "undo_until": undo_until(row)}
+    finally:
+        for k in keys:
+            if _busy.get(k) == p["id"]:
+                del _busy[k]
 
 
-async def undo(u: dict, org_id: str, audit_id: int) -> dict:
-    """Run the reverse plan stored with an audit row (within 24 h, once): move back, restore, old name, ..."""
+def _note_undo(row: dict, u: dict, ok: bool, ids: list[int]) -> None:
+    d = dict(row["detail"] or {})
+    d["undo_attempts"] = [*(d.get("undo_attempts") or []), {"ts": time.time(), "by": u["email"], "ok": ok, "audit_id": ids[-1] if ids else None}][-10:]
+    if ok:
+        d.update(undone_at=time.time(), undone_by=u["email"], undo_audit=ids)
+    db.run(sa.update(db.audit_log).where(db.audit_log.c.id == row["id"]).values(detail=d))
+
+
+async def undo(u: dict, org_id: str, audit_id: int, role: str | None = None) -> dict:
+    """Run the reverse plan stored with an audit row (within 24 h, once): move back, restore, old name, ...
+    Every attempt is logged: a refusal (not undoable, not yours, out of scope, busy, rate limit) as a refused row, each
+    reverse step as its own row (done / failed) with undo_of, and the attempt on the original row."""
     row = db.one(sa.select(db.audit_log).where(db.audit_log.c.id == audit_id, db.audit_log.c.org_id == org_id))
-    if not row:
+    if not row or row.get("method") != "ACTION":
         raise LookupError("no such action")
+    what = row["action"].removeprefix("fleet action: ")
     if not undo_until(row):
-        raise ActionError("this action can no longer be undone (undone already, failed, or older than 24 hours)")
+        raise refuse(u, org_id, 409, "This action can no longer be undone (undone already, failed, or older than 24 hours).", undo_of=audit_id, summary_text=what)
+    if role is not None and not may_undo(row, u, role):
+        raise refuse(u, org_id, 403, "Only an admin can undo someone else's action.", undo_of=audit_id, summary_text=what)
+    take_rate(u, org_id, undo_of=audit_id, summary_text=what)
     lines: list[str] = []
     ok = True
     steps = (row["detail"] or {}).get("reverse") or []
-    ids = []
+    ids: list[int] = []
     for step in steps:
         try:
             p = await build(u, org_id, from_fields(step, internal=True), f"(undo of #{audit_id}) {step.get('action')}", "undo")
         except ActionError as e:
-            lines.append(f"Failed: {e}")
-            ok = False
-            break
-        if not p["card"]["can_execute"]:
-            lines.append("Failed: " + ("; ".join(p["card"]["needs"] + p["card"]["blockers"]) or "cannot be carried out"))
-            ok = False
-            break
-        res = await execute(p, u, {}, undo_of=audit_id)
-        ids.append(res["audit_id"])
-        lines += res["lines"]
-        if not res["ok"]:
-            ok = False
-            break
-    if ok:
-        d = dict(row["detail"] or {})
-        d.update(undone_at=time.time(), undone_by=u["email"], undo_audit=ids)
-        db.run(sa.update(db.audit_log).where(db.audit_log.c.id == audit_id).values(detail=d))
-    return {"ok": ok, "lines": lines, "summary": f"Undo: {row['action'].removeprefix('fleet action: ')}", "audit_id": ids[-1] if ids else None,
-            "undo_until": None}
+            p, why = None, str(e)
+        else:
+            why = out_of_scope(u, org_id, p) or ("; ".join(p["card"]["needs"] + p["card"]["blockers"]) or "cannot be carried out"
+                                                  if not p["card"]["can_execute"] else None)
+        if why is None:
+            try:
+                res = await execute(p, u, {}, undo_of=audit_id)
+            except ActionError as e:
+                why = str(e)
+            else:
+                ids.append(res["audit_id"])
+                lines += res["lines"]
+                if not res["ok"]:
+                    ok = False
+                    break
+                continue
+        lines.append(f"Failed: {why}")
+        ids.append(_write_row(u, org_id, p, 500, {"outcome": "failed", "reason": why, "result": [f"Failed: {why}"]}, audit_id,
+                              None if p else what))
+        ok = False
+        break
+    _note_undo(row, u, ok, ids)
+    return {"ok": ok, "lines": lines, "summary": f"Undo: {what}", "audit_id": ids[-1] if ids else None, "undo_until": None}
