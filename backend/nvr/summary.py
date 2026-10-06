@@ -13,7 +13,7 @@ import time
 
 import httpx
 
-from . import backup, detector, direct, mediamtx, retention
+from . import backup, detector, direct, mediamtx, retention, vlmroute
 from .config import settings
 from .db import db
 
@@ -71,9 +71,9 @@ async def site_summary(state, since: float | None = None, version: str = "") -> 
         "retention_alert": retention.alert,
         "queues": {"verify": p.verify_q.qsize(), "synopsis": p.synopsis_q.qsize()},
         "yolo_ready": detector.yolo_status(p)["yolo_ready"], "vlm_ready": p.vlm_ready, "vlm_model": settings.vlm_model,
-        # detector_fallback / detector_stalled / site_link_down: the hub opens an alert per kind while it is listed
+        # detector_fallback / detector_stalled / vlm_fallback_active / site_link_down: the hub opens an alert per kind while it is listed
         # (hub alerts.py)
-        "health_alerts": detector.health_alerts(p) + ([link] if link else []),
+        "health_alerts": detector.health_alerts(p) + vlmroute.router.health_alerts() + ([link] if link else []),
         "site_link_down": bool(link),
         # what the cameras send this server: {mbps (5-min average), today_gb, month_gb, cameras: {id: mbps}}
         "bandwidth": state.health.bandwidth(enabled) if hasattr(state.health, "bandwidth") else None,

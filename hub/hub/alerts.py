@@ -8,7 +8,7 @@ import sqlalchemy as sa
 
 from . import cameras, db
 
-KINDS = ("offline", "camera_down", "disk", "clock", "detector_fallback", "detector_stalled", "event_high", "event_policy", "event_watched",
+KINDS = ("offline", "camera_down", "disk", "clock", "detector_fallback", "detector_stalled", "vlm_fallback_active", "event_high", "event_policy", "event_watched",
          "site_link_down", "host_offline")
 # site_link_down  the server's heartbeat says every camera is unreachable at once (summary.site_link_down): the link to
 #                 the Site (SpeedFusion tunnel, port forwards, the BR1's cellular uplink) is probably down. One alert for
@@ -18,8 +18,9 @@ KINDS = ("offline", "camera_down", "disk", "clock", "detector_fallback", "detect
 HUB_KINDS = ("host_offline",)
 # Server detector health, from the heartbeat's `health_alerts` list (backend nvr/detector.py): open while listed.
 #   detector_fallback  the Hailo accelerator is missing or failing; YOLO runs on the CPU (or nothing can detect)
+#   vlm_fallback_active  the main local Qwen (e.g. the 27B) is down and the fallback model (the 9B) is answering
 #   detector_stalled   the verify queue has had events for 15 min and none finished
-HEALTH_KINDS = ("detector_fallback", "detector_stalled")
+HEALTH_KINDS = ("detector_fallback", "detector_stalled", "vlm_fallback_active")
 # Alerts about one site event. Unlike the condition kinds above (offline, disk...), which close when the condition
 # clears and must re-open when it returns, an event happens once: its key is the event id, and the same event is
 # re-published many times (heartbeat attention lists, synopsis, feedback, lock), so it dedupes on any row.

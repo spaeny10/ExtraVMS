@@ -2040,6 +2040,9 @@ async def system():
         "vlm_model": settings.vlm_model if settings.local_vlm_enabled else (settings.remote_vlm_model or "remote (not configured)") + " via remote",
         "local_vlm": settings.local_vlm_enabled,
         "vlm_state": state.pipeline.vlm_state, "vlm_down_since": state.pipeline.vlm_down_since,
+        # both local models (NVR_FALLBACK_VLM_MODEL): {primary: {model, gpu, state, queue, ...}, fallback: {...} | null,
+        # routed_to_fallback_last_hour}; vlm_model / vlm_state above stay the primary's
+        "vlm": vlmroute.router.vlm_status() if settings.local_vlm_enabled else None,
         **detector.yolo_status(state.pipeline),   # yolo_ready, yolo_device, yolo_fallback (Hailo -> CPU)
         "yolo_model": settings.yolo_model,
         "health_alerts": _health_alerts(),
@@ -2060,9 +2063,10 @@ def _bandwidth() -> dict | None:
 
 
 def _health_alerts() -> list[dict]:
-    """Detector problems plus site_link_down (every camera silent: the link to the site is down)."""
+    """Detector problems, vlm_fallback_active (the primary Qwen is down, the fallback model serves) and
+    site_link_down (every camera silent: the link to the site is down)."""
     link = summary_mod.link_alert(state)
-    return detector.health_alerts(state.pipeline) + ([link] if link else [])
+    return detector.health_alerts(state.pipeline) + vlmroute.router.health_alerts() + ([link] if link else [])
 
 
 @app.post("/api/backup")

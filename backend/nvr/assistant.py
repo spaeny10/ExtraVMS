@@ -104,6 +104,13 @@ def _event_line(e: dict) -> str:
         pol = json.loads(pol)
     if pol:  # a broken site rule, e.g. "No hard hat in PPE zone 'Yard' (40 s)"
         extra.append(f"SITE RULE BROKEN: {pol['text']}")
+    tc = e.get("towing_check")
+    if isinstance(tc, str):
+        tc = json.loads(tc)
+    if tc is None and isinstance(e.get("synopsis_json"), dict):
+        tc = e["synopsis_json"].get("towing_check")
+    if tc and tc.get("reason"):  # the description said towing; the second look decided (policy.confirm_towing)
+        extra.append(("towing confirmed: " if tc.get("confirmed") else "towing NOT confirmed: ") + tc["reason"][:160])
     if an and an.get("reasons"):
         extra.append("unusual: " + "; ".join(an["reasons"]))
     fb = e.get("feedback")
@@ -262,7 +269,7 @@ def check_plan(raw: dict, question: str, now: float) -> list[dict]:
     if win:  # a time phrase in the question ("today", "last night", "past 3 hours") beats the planner's guess
         for c in out:
             c["args"]["since"], c["args"]["until"] = win["since"], win["until"]
-    return augment(out, question)
+    return augment(out, question, now)
 
 
 _TIME_PHRASES = re.compile(r"\b(today|this morning|this afternoon|this evening|tonight|last night|overnight|yesterday|"
@@ -367,10 +374,47 @@ def footage_text(question: str) -> str:
     return re.sub(r"\s+", " ", q).strip()[:120]
 
 
-def augment(calls: list[dict], question: str) -> list[dict]:
+# "When was a white pickup last seen?", "last time the BigView truck came by", "when did the mower come?": the most
+# recent sighting, from the event records AND the footage index (a footage hit alone once answered Sep 27 when an
+# event had the same truck on Oct 5).
+LAST_SEEN = re.compile(r"\b(last (seen|spotted|sighted|sighting|time|visit|came|come|showed up|arrived|here|on site|by)|"
+                       r"(seen|spotted|here|came|come|visited|showed up|arrived|by) (last|most recently)\b|"
+                       r"(most recent|latest) (time|sighting|visit)|when did .{1,80}?\b(come|came|arrive|show up|visit|leave|drive|pull)|"
+                       r"when was .{1,80}?\b(seen|spotted|here|on site|around|by))")
+LAST_SEEN_FILLER = re.compile(r"\b(last|most recent(ly)?|latest|seen|spotted|sighted|sighting|time|visit(ed)?|came|come|"
+                              r"showed up|show up|arrived?|here|on site|around|by|leave|drive|pull|in|out|the|a|an|was|were|is|did)\b")
+
+
+def last_seen_subject(question: str) -> str:
+    """'When was a white pickup truck last seen?' -> 'white pickup truck' (what to search the records for)."""
+    q = (time_window(question) or {}).get("text", question)   # the time phrase is a filter, not part of the subject
+    return re.sub(r"\s+", " ", LAST_SEEN_FILLER.sub(" ", footage_text(q))).strip()[:120]
+
+
+def augment(calls: list[dict], question: str, now: float | None = None) -> list[dict]:
     q = question.lower()
     have = {c["tool"] for c in calls}
     base = calls[0]["args"] if calls else {}
+    if LAST_SEEN.search(q) and content_words(subject := last_seen_subject(question)):
+        # Always search the event records, newest match first, over all history unless the question names a period;
+        # it replaces the planner's own event search for the same thing (often with a guessed, narrow window).
+        win = time_window(question, now)
+        calls[:] = [c for c in calls if not (c["tool"] == "search_events" and c["args"].get("text"))]
+        calls.insert(0, {"tool": "search_events", "args": {
+            "text": subject, "camera": base.get("camera"), "since": win["since"] if win else None,
+            "until": win["until"] if win else None, "label": query_label(question), "min_priority": None,
+            "group_by": None, "newest": True}})
+        for c in calls:
+            if c["tool"] == "search_footage":
+                c["args"]["newest"] = True
+                if not win:   # no period asked about: all indexed footage, like the event search
+                    c["args"]["since"] = c["args"]["until"] = None
+        if "search_footage" not in {c["tool"] for c in calls} and not GENERIC_SUBJECT.search(q):
+            calls.insert(1, {"tool": "search_footage", "args": {
+                "text": subject, "camera": base.get("camera"), "since": win["since"] if win else None,
+                "until": win["until"] if win else None, "label": None, "min_priority": None, "group_by": None, "newest": True}})
+        have = {c["tool"] for c in calls}
+        base = calls[0]["args"]
     about_records = any(re.search(pat, q) for pat, _ in KEYWORD_TOOLS)
     if "search_footage" not in have and LOOK_FOR.search(q.strip()) and not GENERIC_SUBJECT.search(q) and not about_records:
         text = footage_text(next((c["args"]["text"] for c in calls if c["tool"] == "search_events" and c["args"].get("text")), "") or question)
@@ -387,7 +431,7 @@ def augment(calls: list[dict], question: str) -> list[dict]:
             have.add(tool)
     # A question about a period ("what happened overnight?", "was it quiet today?") is answered from that period's
     # events: list the latest ones and count them. A briefing alone spans a different period and reads as hearsay.
-    win = time_window(question)
+    win = time_window(question, now)
     if win and (WHAT_HAPPENED.search(q) or not content_words(win["text"])):
         common = {"camera": base.get("camera"), "since": win["since"], "until": win["until"], "label": base.get("label"),
                   "min_priority": None}
@@ -413,6 +457,8 @@ def describe_call(c: dict) -> str:
         bits.append(f"priority {a['min_priority']}+")
     if a.get("group_by"):
         bits.append(f"by {a['group_by']}")
+    if a.get("newest"):
+        bits.append("newest first")
     return f"{c['tool']}({', '.join(bits)})"
 
 
@@ -432,14 +478,36 @@ def _where(a: dict, extra: list[str] | None = None) -> tuple[str, list]:
 
 
 EVENT_COLS = ("id, camera_id, camera_class, yolo_class, start_ts, end_ts, synopsis, snapshot, priority, anomaly, "
-              "anomaly_json, feedback, journey_id, watched, areas, policy")
+              "anomaly_json, feedback, journey_id, watched, areas, policy, "
+              "json_extract(CASE WHEN json_valid(synopsis_json) THEN synopsis_json END, '$.towing_check') AS towing_check")
+
+
+def _coverage(words: list[str], r: dict) -> float:
+    """Share of the searched words found in the event's description (plurals count: 'truck' finds 'trucks')."""
+    if not words:
+        return 0.0
+    s = r.get("synopsis_json") if isinstance(r.get("synopsis_json"), dict) else {}
+    doc = " ".join(filter(None, [r.get("synopsis"), s.get("activity"), *(s.get("tags") or []),
+                                 *(o.get("description", "") for o in s.get("objects") or [] if isinstance(o, dict))])).lower()
+    return sum(w in doc for w in words) / len(words)
+
+
+def newest_first(rows: list[dict], text: str) -> list[dict]:
+    """For 'when was X last seen': the best-covering matches, newest first (relevance alone put an older, wordier
+    description of the same truck above the latest sighting)."""
+    from .db import STOPWORDS
+    words = [w for w in re.findall(r"[a-z0-9]+", text.lower()) if w not in STOPWORDS and len(w) > 1]
+    return sorted(rows, key=lambda r: (-round(_coverage(words, r), 2), -r["start_ts"]))
 
 
 async def t_search_events(a: dict, refs: Refs) -> tuple[list[str], int]:
     if a.get("text"):
         emb = await vlm.embed(f"search_query: {a['text']}")
-        rows = await asyncio.to_thread(db.search, a["text"], emb, 25, a.get("camera"), a.get("since"), a.get("until"), a.get("label"))
+        rows = await asyncio.to_thread(db.search, a["text"], emb, 100 if a.get("newest") else 25, a.get("camera"),
+                                       a.get("since"), a.get("until"), a.get("label"))
         rows = [r for r in rows if r.get("status") == "verified"]
+        if a.get("newest"):
+            rows = newest_first(rows, a["text"])
     else:
         where, p = _where(a)
         rows = await asyncio.to_thread(db.all, f"SELECT {EVENT_COLS} FROM events WHERE {where} ORDER BY start_ts DESC LIMIT 25", p)
@@ -452,6 +520,9 @@ async def t_search_events(a: dict, refs: Refs) -> tuple[list[str], int]:
         rows.sort(key=lambda r: -r["start_ts"])
         return (["EARLIER (before the period asked about; nothing matched in that period):"] + [_event_line(r) for r in rows]
                 if rows else ["No earlier matches either."]), 0
+    if a.get("newest") and rows:
+        return (["NEWEST FIRST: the first line is the most recent event matching the description."]
+                + [_event_line(r) for r in rows]), len(rows)
     return [_event_line(r) for r in rows] or ["No matching events."], len(rows)
 
 
@@ -591,12 +662,15 @@ async def t_search_footage(a: dict, refs: Refs) -> tuple[list[str], int]:
             continue
         checked += 1
         if r.get("matches") and r.get("confidence") in ("medium", "high"):
-            lines.append(f"[{refs.moment(m)}] {_cam_name(m['camera_id'])}, {_when(m['ts'])}"
-                         + (f" (for {m['end'] - m['start']:.0f} s)" if m["end"] - m["start"] >= 5 else "")
-                         + f" - CHECKED: yes, {r.get('seen') or 'matches'}")
+            lines.append((m["ts"], f"[{refs.moment(m)}] {_cam_name(m['camera_id'])}, {_when(m['ts'])}"
+                                   + (f" (for {m['end'] - m['start']:.0f} s)" if m["end"] - m["start"] >= 5 else "")
+                                   + f" - CHECKED: yes, {r.get('seen') or 'matches'}"))
+    if a.get("newest"):  # "last seen": the latest confirmed moment first
+        lines.sort(key=lambda x: -x[0])
     head = (f"Footage search: Qwen checked the best {checked} visual matches; {len(lines)} actually show it."
+            + (" Newest first." if a.get("newest") and lines else "")
             if checked else "Footage search: the matches could not be checked.")
-    return [head, *lines], len(lines)
+    return [head, *(l for _, l in lines)], len(lines)
 
 
 def _recording_spans(camera_id: str) -> list[tuple[float, float]]:
@@ -715,7 +789,10 @@ ANSWER_SYSTEM = (
     "When a 'Period asked about' is given, open with that period and how many events the lookups found in it "
     "(for example 'Oct 2 18:00 to Oct 3 07:00: no events.'). A result marked BACKGROUND ONLY is a briefing that "
     "covers a different span: never present its times, people or activity as happening in the period asked about, "
-    "and never take a 'most recent sighting' from it; only event lines and EARLIER lines are sightings."
+    "and never take a 'most recent sighting' from it; only event lines and EARLIER lines are sightings. "
+    "For 'when was X last seen' questions, compare the dates of ALL matching event lines and CHECKED footage lines and "
+    "answer with the most recent one (results marked NEWEST FIRST list their latest match first); mention an older "
+    "match only as extra context."
 )
 
 
@@ -807,11 +884,125 @@ BRIEFING_SCHEMA = {
 }
 BRIEFING_SYSTEM = (
     "You write the morning briefing for the operator of an AI security camera system. From the facts given, write a "
-    "one-line headline and 1-4 short bullets about what needs attention (high priority or unusual events, cameras "
-    "offline, disk problems) and one bullet summing up the period in plain words. Activity counts, journeys, recording "
-    "and disk status are listed separately below your bullets, so don't repeat those numbers. Cite events as [#id] "
-    "exactly as given. Only use the facts provided; if it was quiet, say so. Use American English spelling."
+    "one-line headline and 1-4 short bullets about what needs attention (broken site rules, PPE violations, high "
+    "priority or unusual events, cameras offline, disk problems) and one bullet summing up the period in plain words. "
+    "When the facts have a 'PPE:' line with violations, always give PPE its own bullet: how many violations, in which "
+    "zone and when, citing one or two of the examples; workplace safety breaches matter as much as security events. "
+    "Activity counts, journeys, recording and disk status are listed separately below your bullets, so don't repeat "
+    "those numbers. Cite events as [#id] exactly as given. Only use the facts provided; if it was quiet, say so. "
+    "Use American English spelling."
 )
+
+ATTENTION_MAX = 8      # lines in the briefing's "Needs attention" list
+ATTENTION_EACH = 3     # reserved per category, so one kind (e.g. ten long stays) can't crowd out the others
+PPE_VERDICT_SQL = "json_extract(CASE WHEN json_valid(detections) THEN detections END, '$.ppe.verdict')"
+PPE_FIELD_SQL = "json_extract(CASE WHEN json_valid(detections) THEN detections END, '$.ppe.{}')"
+
+
+def _span(t0: float, t1: float) -> str:
+    a, b = dt.datetime.fromtimestamp(t0), dt.datetime.fromtimestamp(t1)
+    return f"{a:%H:%M}–{b:%H:%M}" if a.date() == b.date() else f"{_when(t0)} – {_when(t1)}"
+
+
+def _spread(rows: list, n: int = 3) -> list:
+    """n examples spread over the list (first, middle, last)."""
+    if len(rows) <= n:
+        return list(rows)
+    return [rows[round(i * (len(rows) - 1) / (n - 1))] for i in range(n)]
+
+
+def ppe_summary(where: str, p: list, refs: Refs) -> list[dict]:
+    """PPE violations in the period, one entry per camera and zone, counted from the events' PPE check."""
+    from . import ppe
+    rows = db.all(f"SELECT id, camera_id, camera_class, start_ts, snapshot, {PPE_FIELD_SQL.format('zone')} AS zone, "
+                  f"{PPE_FIELD_SQL.format('violation')} AS missing FROM events WHERE {where} AND {PPE_VERDICT_SQL}='violation' "
+                  f"ORDER BY start_ts", p)
+    groups: dict[tuple, list] = {}
+    for r in rows:
+        groups.setdefault((r["camera_id"], r["zone"] or "PPE zone"), []).append(r)
+    out = []
+    for (cam, zone), rs in sorted(groups.items(), key=lambda kv: -len(kv[1])):
+        missing: dict[str, int] = {}
+        for r in rs:
+            for item in json.loads(r["missing"] or "[]"):
+                missing[item] = missing.get(item, 0) + 1
+        examples = _spread(rs)
+        for r in examples:
+            refs.event(r)
+        out.append({"camera_id": cam, "zone": zone, "count": len(rs), "first": rs[0]["start_ts"], "last": rs[-1]["start_ts"],
+                    "missing": {ppe.ITEM_WORDS.get(k, k): v for k, v in missing.items()},
+                    "examples": [r["id"] for r in examples]})
+    return out
+
+
+def _has_ppe_zones() -> bool:
+    from . import ppe
+    return any(ppe.ppe_zones(c.get("zones")) for c in db.cameras(enabled_only=True))
+
+
+def ppe_line(s: dict) -> str:
+    items = " or ".join(s["missing"]) or "required PPE"
+    detail = ", ".join(f"{v} without a {k}" for k, v in s["missing"].items())
+    return (f"PPE: {s['count']} violation{'s' if s['count'] != 1 else ''} (people without a {items}) in PPE zone "
+            f"'{s['zone']}' ({_cam_name(s['camera_id'])}), {_span(s['first'], s['last'])}"
+            + (f": {detail}" if len(s["missing"]) > 1 else "")
+            + "; examples " + " ".join(f"[#{i}]" for i in s["examples"]))
+
+
+def rules_summary(where: str, p: list, refs: Refs) -> list[dict]:
+    """Broken site rules in the period by kind: count, highest priority, a few examples and one rule text."""
+    rows = db.all(f"SELECT id, camera_id, camera_class, start_ts, snapshot, policy FROM events WHERE {where} "
+                  f"AND policy IS NOT NULL ORDER BY start_ts", p)
+    kinds: dict[str, list] = {}
+    for r in rows:
+        pol = json.loads(r["policy"]) if isinstance(r["policy"], str) else r["policy"]
+        if pol:
+            kinds.setdefault(pol.get("kind") or "rule", []).append((r, pol))
+    out = []
+    for kind, items in sorted(kinds.items(), key=lambda kv: -max(PRIORITY_RANK.get(p_.get("priority") or "none", 0) for _, p_ in kv[1])):
+        examples = _spread([r for r, _ in items])
+        for r in examples:
+            refs.event(r)
+        top = max(items, key=lambda x: PRIORITY_RANK.get(x[1].get("priority") or "none", 0))
+        out.append({"kind": kind, "count": len(items), "priority": top[1].get("priority") or "none",
+                    "text": top[1].get("text", ""), "examples": [r["id"] for r in examples]})
+    return out
+
+
+def rules_line(rs: list[dict]) -> str:
+    parts = []
+    for s in rs:
+        name = "PPE" if s["kind"] == "ppe" else s["kind"]
+        cites = " ".join(f"[#{i}]" for i in s["examples"])
+        what = " (see the PPE line)" if s["kind"] == "ppe" else (f": {s['text'][:160]}" if s["text"] else "")
+        parts.append(f"{name} {s['count']} ({s['priority']} priority) {cites}{what}")
+    return "Site rules broken: " + "; ".join(parts)
+
+
+def attention(where: str, p: list) -> list[dict]:
+    """The 'Needs attention' events, with room reserved per category: broken rules (other than PPE, which has its
+    own summary line), high priority, unusual for the camera; then the rest by priority. PPE violations only fill
+    left-over room: they are summarized above the list."""
+    rows = db.all(f"SELECT {EVENT_COLS}, {PPE_VERDICT_SQL} AS ppe_verdict FROM events WHERE {where} "
+                  f"AND (priority IN ('low','medium','high') OR COALESCE(anomaly,0) >= ? OR policy IS NOT NULL) "
+                  f"ORDER BY CASE priority WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC, "
+                  f"COALESCE(anomaly, 0) DESC, start_ts DESC LIMIT 500", [*p, baseline.PRIORITY_LOW])
+    pol = lambda r: (json.loads(r["policy"]) if isinstance(r["policy"], str) else r["policy"]) or {}
+    is_ppe = lambda r: r.get("ppe_verdict") == "violation" or pol(r).get("kind") == "ppe"
+    buckets = [
+        [r for r in rows if r["policy"] and pol(r).get("kind") != "ppe"],
+        [r for r in rows if r["priority"] == "high"],
+        sorted((r for r in rows if (r["anomaly"] or 0) >= baseline.PRIORITY_LOW), key=lambda r: -(r["anomaly"] or 0)),
+    ]
+    picked: dict[int, dict] = {}
+    for b in buckets:
+        for r in [r for r in b if r["id"] not in picked][:ATTENTION_EACH]:
+            picked[r["id"]] = r
+    for r in [r for r in rows if not is_ppe(r)] + [r for r in rows if is_ppe(r)]:
+        if len(picked) >= ATTENTION_MAX:
+            break
+        picked.setdefault(r["id"], r)
+    return list(picked.values())[:ATTENTION_MAX]
 
 
 def briefing_settings() -> dict:
@@ -830,9 +1021,9 @@ def gather_facts(start: float, end: float) -> tuple[str, dict, Refs]:
     busiest: dict[str, tuple[str, int]] = {}
     for r in hours:
         busiest.setdefault(r["camera_id"], (r["h"], r["n"]))
-    top = db.all(f"SELECT {EVENT_COLS} FROM events WHERE {where} AND (priority IN ('low','medium','high') OR COALESCE(anomaly,0) >= ?) "
-                 f"ORDER BY CASE priority WHEN 'high' THEN 3 WHEN 'medium' THEN 2 WHEN 'low' THEN 1 ELSE 0 END DESC, "
-                 f"COALESCE(anomaly, 0) DESC LIMIT 8", [*p, baseline.PRIORITY_LOW])
+    ppe_s = ppe_summary(where, p, refs)
+    rules_s = rules_summary(where, p, refs)
+    top = attention(where, p)
     for e in top:
         refs.event(e)
     journeys = db.all("SELECT * FROM journeys WHERE synopsis IS NOT NULL AND first_ts BETWEEN ? AND ? ORDER BY first_ts LIMIT 5", [start, end])
@@ -860,6 +1051,12 @@ def gather_facts(start: float, end: float) -> tuple[str, dict, Refs]:
                                            for c, v in by_cam.items()) or "no verified people or vehicles"))
     if fa:
         lines.append(f"Operator-marked false alarms: {fa}.")
+    # PPE and broken rules are summarized before the capped list, so they can't be crowded out of it
+    lines += [ppe_line(s) for s in ppe_s]
+    if not ppe_s and _has_ppe_zones():
+        lines.append("PPE: no violations in the PPE zones.")
+    if rules_s:
+        lines.append(rules_line(rules_s))
     lines.append("Needs attention:" if top else "Needs attention: nothing flagged (no unusual or elevated-priority events).")
     lines += ["- " + _event_line(e) for e in top]
     if journeys:
@@ -875,6 +1072,9 @@ def gather_facts(start: float, end: float) -> tuple[str, dict, Refs]:
             people = f" (~{est[0]} people)" if est[0] == est[1] else f" (~{est[0]}-{est[1]} people)"
         fixed.append(f"{_cam_name(c)}: " + ", ".join(x + (" sightings" + people if x.endswith("person") else "") for x in v)
                      + (f"; busiest around {busiest[c][0]}:00" if c in busiest else ""))
+    for s in ppe_s:
+        fixed.append(f"PPE: {s['count']} violation{'s' if s['count'] != 1 else ''} in '{s['zone']}' ({_cam_name(s['camera_id'])}), "
+                     f"{_span(s['first'], s['last'])} " + " ".join(f"[#{i}]" for i in s["examples"]))
     if top:
         fixed.append("Flagged for review: " + " ".join(f"[#{e['id']}]" for e in top))
     for j in journeys:
@@ -883,7 +1083,8 @@ def gather_facts(start: float, end: float) -> tuple[str, dict, Refs]:
     fixed.append("Recording: " + ("; ".join(gaps) if gaps else "all cameras recorded continuously"))
     fixed.append(f"Disk: {free_gb:,.0f} GB free" + (" - retention alert" if retention.alert else ""))
     stats = {"counts": counts, "false_alarms": fa, "top": [e["id"] for e in top], "journeys": [j["id"] for j in journeys],
-             "gaps": gaps, "free_gb": round(free_gb, 1), "fixed": fixed}
+             "gaps": gaps, "free_gb": round(free_gb, 1), "fixed": fixed, "ppe": ppe_s,
+             "rules": {s["kind"]: s["count"] for s in rules_s}}
     return "\n".join(lines), stats, refs
 
 

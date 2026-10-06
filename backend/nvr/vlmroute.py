@@ -10,11 +10,22 @@ works the same with no remote configured, no internet, or a remote that is still
 - Circuit breaker: after a remote failure, remote is skipped for DOWN_S.
 - Spend guard: an estimate of billed seconds (request time plus the worker's idle-before-scale-down time)
   times `remote_rate_usd_per_s`; once today's estimate reaches `remote_daily_budget_usd`, tasks go local.
+
+Two local models (optional, NVR_FALLBACK_VLM_MODEL): the primary (vlm_model, e.g. qwen3.8:27b on GPU 1) and a
+smaller fallback (e.g. qwen3.5:9b on GPU 0), each in its own managed `ollama serve` (synopsis.OllamaServer) with
+its own gate. Every local request goes to the primary, except:
+- the primary is not ready (starting, restarting, or skipped for SKIP_S after a connection / 5xx / timeout
+  failure): the fallback answers, and a request whose primary call fails that way is retried on the fallback;
+- high-volume background work (HIGH_VOLUME: synopses, journeys, PPE checks) while the primary's queue (requests in
+  flight plus waiting for their turn, the hub's shared-AI requests included) is over `fallback_when_queue_over`.
+Interactive work (Ask, clip chat, briefings, footage search, the hub's digests) stays on the primary unless it is
+down. Each instance is always called with its own loaded num_ctx, so a request never makes Ollama reload a model.
+With no fallback configured everything goes to the primary exactly as before.
 """
 from __future__ import annotations
 
 import asyncio
-from collections import Counter
+from collections import Counter, deque
 import base64
 import contextlib
 import datetime as dt
@@ -22,7 +33,7 @@ import json
 import logging
 import re
 import time
-from typing import AsyncIterator
+from typing import AsyncIterator, Callable
 
 import httpx
 
@@ -34,6 +45,102 @@ log = logging.getLogger("nvr.vlmroute")
 TASKS = ("assistant", "briefing", "journey", "unusual_review", "footage_verify", "synopsis", "chat", "ppe")
 REMOTE_CONCURRENCY = 2
 DOWN_S = 300
+# local primary / fallback routing
+HIGH_VOLUME = frozenset({"synopsis", "unusual_review", "journey", "ppe"})   # may spill over to the fallback when busy
+SKIP_S = 60             # after a local connection / 5xx / timeout failure, that instance is skipped this long
+FAIL_RESTART = 2        # consecutive such failures before that instance's Ollama is restarted (pipeline.restart_vlm)
+FALLBACK_ALERT_S = 120  # vlm_fallback_active once the primary has been down this long with the fallback serving
+ROLES = ("primary", "fallback")
+
+
+class LocalHTTPError(RuntimeError):
+    """A local Ollama answered with an HTTP error (status kept so 5xx can fall back and 4xx doesn't)."""
+
+    def __init__(self, status: int, text: str) -> None:
+        super().__init__(f"Qwen request failed ({status}): {text[:300]}")
+        self.status = status
+
+
+def retryable(e: BaseException) -> bool:
+    """A local failure that says "this instance is unwell" (try the other one), not "this request is bad"."""
+    if isinstance(e, (httpx.TransportError, asyncio.TimeoutError)):   # connect refused, reset, read/connect timeout
+        return True
+    if isinstance(e, httpx.HTTPStatusError):
+        return e.response.status_code >= 500
+    if isinstance(e, LocalHTTPError):
+        return e.status >= 500
+    return False
+
+
+def size_label(model: str) -> str:
+    """'qwen3.8:27b' -> '27B' (the parameter count from the tag), else the model name."""
+    m = re.search(r"(?<![\d.])(\d+(?:\.\d+)?)b\b", model or "", re.I)
+    return f"{m.group(1)}B" if m else (model or "?")
+
+
+class LocalModel:
+    """One managed `ollama serve` and its model: the primary (vlm_model) or the fallback (fallback_vlm_model).
+    Settings are read live (the hub / tests may change them). The pipeline moves `state` (start_vlm / restart_vlm);
+    the router counts the queue and skips an instance for SKIP_S after it failed."""
+
+    def __init__(self, role: str) -> None:
+        self.role = role
+        self.state = "starting"                  # starting | ready | unresponsive
+        self.down_since: float | None = None     # stopped answering (or failed to start) at
+        self.skip_until = 0.0
+        self.fails = 0                           # consecutive connection / 5xx / timeout failures
+        self.queue = 0                           # requests in flight + waiting for their turn (router + shared AI)
+        self.last_error = ""
+        self.vram: dict | None = None            # {"size", "size_vram"} from /api/ps after warm-up
+
+    @property
+    def primary(self) -> bool:
+        return self.role == "primary"
+
+    @property
+    def configured(self) -> bool:
+        return settings.local_vlm_enabled if self.primary else settings.fallback_vlm_enabled
+
+    @property
+    def model(self) -> str:
+        return settings.vlm_model if self.primary else settings.fallback_vlm_model
+
+    @property
+    def url(self) -> str:
+        return (settings.ollama_url if self.primary else settings.fallback_ollama_url).rstrip("/")
+
+    @property
+    def gpu(self) -> str:
+        return settings.ollama_gpu if self.primary else settings.fallback_ollama_gpu
+
+    @property
+    def num_ctx(self) -> int:
+        return settings.vlm_num_ctx if self.primary else settings.fallback_num_ctx
+
+    @property
+    def parallel(self) -> int:
+        return settings.ollama_parallel if self.primary else settings.fallback_ollama_parallel
+
+    def available(self, now: float | None = None) -> bool:
+        return self.configured and self.state == "ready" and (now or time.time()) >= self.skip_until
+
+    def set_state(self, state: str) -> None:
+        if state == "ready":
+            self.down_since, self.fails, self.skip_until = None, 0, 0.0
+        elif self.down_since is None and state == "unresponsive":
+            self.down_since = time.time()
+        self.state = state
+
+    def failed_start(self) -> None:
+        """Start-up could not load the model (Ollama didn't start, pull / warm-up failed): down from now."""
+        if self.down_since is None:
+            self.down_since = time.time()
+
+    def snapshot(self) -> dict:
+        return {"model": self.model, "gpu": self.gpu, "state": self.state, "queue": self.queue, "url": self.url,
+                "num_ctx": self.num_ctx, "parallel": self.parallel, "down_since": self.down_since,
+                "skipped_until": self.skip_until if time.time() < self.skip_until else None,
+                "last_error": self.last_error or None, "vram": self.vram}
 
 
 def parse_json(content: str) -> dict:
@@ -66,11 +173,19 @@ def no_think(body: dict) -> dict:
     return body
 
 class OllamaBackend:
+    """Native /api/chat on one local instance. Always sends that instance's own num_ctx (a different one would
+    make Ollama reload the model) and nothing else that changes how the model is loaded."""
     kind = "local"
+
+    def __init__(self, inst: LocalModel | None = None) -> None:
+        self.inst = inst or LocalModel("primary")
 
     @property
     def model(self) -> str:
-        return settings.vlm_model
+        return self.inst.model
+
+    def options(self, temperature: float, num_predict: int) -> dict:
+        return {"temperature": temperature, "num_ctx": self.inst.num_ctx, "num_predict": num_predict}
 
     def _messages(self, messages: list[dict]) -> list[dict]:
         out = []
@@ -86,20 +201,21 @@ class OllamaBackend:
         # think=False: Qwen3.x reason by default and would spend the whole token budget thinking (empty JSON);
         # Ollama ignores the flag for models without a thinking mode (Qwen2.5-VL)
         body = {"model": self.model, "messages": self._messages(messages), "format": schema, "stream": False, "think": False,
-                "options": {"temperature": temperature, "num_ctx": settings.vlm_num_ctx, "num_predict": num_predict}}
-        async with httpx.AsyncClient(timeout=timeout) as c:
-            r = await c.post(f"{settings.ollama_url}/api/chat", json=body)
-            r.raise_for_status()
+                "options": self.options(temperature, num_predict)}
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10)) as c:
+            r = await c.post(f"{self.inst.url}/api/chat", json=body)
+            if r.status_code >= 400:
+                raise LocalHTTPError(r.status_code, r.text)
             return parse_json(r.json()["message"]["content"])
 
     async def stream(self, messages: list[dict], num_predict: int, temperature: float,
                      first_token_timeout: float) -> AsyncIterator[str]:
         body = {"model": self.model, "messages": self._messages(messages), "stream": True, "think": False,
-                "options": {"temperature": temperature, "num_ctx": settings.vlm_num_ctx, "num_predict": num_predict}}
+                "options": self.options(temperature, num_predict)}
         async with httpx.AsyncClient(timeout=httpx.Timeout(240, connect=10)) as c:
-            async with c.stream("POST", f"{settings.ollama_url}/api/chat", json=body) as r:
+            async with c.stream("POST", f"{self.inst.url}/api/chat", json=body) as r:
                 if r.status_code >= 400:
-                    raise RuntimeError(f"Qwen request failed ({r.status_code}): {(await r.aread()).decode()[:300]}")
+                    raise LocalHTTPError(r.status_code, (await r.aread()).decode())
                 async for line in r.aiter_lines():
                     if not line:
                         continue
@@ -178,9 +294,14 @@ class TimeToFirstToken(Exception):
 
 class Router:
     def __init__(self) -> None:
-        self.local = OllamaBackend()
+        self.models = {role: LocalModel(role) for role in ROLES}
+        self.local = OllamaBackend(self.models["primary"])
+        self.fallback = OllamaBackend(self.models["fallback"])
         self.remote = OpenAIBackend()
-        self.gate = None                  # the pipeline's VlmGate, set by Pipeline()
+        self.gate = None                  # the pipeline's VlmGate for the primary, set by Pipeline()
+        self.fallback_gate = None         # ...and the fallback's own (it is another GPU: the two run side by side)
+        self.on_unresponsive: Callable[[str], None] | None = None   # pipeline: restart that instance's Ollama
+        self.fallback_served: deque[float] = deque(maxlen=5000)     # when the fallback answered (last hour count)
         self.down_until = 0.0
         self.last_error = ""
         self.last_ok_end = 0.0            # end of the last successful remote request
@@ -266,13 +387,112 @@ class Router:
             self._sem = asyncio.Semaphore(REMOTE_CONCURRENCY)
         return self._sem
 
+    # -- local primary / fallback
+    def plan(self, task: str) -> list[str]:
+        """Which local instance(s) to try, in order (see the module docstring)."""
+        if not settings.fallback_vlm_enabled:
+            return ["primary"]                       # one local model: today's behavior
+        p, f = self.models["primary"], self.models["fallback"]
+        now = time.time()
+        if not f.available(now):
+            return ["primary"]
+        if not p.available(now):
+            return ["fallback"]
+        if task in HIGH_VOLUME and p.queue > settings.fallback_when_queue_over:
+            return ["fallback", "primary"]
+        return ["primary", "fallback"]
+
+    def pick(self, task: str) -> str:
+        """The instance a request would go to now (the hub's shared AI asks this)."""
+        return self.plan(task)[0]
+
+    def backend(self, role: str):
+        return self.local if role == "primary" else self.fallback
+
+    def local_ok(self, role: str) -> None:
+        m = self.models[role]
+        m.fails, m.skip_until = 0, 0.0
+        if role == "fallback":
+            self.fallback_served.append(time.time())
+
+    def local_failed(self, role: str, e: BaseException) -> None:
+        """A connection / 5xx / timeout failure: skip this instance for SKIP_S, and after FAIL_RESTART in a row
+        have the pipeline restart its Ollama (with no fallback configured the pipeline's own watchdog does that,
+        as before)."""
+        m = self.models[role]
+        m.fails += 1
+        m.last_error = f"{type(e).__name__}: {str(e)[:200]}"
+        if not settings.fallback_vlm_enabled:
+            return
+        m.skip_until = time.time() + SKIP_S
+        log.warning("local %s model %s failed (%s, %d in a row); %s", role, m.model, m.last_error, m.fails,
+                    "using the other local model" if role == "primary" else "using the primary")
+        if m.fails >= FAIL_RESTART and m.state == "ready" and self.on_unresponsive is not None:
+            self.on_unresponsive(role)
+
+    def routed_to_fallback_last_hour(self) -> int:
+        cutoff = time.time() - 3600
+        return sum(1 for t in self.fallback_served if t >= cutoff)
+
+    def vlm_status(self) -> dict:
+        """/api/system `vlm`: both local instances in words and numbers."""
+        def one(role):
+            m = self.models[role]
+            return {k: v for k, v in m.snapshot().items() if k in ("model", "gpu", "state", "queue", "down_since", "vram")}
+        return {"primary": one("primary"), "fallback": one("fallback") if settings.fallback_vlm_enabled else None,
+                "routed_to_fallback_last_hour": self.routed_to_fallback_last_hour()}
+
+    def health_alerts(self, now: float | None = None) -> list[dict]:
+        """`vlm_fallback_active` while the primary has been down > FALLBACK_ALERT_S and the fallback is serving."""
+        if not settings.fallback_vlm_enabled:
+            return []
+        now = now or time.time()
+        p, f = self.models["primary"], self.models["fallback"]
+        if p.state == "ready" or p.down_since is None or now - p.down_since < FALLBACK_ALERT_S or f.state != "ready":
+            return []
+        name = size_label(p.model)
+        return [{"kind": "vlm_fallback_active",
+                 "text": f"{'Qwen ' if 'qwen' in p.model.lower() and name != p.model else ''}{name} is down; "
+                         f"descriptions are using the {size_label(f.model)}",
+                 "since": p.down_since, "error": p.last_error or None, "model": p.model, "fallback_model": f.model}]
+
+    def embed_url(self) -> str:
+        """Embeddings (one small model, same vectors anywhere): the primary, or the fallback while it is down."""
+        p, f = self.models["primary"], self.models["fallback"]
+        return f.url if settings.fallback_vlm_enabled and not p.available() and f.available() else p.url
+
     @contextlib.asynccontextmanager
-    async def _local_turn(self, priority: str):
-        if self.gate is None:
-            yield
-        else:
-            async with (self.gate.chat() if priority == "chat" else self.gate.background()):
+    async def _local_turn(self, priority: str, role: str = "primary"):
+        """Count the request in the instance's queue while it waits for its turn and runs."""
+        m = self.models[role]
+        gate = self.gate if role == "primary" else self.fallback_gate
+        m.queue += 1
+        try:
+            if gate is None:
                 yield
+            else:
+                async with (gate.chat() if priority == "chat" else gate.background()):
+                    yield
+        finally:
+            m.queue -= 1
+
+    async def _local_json(self, task: str, messages: list[dict], schema: dict, num_predict: int, temperature: float,
+                          priority: str) -> dict:
+        order = self.plan(task)
+        for i, role in enumerate(order):
+            try:
+                async with self._local_turn(priority, role):
+                    r = await self.backend(role).chat_json(messages, schema, num_predict, temperature, 180)
+            except Exception as e:
+                if not retryable(e):
+                    raise
+                self.local_failed(role, e)
+                if i + 1 < len(order) and self.models[order[i + 1]].available():
+                    continue
+                raise
+            self.local_ok(role)
+            return {**r, "_model": self.backend(role).model}
+        raise RuntimeError("no local model")   # unreachable: plan() is never empty
 
     # -- calls
     async def chat_json(self, task: str, system: str, text: str, images: list[bytes], schema: dict,
@@ -298,9 +518,7 @@ class Router:
                     raise self._no_local(task, e) from e
         if not settings.local_vlm_enabled:
             raise self._no_local(task)
-        async with self._local_turn(priority):
-            r = await self.local.chat_json(messages, schema, num_predict, temperature, 180)
-        return {**r, "_model": self.local.model}
+        return await self._local_json(task, messages, schema, num_predict, temperature, priority)
 
     async def stream(self, task: str, messages: list[dict], num_predict: int = 500, temperature: float = 0.3,
                      priority: str = "chat") -> AsyncIterator[tuple[str, str]]:
@@ -336,10 +554,31 @@ class Router:
                 yield ("fallback", "remote waking up" if cold else "remote unavailable")
         if not settings.local_vlm_enabled:
             raise self._no_local(task)
-        async with self._local_turn(priority):
-            yield ("model", self.local.model)
-            async for chunk in self.local.stream(messages, num_predict, temperature, 240):
-                yield ("delta", chunk)
+        order = self.plan(task)
+        for i, role in enumerate(order):
+            backend, started = self.backend(role), False
+            try:
+                async with self._local_turn(priority, role):
+                    if len(order) == 1:   # nothing to fall back to: name the model up front, as before
+                        started = True
+                        yield ("model", backend.model)
+                    async for chunk in backend.stream(messages, num_predict, temperature, 240):
+                        if not started:   # the model is named once it has answered, so a fallback can still rename it
+                            started = True
+                            yield ("model", backend.model)
+                        yield ("delta", chunk)
+                    if not started:
+                        yield ("model", backend.model)
+            except Exception as e:
+                if not retryable(e):
+                    raise
+                self.local_failed(role, e)
+                if started or i + 1 >= len(order) or not self.models[order[i + 1]].available():
+                    raise   # failed mid-answer (can't restart silently) or nowhere else to go
+                yield ("fallback", "primary model unavailable" if role == "primary" else "fallback model unavailable")
+                continue
+            self.local_ok(role)
+            return
 
     async def warm(self) -> dict:
         """Tiny remote request so a cold worker starts loading (e.g. when the Ask tab opens)."""

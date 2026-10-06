@@ -23,6 +23,7 @@ describe("whereLabel", () => {
 describe("KIND_LABEL", () => {
   it("names the detector health alerts (hub alerts.py HEALTH_KINDS)", () => {
     expect(KIND_LABEL.detector_fallback).toBe("Detection on CPU");
+    expect(KIND_LABEL.vlm_fallback_active).toBe("AI on fallback model");
     expect(KIND_LABEL.detector_stalled).toBe("Verification stalled");
   });
   it("names the central recording alerts", () => {

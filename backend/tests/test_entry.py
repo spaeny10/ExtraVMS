@@ -52,7 +52,8 @@ def test_place_and_edge_facts():
     assert zones.edge_of(0.3, 0.97).startswith("bottom") and zones.edge_of(0.5, 0.5) is None
     e = {"path": [[0.0, *box(0.55, 0.42)], [3.0, *box(0.3, 0.99)]], "camera_class": "person"}
     fact = _track_fact(e, {"zones": [DOOR]})
-    assert "first seen at 'South Exterior Door'" in fact and "bottom edge" in fact and "entered through" in fact
+    assert "first seen in 'South Exterior Door'" in fact and "bottom edge" in fact and "entered through" in fact
+    assert "left through South" not in fact and "came back" not in fact
 
 
 def add(ts, path, areas, vec):

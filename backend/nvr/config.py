@@ -77,7 +77,17 @@ class Settings(BaseSettings):
     # take 2: one request's image encoding overlaps another's token generation (~+40% throughput; each slot
     # holds its own vlm_num_ctx KV cache).
     ollama_parallel: int = 1
-    chat_frames: int = 4                    # frames per chat question (~1,050 tokens each)
+    # Optional second local model (vlmroute): a smaller Qwen in its own managed `ollama serve` on another GPU.
+    # Work goes to the primary (vlm_model above); it falls back to this one while the primary is down, starting
+    # or failing, and high-volume background work (synopses, journeys) also spills over to it when the primary's
+    # queue is longer than fallback_when_queue_over. Unset (empty model) = one model, as before.
+    fallback_vlm_model: str = ""                     # e.g. qwen3.5:9b
+    fallback_ollama_url: str = "http://127.0.0.1:11437"
+    fallback_ollama_gpu: str = ""                    # CUDA index in PCI order, e.g. "0"; empty = Ollama picks
+    fallback_num_ctx: int = 6144                     # the fallback's own context (each instance keeps its own loaded)
+    fallback_ollama_parallel: int = 1                # its OLLAMA_NUM_PARALLEL (it shares a GPU with YOLO)
+    fallback_when_queue_over: int = 4                # primary in-flight + waiting above this: synopses use the fallback
+    chat_frames: int = 4                   # frames per chat question (~1,050 tokens each)
     embed_model: str = "nomic-embed-text"
     synopsis_images: int = 4
     # Back-to-back fragments of one visit on a camera merge into one event before Qwen describes it (merge.py)
@@ -153,6 +163,11 @@ class Settings(BaseSettings):
     https_port: int = 8443                  # the same app over HTTPS (self-signed cert in data_dir/tls) for those browsers
     # Low-bitrate playback (/api/playback?q=sd): concurrent 720p/700 kbps transcodes. 0 = auto: 4 with NVENC, 2 on CPU
     playback_transcode_max: int = 0
+
+    @property
+    def fallback_vlm_enabled(self) -> bool:
+        """A second local model is configured (and there is a local model at all)."""
+        return self.local_vlm_enabled and bool(self.fallback_vlm_model.strip())
 
     @property
     def torch_device(self) -> str:

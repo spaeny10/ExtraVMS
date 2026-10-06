@@ -68,6 +68,9 @@ class Pipeline:
         self.cameras: dict[str, dict] = {}
         self.gate = vlm.VlmGate()
         vlmroute.router.gate = self.gate  # local Qwen calls take turns here; remote ones don't need to
+        # the fallback model (NVR_FALLBACK_VLM_MODEL) is on another GPU: its own turns, beside the primary's
+        vlmroute.router.fallback_gate = vlm.VlmGate("fallback")
+        vlmroute.router.on_unresponsive = lambda role: asyncio.create_task(self.restart_vlm(role), name=f"vlm-restart-{role}")
         self.decode = ThreadPoolExecutor(max_workers=2, thread_name_prefix="decode")
         self.clip = None  # OpenCLIP, shared by the footage index and vehicle fingerprints (loaded on the GPU thread)
         self.ptz = None   # ptz.PtzManager, set by the API at startup (PTZ cameras: home/away, relay, digital input)
@@ -265,7 +268,21 @@ class Pipeline:
                 if e and e["status"] == "verified" and not e["synopsis"]:
                     self.queue_synopsis(event_id)
 
+    def synopsis_workers(self) -> int:
+        """One synopsis at a time with one local model (as before). With a fallback model, enough workers that the
+        primary's queue can pass fallback_when_queue_over, so a burst spills over to the fallback (vlmroute.plan)
+        instead of waiting behind the primary."""
+        return max(1, settings.fallback_when_queue_over + 2) if settings.fallback_vlm_enabled else 1
+
     async def synopsis_loop(self) -> None:
+        n = self.synopsis_workers()
+        if n == 1:
+            return await self._synopsis_worker()
+        log.info("synopses: %d workers (primary %s, fallback %s when its queue is over %d)", n, settings.vlm_model,
+                 settings.fallback_vlm_model, settings.fallback_when_queue_over)
+        await asyncio.gather(*(self._synopsis_worker() for _ in range(n)))
+
+    async def _synopsis_worker(self) -> None:
         while True:
             item = await self.synopsis_q.get()
             event_id = item[2]
@@ -280,7 +297,8 @@ class Pipeline:
                 self.vlm_timeouts += 1
                 log.warning("synopsis %s timed out (%s in a row): %s", event_id, self.vlm_timeouts, type(ex).__name__)
                 self.synopsis_pending.discard(event_id)
-                if self.vlm_timeouts >= 2 and self.vlm_ready:
+                # with a fallback model the router already retried there and restarts whichever instance failed
+                if self.vlm_timeouts >= 2 and self.vlm_ready and not settings.fallback_vlm_enabled:
                     asyncio.create_task(self.restart_vlm(), name="vlm-restart")
                 self.queue_synopsis(event_id)   # not the event's fault: it goes back to the queue (behind the restart)
                 continue
@@ -402,11 +420,13 @@ class Pipeline:
         summary = result.get("summary", "").strip()
         summary = zones.apply_door_facts(summary, e)  # entries/exits through named doors come from the track, not the model
         names = [a["name"] for a in (e.get("areas") or []) if a["name"].lower() not in summary.lower()]
-        if names:  # the 7B model sometimes ignores the operator's place names: state them anyway
-            summary = (summary.rstrip(".") + ". " if summary else "") + "Went into " + ", then ".join(dict.fromkeys(names)) + "."
+        if names:  # the model sometimes ignores the operator's place names: state them anyway, as "went to" because
+            # a door place visited and left again (event 8377) is not an entry; entries/exits come from apply_door_facts
+            summary = (summary.rstrip(".") + ". " if summary else "") + "Went to " + ", then ".join(dict.fromkeys(names)) + "."
         result["summary"] = summary
         db.update_event(event_id, synopsis=summary, synopsis_json=result, threat=result.get("threat_level"), error=None)
         if not e.get("ptz_preset"):
+            await policy.confirm_towing(event_id)   # a towing claim needs a second, focused look before a rule can break
             policy.check(event_id, camera)          # site rules (who may tow what) now that Qwen has looked
             baseline.apply(event_id, rescore=False)  # threat changed: update priority
         await self.reindex(event_id)
@@ -521,34 +541,63 @@ class Pipeline:
                     log.info("remote VLM %s", f"ready: {settings.remote_vlm_model}" if ready else "not configured; Qwen tasks wait")
                 self.vlm_ready, self.vlm_state = ready, "ready" if ready else "starting"
                 await asyncio.sleep(30)
-        if await vlm.wait_ready():
-            try:
-                await vlm.ensure_models()
-                log.info("loading %s into VRAM...", settings.vlm_model)
-                log.info("VLM ready: %s (loaded and warmed in %.0fs)", settings.vlm_model, await vlm.warm_up())
-                self.vlm_ready, self.vlm_state, self.vlm_timeouts, self.vlm_down_since = True, "ready", 0, None
-            except Exception:
-                log.exception("could not prepare Ollama models")
-        else:
-            log.error("Ollama did not start at %s", settings.ollama_url)
+        roles = ["primary", "fallback"] if settings.fallback_vlm_enabled else ["primary"]
+        ok = await asyncio.gather(*(self._start_local(r) for r in roles))
+        if settings.fallback_vlm_enabled:
+            # with two models the other one serves meanwhile: keep retrying the one that didn't come up
+            for role, up in zip(roles, ok):
+                if not up:
+                    asyncio.create_task(self.restart_vlm(role), name=f"vlm-restart-{role}")
 
-    async def restart_vlm(self) -> None:
-        """Qwen stopped answering: restart Ollama and warm the model; keep trying every 5 min while it stays down
-        (a GPU that fell off the bus needs a reboot, which Settings → System and the advisor say)."""
-        if self.vlm_state == "unresponsive" or not settings.local_vlm_enabled:
+    def _set_local(self, role: str, state: str) -> None:
+        """A local model changed state. vlm_state / vlm_down_since mirror the primary (Settings → System, the
+        advisor); vlm_ready means some local model can answer (the primary, or the fallback while it is down)."""
+        models = vlmroute.router.models
+        models[role].set_state(state)
+        if role == "primary":
+            self.vlm_state, self.vlm_down_since = state, models["primary"].down_since
+        self.vlm_ready = any(m.configured and m.state == "ready" for m in models.values())
+
+    async def _start_local(self, role: str = "primary") -> bool:
+        """Wait for that instance's `ollama serve`, pull and warm its model, check it is all in VRAM."""
+        m = vlmroute.router.models[role]
+        if await vlm.wait_ready(role=role):
+            try:
+                await vlm.ensure_models(role)
+                log.info("loading %s (%s) into VRAM...", m.model, role)
+                log.info("VLM ready: %s (%s, loaded and warmed in %.0fs)", m.model, role, await vlm.warm_up(role))
+                await vlm.check_vram(role)
+                if role == "primary":
+                    self.vlm_timeouts = 0
+                self._set_local(role, "ready")
+                return True
+            except Exception:
+                log.exception("could not prepare Ollama models (%s)", role)
+        else:
+            log.error("Ollama did not start at %s", m.url)
+        m.failed_start()
+        return False
+
+    async def restart_vlm(self, role: str = "primary") -> None:
+        """Qwen stopped answering: restart that instance's Ollama and warm its model; keep trying every 5 min while
+        it stays down (a GPU that fell off the bus needs a reboot, which Settings → System and the advisor say).
+        With a fallback model configured the other instance answers meanwhile (vlmroute)."""
+        m = vlmroute.router.models[role]
+        if m.state == "unresponsive" or not settings.local_vlm_enabled or not m.configured:
             return   # nothing local to restart: the router's circuit breaker handles a remote outage
-        self.vlm_ready, self.vlm_state, self.vlm_down_since = False, "unresponsive", time.time()
-        log.error("Qwen is not answering: restarting Ollama")
-        while not self.vlm_ready:
+        self._set_local(role, "unresponsive")
+        log.error("Qwen (%s, %s) is not answering: restarting its Ollama", role, m.model)
+        while m.state != "ready":
             try:
                 if self.ollama is not None:
-                    await self.ollama.stop()   # its supervisor loop starts a fresh `ollama serve` in 5 s
+                    await self.ollama.stop(role)   # its supervisor loop starts a fresh `ollama serve` in 5 s
                     await asyncio.sleep(8)
-                await asyncio.wait_for(self.start_vlm(), 240)
+                await asyncio.wait_for(self._start_local(role), 240)
             except Exception as e:
-                log.warning("Qwen restart did not succeed: %s", e)
-            if not self.vlm_ready:
-                log.error("Qwen still down (%.0f min); next try in 5 min. If nvidia-smi reports the GPU as lost, reboot.", (time.time() - (self.vlm_down_since or time.time())) / 60)
+                log.warning("Qwen (%s) restart did not succeed: %s", role, e)
+            if m.state != "ready":
+                log.error("Qwen (%s) still down (%.0f min); next try in 5 min. If nvidia-smi reports the GPU as lost, "
+                          "reboot.", role, (time.time() - (m.down_since or time.time())) / 60)
                 await asyncio.sleep(300)
 
     def synopsis_labels(self, camera_id: str) -> list[str]:

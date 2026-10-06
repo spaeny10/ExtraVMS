@@ -28,7 +28,7 @@ function describe(a: Alert): string {
   const d = a.detail as Record<string, unknown>;
   return a.kind === "camera_down" ? `${d.name ?? a.key}: ${(d.problems as string[] | undefined)?.join("; ") || "no stream"}`
     : a.kind === "clock" ? `${d.skew_s} s off` : a.kind === "disk" ? String(d.message ?? "low space")
-    : a.kind === "detector_fallback" || a.kind === "detector_stalled" ? `${d.text ?? ""}${d.error ? ` (${d.error})` : ""}`
+    : a.kind === "detector_fallback" || a.kind === "detector_stalled" || a.kind === "vlm_fallback_active" ? `${d.text ?? ""}${d.error ? ` (${d.error})` : ""}`
     : a.kind === "offline" ? `last seen ${ago(d.last_seen_at as number)}` : `${d.name ? `${d.name} · ` : ""}${d.text ?? d.synopsis ?? ""}`;
 }
 

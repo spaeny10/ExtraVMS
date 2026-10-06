@@ -14,6 +14,7 @@ import { PtzBadge, PtzOverlay, PtzSettings } from "./PtzControl";
 import { regionPass, regions, useRegions } from "./region";
 import { useRef } from "react";
 import { yoloFallbackText, yoloState } from "./yoloStatus";
+import { vlmSub, vlmValue } from "./vlmStatus";
 
 /* ------------------------------------------------------------------ Live */
 
@@ -610,8 +611,8 @@ export function SystemView() {
           sub={[s.yolo_fallback ? yoloFallbackText(s.yolo_fallback) : "",
             ...(s.health_alerts ?? []).filter((a) => a.kind === "detector_stalled").map((a) => a.text),
             s.queues.verify ? `${s.queues.verify} waiting` : "queue empty", s.yolo_frame_ms != null ? `${s.yolo_frame_ms} ms a frame` : ""].filter(Boolean).join(" · ")} />
-        <Row label="Qwen" value={<><Status ok={s.vlm_ready} /> {s.vlm_ready ? "Ready" : s.vlm_state === "unresponsive" ? "Not answering · restarting Ollama" : "Starting"} · {s.vlm_model}</>}
-          sub={s.vlm_state === "unresponsive" ? `down since ${s.vlm_down_since ? fmtTime(s.vlm_down_since) : "?"} · if nvidia-smi says the GPU is lost, reboot` : s.queues.synopsis ? `${s.queues.synopsis} waiting` : "queue empty"}
+        <Row label="Qwen" value={<><Status ok={s.vlm_ready} /> {vlmValue(s)}</>}
+          sub={vlmSub(s)}
           action={<QwenFeedbackInfo />} />
         <RemoteRow />
         <FootageRow />

@@ -66,27 +66,55 @@ def describe_motion(path: list) -> str:
 
 
 def _track_fact(event: dict, camera: dict) -> str | None:
-    """Where the NVR first and last saw the object: a named place it was at or beside, else a picture edge."""
+    """Where the NVR first and last saw the object (a named place it was in or beside, else a picture edge), and
+    what the track says about doors. Only what the track shows (zones.door_facts): "entered through" a door only
+    when the track begins in it, "left through" only when it ends in it; a door it walked to from inside and away
+    from again is "went to <door> and came back", one it was only beside is "was near <door>". (A hint that a
+    track starting *beside* a door meant an entry made models write "entered through the South Exterior Door" for
+    a man who walked up to a tablet by the door from inside and back: event 8377.)"""
     from . import zones
     path = event.get("path") or []
     if len(path) < 2:
         return None
-    zl = camera.get("zones")
+    zl = zones.normalize(camera.get("zones"))
     x0, y0 = zones.foot(path[0][1:5])
     x1, y1 = zones.foot(path[-1][1:5])
+
     def describe(x, y):
         place = zones.place_of(x, y, zl)
         if place:
-            return f"at '{place}'"
+            inside = any((z.get("name") or "Area").strip() == place and zones.point_in_polygon(x, y, z["points"])
+                         for z in zl if z["type"] == "area")
+            return place, f"in '{place}'" if inside else f"beside '{place}'"
         edge = zones.edge_of(x, y)
-        return f"at the {edge}" if edge else "in the middle of the view"
-    first, last = describe(x0, y0), describe(x1, y1)
+        return None, f"at the {edge}" if edge else "in the middle of the view"
+
+    (p0, first), (p1, last) = describe(x0, y0), describe(x1, y1)
     line = f"Track (from the NVR): first seen {first}; last seen {last}."
-    if first.startswith("at '") and "door" in first.lower():
-        line += (" It appeared at that door, so it came into the building through it: state that plainly "
-                 "('entered through the South door'), don't say it came from the kitchen.")
-    if last.startswith("at '") and "door" in last.lower():
-        line += " It was last seen at that door: it most likely left through it."
+    entered, left = zones.door_facts(event)
+    # first / last sample in (or on the mat of) a door and not the same door at the other end: that is an entry / exit
+    # too (door_facts needs the event's areas, which a short track may not have)
+    entered = entered or (p0 if p0 and p0 != p1 and zones.DOOR_RE.search(p0) else None)
+    left = left or (p1 if p1 and p1 != p0 and zones.DOOR_RE.search(p1) else None)
+    visited =[a["name"] for a in event.get("areas") or []]
+    doors = list(dict.fromkeys(n for n in [*visited, p0, p1] if n and zones.DOOR_RE.search(n)))
+    for name in doors:
+        if name == entered and name == left:
+            line += (f" It appeared in '{name}' when the track began and was in it again when the track ended: it came "
+                     f"in through {name} and went back out through it.")
+        elif name == entered:
+            line += (f" It appeared in '{name}' when the track began: it came in through that door. Say it entered "
+                     f"through {name}.")
+        elif name == left:
+            line += f" It was in '{name}' when the track ended: it left through that door. Say it left through {name}."
+        elif name in visited:
+            line += (f" It was already in view away from '{name}' when the track began, walked to it and moved away "
+                     f"from it again: "
+                     f"write 'went to {name} and came back' (or 'was near {name}'). It did NOT come in or go out "
+                     f"through {name}: never write 'entered through' or 'left through' it.")
+        else:
+            line += (f" It was only near '{name}' and was not seen going through it: write 'was near {name}', never "
+                     f"'entered through' or 'left through' it.")
     return line
 
 
@@ -149,12 +177,17 @@ def event_facts(event: dict, camera: dict) -> str:
     if known:  # operator-named person/vehicle, e.g. "Known person: 'Shawn' (owner)"
         lines.append(known)
     if event.get("areas"):  # named by the operator: say where they went in the site's own words
+        from . import zones
         t0 = event["start_ts"]
+        a0 = event["areas"][0]["name"]
+        doors = any(zones.DOOR_RE.search(a["name"]) for a in event["areas"])
+        # no "came in through <door>" example here: whether it did is the Track line's call (_track_fact)
         lines.append("Places (named by the operator) the " + event["camera_class"] + " was at, in order: "
                      + ", ".join(f"'{a['name']}' at {a['from'] - t0:+.0f} s" for a in event["areas"])
-                     + ". In the summary name these places (e.g. 'went into "
-                     + f"{event['areas'][0]['name']}', or for a door 'came in through {event['areas'][0]['name']}'), "
-                     + "never just 'a bathroom' or 'a door'.")
+                     + f". In the summary name these places (e.g. '{'went to' if zones.DOOR_RE.search(a0) else 'went into'} "
+                     + f"{a0}'), never just 'a bathroom' or 'a door'."
+                     + (" Being at a door is not going through it: the Track line says whether it came in or went "
+                        "out through one." if doors else ""))
     where = _zone_fact(event, camera)
     if where:  # otherwise Qwen tends to call anything with the road behind it "background highway traffic"
         lines.append(where)
@@ -185,43 +218,64 @@ def build_prompt(event: dict, camera: dict, examples: list[dict]) -> str:
     return event_facts(event, camera) + shots + "\nWrite the synopsis of this event as JSON."
 
 
+def ollama_env(inst: vlmroute.LocalModel, base: dict | None = None) -> dict:
+    """Environment for one managed `ollama serve` (primary or fallback): its own port and GPU, the same model store."""
+    return {**(os.environ if base is None else base), "OLLAMA_HOST": inst.url.split("://", 1)[-1],
+            "CUDA_DEVICE_ORDER": "PCI_BUS_ID", "CUDA_VISIBLE_DEVICES": inst.gpu,
+            # Vulkan ignores CUDA_VISIBLE_DEVICES and would expose the other GPU too.
+            "OLLAMA_VULKAN": "0", "GGML_VK_VISIBLE_DEVICES": "",
+            # never unload the model (a reload costs 1-3 min on Windows)
+            "OLLAMA_KEEP_ALIVE": "-1", "OLLAMA_NUM_PARALLEL": str(max(1, inst.parallel)),
+            # a q8 KV cache (needs flash attention) keeps the whole model and its context in VRAM instead of
+            # spilling layers to the CPU, which made calls take minutes on a card shared with the desktop.
+            "OLLAMA_FLASH_ATTENTION": "1", "OLLAMA_KV_CACHE_TYPE": "q8_0",
+            # requests through the OpenAI-compatible /v1 (the hub's shared AI for other sites) can't set num_ctx
+            # per call, so the server default must be the same context the native calls ask for
+            "OLLAMA_CONTEXT_LENGTH": str(inst.num_ctx)}
+
+
 class OllamaServer:
-    """Runs `ollama serve` on its own port with only the VLM GPU visible."""
+    """Runs `ollama serve` on its own port with only the VLM GPU visible, and a second one for the fallback model
+    (NVR_FALLBACK_VLM_MODEL) on its own port and GPU when that is configured. Each is restarted if it exits."""
+
+    LOGS = {"primary": "ollama.log", "fallback": "ollama-fallback.log"}
 
     def __init__(self) -> None:
-        self.proc: asyncio.subprocess.Process | None = None
+        self.procs: dict[str, asyncio.subprocess.Process | None] = {"primary": None, "fallback": None}
+
+    @property
+    def proc(self) -> asyncio.subprocess.Process | None:
+        return self.procs["primary"]
+
+    def roles(self) -> list[str]:
+        return ["primary", "fallback"] if settings.fallback_vlm_enabled else ["primary"]
 
     async def run(self) -> None:
-        env = {**os.environ, "OLLAMA_HOST": settings.ollama_url.split("://", 1)[-1],
-               "CUDA_DEVICE_ORDER": "PCI_BUS_ID", "CUDA_VISIBLE_DEVICES": settings.ollama_gpu,
-               # Vulkan ignores CUDA_VISIBLE_DEVICES and would expose the YOLO GPU too.
-               "OLLAMA_VULKAN": "0", "GGML_VK_VISIBLE_DEVICES": "",
-               # GPU 1 is Qwen's: never unload it (a reload costs 1-3 min on Windows)
-               "OLLAMA_KEEP_ALIVE": "-1", "OLLAMA_NUM_PARALLEL": str(settings.ollama_parallel),
-               # 8 GB shared with the Windows desktop: a q8 KV cache (needs flash attention) keeps the whole
-               # model and its context in VRAM instead of spilling layers to the CPU, which made calls take minutes.
-               "OLLAMA_FLASH_ATTENTION": "1", "OLLAMA_KV_CACHE_TYPE": "q8_0",
-               # requests through the OpenAI-compatible /v1 (the hub's shared AI for other sites) can't set num_ctx
-               # per call, so the server default must be the same context the native calls ask for
-               "OLLAMA_CONTEXT_LENGTH": str(settings.vlm_num_ctx)}
         if not settings.ollama_exe.exists():
             log.error("Ollama not found at %s; synopses disabled", settings.ollama_exe)
             return
-        log_file = open(settings.runtime_dir / "ollama.log", "ab")
+        await asyncio.gather(*(self._serve(role) for role in self.roles()))
+
+    async def _serve(self, role: str) -> None:
+        env = ollama_env(vlmroute.router.models[role])
+        log_file = open(settings.runtime_dir / self.LOGS[role], "ab")
         while True:
             # own process group / session so stop() can take the model runners (llama-server) down with the server
             kw = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
-            self.proc = await asyncio.create_subprocess_exec(str(settings.ollama_exe), "serve", env=env,
-                                                             stdout=log_file, stderr=log_file, **kw)
-            code = await self.proc.wait()
-            log.warning("ollama serve exited (%s); restarting in 5s", code)
+            self.procs[role] = await asyncio.create_subprocess_exec(str(settings.ollama_exe), "serve", env=env,
+                                                                    stdout=log_file, stderr=log_file, **kw)
+            code = await self.procs[role].wait()
+            log.warning("ollama serve (%s) exited (%s); restarting in 5s", role, code)
             await asyncio.sleep(5)
 
-    async def stop(self) -> None:
-        """Stop `ollama serve` and its runner children. Terminating only the server orphaned one llama-server per
-        watchdog restart while a GPU was lost; each kept ~7 GB committed and twelve of them exhausted the machine."""
-        if self.proc and self.proc.returncode is None:
-            await kill_tree(self.proc.pid)
+    async def stop(self, role: str | None = None) -> None:
+        """Stop `ollama serve` and its runner children (one instance, or both). Terminating only the server orphaned
+        one llama-server per watchdog restart while a GPU was lost; each kept ~7 GB committed and twelve of them
+        exhausted the machine."""
+        for r in ([role] if role else list(self.procs)):
+            p = self.procs.get(r)
+            if p and p.returncode is None:
+                await kill_tree(p.pid)
 
 
 async def kill_tree(pid: int) -> None:
@@ -240,11 +294,16 @@ async def kill_tree(pid: int) -> None:
         log.debug("kill_tree %s: %s", pid, e)
 
 
-async def wait_ready(timeout: float = 60) -> bool:
+def _inst(role: str) -> vlmroute.LocalModel:
+    return vlmroute.router.models[role]
+
+
+async def wait_ready(timeout: float = 60, role: str = "primary") -> bool:
+    url = _inst(role).url
     async with httpx.AsyncClient(timeout=3) as c:
         for _ in range(int(timeout)):
             try:
-                if (await c.get(f"{settings.ollama_url}/api/version")).status_code == 200:
+                if (await c.get(f"{url}/api/version")).status_code == 200:
                     return True
             except httpx.HTTPError:
                 pass
@@ -252,33 +311,76 @@ async def wait_ready(timeout: float = 60) -> bool:
     return False
 
 
-async def warm_up() -> float:
+def warm_body(inst: vlmroute.LocalModel, image: bytes) -> dict:
+    """The warm-up request: the same model and num_ctx every later request uses, so nothing reloads afterwards."""
+    return {"model": inst.model, "stream": False, "keep_alive": -1,
+            "messages": [{"role": "user", "content": "Reply OK.", "images": [base64.b64encode(image).decode()]}],
+            "options": {"num_ctx": inst.num_ctx, "num_predict": 2}}
+
+
+async def warm_up(role: str = "primary") -> float:
     """Load Qwen (and its vision projector) into VRAM now, so the first real question doesn't wait for it.
     On Windows+CUDA Ollama loads without mmap: ~1 min, plus a slow first inference."""
     import cv2
     import numpy as np
+    inst = _inst(role)
     img = cv2.imencode(".jpg", np.full((64, 64, 3), 128, np.uint8))[1].tobytes()
-    body = {"model": settings.vlm_model, "stream": False, "keep_alive": -1,
-            "messages": [{"role": "user", "content": "Reply OK.", "images": [base64.b64encode(img).decode()]}],
-            "options": {"num_ctx": settings.vlm_num_ctx, "num_predict": 2}}
     t0 = time.time()
     async with httpx.AsyncClient(timeout=900) as c:
-        (await c.post(f"{settings.ollama_url}/api/chat", json=body)).raise_for_status()
+        (await c.post(f"{inst.url}/api/chat", json=warm_body(inst, img))).raise_for_status()
     return time.time() - t0
 
 
-async def ensure_models() -> None:
+async def ensure_models(role: str = "primary") -> None:
+    """Pull what this instance serves (the model store is shared: the primary also pulls the embedding model)."""
+    inst = _inst(role)
+    wanted = (inst.model, settings.embed_model) if role == "primary" else (inst.model,)
     async with httpx.AsyncClient(timeout=None) as c:
-        have = {m["name"] for m in (await c.get(f"{settings.ollama_url}/api/tags")).json().get("models", [])}
-        for model in (settings.vlm_model, settings.embed_model):
+        have = {m["name"] for m in (await c.get(f"{inst.url}/api/tags")).json().get("models", [])}
+        for model in wanted:
             if model in have or f"{model}:latest" in have:
                 continue
             log.info("pulling %s (first run only)...", model)
-            async with c.stream("POST", f"{settings.ollama_url}/api/pull", json={"model": model}) as r:
+            async with c.stream("POST", f"{inst.url}/api/pull", json={"model": model}) as r:
                 async for line in r.aiter_lines():
                     if '"error"' in line:
                         raise RuntimeError(line)
             log.info("pulled %s", model)
+
+
+def vram_verdict(ps: dict, model: str) -> dict | None:
+    """From Ollama's /api/ps: {size, size_vram, on_gpu} for `model`, or None if it is not loaded."""
+    for m in ps.get("models") or []:
+        if m.get("name") == model or m.get("model") == model or m.get("name") == f"{model}:latest":
+            size, vram = int(m.get("size") or 0), int(m.get("size_vram") or 0)
+            return {"size": size, "size_vram": vram, "on_gpu": size > 0 and vram >= size}
+    return None
+
+
+async def check_vram(role: str = "primary") -> dict | None:
+    """After warm-up: is the whole model (weights + KV cache) in VRAM? A model partly on the CPU answers many
+    times slower; log a WARNING with what to change."""
+    inst = _inst(role)
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(f"{inst.url}/api/ps")
+            r.raise_for_status()
+            v = vram_verdict(r.json(), inst.model)
+    except (httpx.HTTPError, ValueError) as e:
+        log.warning("could not read %s placement from Ollama (%s): %s", inst.model, role, e)
+        return None
+    inst.vram = v
+    if v is None:
+        log.warning("%s (%s) is not listed as loaded by Ollama after warm-up", inst.model, role)
+    elif not v["on_gpu"]:
+        log.warning("%s (%s, GPU %s) is partly on the CPU: %.1f of %.1f GB in VRAM (num_ctx %d, parallel %d). "
+                    "Lower %s or %s, or free that GPU.", inst.model, role, inst.gpu or "auto", v["size_vram"] / 1e9,
+                    v["size"] / 1e9, inst.num_ctx, inst.parallel,
+                    "NVR_VLM_NUM_CTX" if role == "primary" else "NVR_FALLBACK_NUM_CTX",
+                    "NVR_OLLAMA_PARALLEL" if role == "primary" else "NVR_FALLBACK_OLLAMA_PARALLEL")
+    else:
+        log.info("%s (%s) fully in VRAM on GPU %s: %.1f GB", inst.model, role, inst.gpu or "auto", v["size_vram"] / 1e9)
+    return v
 
 
 async def synopsis(event: dict, camera: dict, images: list[bytes], examples: list[dict]) -> dict:
@@ -293,7 +395,7 @@ async def embed(text: str) -> list[float] | None:
         return None   # no local Ollama: the search index stays keyword-only
     try:
         async with httpx.AsyncClient(timeout=30) as c:
-            r = await c.post(f"{settings.ollama_url}/api/embed",
+            r = await c.post(f"{vlmroute.router.embed_url()}/api/embed",
                              json={"model": settings.embed_model, "input": text})
             r.raise_for_status()
             return r.json()["embeddings"][0]
@@ -337,19 +439,19 @@ async def chat_stream(event: dict, camera: dict, frames: list[tuple[float, bytes
             yield val
 
 
-_gate_held: contextvars.ContextVar[bool] = contextvars.ContextVar("vlm_gate_held", default=False)
-
-
 class VlmGate:
     """One VLM request at a time; interactive chat always goes ahead of background synopses.
 
     Re-entrant within a task: a request that already holds the gate (an Ask whose handler and the router both
     take a chat turn) passes straight through instead of waiting on itself, which once froze every synopsis.
-    A background turn that waits unusually long is logged, so a stuck holder shows up in the log."""
+    A background turn that waits unusually long is logged, so a stuck holder shows up in the log.
+    Each local model (primary, fallback) has its own gate; holding one says nothing about the other."""
 
     WAIT_WARN_S = 120
 
-    def __init__(self) -> None:
+    def __init__(self, name: str = "primary") -> None:
+        self.name = name
+        self._held: contextvars.ContextVar[bool] = contextvars.ContextVar(f"vlm_gate_held_{name}_{id(self)}", default=False)
         self.lock = asyncio.Lock()
         self.chat_waiting = 0
         self.no_chat = asyncio.Event()
@@ -359,19 +461,19 @@ class VlmGate:
 
     @contextlib.asynccontextmanager
     async def chat(self):
-        if _gate_held.get():
+        if self._held.get():
             yield
             return
         self.chat_waiting += 1
         self.no_chat.clear()
         try:
             async with self.lock:
-                token = _gate_held.set(True)
+                token = self._held.set(True)
                 self.held_since, self.holder = time.time(), "chat"
                 try:
                     yield
                 finally:
-                    _gate_held.reset(token)
+                    self._held.reset(token)
                     self.held_since = None
         finally:
             self.chat_waiting -= 1
@@ -380,7 +482,7 @@ class VlmGate:
 
     @contextlib.asynccontextmanager
     async def background(self):
-        if _gate_held.get():
+        if self._held.get():
             yield
             return
         t0, warned = time.time(), False
@@ -391,19 +493,19 @@ class VlmGate:
             except asyncio.TimeoutError:
                 if not warned:
                     warned = True
-                    log.warning("VLM gate: a background call has waited %.0fs (held by %s for %.0fs, %d chat waiting)",
+                    log.warning("VLM gate (%s): a background call has waited %.0fs (held by %s for %.0fs, %d chat waiting)",
                                 time.time() - t0, self.holder or "nobody",
                                 time.time() - self.held_since if self.held_since else 0, self.chat_waiting)
                 continue
             if not self.chat_waiting:
                 break
             self.lock.release()
-        token = _gate_held.set(True)
+        token = self._held.set(True)
         self.held_since, self.holder = time.time(), "background"
         try:
             yield
         finally:
-            _gate_held.reset(token)
+            self._held.reset(token)
             self.held_since = None
             self.lock.release()
 

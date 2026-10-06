@@ -350,6 +350,9 @@ export type HubStatus = {
   enroll_token?: boolean;
 };
 
+/** One local Qwen instance (primary or fallback) on Settings → System. */
+export type VlmInstance = { model: string; gpu: string; state: "starting" | "ready" | "unresponsive"; queue: number; down_since?: number | null };
+
 export type SystemInfo = {
   recordings_disk: { total_gb: number; free_gb: number };
   retention_days: number;
@@ -358,6 +361,8 @@ export type SystemInfo = {
   vlm_model: string;
   vlm_state?: "starting" | "ready" | "unresponsive";
   vlm_down_since?: number | null;
+  /** both local models (backend vlmroute.Router.vlm_status); fallback null when only one is configured */
+  vlm?: { primary: VlmInstance; fallback: VlmInstance | null; routed_to_fallback_last_hour: number } | null;
   yolo_ready: boolean;
   yolo_model: string;
   yolo_device?: string;           // "cuda:0", "cpu", "hailo-8", "cpu (hailo unavailable)"

@@ -142,7 +142,7 @@ async def notify_alert(org_id: str, site: dict, kind: str, detail: dict) -> int:
     subs = db.rows(sa.select(db.push_subscriptions).where(db.push_subscriptions.c.user_id.in_(list(uids))))
     name = title_name(site)
     title = {"offline": f"{name} is offline", "camera_down": f"{name}: camera down", "disk": f"{name}: disk low",
-             "clock": f"{name}: clock skew", "detector_fallback": f"{name}: detection on the CPU",
+             "clock": f"{name}: clock skew", "detector_fallback": f"{name}: detection on the CPU", "vlm_fallback_active": f"{name}: AI on the fallback model",
              "detector_stalled": f"{name}: event verification stalled", "event_high": f"{name}: high-priority event",
              "event_policy": f"{name}: site rule broken", "event_watched": f"{name}: watched person seen",
              "site_link_down": f"{name}: link to the site down"}.get(kind, f"{name}: {kind}")
