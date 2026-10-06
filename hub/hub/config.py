@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
     log_level: str = "info"
+    # Who may set X-Forwarded-For / -Proto (the client address and https behind Caddy): comma-separated IPs or CIDRs.
+    # Only 127.0.0.1 by default; docker-compose.yml sets the compose network's private ranges, where only Caddy can
+    # reach the hub (port 8000 is exposed to the network, never published). Never "*": then anyone reaching the port
+    # could forge their address (sign-in rate limit, audit IPs) and the scheme.
+    forwarded_allow_ips: str = "127.0.0.1"
 
     # TURN relay for live video through the hub (coturn with use-auth-secret; see hub/coturn/turnserver.conf)
     turn_host: str = ""                       # e.g. hub.axiomvision.ai; empty = no relay (LAN viewing only)
@@ -34,7 +39,8 @@ class Settings(BaseSettings):
     turn_port: int = 3478
     turn_tls_port: int = 0                    # 5349 once coturn has a certificate; 0 = not advertised
     turn_user_ttl_s: int = 3600
-    turn_site_ttl_s: int = 30 * 86400
+    turn_site_ttl_s: int = 86400              # a site's credential (MediaMTX relays with it); refreshed over the tunnel
+    turn_site_refresh_s: int = 8 * 3600       # ... once it has less than this left (checked on every heartbeat)
 
     # Direct-on-LAN: lifetime of the media token a browser presents straight to a server on its LAN (hub/direct.py)
     direct_token_ttl_s: int = 900

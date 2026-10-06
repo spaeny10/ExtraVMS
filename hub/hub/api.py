@@ -19,7 +19,7 @@ from pydantic import BaseModel, EmailStr, Field
 from . import __version__, alerts, auth, backups, cameras, dashboards, db, digest, direct, fleet_actions, proxy, push, soc_api, turn, vlm_proxy
 from . import fleet as fleet_mod
 from . import find as find_mod
-from . import geocode, soc, soc_reports
+from . import geocode, security, soc, soc_reports
 from fastapi.responses import StreamingResponse
 from .agents import registry
 from .config import settings
@@ -79,6 +79,14 @@ async def csrf(request: Request, call_next):
     return await call_next(request)
 
 
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    """HSTS, nosniff, framing, referrer/permissions policies and a CSP on every response (security.py)."""
+    response = await call_next(request)
+    security.apply(request, response)
+    return response
+
+
 def user(request: Request) -> dict:
     return auth.require_user(request)
 
@@ -97,6 +105,8 @@ async def login(body: LoginIn, request: Request, response: Response):
     if auth.too_many_failures(key):
         raise HTTPException(429, "too many attempts; try again in 15 minutes")
     u = auth.user_by_email(body.email)
+    if not u:
+        auth.burn_password_check(body.password)   # as slow as a wrong password, so unknown emails don't stand out
     if not u or not auth.verify_password(body.password, u["password_hash"]):
         auth.record_failure(key)
         raise HTTPException(401, "wrong email or password")
@@ -136,16 +146,56 @@ class PasswordIn(BaseModel):
 
 @app.post("/auth/password")
 async def change_password(body: PasswordIn, u: dict = Depends(user)):
+    """Change the password and sign out every other session of this user (this one stays signed in)."""
+    _reauth_limit(u)
     if not auth.verify_password(body.current, u["password_hash"]):
+        auth.record_failure(f"reauth|{u['id']}")
         raise HTTPException(401, "current password is wrong")
     db.run(sa.update(db.users).where(db.users.c.id == u["id"]).values(password_hash=auth.hash_password(body.new)))
+    auth.end_other_sessions(u["id"], u["session"]["id"])
     return {"ok": True}
 
 
+# Two-factor changes need more than a session (a stolen cookie must not be able to turn 2FA off or move it to the
+# thief's phone): the current password always, and a current authenticator code while 2FA is on. A new secret
+# waits in kv ("totp_pending:<user>") until a code from it is confirmed, so re-setup never leaves 2FA off.
+
+class ReauthIn(BaseModel):
+    password: str = Field(min_length=1, max_length=200)
+    code: str | None = Field(None, max_length=12)
+
+
+def _pending_key(uid: str) -> str:
+    return f"totp_pending:{uid}"
+
+
+def _reauth_limit(u: dict) -> None:
+    if auth.too_many_failures(f"reauth|{u['id']}"):
+        raise HTTPException(429, "too many attempts; try again in 15 minutes")
+
+
+def _reauth(u: dict, body: ReauthIn) -> None:
+    """401 unless the password is right and, with 2FA on, the code is a current unused one (it is used up)."""
+    _reauth_limit(u)
+    if not auth.verify_password(body.password, u["password_hash"]):
+        auth.record_failure(f"reauth|{u['id']}")
+        raise HTTPException(401, "current password is wrong")
+    if u["totp_enabled"]:
+        if not body.code:
+            raise HTTPException(401, "enter a code from your authenticator app")
+        if not auth.totp_ok(u, body.code):
+            auth.record_failure(f"reauth|{u['id']}")
+            raise HTTPException(401, "wrong or already used authenticator code")
+
+
 @app.post("/auth/totp/setup")
-async def totp_setup(u: dict = Depends(user)):
+async def totp_setup(body: ReauthIn, u: dict = Depends(user)):
+    """A new secret to add to an authenticator app; nothing changes until /auth/totp/enable confirms a code from it."""
+    _reauth(u, body)
     secret = pyotp.random_base32()
-    db.run(sa.update(db.users).where(db.users.c.id == u["id"]).values(totp_secret=secret, totp_enabled=False))
+    with db.engine().begin() as c:
+        c.execute(sa.delete(db.kv).where(db.kv.c.key == _pending_key(u["id"])))
+        c.execute(db.kv.insert().values(key=_pending_key(u["id"]), value={"secret": secret, "at": time.time()}))
     return {"secret": secret, "uri": pyotp.TOTP(secret).provisioning_uri(name=u["email"], issuer_name="Axiom Vision")}
 
 
@@ -155,15 +205,28 @@ class TotpIn(BaseModel):
 
 @app.post("/auth/totp/enable")
 async def totp_enable(body: TotpIn, u: dict = Depends(user)):
-    if not u["totp_secret"] or not pyotp.TOTP(u["totp_secret"]).verify(body.code.strip(), valid_window=1):
+    """Confirm the pending secret with a code from it: it becomes the user's (2FA on, or moved to the new device)."""
+    _reauth_limit(u)
+    row = db.one(sa.select(db.kv).where(db.kv.c.key == _pending_key(u["id"])))
+    secret = (row or {}).get("value", {}).get("secret") if row else None
+    if not secret or time.time() - float(row["value"].get("at") or 0) > 3600:
+        raise HTTPException(400, "start the set-up again (it lasts an hour)")
+    step = auth.totp_step_for(secret, body.code)
+    if step is None:
+        auth.record_failure(f"reauth|{u['id']}")
         raise HTTPException(400, "code doesn't match")
-    db.run(sa.update(db.users).where(db.users.c.id == u["id"]).values(totp_enabled=True))
+    with db.engine().begin() as c:
+        c.execute(sa.update(db.users).where(db.users.c.id == u["id"]).values(totp_secret=secret, totp_enabled=True))
+        auth.consume_totp_step(u["id"], step, c)
+        c.execute(sa.delete(db.kv).where(db.kv.c.key == _pending_key(u["id"])))
     return {"ok": True}
 
 
 @app.post("/auth/totp/disable")
-async def totp_disable(u: dict = Depends(user)):
+async def totp_disable(body: ReauthIn, u: dict = Depends(user)):
+    _reauth(u, body)
     db.run(sa.update(db.users).where(db.users.c.id == u["id"]).values(totp_enabled=False, totp_secret=None))
+    db.run(sa.delete(db.kv).where(db.kv.c.key == _pending_key(u["id"])))
     return {"ok": True}
 
 
@@ -503,11 +566,12 @@ async def invite_accept(code: str, body: AcceptIn, request: Request, response: R
         locs = list(dict.fromkeys(sorted(auth.granted_location_ids(target["id"], org_id)) + locs))
     access = auth.set_access(org_id, target["id"], all_sites, locs)
     if attached:
-        sid = target["session"]["id"]
+        key = target["session"]["id"]
     else:
         sid = auth.new_session(target, request)
         auth.set_cookie(response, sid)
-    db.run(sa.update(db.sessions).where(db.sessions.c.id == sid).values(org_id=org_id))   # land in the customer just joined
+        key = auth.session_key(sid)
+    db.run(sa.update(db.sessions).where(db.sessions.c.id == key).values(org_id=org_id))   # land in the customer just joined
     _audit(target, org_id, None, f"invite accepted: {target['email']} -> {role}",
            {"label": inv.get("label"), "invited_by": inv.get("created_by"), "new_user": created,
             "all_sites": access["all_sites"], "location_ids": access["location_ids"]})
@@ -1100,6 +1164,9 @@ async def ack_alert(alert_id: int, u: dict = Depends(user)):
     if not a:
         raise HTTPException(404)
     auth.require_role(u, a["org_id"], "viewer")
+    see = auth.scope_filter(u, a["org_id"])
+    if see is not None and not see({"site_id": a["site_id"]}):
+        raise HTTPException(404)   # a server on a Site this member isn't granted: as if it didn't exist
     alerts.ack(alert_id, u["id"])
     return {"ok": True}
 
@@ -1107,12 +1174,25 @@ async def ack_alert(alert_id: int, u: dict = Depends(user)):
 @app.get("/api/audit")
 async def audit(org: str, site: str | None = None, since: float | None = None, limit: int = Query(200, le=2000), u: dict = Depends(user)):
     auth.require_customer_role(u, org, "admin")
-    q = sa.select(db.audit_log).where(db.audit_log.c.org_id == org).order_by(db.audit_log.c.ts.desc()).limit(limit)
+    see = auth.scope_filter(u, org)   # a Site-restricted admin reads the rows of their own servers and Sites only
+    if site and see is not None and not see({"site_id": site}):
+        raise HTTPException(403, "not granted this site")
+    q = sa.select(db.audit_log).where(db.audit_log.c.org_id == org).order_by(db.audit_log.c.ts.desc(), db.audit_log.c.id.desc())
     if site:
         q = q.where(db.audit_log.c.site_id == site)
     if since:
         q = q.where(db.audit_log.c.ts >= since)
-    rows = db.rows(q)
+    if see is None:
+        rows = db.rows(q.limit(limit))
+    else:
+        rows, offset, page = [], 0, max(limit, 200)
+        while len(rows) < limit:
+            batch = db.rows(q.limit(page).offset(offset))
+            rows += [r for r in batch if see(r)]
+            if len(batch) < page:
+                break
+            offset += page
+        rows = rows[:limit]
     tags = _location_tags(org)
     for r in rows:
         r["undo_until"] = fleet_actions.undo_until(r)   # fleet actions: Undo is offered on the row for 24 h
@@ -1264,6 +1344,11 @@ async def action_execute(org_id: str, body: ActionExecIn, u: dict = Depends(user
 async def action_undo(org_id: str, audit_id: int, u: dict = Depends(user)):
     """Run the reverse plan stored with a fleet action's audit row (within 24 h, once)."""
     auth.require_role(u, org_id, "admin")
+    see = auth.scope_filter(u, org_id)
+    if see is not None:
+        row = db.one(sa.select(db.audit_log.c.site_id, db.audit_log.c.detail).where(db.audit_log.c.id == audit_id, db.audit_log.c.org_id == org_id))
+        if not row or not see(row):
+            raise HTTPException(404, "no such fleet action")
     try:
         return await fleet_actions.undo(u, org_id, audit_id)
     except LookupError:
@@ -1276,18 +1361,31 @@ async def action_undo(org_id: str, audit_id: int, u: dict = Depends(user)):
 async def action_reference(org_id: str, u: dict = Depends(user)):
     """Every instruction the hub understands (from fleet_actions.VERBS), the safety rules, and the last 50 actions (admins)."""
     role = auth.require_role(u, org_id, "viewer")
-    return fleet_actions.reference(u, org_id, auth.allows(role, "admin"))
+    out = fleet_actions.reference(u, org_id, auth.allows(role, "admin"))
+    see = auth.scope_filter(u, org_id)
+    if see is not None and out["recent"]:   # a Site-restricted admin: only actions on servers they can see
+        tags = {r["id"]: r for r in db.rows(sa.select(db.audit_log.c.id, db.audit_log.c.site_id, db.audit_log.c.detail)
+                                             .where(db.audit_log.c.id.in_([x["id"] for x in out["recent"]])))}
+        out["recent"] = [r for r in out["recent"] if see(tags.get(r["id"]) or {})]
+    return out
 
 
 @app.get("/api/orgs/{org_id}/digests")
 async def org_digests(org_id: str, limit: int = Query(7, le=60), u: dict = Depends(user)):
+    """The customer's digests. A Site-restricted member gets each one cut down to the servers they can see (the
+    per-server data, and a plain-text note rebuilt from it in place of the whole customer's summary)."""
     auth.require_role(u, org_id, "viewer")
-    return digest.latest(org_id, limit)
+    rows = digest.latest(org_id, limit)
+    see = auth.scope_filter(u, org_id)
+    return rows if see is None else [digest.scoped(r, see) for r in rows]
 
 
 @app.post("/api/orgs/{org_id}/digests/generate")
 async def org_digest_now(org_id: str, u: dict = Depends(user)):
-    auth.require_role(u, org_id, "viewer")
+    """Write a digest now (it asks every server of the customer and may use the shared AI): admins who see every Site."""
+    auth.require_role(u, org_id, "admin")
+    if auth.scope_filter(u, org_id) is not None:
+        raise HTTPException(403, "the digest covers every Site of the customer: an admin with access to all Sites generates it")
     return await digest.generate(org_id)
 
 
@@ -1475,14 +1573,37 @@ async def delete_dashboard(org_id: str, dash_id: str, u: dict = Depends(user)):
 @app.get("/api/orgs/{org_id}/groups")
 async def list_groups(org_id: str, u: dict = Depends(user)):
     auth.require_role(u, org_id, "viewer")
-    return dashboards.groups_for(org_id)
+    groups = dashboards.groups_for(org_id)
+    see = auth.scope_filter(u, org_id)
+    if see is None:
+        return groups
+    out = []
+    for g in groups:   # a Site-restricted member: only cameras on servers they can see; a group with none is hidden
+        mine = [m for m in g["members"] or [] if see({"site_id": m.get("site_id")})]
+        if mine or not g["members"]:
+            out.append({**g, "members": mine})
+    return out
+
+
+def _group_members_in_scope(u: dict, org_id: str, members: list, existing: list[dict] | None = None) -> list:
+    """A Site-restricted admin may only name cameras they can see; the group's cameras on other Sites (which they
+    were never shown) are kept as they were."""
+    see = auth.scope_filter(u, org_id)
+    if see is None:
+        return members
+    for m in members or []:
+        site = (m.get("site") or m.get("site_id")) if isinstance(m, dict) else None
+        if not see({"site_id": site or "?"}):
+            raise HTTPException(403, "not granted that server")
+    hidden = [{"site": m["site_id"], "camera": m["camera_id"]} for m in existing or [] if not see({"site_id": m.get("site_id")})]
+    return [*(members or []), *hidden]
 
 
 @app.post("/api/orgs/{org_id}/groups")
 async def create_group(org_id: str, body: GroupIn, u: dict = Depends(user)):
     auth.require_role(u, org_id, "admin")
     try:
-        row = dashboards.create_group(u, org_id, body.name, body.members)
+        row = dashboards.create_group(u, org_id, body.name, _group_members_in_scope(u, org_id, body.members))
     except ValueError as e:
         raise HTTPException(422, str(e))
     _audit(u, org_id, None, f"group.create {row['name']}")
@@ -1492,8 +1613,16 @@ async def create_group(org_id: str, body: GroupIn, u: dict = Depends(user)):
 @app.put("/api/orgs/{org_id}/groups/{group_id}")
 async def update_group(org_id: str, group_id: str, body: GroupPatch, u: dict = Depends(user)):
     auth.require_role(u, org_id, "admin")
+    see = auth.scope_filter(u, org_id)
+    members = body.members
+    if see is not None:
+        old = db.one(sa.select(db.camera_groups).where(db.camera_groups.c.id == group_id, db.camera_groups.c.org_id == org_id))
+        if not old or (old["members"] and not any(see({"site_id": m.get("site_id")}) for m in old["members"])):
+            raise HTTPException(404, "no such group")   # hidden from them in the list, so not theirs to edit
+        if members is not None:
+            members = _group_members_in_scope(u, org_id, members, old["members"])
     try:
-        row = dashboards.update_group(org_id, group_id, body.name, body.members)
+        row = dashboards.update_group(org_id, group_id, body.name, members)
     except ValueError as e:
         raise HTTPException(422, str(e))
     if not row:
@@ -1505,6 +1634,11 @@ async def update_group(org_id: str, group_id: str, body: GroupPatch, u: dict = D
 @app.delete("/api/orgs/{org_id}/groups/{group_id}")
 async def delete_group(org_id: str, group_id: str, u: dict = Depends(user)):
     auth.require_role(u, org_id, "admin")
+    see = auth.scope_filter(u, org_id)
+    if see is not None:
+        old = db.one(sa.select(db.camera_groups).where(db.camera_groups.c.id == group_id, db.camera_groups.c.org_id == org_id))
+        if old and old["members"] and not all(see({"site_id": m.get("site_id")}) for m in old["members"]):
+            raise HTTPException(403, "this group includes cameras on Sites you can't see")
     if not dashboards.delete_group(org_id, group_id):
         raise HTTPException(404, "no such group")
     _audit(u, org_id, None, f"group.delete {group_id}")

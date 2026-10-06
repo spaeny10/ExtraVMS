@@ -11,6 +11,7 @@ import tempfile
 import time
 from pathlib import Path
 
+os.environ.setdefault("NVR_ALLOWED_HOSTS", "site")  # the test client's Host (lan_guard Host allow-list)
 os.environ["NVR_DATA_DIR"] = tempfile.mkdtemp(prefix="nvr-handoff-test-")  # never the real DB
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -30,7 +31,7 @@ CAM = {"id": "cam1", "name": "Front Door", "host": "10.0.0.5", "onvif_port": 80,
 
 def get(path, client_marker, headers=None):
     async def go():
-        transport = httpx.ASGITransport(app=app, client=client_marker)
+        transport = httpx.ASGITransport(app=hub_agent.as_tunnel(app) if client_marker == hub_agent.IN_PROCESS_CLIENT else app, client=client_marker)
         async with httpx.AsyncClient(transport=transport, base_url="http://site") as c:
             return await c.get(path, headers=headers or {})
     return asyncio.run(go())
@@ -111,7 +112,7 @@ def test_mark_moved():
 
 def _post(path, client_marker, body, headers=None):
     async def go():
-        transport = httpx.ASGITransport(app=app, client=client_marker)
+        transport = httpx.ASGITransport(app=hub_agent.as_tunnel(app) if client_marker == hub_agent.IN_PROCESS_CLIENT else app, client=client_marker)
         async with httpx.AsyncClient(transport=transport, base_url="http://site") as c:
             return await c.post(path, json=body, headers=headers or {})
     return asyncio.run(go())

@@ -17,4 +17,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(na
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 if __name__ == "__main__":
-    uvicorn.run("nvr.api:app", host=settings.host, port=settings.port, log_level="info")
+    # proxy_headers=False: no reverse proxy sits in front of the NVR, and uvicorn's default (trust
+    # X-Forwarded-For from 127.0.0.1) let any local process choose the client address the app sees
+    uvicorn.run("nvr.api:app", host=settings.host, port=settings.port, log_level="info", proxy_headers=False)

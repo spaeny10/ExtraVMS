@@ -107,14 +107,14 @@ def test_push_only_to_members_who_see_the_server(client, superuser):
     v = root.post(f"/api/orgs/{oid}/members", json={"email": "push@access.example", "role": "viewer", "password": "push-pass-1234"}).json()
     root.put(f"/api/orgs/{oid}/members/{v['id']}/access", json={"all_sites": False, "location_ids": [a["location_id"]]})
     viewer = _login(client, "push@access.example", "push-pass-1234")
-    assert viewer.post("/api/push/subscribe", json={"subscription": {"endpoint": "https://push.example/guard"}, "kinds": ["offline"]}).status_code == 200
+    assert viewer.post("/api/push/subscribe", json={"subscription": {"endpoint": "https://fcm.googleapis.com/fcm/send/guard"}, "kinds": ["offline"]}).status_code == 200
     sent = []
     push.set_sender(lambda sub, payload: sent.append((sub["endpoint"], payload["site_id"])) or True)
     try:
         asyncio.run(push.notify_alert(oid, db.one(sa.select(db.sites).where(db.sites.c.id == b["id"])), "offline", {}))
-        assert ("https://push.example/guard", b["id"]) not in sent
+        assert ("https://fcm.googleapis.com/fcm/send/guard", b["id"]) not in sent
         asyncio.run(push.notify_alert(oid, db.one(sa.select(db.sites).where(db.sites.c.id == a["id"])), "offline", {}))
-        assert ("https://push.example/guard", a["id"]) in sent
+        assert ("https://fcm.googleapis.com/fcm/send/guard", a["id"]) in sent
     finally:
         push.set_sender(None)
-        viewer.post("/api/push/unsubscribe", json={"endpoint": "https://push.example/guard"})
+        viewer.post("/api/push/unsubscribe", json={"endpoint": "https://fcm.googleapis.com/fcm/send/guard"})

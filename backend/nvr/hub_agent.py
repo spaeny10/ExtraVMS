@@ -21,6 +21,7 @@ import socket
 import ssl
 import string
 import time
+import urllib.parse
 from typing import Any, Callable
 
 import certifi
@@ -38,7 +39,43 @@ CLAIM_TTL_S = 15 * 60
 # remote-VLM settings the operator pinned in .env (captured before the hub ever assigns them at runtime)
 _ENV_PINNED = frozenset(settings.model_fields_set) & {"remote_vlm_url", "remote_vlm_key", "remote_vlm_model"}
 CLAIM_ALPHABET = string.ascii_uppercase.replace("O", "").replace("I", "") + "23456789"
-IN_PROCESS_CLIENT = ("hub", 0)   # scope["client"] marker: the request came down the tunnel, not from the LAN
+IN_PROCESS_CLIENT = ("hub", 0)   # scope["client"] of a tunnelled request: for logs only, NOT proof of the tunnel
+# Proof that a request came down the tunnel: a private object in the ASGI scope. scope["client"] can be spoofed
+# (uvicorn rewrites it from X-Forwarded-For when proxy headers are on), but no network request can put an
+# object of ours into its scope, so every tunnel-only check uses is_tunnel(), never the client tuple.
+TUNNEL_KEY = "nvr.hub_tunnel"
+_TUNNEL = object()
+LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "::1")
+
+
+def mark_tunnel(scope: dict) -> dict:
+    scope[TUNNEL_KEY] = _TUNNEL
+    scope["client"] = IN_PROCESS_CLIENT
+    return scope
+
+
+def is_tunnel(scope) -> bool:
+    return scope.get(TUNNEL_KEY) is _TUNNEL
+
+
+def as_tunnel(app):
+    """`app` as the tunnel calls it (every HTTP scope marked); tests use it to stand in for the hub bridge."""
+    async def wrapped(scope, receive, send):
+        if scope.get("type") == "http":
+            scope = mark_tunnel(dict(scope))
+        await app(scope, receive, send)
+    return wrapped
+
+
+def check_hub_url(url: str) -> None:
+    """ValueError unless `url` is somewhere this site may send its device token: wss://, or ws:// only to this
+    machine itself (a dev hub) or with NVR_HUB_ALLOW_INSECURE=1. Plain ws:// elsewhere would put the token on
+    the wire in clear text."""
+    u = urllib.parse.urlsplit(url)
+    if u.scheme not in ("ws", "wss") or not u.hostname:
+        raise ValueError("the hub address must look like wss://hub.example.com/agent")
+    if u.scheme == "ws" and u.hostname.lower() not in LOOPBACK_HOSTS and not settings.hub_allow_insecure:
+        raise ValueError("plain ws:// is only allowed to this machine; use wss:// (or set NVR_HUB_ALLOW_INSECURE=1 for a dev hub)")
 BULK_FRAME = 1024 * 1024         # video bodies go up the tunnel in 1 MB frames (uvicorn's WebSocket limit at the hub is 16 MB)
 
 
@@ -88,14 +125,28 @@ class HubAgent:
                 "vlm_managed": bool(db.get_setting("hub_vlm"))}
 
     async def configure(self, hub_url: str | None = None, unenrol: bool = False) -> None:
+        """Set the hub address and/or unenrol. A NEW address always unenrols: the device token, site id, shared-AI
+        and TURN settings belong to the hub that issued them and must never be sent to (or used with) another
+        one, so the site shows a fresh claim code and has to be claimed at the new hub. ValueError on a bad URL."""
         if hub_url is not None:
-            db.set_setting("hub_url", hub_url.strip())
+            url = hub_url.strip()
+            if url:   # "" = back to the .env default (set by whoever installed the site)
+                check_hub_url(url)
+            if (url or settings.hub_url) != self.hub_url():
+                unenrol = True
+            db.set_setting("hub_url", url)
         if unenrol:
-            for k in ("hub_token", "hub_site_id", "hub_vlm", "hub_turn"):
+            for k in ("hub_token", "hub_site_id", "hub_vlm", "hub_turn", "hub_claim"):
                 db.set_setting(k, None)
             self.enrolled, self.site_id, self.org = False, None, None
             self.location = self.location_id = None
             self._apply_vlm(None)
+            mtx = getattr(self.state, "mtx", None)
+            if mtx is not None:   # drop the old hub's TURN relay from MediaMTX too
+                try:
+                    mtx.write_config(db.cameras(enabled_only=True))
+                except Exception as e:
+                    log.warning("hub: could not update MediaMTX after unenrolling: %s", e)
         await self.reconnect()
 
     async def reconnect(self) -> None:
@@ -131,6 +182,7 @@ class HubAgent:
 
     async def _session(self) -> None:
         url = self.hub_url()
+        check_hub_url(url)   # also for an address from .env or an older version: never send the token in clear text
         kw: dict = {}
         if url.startswith("wss://"):
             # Verify against certifi's bundle, not the OS store: on Windows, Python + OpenSSL 3.0 picked an expired
@@ -249,6 +301,7 @@ class HubAgent:
                  "method": req["method"].upper(), "scheme": "http", "path": req["path"], "raw_path": req["path"].encode(),
                  "query_string": query.encode(), "root_path": "", "headers": headers,
                  "client": IN_PROCESS_CLIENT, "server": ("hub", 0), "state": {}}
+        mark_tunnel(scope)
         started = False
         bulk = False
         pending = bytearray()

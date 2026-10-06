@@ -34,6 +34,7 @@ class AgentConn:
         self._next_id = 1                     # hub-initiated streams are odd
         self._lock = asyncio.Lock()
         self.last_seen = time.time()
+        self.turn_expires = 0.0                # the TURN credential this site holds (welcome, then refreshed on heartbeats)
         self.summary: dict | None = None
         self.subscribers: set[asyncio.Queue] = set()   # browsers on /s/{id}/api/ws
         self.closed = asyncio.Event()
@@ -217,6 +218,7 @@ class AgentRegistry:
                         _sync_cameras(conn.site, conn.summary["cameras"], conn.summary.get("disabled"), "heartbeat")
                     alerts.on_heartbeat(conn.site, conn.summary, skew)
                     _soc(conn, soc.on_attention, conn.summary.get("attention"))
+                    await self._refresh_turn(conn)
             elif t == "event":
                 msg = frame.get("msg") or {}
                 conn.broadcast(msg)
@@ -271,16 +273,33 @@ class AgentRegistry:
         if isinstance(frame.get("cameras"), list):
             _sync_cameras(conn.site, frame["cameras"], frame.get("disabled"), "hello")
         org = db.one(sa.select(db.orgs).where(db.orgs.c.id == conn.site["org_id"]))
+        cred = turn.mint(f"site:{conn.site_id}", settings.turn_site_ttl_s)
+        conn.turn_expires = float(cred["expires"]) if cred else 0.0
         welcome = {"t": "welcome", "site_id": conn.site_id, "org": org["name"] if org else None,
                    "location": (conn.location or {}).get("name"),   # the Site's name (additive; old agents ignore it)
                    "location_id": (conn.location or {}).get("id"),  # for the server UI's link back to /sites/<id>/servers
                    "heartbeat_s": settings.heartbeat_s, "now": time.time(), "max_streams": settings.max_streams_per_site,
-                   "turn": turn.mint(f"site:{conn.site_id}", settings.turn_site_ttl_s),
+                   "turn": cred,
                    "vlm": self.vlm_config(org, conn.token, conn.site_id)}
         await conn.send(welcome)
         alerts.close(conn.site, "offline")
         log.info("site %s (%s) connected from %s", conn.site_id, conn.site["name"], conn.ip)
         self.broadcast_org(conn.site["org_id"], {"type": "site_online", **conn.tag()})
+
+    async def _refresh_turn(self, conn: AgentConn) -> None:
+        """Site TURN credentials are short-lived (settings.turn_site_ttl_s): a fresh one goes down the tunnel
+        ({"t": "turn"}, which every agent version handles) once the current one is within turn_site_refresh_s of
+        expiring, so a long-lived connection never ends up relaying with an expired credential."""
+        if not conn.turn_expires or conn.turn_expires - time.time() > settings.turn_site_refresh_s:
+            return
+        cred = turn.mint(f"site:{conn.site_id}", settings.turn_site_ttl_s)
+        if not cred:
+            return
+        conn.turn_expires = float(cred["expires"])
+        try:
+            await conn.send({"t": "turn", "turn": cred})
+        except Exception as e:
+            log.warning("TURN refresh for %s failed: %s", conn.site_id, e)
 
     def broadcast_org(self, org_id: str, msg: dict) -> None:
         """Dashboards and other org-wide pages listen on /api/fleet/ws; slow readers are skipped, not blocked."""

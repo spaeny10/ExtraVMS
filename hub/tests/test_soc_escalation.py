@@ -36,7 +36,7 @@ def test_ladder_levels_and_hook(client, superuser, monkeypatch):
     monkeypatch.setattr(soc, "on_level3", lambda inc: hooked.append(inc["id"]))
     try:
         for k in ("op", "sup", "view"):
-            push.subscribe(ids[k], {"endpoint": f"https://push.example/{k}-ladder"}, None, "test")
+            push.subscribe(ids[k], {"endpoint": f"https://fcm.googleapis.com/fcm/send/{k}-ladder"}, None, "test")
         soc.set_presence(ids["op"], "available")   # on shift (the supervisor is not)
         t0 = time.time() - 1000
         inc = soc.ingest(srv, loc, ev(1, "high"), now=t0)[1]
@@ -76,7 +76,7 @@ def test_ladder_levels_and_hook(client, superuser, monkeypatch):
     finally:
         push.set_sender(None)
         for k in ("op", "sup", "view"):   # later tests count pushes to everyone on shift: leave no subscriptions behind
-            push.unsubscribe(ids[k], f"https://push.example/{k}-ladder")
+            push.unsubscribe(ids[k], f"https://fcm.googleapis.com/fcm/send/{k}-ladder")
 
 
 def test_overdue_once_and_quiet_expiry(client, superuser):
@@ -86,7 +86,7 @@ def test_overdue_once_and_quiet_expiry(client, superuser):
     sent = []
     push.set_sender(lambda sub, payload: sent.append((sub["user_id"], payload)) or True)
     try:
-        push.subscribe(ids["sup"], {"endpoint": "https://push.example/sup-overdue"}, None, "test")
+        push.subscribe(ids["sup"], {"endpoint": "https://fcm.googleapis.com/fcm/send/sup-overdue"}, None, "test")
         inc = soc.ingest(srv, loc, ev(1, "high"))[1]
         s["op"].post(f"/api/soc/incidents/{inc['id']}/claim")
         now = time.time()
@@ -122,7 +122,7 @@ def test_overdue_once_and_quiet_expiry(client, superuser):
         assert actions(old["id"]) == ["opened", "expired"]
     finally:
         push.set_sender(None)
-        push.unsubscribe(ids["sup"], "https://push.example/sup-overdue")
+        push.unsubscribe(ids["sup"], "https://fcm.googleapis.com/fcm/send/sup-overdue")
 
 
 def test_feedback_retry_when_back_online(client, superuser, monkeypatch):

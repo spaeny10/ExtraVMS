@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     mediamtx_webrtc_port: int = 8889            # WHEP signalling; localhost only, the NVR proxies it (/api/whep)
     webrtc_media_port: int = 8189               # WebRTC video (UDP, TCP fallback): forward this port for remote live view
     webrtc_public_hosts: list[str] = []         # extra public IPs/hostnames to offer; the one in the browser's URL is added automatically
+    # MediaMTX RTSP readers need the generated internal user/password (settings table `mediamtx_reader`);
+    # NVR_RTSP_AUTH=0 restores the old anonymous reads from localhost and private networks.
+    rtsp_auth: bool = True
     segment_duration: str = "10m"
     playback_format: str = "fmp4"           # what /api/playback serves: fmp4 (progressive) or mp4 (indexed first)
     backup_dir: Path = Path("D:/NVR/backups")   # nightly database copies (backup.py)
@@ -122,11 +125,19 @@ class Settings(BaseSettings):
     # API
     host: str = "0.0.0.0"
     port: int = 8080
+    # Browsers may reach this server only under these Host names (DNS-rebinding guard, api.lan_guard): localhost,
+    # this machine's hostname(s) and local IP addresses, webrtc_public_hosts, plus this comma-separated list
+    # (e.g. "nvr.example.com,nvr-yard.lan" when the UI is opened under a DNS name or a port forward).
+    allowed_hosts: str = ""
+    # NVR_DEV_ORIGINS=1: also trust the hub UI's development origins (http://localhost:8000, http://localhost:5174)
+    # for Direct-on-LAN CORS. Off in production.
+    dev_origins: bool = False
 
     # Fleet hub (hub_agent.py): this site dials out to the hub; nothing is opened inbound.
     hub_enabled: bool = True
     hub_url: str = "wss://hub.axiomvision.ai/agent"   # the settings table can override (Settings -> System)
     hub_insecure: bool = False                         # NVR_HUB_INSECURE=1: accept a self-signed hub cert (dev only)
+    hub_allow_insecure: bool = False                   # NVR_HUB_ALLOW_INSECURE=1: allow a plain ws:// hub other than localhost (dev only)
 
     # Direct-on-LAN (direct.py): a browser that can reach this server on its LAN fetches live/playback/frames
     # straight from it, authorised by a short-lived token the hub mints, instead of through the hub tunnel.

@@ -143,3 +143,13 @@ async def daily_loop() -> None:
 async def _sleep(s: float) -> None:
     import asyncio
     await asyncio.sleep(max(1.0, s))
+
+
+def scoped(row: dict, see) -> dict:
+    """A digest cut down for a Site-restricted member (`see`: auth.scope_filter's predicate): only the servers they
+    can see, and in place of the whole customer's text (or its AI summary) the plain lines for those servers."""
+    data = row.get("data") if isinstance(row.get("data"), dict) else {}
+    parts = [p for p in data.get("sites") or [] if see({"site_id": p.get("site_id")})]
+    text = _plain(parts) if data.get("sites") is not None else "This digest covers Sites you don't have access to."
+    return {**row, "text": text, "model": None, "scoped": True,
+            "data": {**data, "sites": parts, "locations": group(parts)} if data else None}

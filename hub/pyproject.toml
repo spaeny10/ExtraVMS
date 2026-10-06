@@ -5,7 +5,7 @@ description = "Axiom Vision fleet hub: one webpage for every site; sites dial ou
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.110",
-  "uvicorn[standard]>=0.29",
+  "uvicorn[standard]>=0.32",   # forwarded_allow_ips with CIDR ranges
   "websockets>=13",
   "sqlalchemy>=2.0",
   "psycopg[binary]>=3.1",

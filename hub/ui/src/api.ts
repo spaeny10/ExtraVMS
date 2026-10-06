@@ -114,6 +114,8 @@ export type DigestPart = ServerTag & {
 /** `data` is what the text was written from; `locations` groups its servers by Site (absent on digests older than Sites). */
 export type Digest = {
   id: number; org_id: string; day: string; created_at: number; text: string; model: string | null;
+  /** cut down to the Sites this member can see (a Site-restricted member: the hub rebuilds the text from those servers) */
+  scoped?: boolean;
   data?: { generated_at?: number; sites?: DigestPart[]; locations?: { id: string | null; name: string; servers: string[] }[] } | null;
 };
 /** A pending invite link (GET /api/orgs/{org}/invites). `email` "" = anyone holding the link may accept it. */
@@ -190,9 +192,10 @@ export const api = {
   directToken: (server: string) => req<DirectToken>(`/api/servers/${server}/direct-token`, { method: "POST" }),
   login: (email: string, password: string, totp?: string) => req<{ totp_required?: boolean } & Partial<Me>>("/auth/login", json("POST", { email, password, totp })),
   logout: () => req("/auth/logout", { method: "POST" }),
-  totpSetup: () => req<{ secret: string; uri: string }>("/auth/totp/setup", { method: "POST" }),
+  /** Two-factor changes re-check the password, and a current authenticator code while two-factor is on. */
+  totpSetup: (password: string, code?: string) => req<{ secret: string; uri: string }>("/auth/totp/setup", json("POST", { password, code: code || null })),
   totpEnable: (code: string) => req("/auth/totp/enable", json("POST", { code })),
-  totpDisable: () => req("/auth/totp/disable", { method: "POST" }),
+  totpDisable: (password: string, code: string) => req("/auth/totp/disable", json("POST", { password, code })),
   password: (current: string, next: string) => req("/auth/password", json("POST", { current, new: next })),
   fleet: (org?: string, include_retired?: boolean) => seen(req<Fleet>(`/api/fleet?${qs({ org, include_retired: include_retired || undefined })}`),
     (f) => f.orgs.flatMap((o) => [...o.sites, ...(o.locations ?? []).flatMap((l) => l.servers), ...(o.unassigned ?? [])])),

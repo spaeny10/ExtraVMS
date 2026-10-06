@@ -215,25 +215,68 @@ function AuditPage({ org }: { org: Org }) {
 
 // ---------------------------------------------------------------- account
 
+/**
+ * Asks again for the password (and, with two-factor on, a current authenticator code) before a two-factor change:
+ * a signed-in session alone can't turn two-factor off or move it to another phone.
+ */
+function ReauthForm({ needCode, submitLabel, danger, onSubmit, onCancel }: {
+  needCode: boolean; submitLabel: string; danger?: boolean;
+  onSubmit: (password: string, code: string) => Promise<void>; onCancel: () => void;
+}) {
+  const [password, setPassword] = useState("");
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  return (
+    <form style={{ marginTop: 8 }} onSubmit={async (e) => {
+      e.preventDefault();
+      setBusy(true);
+      try { await onSubmit(password, code.trim()); } catch (err) { toast.error(err); } finally { setBusy(false); }
+    }}>
+      <label className="field"><span>Current password</span><input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} autoFocus /></label>
+      {needCode && <label className="field"><span>Code from your authenticator app</span><input inputMode="numeric" autoComplete="one-time-code" placeholder="123456" value={code} onChange={(e) => setCode(e.target.value)} /></label>}
+      <div className="row">
+        <button type="submit" className={danger ? "danger" : undefined} disabled={busy || !password || (needCode && !code.trim())}>{submitLabel}</button>
+        <button type="button" className="ghost" onClick={onCancel}>Cancel</button>
+      </div>
+    </form>
+  );
+}
+
 function AccountPage({ me, onChanged }: { me: Me; onChanged: () => void }) {
   const [setup, setSetup] = useState<{ secret: string; uri: string } | null>(null);
   const [code, setCode] = useState("");
+  const [asking, setAsking] = useState<null | "off" | "setup">(null);
   return (
     <>
       <h2>Account <span className="muted small">{me.user.email}</span></h2>
       <div className="card">
         <h3>Two-factor sign-in</h3>
-        {me.user.totp_enabled ? (
-          <div className="row"><span>Authenticator app: <strong>on</strong></span><button className="ghost small" onClick={async () => { if (await confirmDialog("Turn off two-factor sign-in?", { danger: true, confirmLabel: "Turn off" })) { await api.totpDisable(); onChanged(); } }}>Turn off</button></div>
+        {asking ? (
+          <ReauthForm needCode={me.user.totp_enabled} danger={asking === "off"}
+            submitLabel={asking === "off" ? "Turn off" : "Continue"} onCancel={() => setAsking(null)}
+            onSubmit={async (password, c) => {
+              if (asking === "off") {
+                await api.totpDisable(password, c);
+                setAsking(null); onChanged(); toast.success("Two-factor sign-in is off");
+              } else {
+                setSetup(await api.totpSetup(password, c)); setCode(""); setAsking(null);
+              }
+            }} />
         ) : setup ? (
           <div>
             <p className="small">Add this to your authenticator app (Google Authenticator, 1Password, Authy…), then enter a code:</p>
             <code style={{ wordBreak: "break-all" }}>{setup.uri}</code>
             <p className="muted small">Secret: {setup.secret}</p>
-            <div className="row"><input placeholder="123456" value={code} onChange={(e) => setCode(e.target.value)} /><button onClick={async () => { try { await api.totpEnable(code); setSetup(null); onChanged(); toast.success("Two-factor sign-in is on"); } catch (e) { toast.error(e); } }}>Confirm</button></div>
+            {me.user.totp_enabled && <p className="muted small">Your current authenticator keeps working until you confirm a code from the new one.</p>}
+            <div className="row"><input placeholder="123456" inputMode="numeric" autoComplete="one-time-code" value={code} onChange={(e) => setCode(e.target.value)} /><button onClick={async () => { try { await api.totpEnable(code); setSetup(null); onChanged(); toast.success("Two-factor sign-in is on"); } catch (e) { toast.error(e); } }}>Confirm</button>
+              <button className="ghost" onClick={() => setSetup(null)}>Cancel</button></div>
           </div>
+        ) : me.user.totp_enabled ? (
+          <div className="row"><span>Authenticator app: <strong>on</strong></span><span className="spacer" />
+            <button className="ghost small" onClick={() => setAsking("setup")}>Move to a new device…</button>
+            <button className="ghost small" onClick={() => setAsking("off")}>Turn off…</button></div>
         ) : (
-          <div className="row"><span>Authenticator app: off</span><button className="ghost small" onClick={() => api.totpSetup().then(setSetup).catch((e) => toast.error(e))}>Set up</button></div>
+          <div className="row"><span>Authenticator app: off</span><button className="ghost small" onClick={() => setAsking("setup")}>Set up…</button></div>
         )}
       </div>
       <PushCard />
@@ -243,7 +286,7 @@ function AccountPage({ me, onChanged }: { me: Me; onChanged: () => void }) {
         <button className="ghost small" onClick={async () => {
           const cur = await promptDialog("Current password", { label: "Current password" }); if (!cur) return;
           const next = await promptDialog("New password", { label: "At least 10 characters" }); if (!next) return;
-          try { await api.password(cur, next); toast.success("Password changed"); } catch (e) { toast.error(e); }
+          try { await api.password(cur, next); toast.success("Password changed. Your other devices are signed out."); } catch (e) { toast.error(e); }
         }}>Change password…</button>
       </div>
     </>

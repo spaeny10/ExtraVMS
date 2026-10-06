@@ -21,11 +21,11 @@ import httpx
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from . import assistant, backup, baseline, footage, frames, health, identities, journeys, keep, mediamtx, policy, ptz, retention, zones
 from . import synopsis as vlm
-from . import advisor, ai_serve, detector, direct, hub_agent, site_actions, siteconfig
+from . import advisor, ai_serve, detector, direct, hub_agent, lan_guard, site_actions, siteconfig
 from . import vlmroute
 from .config import ROOT, settings
 from .db import JOURNEY_CAMS_SQL, LOCKED_SQL, PRIORITY_RANK_SQL, db, event_filters
@@ -147,8 +147,10 @@ def _https_server():
     except Exception as e:   # no cryptography and no openssl: the HTTP port keeps working, direct does not
         log.warning("direct: no LAN certificate (%s); HTTPS port %s not started", e, settings.https_port)
         return None
+    # proxy_headers=False: nothing proxies this listener, and uvicorn's default trusts X-Forwarded-For from
+    # 127.0.0.1, which let a local process rewrite scope["client"]
     cfg = uvicorn.Config(app, host=settings.host, port=settings.https_port, ssl_certfile=str(cert), ssl_keyfile=str(key),
-                         lifespan="off", log_level="info", log_config=None)   # logging is set up by the main server
+                         lifespan="off", log_level="info", log_config=None, proxy_headers=False)   # logging: main server
     return QuietServer(cfg)
 
 
@@ -166,7 +168,7 @@ app.include_router(ai_serve.router)   # this site's Qwen for the fleet, tunnel-o
 
 DIRECT_WRITES = re.compile(r"^/api/whep/")   # WebRTC session lifecycle: the only non-GET a direct browser may send
 # what the hub's proxy refuses (hub/hub/proxy.py) is refused on a direct connection too
-DIRECT_HIDDEN = re.compile(r"^/api/(hub$|ai/|config/history|config/handoff$)")
+DIRECT_HIDDEN = re.compile(r"^/api/(hub$|turn$|ai/|config/history|config/handoff$)")
 DIRECT_OPEN = ("/api/direct/probe", "/api/direct/handshake")   # answer the hub origin without a token
 
 
@@ -192,6 +194,23 @@ def _deny(status: int, detail: str, cors: str | None) -> JSONResponse:
     return JSONResponse({"detail": detail}, status_code=status, headers=_cors_headers(cors) if cors else None)
 
 
+async def _lan_request(request: Request, call_next, path: str, host: str | None, cors: str | None):
+    """A network request without a (valid) hub or direct token: this server's own UI, a LAN tool, or a page from
+    somewhere else that the browser was made to send here. The last may not change anything (lan_guard.py)."""
+    if request.method not in lan_guard.SAFE_METHODS:
+        if lan_guard.from_other_site(request.headers, host):
+            log.warning("refused cross-site %s %s (origin %r)", request.method, path,
+                        (request.headers.get("origin") or request.headers.get("referer") or "?")[:100])
+            return _deny(403, "cross-site request refused: use this server's own page or the hub", cors)
+        problem = lan_guard.body_type_problem(request.method, path, request.headers)
+        if problem:
+            return _deny(415, problem, cors)
+    resp = await call_next(request)
+    if cors and path in DIRECT_OPEN:
+        resp.headers.update(_cors_headers(cors))
+    return resp
+
+
 @app.middleware("http")
 async def hub_headers(request: Request, call_next):
     """X-Hub-* headers identify the hub user behind a tunnelled request. Only the in-process tunnel may set
@@ -199,21 +218,28 @@ async def hub_headers(request: Request, call_next):
 
     Direct-on-LAN (direct.py): a LAN request carrying a hub-minted token (Authorization: Direct, ?direct= or the
     `direct` cookie) gets the same x-hub-user/x-hub-role/x-hub-site headers a tunnelled one would, so role and
-    audit logic treat both alike, and is read-only apart from WHEP signalling. scope["client"] stays the real LAN
-    peer, so tunnel-only endpoints (_tunnel_only, ai_serve) still refuse it. A LAN request without a token is
-    exactly as before (the site's own UI)."""
+    audit logic treat both alike, and is read-only apart from WHEP signalling. It never carries the tunnel marker
+    (hub_agent.is_tunnel), so tunnel-only endpoints (_tunnel_only, ai_serve) still refuse it. A LAN request without a token is
+    exactly as before (the site's own UI), except for the browser guards (lan_guard.py): an allowed Host name
+    always, and for state-changing requests a same-origin page and a JSON body."""
     scope = request.scope
-    if scope.get("client") == hub_agent.IN_PROCESS_CLIENT:
+    if hub_agent.is_tunnel(scope):
         if request.method != "GET":
             log.info("hub write: %s %s by %s (%s)", request.method, request.url.path,
                      request.headers.get("x-hub-user", "?"), request.headers.get("x-hub-role", "?"))
         return await call_next(request)
     scope["headers"] = [(k, v) for k, v in scope["headers"] if not k.startswith(b"x-hub-")]
-    if not settings.direct_enabled:
-        return await call_next(request)
     path = request.url.path
+    host = request.headers.get("host")
+    if not lan_guard.host_allowed(host):
+        # DNS rebinding: a page on another name resolving to this server. Not this server's name: say so.
+        log.warning("refused %s %s for unknown host name %r (add it to NVR_ALLOWED_HOSTS if it is yours)",
+                    request.method, path, (host or "")[:100])
+        return JSONResponse({"detail": "unknown host name for this server (see NVR_ALLOWED_HOSTS)"}, status_code=421)
     origin = request.headers.get("origin")
-    cors = origin if origin and origin.lower() in direct.allowed_origins() else None
+    cors = origin if settings.direct_enabled and origin and origin.lower() in direct.allowed_origins() else None
+    if not settings.direct_enabled:
+        return await _lan_request(request, call_next, path, host, cors)
     if request.method == "OPTIONS" and cors and request.headers.get("access-control-request-method"):
         # preflights carry no credentials, so they can't be checked against a token: answer for the allowed
         # origins only; the real request that follows is checked
@@ -235,10 +261,7 @@ async def hub_headers(request: Request, call_next):
         # anonymous LAN access; a stale cookie on a same-origin page is ignored instead
         return _deny(401, "direct token invalid or expired", cors)
     if claims is None:
-        resp = await call_next(request)
-        if cors and path in DIRECT_OPEN:
-            resp.headers.update(_cors_headers(cors))
-        return resp
+        return await _lan_request(request, call_next, path, host, cors)
     if request.method not in ("GET", "HEAD") and not (request.method in ("POST", "PATCH", "DELETE") and DIRECT_WRITES.match(path)):
         return _deny(403, "direct connection is read-only; use the hub", cors)
     if DIRECT_HIDDEN.match(path):
@@ -360,6 +383,8 @@ class ConfigImportIn(BaseModel):
 async def config_import(body: ConfigImportIn):
     try:
         counts = siteconfig.import_config(body.data, body.replace_identities)
+    except siteconfig.InvalidCamera as e:
+        raise HTTPException(422, f"bad backup: {e}")
     except (ValueError, KeyError) as e:
         raise HTTPException(400, f"bad backup: {e}")
     for cid in list(state.ingests):  # cameras may have changed: restart readers with the new settings
@@ -374,7 +399,7 @@ async def config_handoff(request: Request, cameras: str = ""):
     can move them to another site. Tunnel-only: the request must come through the in-process hub bridge and
     carry `x-hub-internal: handoff` (the hub's public /s/<site>/api proxy strips x-hub-* and refuses this path),
     so neither the LAN nor a browser through the hub can read camera passwords."""
-    if request.scope.get("client") != hub_agent.IN_PROCESS_CLIENT or request.headers.get("x-hub-internal") != "handoff":
+    if not hub_agent.is_tunnel(request.scope) or request.headers.get("x-hub-internal") != "handoff":
         raise HTTPException(403, "camera credentials are only handed to the fleet hub")
     ids = [c for c in cameras.split(",") if c] or None
     log.info("camera handoff to the hub: %s (by %s)", ",".join(ids) if ids else "all cameras", request.headers.get("x-hub-user", "?"))
@@ -391,6 +416,8 @@ async def config_merge(body: ConfigMergeIn):
     dashboards and other cameras are left alone."""
     try:
         counts = siteconfig.merge_cameras(body.data)
+    except siteconfig.InvalidCamera as e:
+        raise HTTPException(422, f"bad camera handoff: {e}")
     except (ValueError, KeyError, TypeError) as e:
         raise HTTPException(400, f"bad camera handoff: {type(e).__name__}")
     for cid in set(counts["ids"].values()):  # restart readers of cameras that were updated in place
@@ -401,7 +428,7 @@ async def config_merge(body: ConfigMergeIn):
 
 
 def _tunnel_only(request: Request) -> None:
-    if request.scope.get("client") != hub_agent.IN_PROCESS_CLIENT or request.headers.get("x-hub-internal") != "handoff":
+    if not hub_agent.is_tunnel(request.scope) or request.headers.get("x-hub-internal") != "handoff":
         raise HTTPException(403, "event history is only exchanged with the fleet hub")
 
 
@@ -453,15 +480,25 @@ async def config_history_files(body: HistoryFilesIn, request: Request):
 
 
 @app.get("/api/turn")
-async def turn_servers():
-    """ICE servers for a browser on the site's own address (through the hub, the hub answers /s/<site>/api/turn)."""
+async def turn_servers(request: Request):
+    """ICE servers for a browser on the site's own address (through the hub, the hub answers /s/<site>/api/turn).
+    The TURN credential is valid for weeks: only the tunnel and this server's own page get it (a direct
+    connection is refused by DIRECT_HIDDEN; a page elsewhere could not read the answer anyway, without CORS)."""
+    if not hub_agent.is_tunnel(request.scope) and lan_guard.from_other_site(request.headers, request.headers.get("host")):
+        raise HTTPException(403, "TURN credentials are only given to this server's own page")
     t = db.get_setting("hub_turn") or {}
-    return {"iceServers": [{"urls": t["urls"], "username": t["username"], "credential": t["credential"]}] if t.get("urls") else []}
+    return JSONResponse({"iceServers": [{"urls": t["urls"], "username": t["username"], "credential": t["credential"]}] if t.get("urls") else []},
+                        headers={"Cache-Control": "no-store"})
 
 
 @app.put("/api/hub")
 async def hub_configure(body: HubIn):
-    await state.hub.configure(hub_url=body.hub_url, unenrol=body.unenrol)
+    """Change the hub address (a different address un-enrols this server: it must be claimed again at the new
+    hub; the old hub's device token is never sent anywhere else) or unenrol."""
+    try:
+        await state.hub.configure(hub_url=body.hub_url, unenrol=body.unenrol)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
     return state.hub.status()
 
 PUBLIC_CAMERA_FIELDS = ("id", "name", "host", "onvif_port", "rtsp_port", "username", "main_path",
@@ -502,6 +539,15 @@ class CameraIn(BaseModel):
     retention_policy: dict | None = None  # partial override of the site retention policy; None = inherit
     synopsis_labels: list[Literal["person", "vehicle"]] | None = None  # what Qwen describes; None = site default
     policies: list[SiteRule] = []  # site rules checked after Qwen describes a vehicle (policy.py)
+
+    @model_validator(mode="after")
+    def _rtsp_safe(self):
+        # main_path / sub_path are appended to rtsp://user:pass@host:port: "@evil:554/x" would send the camera
+        # password to another host. Same rules as a config import (mediamtx.camera_problem).
+        problem = mediamtx.camera_problem(self.model_dump(include={"id", "host", "main_path", "sub_path", "rtsp_port", "onvif_port"}))
+        if problem:
+            raise ValueError(problem)
+        return self
 
 
 @app.get("/api/cameras")
@@ -901,11 +947,28 @@ async def get_event(event_id: int):
     return state.pipeline.annotate(e)
 
 
+def contained(base: Path, rel: str) -> Path | None:
+    """base/rel when it really is a file below `base`, else None. For any file served under a request-supplied
+    name: refuses "..", backslashes, drive letters / colons (also NTFS streams like "x::$DATA"), absolute paths
+    and NULs before touching the filesystem, then checks the resolved path (symlinks included) is inside base."""
+    if (not rel or rel.startswith(("/", "\\")) or "\\" in rel or ":" in rel or "\x00" in rel
+            or any(part == ".." for part in rel.split("/"))):
+        return None
+    try:
+        root = base.resolve()
+        target = (root / rel).resolve()
+    except (OSError, ValueError):
+        return None
+    if not target.is_relative_to(root) or target == root or not target.is_file():
+        return None
+    return target
+
+
 def _event_file(event_id: int, name: str) -> Path:
     if not re.fullmatch(r"[a-z_0-9]+\.(jpg|mp4)", name):
         raise HTTPException(400)
-    f = settings.data_dir / "events" / str(event_id) / name
-    if not f.exists():
+    f = contained(settings.data_dir / "events", f"{int(event_id)}/{name}")
+    if f is None:
         raise HTTPException(404)
     return f
 
@@ -1457,6 +1520,8 @@ async def unlock_event(event_id: int):
 
 @app.get("/api/recordings/{camera_id}")
 async def recordings(camera_id: str, start: float | None = None, end: float | None = None):
+    if not MTX_PATH_RE.fullmatch(camera_id):
+        raise HTTPException(400, "bad camera id")
     try:
         spans = await mediamtx.recording_spans(camera_id, start, end)
     except httpx.HTTPError as e:
@@ -1495,7 +1560,7 @@ class SiteExecIn(BaseModel):
 def _hub_role(request: Request) -> str | None:
     """The hub user's role when the request came down the tunnel or carried a direct token (the middleware strips
     x-hub-* from the LAN and sets them itself only for a verified direct token)."""
-    if request.scope.get("client") == hub_agent.IN_PROCESS_CLIENT or request.scope.get("nvr_direct"):
+    if hub_agent.is_tunnel(request.scope) or request.scope.get("nvr_direct"):
         return request.headers.get("x-hub-role")
     return None
 
@@ -1666,6 +1731,7 @@ async def frame(camera_id: str, t: float, w: int = Query(960, ge=320, le=1280), 
     })
 
 
+MTX_PATH_RE = re.compile(r"[a-z0-9_]{1,40}")    # a MediaMTX path: a camera id, or <id>_sub
 BROWSER_MUTE_AUDIO = {"G711", "LPCM", "G722"}   # recorded fine, but browsers cannot decode them inside MP4
 _audio_tracks: dict[str, tuple[float, bool]] = {}
 
@@ -1870,6 +1936,8 @@ async def playback(camera_id: str, start: float, duration: float = Query(60, le=
     """Proxy MediaMTX playback so the browser stays same-origin. fMP4 streams as it is read from disk (first
     bytes in ~0.2 s); plain MP4 has to be indexed over the whole range first (seconds, more on a spinning disk).
     q=sd: a 720p / ~700 kbps H.264 transcode for viewers behind the hub tunnel (fmt is ignored: always fMP4)."""
+    if not MTX_PATH_RE.fullmatch(camera_id):   # it goes into MediaMTX API URLs (_needs_audio_transcode)
+        raise HTTPException(400, "bad camera id")
     params = {"path": camera_id, "start": mediamtx.rfc3339(start), "duration": str(duration), "format": fmt or settings.playback_format}
     if q == "sd":
         return await _playback_sd(camera_id, params)
@@ -2051,6 +2119,14 @@ async def remove_identity(iid: int):
 
 @app.websocket("/api/ws")
 async def ws(sock: WebSocket):
+    # WebSockets bypass CORS and the HTTP middleware: Host and Origin are checked here (lan_guard.ws_allowed)
+    allowed = lan_guard.ws_allowed(sock.headers, sock.cookies, sock.query_params)
+    _strip_query_param(sock.scope, "direct")   # uvicorn logs the accepted path from this scope: no token in the log
+    if not allowed:
+        log.warning("refused WebSocket from origin %r host %r", (sock.headers.get("origin") or "")[:100],
+                    (sock.headers.get("host") or "")[:100])
+        await sock.close(code=1008)
+        return
     await sock.accept()
     q: asyncio.Queue = asyncio.Queue()
     state.pipeline.subscribers.add(q)
@@ -2074,7 +2150,7 @@ async def whep(path: str, request: Request):
         raise HTTPException(400)
     async with httpx.AsyncClient(timeout=15) as c:
         r = await c.post(f"http://127.0.0.1:{settings.mediamtx_webrtc_port}/{path}/whep", content=await request.body(),
-                         headers={"Content-Type": "application/sdp"})
+                         headers={"Content-Type": "application/sdp", **mediamtx.reader_auth_header()})
     body = r.content
     if r.status_code in (200, 201) and not request.headers.get("x-hub-site"):  # through the hub the relay does this
         hosts = [*settings.webrtc_public_hosts, request.headers.get("host", "")]
@@ -2140,16 +2216,26 @@ def add_candidates(sdp: str, ips: list[str], port: int) -> str:
 # ---------------------------------------------------------------- UI
 
 mimetypes.add_type("application/manifest+json", ".webmanifest")
+# client-side routes that get index.html: words and single slashes, no dots, not absolute (a missing file.ext is a 404)
+SPA_ROUTE = re.compile(r"(?!.*//)[A-Za-z0-9_\-][A-Za-z0-9_\-/]{0,199}")
 dist = ROOT / "frontend" / "dist"
 if dist.exists():
     app.mount("/assets", StaticFiles(directory=dist / "assets"), name="assets")
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa(full_path: str):
-        f = dist / full_path
-        if full_path and f.is_file():
-            # the service worker and manifest must be revalidated so app updates reach installed copies
-            fresh = f.name in ("sw.js", "manifest.webmanifest")
-            return FileResponse(f, headers={"Cache-Control": "no-cache"} if fresh else None)
+        if full_path == "api" or full_path.startswith("api/"):
+            # an unknown API path is a real 404 for clients, not the UI's index.html
+            return JSONResponse({"detail": "Not Found"}, status_code=404)
+        if full_path:
+            f = contained(dist, full_path)
+            if f is not None:
+                # the service worker and manifest must be revalidated so app updates reach installed copies
+                fresh = f.name in ("sw.js", "manifest.webmanifest")
+                return FileResponse(f, headers={"Cache-Control": "no-cache"} if fresh else None)
+            if not SPA_ROUTE.fullmatch(full_path):
+                # traversal attempts (.., backslashes, drive letters, absolute paths) and missing files with an
+                # extension: 404, never a file from outside dist/ and not the UI either
+                return JSONResponse({"detail": "Not Found"}, status_code=404)
         # index.html must always be revalidated so a rebuilt UI (new hashed assets) is picked up.
         return FileResponse(dist / "index.html", headers={"Cache-Control": "no-cache"})

@@ -82,6 +82,36 @@ a tenancy v2 commit before 0.2.0, like hub.axiomvision.ai at 6af80ae, only does 
 Check afterwards: `/healthz` says `"version": "0.2.0"`, Sites shows one Site per server, and a restricted member
 still sees only their servers.
 
+## Security hardening (October 2026)
+An update past this point changes the following; check these on the server before (or right after) `up -d --build`:
+- **Postgres password.** `grep -c '^POSTGRES_PASSWORD=.\+' hub/.env` must print 1. If it prints 0, the database was
+  created with the old `change-me` fallback: generate one, then set it in Postgres and in `.env` together:
+  ```bash
+  NEW=$(openssl rand -hex 24)
+  docker compose -f hub/docker-compose.yml exec -T postgres psql -U hub -d hub -c "ALTER USER hub PASSWORD '$NEW'"
+  echo "POSTGRES_PASSWORD=$NEW" >> hub/.env && docker compose -f hub/docker-compose.yml up -d hub
+  ```
+  (`POSTGRES_PASSWORD` only takes effect when the data volume is first created, so changing `.env` alone breaks the
+  hub's connection.) Once every install has one, make it required in docker-compose.yml (`${POSTGRES_PASSWORD:?...}`).
+- **Shared AI on the hub's own GPU** (`--profile ai`): the vLLM container now refuses to start without `HUB_VLLM_KEY`
+  (it used to fall back to the key `internal`). Installs relaying through a site (`HUB_VLLM_SITE`) are unaffected.
+- **coturn** has more denied peer ranges (link-local/metadata, CGNAT, multicast, IPv6 ULA/link-local, ...): it reads its
+  config only at start. This update recreates the container anyway (its logging settings changed); after any later
+  edit of turnserver.conf alone run `docker compose -f hub/docker-compose.yml restart coturn`. Site TURN credentials
+  now last 24 h and the hub refreshes them over the tunnel, so sites need no change.
+- **Container logs** rotate (json-file, 5 x 50 MB per service): `up -d` recreates the containers to apply it.
+- **Trusted proxies**: the hub trusts `X-Forwarded-For/-Proto` only from `HUB_FORWARDED_ALLOW_IPS` (compose default:
+  the private ranges of the compose network, where only Caddy reaches port 8000). Check `docker compose logs hub` shows
+  "trusting X-Forwarded-* from 172.16.0.0/12, ..." and that the Audit page shows real client IPs, not 172.x.
+- **Security headers** come from the hub itself (HSTS, CSP, nosniff, framing, referrer and permissions policies); the
+  Caddyfile is unchanged, no Caddy reload needed. After the update: open the hub, a Site's live view, the map and a
+  server console (/s/<id>/), with the browser console open: there should be no "Content Security Policy" errors.
+- **What users notice**: other devices are signed out when someone changes their password; turning two-factor off or
+  moving it to a new phone asks for the password and a current code (setting it up asks for the password); each
+  authenticator code works once, so signing in twice within 30 s needs the next code; existing sessions keep working
+  (their ids are rehashed on first use); push subscriptions to anything but the browser push services are refused,
+  and any such stored row is dropped instead of sent to.
+
 ## Users and invites
 - Reset a password from the server (prompts twice; signs the user out everywhere):
   `docker compose -f hub/docker-compose.yml exec hub python -m hub setpassword you@example.com`.

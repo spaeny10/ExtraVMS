@@ -18,6 +18,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import Callable
 
+from . import mediamtx
 from .config import settings
 from .onvif_soap import ACTION_PULL, Onvif, OnvifError, escape, find, find_all, local, simple_items, text
 from .rtsp_client import Rtsp, keepalive, play_track, rtp_payload
@@ -149,7 +150,8 @@ class MetadataReader(threading.Thread):
             backoff = min(backoff * 2, 30)
 
     def _session(self) -> None:
-        cam = Rtsp(f"{settings.mediamtx_rtsp}/{self.camera_id}", "", "")
+        user, pw = mediamtx.reader_credentials() or ("", "")   # MediaMTX wants the NVR's reader password (rtsp_auth)
+        cam = Rtsp(f"{settings.mediamtx_rtsp}/{self.camera_id}", user, pw)
         try:
             play_track(cam, "application")
             cam.sock.settimeout(5)

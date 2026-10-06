@@ -12,6 +12,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+os.environ.setdefault("NVR_ALLOWED_HOSTS", "lan")  # the test client's Host (lan_guard Host allow-list)
 os.environ["NVR_DATA_DIR"] = tempfile.mkdtemp(prefix="nvr-sd-test-")  # never the real DB
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tunnelproto"))

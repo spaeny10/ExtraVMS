@@ -448,7 +448,21 @@ function Row({ label, hint, value, sub, action, children }: {
 function HubPanel() {
   const [h, setH] = useState<HubStatus | null>(null);
   const [url, setUrl] = useState<string | null>(null);
+  const [urlErr, setUrlErr] = useState<string | null>(null);
   const load = () => api.hub().then(setH).catch(() => {});
+  // A different hub address un-enrols this server (its device token belongs to the old hub), so it shows a new
+  // claim code and must be claimed again at the new hub.
+  const saveUrl = async () => {
+    if (h?.enrolled && !(await confirmDialog("Changing the hub URL un-enrols this server; it must be claimed again at the new hub.", { confirmLabel: "Change and un-enrol", danger: true }))) return;
+    try {
+      await api.setHub({ hub_url: url! });
+      setUrl(null);
+      setUrlErr(null);
+    } catch (e) {
+      setUrlErr(String(e instanceof Error ? e.message : e).replace(/^\d+ /, ""));
+    }
+    load();
+  };
   useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, []);
   if (!h) return null;
   const where = h.location ? ` · Site: ${h.location}` : "";   // newer hubs say which Site this server is in
@@ -467,8 +481,10 @@ function HubPanel() {
       )}
       <div className="row small">
         <input value={url ?? h.hub_url} onChange={(e) => setUrl(e.target.value)} style={{ minWidth: 320 }} title="Hub address (wss://…/agent)" />
-        <button className="ghost small" disabled={url == null || url === h.hub_url} onClick={async () => { await api.setHub({ hub_url: url! }); setUrl(null); load(); }}>Save hub URL</button>
+        <button className="ghost small" disabled={url == null || url === h.hub_url} onClick={saveUrl}>Save hub URL</button>
       </div>
+      <div className="muted small">Changing the hub URL un-enrols this server; it must be claimed again.</div>
+      {urlErr && <div className="small error">{urlErr}</div>}
     </Row>
   );
 }

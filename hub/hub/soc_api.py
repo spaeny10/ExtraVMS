@@ -938,7 +938,13 @@ async def customer_soc_reports(org_id: str, limit: int = Query(12, ge=1, le=60),
     """The customer's stored monthly summaries, newest first (a real admin of the customer: SOC supervisors read
     them through /api/soc/reports/customers)."""
     auth.require_customer_role(u, org_id, "admin")
-    return [_report_out(r, customer=True) for r in soc_reports.stored("monthly", org_id=org_id, limit=limit)]
+    rows = soc_reports.stored("monthly", org_id=org_id, limit=limit)
+    m = auth.membership(u, org_id)
+    if m and not m["all_sites"]:   # a Site-restricted admin: their Sites' part of each month
+        locs = auth.granted_location_ids(u["id"], org_id)
+        org = db.one(sa.select(db.orgs.c.name).where(db.orgs.c.id == org_id))
+        rows = [soc_reports.monthly_scoped(r, locs, org["name"] if org else org_id) for r in rows]
+    return [_report_out(r, customer=True) for r in rows]
 
 
 @router.get("/api/orgs/{org_id}/soc/false-alarms")
@@ -946,4 +952,6 @@ async def customer_false_alarms(org_id: str, since: float | None = None, until: 
     """False-alarm rates at the customer's Sites and cameras since `since` (default 30 days): which cameras the
     SOC keeps dismissing, so the customer can re-aim or re-zone them. `until` defaults to now."""
     auth.require_customer_role(u, org_id, "admin")
-    return soc_reports.false_alarm_rate(*_window(since, until, MONTH_S), org_id)
+    m = auth.membership(u, org_id)
+    locs = None if not m or m["all_sites"] else auth.granted_location_ids(u["id"], org_id)   # Site-restricted: their Sites
+    return soc_reports.false_alarm_rate(*_window(since, until, MONTH_S), org_id, locs)

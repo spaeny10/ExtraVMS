@@ -32,11 +32,11 @@ Roles nest: each one includes everything below it.
 | **Admin** | yes | yes | yes | yes |
 | **Owner** | yes | yes | yes | yes, plus rename the Customer |
 
-**Watch** means everything read-only: Live video, Timeline and playback, Find and search, event details and clips, alerts (viewers may also acknowledge them), Site maps and addresses, dashboards, the fleet overview, and asking the AI (Ask, clip chat). Viewers also reach video directly over the LAN when they are on the same network as a server.
+**Watch** means everything read-only: Live video, Timeline and playback, Find and search, event details and clips, alerts (viewers may also acknowledge them, on the Sites they can see), Site maps and addresses, dashboards, the fleet overview, and asking the AI (Ask, clip chat). Viewers also reach video directly over the LAN when they are on the same network as a server.
 
 **Act** adds the things an operator does during a shift: PTZ, relays and presets; marking events (feedback such as false alarm or wrong class, editing or regenerating a synopsis, locking an event, watching a person or vehicle, naming identities, reprocessing); saved Find views, layouts and dashboards; briefings on demand; arming or disarming a Site's SOC monitoring for a short period with a reason; running fleet actions that the server's own rules allow an operator to run.
 
-**Configure** adds server and Site setup: cameras, zones and named places, retention, topology, remote AI, backups and restores, site rules; claiming a new server into the Customer, moving it between Sites, rotating its token, retiring or deleting it; creating, editing and deleting Sites, including address, map pin and time zone; a Site's SOC monitoring schedule, contacts and procedures.
+**Configure** adds server and Site setup: cameras, zones and named places, a PTZ camera's settings (such as its return-home timer), retention (including applying a system-optimiser suggestion, which can change it), topology, remote AI, backups and restores, site rules; claiming a new server into the Customer, moving it between Sites, rotating its token, retiring or deleting it; creating, editing and deleting Sites, including address, map pin and time zone; a Site's SOC monitoring schedule, contacts and procedures.
 
 **Manage the Customer** is admin and above with a *real* membership (see the SOC note below): adding and removing members, setting each member's role and Site scope, creating invites, reading the Customer's audit log, and deleting a Site that still has servers.
 

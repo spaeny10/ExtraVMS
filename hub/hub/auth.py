@@ -1,6 +1,7 @@
 """Users, passwords (argon2), optional TOTP, cookie sessions, roles and the org a request acts in."""
 from __future__ import annotations
 
+import hmac
 import time
 from collections import defaultdict, deque
 
@@ -29,6 +30,18 @@ def verify_password(pw: str, hashed: str) -> bool:
         return _ph.verify(hashed, pw)
     except VerifyMismatchError:
         return False
+
+
+_dummy_hash: str | None = None
+
+
+def burn_password_check(pw: str) -> None:
+    """For an unknown email: the same argon2 work a real check costs, so sign-in time doesn't reveal which emails
+    have accounts."""
+    global _dummy_hash
+    if _dummy_hash is None:
+        _dummy_hash = _ph.hash("not a real account: timing only")
+    verify_password(pw, _dummy_hash)
 
 
 def too_many_failures(key: str) -> bool:
@@ -218,18 +231,54 @@ def _soc_membership(u: dict, org_id: str) -> dict | None:
     return {"role": "admin" if lvl == "supervisor" else "operator", "all_sites": True, "soc": True}
 
 
+TOTP_STEP_S = 30
+
+
+def totp_step_for(secret: str | None, code: str | None, now: float | None = None) -> int | None:
+    """The 30 s time step (now, or one either side for clock drift) whose code this is, or None."""
+    code = (code or "").strip().replace(" ", "")
+    if not secret or not code.isdigit():
+        return None
+    totp = pyotp.TOTP(secret)
+    cur = int((now if now is not None else time.time()) // TOTP_STEP_S)
+    for step in (cur, cur - 1, cur + 1):
+        if hmac.compare_digest(totp.generate_otp(step), code):
+            return step
+    return None
+
+
+def consume_totp_step(uid: str, step: int, conn=None) -> bool:
+    """Record `step` as this user's last used code, only if it is newer than the last one: a code works once, so one
+    seen over a shoulder or replayed from a log within its 90 s window is refused. Atomic (conditional UPDATE)."""
+    stmt = sa.update(db.users).where(db.users.c.id == uid, sa.or_(db.users.c.totp_last_step.is_(None),
+                                                                   db.users.c.totp_last_step < step)).values(totp_last_step=step)
+    if conn is not None:
+        return conn.execute(stmt).rowcount == 1
+    with db.engine().begin() as c:
+        return c.execute(stmt).rowcount == 1
+
+
 def totp_ok(u: dict, code: str | None) -> bool:
+    """True when the user has no TOTP, or `code` is a current code not used before (it is then used up)."""
     if not u["totp_enabled"]:
         return True
-    return bool(code) and pyotp.TOTP(u["totp_secret"]).verify(code.strip().replace(" ", ""), valid_window=1)
+    step = totp_step_for(u["totp_secret"], code)
+    return step is not None and consume_totp_step(u["id"], step)
 
 
 # ---------------------------------------------------------------- sessions
 
+def session_key(sid: str) -> str:
+    """What sessions.id stores for a cookie value: its sha256, so a leaked database (or backup) holds no usable
+    session. Sessions made before this was introduced are stored plain; session_of upgrades them on first use."""
+    return db.token_hash(sid)
+
+
 def new_session(u: dict, request: Request) -> str:
+    """Start a session; returns the cookie value (the row is keyed by session_key of it)."""
     sid = db.new_token()
     orgs = user_orgs(u["id"])
-    db.insert(db.sessions, {"id": sid, "user_id": u["id"], "org_id": orgs[0]["id"] if orgs else None, "created_at": time.time(),
+    db.insert(db.sessions, {"id": session_key(sid), "user_id": u["id"], "org_id": orgs[0]["id"] if orgs else None, "created_at": time.time(),
                             "expires_at": time.time() + settings.session_days * 86400,
                             "ip": request.client.host if request.client else None, "ua": (request.headers.get("user-agent") or "")[:300]})
     db.run(sa.update(db.users).where(db.users.c.id == u["id"]).values(last_login_at=time.time()))
@@ -246,12 +295,27 @@ def clear_cookie(resp: Response) -> None:
 
 def session_of(request: Request) -> dict | None:
     sid = request.cookies.get(COOKIE)
-    if not sid:
+    if not sid or len(sid) > 128:
         return None
-    s = db.one(sa.select(db.sessions).where(db.sessions.c.id == sid))
+    key = session_key(sid)
+    s = db.one(sa.select(db.sessions).where(db.sessions.c.id == key))
+    if s is None:
+        # a session from before ids were hashed: rehash it in place, so nobody is signed out by the upgrade
+        s = db.one(sa.select(db.sessions).where(db.sessions.c.id == sid))
+        if s is not None:
+            db.run(sa.update(db.sessions).where(db.sessions.c.id == sid).values(id=key))
+            s["id"] = key
     if not s or s["expires_at"] < time.time():
         return None
     return s
+
+
+def end_other_sessions(uid: str, keep_id: str | None) -> None:
+    """Sign the user out everywhere except the session `keep_id` (a sessions.id, i.e. already hashed)."""
+    q = sa.delete(db.sessions).where(db.sessions.c.user_id == uid)
+    if keep_id:
+        q = q.where(db.sessions.c.id != keep_id)
+    db.run(q)
 
 
 def current_user(request: Request) -> dict | None:
@@ -397,6 +461,27 @@ def visible_sites(u: dict, org_id: str, include_retired: bool = False) -> list[d
 
 
 visible_servers = visible_sites
+
+
+def scope_filter(u: dict, org_id: str):
+    """None when this user sees the whole customer (all-sites members, hub administrators, SOC staff); otherwise a
+    predicate for rows tagged with a server (`site_id`) and/or a Site (`location_id`, or detail.location_id as audit
+    rows carry it): true only for the servers and Sites they can see. Rows tagged with neither are customer-wide
+    and are hidden from Site-restricted members."""
+    m = membership(u, org_id)
+    if m and m["all_sites"]:
+        return None
+    servers = {s["id"] for s in visible_sites(u, org_id, include_retired=True)} if m else set()
+    locs = granted_location_ids(u["id"], org_id) if m else set()
+
+    def ok(row: dict) -> bool:
+        sid = row.get("site_id") or row.get("server_id")
+        if sid:
+            return sid in servers
+        detail = row.get("detail") if isinstance(row.get("detail"), dict) else {}
+        lid = row.get("location_id") or detail.get("location_id")
+        return bool(lid) and lid in locs
+    return ok
 
 
 def site_access(u: dict, site_id: str) -> tuple[dict, str]:

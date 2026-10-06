@@ -45,7 +45,9 @@ users = Table("users", metadata,
               Column("created_at", Float, nullable=False), Column("last_login_at", Float, nullable=True),
               # SOC staff (None | operator | supervisor): hub-level like is_super, scoped to customers with a monitored
               # Site (auth.membership). One internal SOC, so a column; a soc_members table only if several SOCs exist.
-              Column("soc_role", String(16), nullable=True))
+              Column("soc_role", String(16), nullable=True),
+              # the last TOTP time step used to sign in or re-authenticate: each code works once (auth.consume_totp_step)
+              Column("totp_last_step", sa.BigInteger, nullable=True))
 memberships = Table("memberships", metadata,
                     Column("user_id", String(24), primary_key=True), Column("org_id", String(24), primary_key=True),
                     Column("role", String(16), nullable=False),
@@ -234,7 +236,7 @@ ADDED_COLUMNS = [("sites", "retired_at"), ("sites", "location_id"), ("membership
                  ("users", "soc_role"), ("locations", "monitored"), ("locations", "arm_schedule"), ("locations", "arm_holidays"),
                  ("locations", "arm_override"), ("locations", "soc_group_minutes"),
                  ("locations", "lat"), ("locations", "lon"), ("locations", "address_parts"), ("locations", "geocoded_at"),
-                 ("locations", "geocode_source")]
+                 ("locations", "geocode_source"), ("users", "totp_last_step")]
 
 
 def upgrade(eng: Engine) -> None:

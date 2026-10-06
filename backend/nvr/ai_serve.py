@@ -5,8 +5,8 @@ The hub can be told (HUB_VLLM_SITE) that one site's GPU is the shared AI. Other 
 module relays it to the local Ollama's OpenAI-compatible `/v1`. So the fleet gets a shared model without a GPU
 at the hub and without this site opening any port.
 
-Only requests that arrived through the tunnel are accepted (the bridge marks them with scope client
-`hub_agent.IN_PROCESS_CLIENT`, and the hub adds `x-hub-internal: ai`); the LAN gets 403 and the hub's public
+Only requests that arrived through the tunnel are accepted (the bridge marks their ASGI scope, checked with
+`hub_agent.is_tunnel`, and the hub adds `x-hub-internal: ai`); the LAN gets 403 and the hub's public
 `/s/<site>/api/` proxy refuses the path before it reaches the tunnel. Ollama's own parallel slots
 (`ollama_parallel`) queue these behind or beside the site's own calls; the site's `VlmGate` is not involved.
 """
@@ -40,7 +40,7 @@ def set_client(c: httpx.AsyncClient | None) -> None:
 
 
 def guard(request: Request) -> None:
-    if request.scope.get("client") != hub_agent.IN_PROCESS_CLIENT or request.headers.get("x-hub-internal") != "ai":
+    if not hub_agent.is_tunnel(request.scope) or request.headers.get("x-hub-internal") != "ai":
         raise HTTPException(403, "the shared AI is only served to the hub")
     if not settings.local_vlm_enabled:
         raise HTTPException(503, "this site has no local model to share")

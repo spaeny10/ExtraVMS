@@ -165,11 +165,12 @@ def _rate_row(closed: list[dict]) -> dict:
             "last_incident_at": max((i["opened_at"] for i in closed), default=None)}
 
 
-def false_alarm_rate(since: float, until: float, org_id: str | None = None) -> dict:
+def false_alarm_rate(since: float, until: float, org_id: str | None = None, location_ids: set[str] | None = None) -> dict:
     """Closed incidents opened in [since, until), per Site and per camera (server_id, camera_id): how many, how
     many were false_alarm or nuisance, the rate over judged incidents (swept and expired ones were never looked at,
     so they are counted in `closed` but not in the rate), the most common disposition and the newest incident."""
-    closed = [i for i in _incidents(since, until, org_id) if i["state"] == "closed"]
+    closed = [i for i in _incidents(since, until, org_id) if i["state"] == "closed"
+              and (location_ids is None or i["location_id"] in location_ids)]   # a Site-restricted customer admin
     by_loc: dict[str, list[dict]] = defaultdict(list)
     for i in closed:
         by_loc[i["location_id"]].append(i)
@@ -414,6 +415,22 @@ def monthly_plain(org_name: str, d: dict) -> str:
         lines.append(f"• {s['name']}: {s['incidents']} incident(s), median response {_dur(s['median_response_s'])}, {s['calls']} call(s), "
                      f"armed about {s['armed_hours']:.0f} h ({cov} of the month){'; ' + disp if disp else ''}")
     return "\n".join(lines)
+
+
+def monthly_scoped(row: dict, location_ids: set[str], org_name: str) -> dict:
+    """A stored monthly summary cut down to these Sites (a Site-restricted customer admin): their Sites' rows, totals
+    summed from them (the customer-wide median can't be split, so it is left out) and the text rebuilt."""
+    d = row.get("data") if isinstance(row.get("data"), dict) else None
+    if not d or "sites" not in d:
+        return {**row, "text": "This summary covers Sites you don't have access to.", "data": None}
+    sites = [x for x in d["sites"] if x.get("location_id") in location_ids]
+    disp: Counter = Counter()
+    for x in sites:
+        disp.update(x.get("dispositions") or {})
+    totals = {"incidents": sum(x.get("incidents") or 0 for x in sites), "median_response_s": None, "dispositions": dict(disp),
+              "calls": sum(x.get("calls") or 0 for x in sites), "armed_hours": round(sum(x.get("armed_hours") or 0 for x in sites), 1)}
+    nd = {**d, "sites": sites, "totals": totals}
+    return {**row, "text": monthly_plain(org_name, nd), "data": nd}
 
 
 def monthly_customer_summary(org_id: str, year: int, month: int, created_by: str | None = None) -> dict:

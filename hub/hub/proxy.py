@@ -13,7 +13,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 
-from . import auth, db
+from . import auth, db, security
 from .agents import TooManyStreams, registry
 from .config import settings
 from .roles import allows, required_role
@@ -68,9 +68,8 @@ async def proxy_api(site_id: str, path: str, request: Request):
     if s.aborted or s.status is None:
         conn.finish(s)
         raise HTTPException(503, f"site aborted: {s.aborted or 'no response'}")
-    status, resp_headers = s.status, dict(s.headers)
-    for h in ("transfer-encoding", "connection", "content-length"):
-        resp_headers.pop(h, None)
+    # allow-listed headers only, never an active content type, always nosniff + a sandboxing CSP (security.py)
+    status, resp_headers = s.status, security.filter_proxy_headers(s.headers, site_id)
 
     async def body_iter():
         try:

@@ -324,7 +324,7 @@ def test_push_to_soc_and_customers(client, superuser):
     try:
         ids = {k: auth.user_by_email(f"{k}@pushsoc.example")["id"] for k in ("op", "sup", "view", "adm")}
         for k in ids:
-            push.subscribe(ids[k], {"endpoint": f"https://push.example/{k}-pushsoc"}, ["offline"] if k == "adm" else None, "test")
+            push.subscribe(ids[k], {"endpoint": f"https://fcm.googleapis.com/fcm/send/{k}-pushsoc"}, ["offline"] if k == "adm" else None, "test")
         soc.set_presence(ids["op"], "available")
         inc = _incident(s, 1, "high")
         assert asyncio.run(push.notify_soc(inc, "operators")) == 1   # on shift: op; sup has no presence
@@ -336,7 +336,7 @@ def test_push_to_soc_and_customers(client, superuser):
         # customers: only subscriptions that opted into soc_incident (the default kinds' event_high already pushes the
         # same event, so view on the defaults gets nothing extra; adm chose offline only)
         assert asyncio.run(push.notify_incident_customers(inc)) == 0
-        push.subscribe(ids["view"], {"endpoint": "https://push.example/view-pushsoc"}, [*push.DEFAULT_KINDS, "soc_incident"], "test")
+        push.subscribe(ids["view"], {"endpoint": "https://fcm.googleapis.com/fcm/send/view-pushsoc"}, [*push.DEFAULT_KINDS, "soc_incident"], "test")
         assert asyncio.run(push.notify_incident_customers(inc)) == 1
         assert sent[0][0] == ids["view"] and sent[0][1]["kind"] == "soc_incident" and sent[0][1]["url"] == f"/sites/{s['loc']['id']}/alerts"
         assert "soc_incident" in s["view"].get("/api/push/vapid").json()["kinds"]   # the PushCard can offer it

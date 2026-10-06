@@ -3,6 +3,15 @@
 #   docker compose -f hub/docker-compose.yml up -d --build
 #   docker compose -f hub/docker-compose.yml exec hub python -m hub createsuper you@example.com
 # Update: git pull && docker compose -f hub/docker-compose.yml up -d --build
+#
+# POSTGRES_PASSWORD: set it in hub/.env (DEPLOY.md). The "change-me" fallback below only remains so an install whose
+# database was first created without it keeps starting; such an install must change the password (DEPLOY.md,
+# "Postgres password") and then this fallback should become ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in hub/.env}.
+
+x-logging: &logging   # every container: rotate its JSON log (Docker keeps them forever by default)
+  driver: json-file
+  options: { max-size: "50m", max-file: "5" }
+
 services:
   caddy:
     image: caddy:2
@@ -15,6 +24,7 @@ services:
     environment:
       HUB_DOMAIN: ${HUB_DOMAIN:-hub.axiomvision.ai}
     depends_on: [hub]
+    logging: *logging
 
   hub:
     build: { context: .., dockerfile: hub/Dockerfile }
@@ -25,6 +35,8 @@ services:
       HUB_SECRET: ${HUB_SECRET:?set HUB_SECRET in hub/.env}
       HUB_PUBLIC_URL: ${HUB_PUBLIC_URL:-https://hub.axiomvision.ai}
       HUB_COOKIE_SECURE: "1"
+      # X-Forwarded-For/-Proto are trusted from the compose network only (Caddy; port 8000 is never published)
+      HUB_FORWARDED_ALLOW_IPS: ${HUB_FORWARDED_ALLOW_IPS:-172.16.0.0/12,192.168.0.0/16,10.0.0.0/8}
       HUB_TURN_HOST: ${HUB_DOMAIN:-hub.axiomvision.ai}
       HUB_TURN_SECRET: ${HUB_TURN_SECRET:-}
       # Shared AI: either a site whose local Qwen serves the fleet through its tunnel (no GPU on the hub) ...
@@ -43,6 +55,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
     expose: ["8000"]
+    logging: *logging
 
   postgres:
     image: postgres:16-alpine
@@ -50,8 +63,9 @@ services:
     environment:
       POSTGRES_DB: hub
       POSTGRES_USER: hub
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}   # see the note at the top: set it in hub/.env
     volumes: [pg_data:/var/lib/postgresql/data]
+    logging: *logging
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U hub -d hub"]
       interval: 5s
@@ -65,6 +79,7 @@ services:
     network_mode: host
     volumes: ["./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro"]
     command: ["-c", "/etc/coturn/turnserver.conf", "--static-auth-secret=${HUB_TURN_SECRET:?set HUB_TURN_SECRET in hub/.env}", "--realm=${HUB_DOMAIN:-hub.axiomvision.ai}"]
+    logging: *logging
 
   # Shared AI on the hub's own GPU (optional: docker compose --profile ai up), e.g. Qwen2.5-VL-32B. Set
   # HUB_VLLM_URL=http://vllm:8000/v1 and HUB_VLLM_KEY to match.
@@ -72,10 +87,17 @@ services:
     image: vllm/vllm-openai:latest
     profiles: ["ai"]
     restart: unless-stopped
+    # The API key comes from HUB_VLLM_KEY (vLLM reads VLLM_API_KEY) and is required: without it the model would answer
+    # anyone on the network. Checked when the container starts rather than with ${VAR:?}, which compose evaluates
+    # for every service, so it would stop installs that never enable the `ai` profile.
+    environment:
+      VLLM_API_KEY: ${HUB_VLLM_KEY:-}
+    entrypoint: ["/bin/sh", "-c", 'if [ -z "$$VLLM_API_KEY" ]; then echo "set HUB_VLLM_KEY in hub/.env" >&2; exit 1; fi; exec python3 -m vllm.entrypoints.openai.api_server "$$@"', "vllm"]
     command: ["--model", "${HUB_VLLM_MODEL:-Qwen/Qwen2.5-VL-32B-Instruct-AWQ}", "--quantization", "awq", "--max-model-len", "8192",
-              "--api-key", "${HUB_VLLM_KEY:-internal}", "--limit-mm-per-prompt", "image=6", "--gpu-memory-utilization", "0.92"]
+              "--limit-mm-per-prompt", "image=6", "--gpu-memory-utilization", "0.92"]
     volumes: ["hf_cache:/root/.cache/huggingface"]
     expose: ["8000"]
+    logging: *logging
     deploy:
       resources:
         reservations:

@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import datetime as dt
 import logging
 import re
+import secrets
 import urllib.parse
 
 import httpx
@@ -17,10 +19,84 @@ log = logging.getLogger("nvr.mediamtx")
 
 
 HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.\-]{0,252}$")   # IP address or hostname; anything else breaks the RTSP URL
+CAMERA_ID_RE = re.compile(r"^[a-z0-9_]{1,32}$")
+# An RTSP path on the camera, appended after host:port in camera_url. Must start with one "/" and may not hold
+# "@" (rtsp://u:p@host:554@evil:554/x sends the password elsewhere), whitespace or "#". Covers the vendor forms
+# seen so far: /main, /Streaming/Channels/101, /cam/realmonitor?channel=1&subtype=0, /h264Preview_01_main,
+# /media/video1;stream=1, /axis-media/media.amp?videocodec=h264&resolution=1920x1080, /live/ch00_0, /11.
+PATH_RE = re.compile(r"^/(?!/)[A-Za-z0-9_.~/\-?=&%;:,+]{0,254}$")
 
 
 def valid_host(host: str | None) -> bool:
-    return bool(host) and HOST_RE.match(host) is not None
+    return bool(host) and HOST_RE.fullmatch(host) is not None
+
+
+def camera_problem(cam: dict, partial: bool = False) -> str | None:
+    """Why this camera row may not be stored (it would produce a dangerous or broken RTSP URL), or None.
+    `partial`: fields that are absent are not checked (an import or merge may leave paths to the defaults)."""
+    cid = cam.get("id")
+    if not isinstance(cid, str) or not CAMERA_ID_RE.fullmatch(cid):
+        return f"camera id {str(cid)[:40]!r} must be 1-32 lowercase letters, digits or _"
+    if not (partial and "host" not in cam) and not (isinstance(cam.get("host"), str) and valid_host(cam["host"])):
+        return f"camera {cid}: address {str(cam.get('host'))[:60]!r} is not an IP address or hostname"
+    for k in ("main_path", "sub_path"):
+        if partial and k not in cam:
+            continue
+        v = cam.get(k)
+        if not isinstance(v, str) or not PATH_RE.fullmatch(v):
+            return (f"camera {cid}: {k} {str(v)[:60]!r} must start with a single / and use only letters, digits and "
+                    "_ . ~ / - ? = & % ; : , + (no @, spaces or #)")
+    for k in ("rtsp_port", "onvif_port"):
+        if partial and k not in cam:
+            continue
+        v = cam.get(k)
+        if isinstance(v, bool) or not isinstance(v, int) or not 1 <= v <= 65535:
+            return f"camera {cid}: {k} must be a port number 1-65535"
+    return None
+
+
+# ---- the NVR's own RTSP / WHEP reader (settings.rtsp_auth)
+
+def reader_credentials() -> tuple[str, str] | None:
+    """User and password the NVR's own readers use against MediaMTX (ingest's RTSP metadata session, the WHEP
+    proxy). Generated on first use and kept in the settings table, not .env. None when rtsp_auth is off."""
+    if not settings.rtsp_auth:
+        return None
+    c = db.get_setting("mediamtx_reader")
+    if not (isinstance(c, dict) and c.get("user") and c.get("pass")):
+        c = {"user": "nvr", "pass": secrets.token_urlsafe(24)}
+        db.set_setting("mediamtx_reader", c)
+    return c["user"], c["pass"]
+
+
+def reader_auth_header() -> dict[str, str]:
+    cred = reader_credentials()
+    if not cred:
+        return {}
+    return {"Authorization": "Basic " + base64.b64encode(f"{cred[0]}:{cred[1]}".encode()).decode()}
+
+
+LOCAL_IPS = ["127.0.0.1", "::1"]
+PRIVATE_IPS = ["127.0.0.1", "::1", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"]
+
+
+def auth_users() -> list[dict]:
+    cred = reader_credentials()
+    if cred is None:   # NVR_RTSP_AUTH=0: as before, anyone on this machine or a private network may view
+        return [
+            {"user": "any", "pass": "", "ips": PRIVATE_IPS, "permissions": [{"action": "read"}, {"action": "playback"}]},
+            {"user": "any", "pass": "", "ips": LOCAL_IPS,
+             "permissions": [{"action": "publish"}, {"action": "api"}, {"action": "metrics"}]},
+        ]
+    return [
+        # Viewing (RTSP, WebRTC) needs the NVR's generated reader password, from this machine or the local network:
+        # a LAN device can no longer pull the cameras through MediaMTX anonymously.
+        {"user": cred[0], "pass": cred[1], "ips": PRIVATE_IPS, "permissions": [{"action": "read"}, {"action": "playback"}]},
+        # This machine only, no password: publishing, the API and metrics (127.0.0.1-bound anyway) and playback
+        # (its server listens on 127.0.0.1 only; the NVR proxies it as /api/playback).
+        {"user": "any", "pass": "", "ips": LOCAL_IPS,
+         "permissions": [{"action": "publish"}, {"action": "api"}, {"action": "metrics"}, {"action": "playback"}]},
+    ]
 
 
 def camera_url(cam: dict, path: str) -> str:
@@ -33,10 +109,12 @@ def build_config(cameras: list[dict]) -> dict:
     rec_root = settings.recordings_dir.as_posix()
     paths: dict = {}
     for cam in cameras:
-        if not valid_host(cam.get("host")):
-            # MediaMTX refuses to start on one malformed source URL, taking every camera down with it: leave this
-            # camera out (it shows as down in Settings) and keep the others recording.
-            log.error("[%s] address %r is not an IP address or hostname: camera left out of MediaMTX", cam["id"], cam.get("host"))
+        problem = camera_problem(cam, partial=True)
+        if problem:
+            # MediaMTX refuses to start on one malformed source URL, taking every camera down with it, and a crafted
+            # path could send the password elsewhere: leave this camera out (it shows as down in Settings) and keep
+            # the others recording.
+            log.error("[%s] %s: camera left out of MediaMTX", cam.get("id"), problem)
             continue
         # Main stream: always pulled and recorded 24/7. The NVR also reads the ONVIF
         # metadata track from this path, so the camera only serves one main session.
@@ -57,14 +135,10 @@ def build_config(cameras: list[dict]) -> dict:
         "logDestinations": ["stdout", "file"],
         "logFile": (settings.runtime_dir / "mediamtx.log").as_posix(),
         "authMethod": "internal",
-        "authInternalUsers": [
-            # Only this machine may publish or use the API. Viewing needs this machine or the local network, so a
-            # forwarded MediaMTX port never exposes the cameras to the internet (remote viewing goes through the NVR).
-            {"user": "any", "pass": "", "ips": ["127.0.0.1", "::1", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"],
-             "permissions": [{"action": "read"}, {"action": "playback"}]},
-            {"user": "any", "pass": "", "ips": ["127.0.0.1", "::1"],
-             "permissions": [{"action": "publish"}, {"action": "api"}, {"action": "metrics"}]},
-        ],
+        # Only this machine may publish or use the API. Viewing needs this machine or the local network (so a
+        # forwarded MediaMTX port never exposes the cameras to the internet; remote viewing goes through the NVR)
+        # and, with rtsp_auth, the NVR's generated reader password.
+        "authInternalUsers": auth_users(),
         "api": True, "apiAddress": "127.0.0.1:9997",
         "metrics": True, "metricsAddress": "127.0.0.1:9998",
         "playback": True, "playbackAddress": "127.0.0.1:9996",  # the NVR proxies playback (/api/playback)

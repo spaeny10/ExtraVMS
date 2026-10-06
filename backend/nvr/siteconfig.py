@@ -20,6 +20,24 @@ from . import __version__
 from .db import db
 
 SETTINGS_KEYS = ("retention_policy", "briefing")
+
+
+class InvalidCamera(ValueError):
+    """A camera in an import or handoff that would produce an unsafe or broken RTSP URL (api answers 422)."""
+
+
+def _check_cameras(cams, remap_ids: bool = False) -> None:
+    """Validate every camera before any is stored (the same rules as PUT /api/cameras: mediamtx.camera_problem).
+    `remap_ids`: a merge gives a camera with an unusable id a new one, so only its address fields matter."""
+    from .mediamtx import camera_problem
+    if not isinstance(cams, list):
+        raise InvalidCamera("cameras must be a list")
+    for c in cams:
+        if not isinstance(c, dict):
+            raise InvalidCamera("each camera must be an object")
+        problem = camera_problem({**c, "id": "x"} if remap_ids else c, partial=True)
+        if problem:
+            raise InvalidCamera(problem.replace("camera x:", f"camera {str(c.get('id'))[:40]!r}:") if remap_ids else problem)
 CAMERA_COLS = ("name", "host", "onvif_port", "rtsp_port", "username", "main_path", "sub_path", "enabled", "zones",
                "retention_days", "scene_notes", "retention_policy", "synopsis_labels", "policies")
 
@@ -73,6 +91,7 @@ def import_config(data: dict, replace_identities: bool = False) -> dict:
         raise ValueError("unknown backup format")
     if data.get("partial"):
         raise ValueError("a partial export (camera handoff) is merged with merge_cameras, not restored")
+    _check_cameras(data.get("cameras", []))
     counts = {"cameras": 0, "camera_links": 0, "identities": 0, "layouts": 0, "dashboards": 0}
     existing_pw = {c["id"]: c["password"] for c in db.cameras()}
     for c in data.get("cameras", []):
@@ -141,6 +160,7 @@ def merge_cameras(data: dict) -> dict:
     existing one is kept. Returns counts and the id mapping {source id: id here}."""
     if data.get("format") != 1:
         raise ValueError("unknown export format")
+    _check_cameras(data.get("cameras", []), remap_ids=True)
     existing = db.cameras()
     by_id = {c["id"]: c for c in existing}
     by_addr = {_address(c): c["id"] for c in existing}

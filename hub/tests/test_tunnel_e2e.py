@@ -30,6 +30,11 @@ async def site_app(scope, receive, send):
             await asyncio.sleep(0.2)
             await send({"type": "http.response.body", "body": f'{{"n":{i}}}\n'.encode(), "more_body": True})
         await send({"type": "http.response.body", "body": b"", "more_body": False})
+    elif path == "/api/evil":   # a compromised site: HTML with script, a session cookie, CORS, its own CSP
+        await send({"type": "http.response.start", "status": 200, "headers": [
+            (b"content-type", b"text/html; charset=utf-8"), (b"set-cookie", b"hub_session=fixated; Path=/"),
+            (b"access-control-allow-origin", b"*"), (b"content-security-policy", b"default-src *"), (b"x-frame-time", b"12.5")]})
+        await send({"type": "http.response.body", "body": b"<script>fetch('/api/orgs')</script>"})
     elif path == "/api/cameras/x/ptz/move":
         await send({"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"application/json")]})
         await send({"type": "http.response.body", "body": b'{"ok":true}'})
@@ -102,6 +107,13 @@ def test_enrol_proxy_roles_offline(hub_server, superuser):
         # proxied requests carry the hub identity; streaming arrives incrementally
         r = owner.get(f"/s/{site['id']}/api/json")
         assert r.status_code == 200 and r.json() == {"user": superuser["email"], "role": "owner", "site": site["id"]}
+        assert r.headers["x-content-type-options"] == "nosniff" and r.headers["content-security-policy"].startswith("sandbox")
+        # whatever a site answers is served on the hub's origin: no cookies, no active content, nothing security-related
+        evil = owner.get(f"/s/{site['id']}/api/evil")
+        assert evil.status_code == 200 and "set-cookie" not in evil.headers and "access-control-allow-origin" not in evil.headers
+        assert evil.headers["content-type"].startswith("text/plain") and evil.headers["x-frame-time"] == "12.5"
+        assert evil.headers["content-security-policy"].startswith("sandbox; default-src 'none'")
+        assert owner.cookies.get("hub_session") != "fixated"
         t0 = time.time(); stamps = []
         with owner.stream("GET", f"/s/{site['id']}/api/slow") as resp:
             for line in resp.iter_lines():

@@ -7,6 +7,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+os.environ.setdefault("NVR_ALLOWED_HOSTS", "site")  # the test client's Host (lan_guard Host allow-list)
 os.environ["NVR_DATA_DIR"] = tempfile.mkdtemp(prefix="nvr-ai-serve-test-")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -31,7 +32,7 @@ def fake_ollama(request: httpx.Request) -> httpx.Response:
 
 def call(client_marker, headers, body):
     async def go():
-        transport = httpx.ASGITransport(app=app, client=client_marker)
+        transport = httpx.ASGITransport(app=hub_agent.as_tunnel(app) if client_marker == hub_agent.IN_PROCESS_CLIENT else app, client=client_marker)
         async with httpx.AsyncClient(transport=transport, base_url="http://site") as c:
             return await c.post("/api/ai/v1/chat/completions", json=body, headers=headers)
     return asyncio.run(go())

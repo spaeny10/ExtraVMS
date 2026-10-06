@@ -38,9 +38,10 @@ log = logging.getLogger("nvr.direct")
 
 ROLES = ("viewer", "operator", "admin", "owner")
 COOKIE = "direct"
-# Origins of the hub UI in development (vite dev server and the hub's own uvicorn); the production origin comes
-# from the hub URL. Deliberately not "the LAN origin of the request" or a wildcard: CORS with credentials to
-# any page would let any site on the internet read this server through a viewer's browser.
+# Origins of the hub UI in development (vite dev server and the hub's own uvicorn), trusted only with
+# NVR_DEV_ORIGINS=1 (any local web page on those ports could otherwise use a viewer's token); the production
+# origin comes from the hub URL. Deliberately not "the LAN origin of the request" or a wildcard: CORS with
+# credentials to any page would let any site on the internet read this server through a viewer's browser.
 DEV_ORIGINS = ("http://localhost:8000", "http://localhost:5174")
 
 
@@ -118,10 +119,26 @@ def hub_origin(hub_url: str | None) -> str | None:
 
 def allowed_origins() -> set[str]:
     hub = hub_origin(db.get_setting("hub_url") or settings.hub_url)  # the settings table overrides .env, as in hub_agent
-    return {o for o in (hub, *DEV_ORIGINS) if o}
+    return {o for o in (hub, *(DEV_ORIGINS if settings.dev_origins else ())) if o}
 
 
 # ---------------------------------------------------------------- LAN addresses and the certificate
+
+def local_ipv6s() -> list[str]:
+    """This machine's IPv6 addresses (psutil only; zone ids dropped). For the Host allow-list, not the certificate."""
+    out: list[str] = []
+    try:
+        import psutil
+        for addrs in psutil.net_if_addrs().values():
+            for a in addrs:
+                if a.family == socket.AF_INET6:
+                    ip = a.address.split("%", 1)[0].lower()
+                    if ip and ip not in out:
+                        out.append(ip)
+    except Exception:
+        pass
+    return out
+
 
 def local_ipv4s() -> list[str]:
     """This machine's non-loopback, non-link-local IPv4 addresses (psutil when present: getaddrinfo(hostname)

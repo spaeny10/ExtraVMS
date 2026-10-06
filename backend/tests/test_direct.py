@@ -13,6 +13,7 @@ import tempfile
 import time
 from pathlib import Path
 
+os.environ.setdefault("NVR_ALLOWED_HOSTS", "lan")  # the test client's Host (lan_guard Host allow-list)
 os.environ["NVR_DATA_DIR"] = tempfile.mkdtemp(prefix="nvr-direct-test-")  # never the real DB (or its certificate)
 os.environ["NVR_HUB_URL"] = "wss://hub.axiomvision.ai/agent"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -116,7 +117,12 @@ def test_hub_origin():
     assert direct.hub_origin("wss://hub.axiomvision.ai/agent") == HUB
     assert direct.hub_origin("ws://127.0.0.1:8000/agent") == "http://127.0.0.1:8000"
     assert direct.hub_origin("") is None and direct.hub_origin("ftp://x/y") is None
-    assert direct.allowed_origins() == {HUB, "http://localhost:8000", "http://localhost:5174"}
+    assert direct.allowed_origins() == {HUB}                     # the dev origins only with NVR_DEV_ORIGINS=1
+    settings.dev_origins = True
+    try:
+        assert direct.allowed_origins() == {HUB, "http://localhost:8000", "http://localhost:5174"}
+    finally:
+        settings.dev_origins = False
 
 
 # ---------------------------------------------------------------- middleware
@@ -186,7 +192,13 @@ def test_probe_and_cors():
     r = run(call("GET", "/api/direct/probe"))
     assert r.status_code == 204 and "access-control-allow-origin" not in r.headers
     r = run(call("GET", "/api/direct/probe", headers={"Origin": "http://localhost:5174"}))
-    assert r.headers["access-control-allow-origin"] == "http://localhost:5174"
+    assert "access-control-allow-origin" not in r.headers     # dev origin, NVR_DEV_ORIGINS off
+    settings.dev_origins = True
+    try:
+        r = run(call("GET", "/api/direct/probe", headers={"Origin": "http://localhost:5174"}))
+        assert r.headers["access-control-allow-origin"] == "http://localhost:5174"
+    finally:
+        settings.dev_origins = False
     # preflight from the hub (incl. Chrome's Private Network Access ask); none for other origins
     pre = {"Origin": HUB, "Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "authorization,content-type",
            "Access-Control-Request-Private-Network": "true"}

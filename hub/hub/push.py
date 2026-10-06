@@ -7,6 +7,7 @@ import json
 import logging
 import time
 from typing import Callable
+from urllib.parse import urlsplit
 
 import sqlalchemy as sa
 
@@ -40,11 +41,47 @@ def vapid() -> dict:
     return value
 
 
+# The hub POSTs to whatever endpoint a browser hands it, so only the real push services are accepted: otherwise a
+# signed-in user could point the hub at anything it can reach (postgres:5432, the cloud metadata address, ...).
+PUSH_HOSTS = {"fcm.googleapis.com", "android.googleapis.com",               # Chrome, Edge on Android, Opera, Samsung
+              "updates.push.services.mozilla.com"}                          # Firefox
+PUSH_HOST_SUFFIXES = (".push.apple.com",                                    # Safari / iOS web apps (web.push.apple.com)
+                      ".notify.windows.com",                                # Edge on Windows (wns2-*.notify.windows.com)
+                      ".push.services.mozilla.com")
+SEND_TIMEOUT_S = 10.0
+
+
+def endpoint_ok(endpoint: str) -> bool:
+    """https on the default port, no credentials in the URL, host a known push service."""
+    try:
+        p = urlsplit(endpoint)
+        port = p.port
+    except ValueError:
+        return False
+    host = (p.hostname or "").lower().rstrip(".")
+    if p.scheme != "https" or p.username or p.password or port not in (None, 443) or not host:
+        return False
+    return host in PUSH_HOSTS or host.endswith(PUSH_HOST_SUFFIXES)
+
+
+def _same_keys(a: dict, b: dict) -> bool:
+    ka, kb = (a or {}).get("keys") or {}, (b or {}).get("keys") or {}
+    return bool(ka.get("p256dh")) and ka.get("p256dh") == kb.get("p256dh") and ka.get("auth") == kb.get("auth")
+
+
 def subscribe(user_id: str, sub: dict, kinds: list[str] | None, ua: str) -> None:
     endpoint = sub.get("endpoint")
-    if not endpoint:
+    if not endpoint or not isinstance(endpoint, str):
         raise ValueError("subscription needs an endpoint")
-    db.run(sa.delete(db.push_subscriptions).where(db.push_subscriptions.c.endpoint == endpoint))
+    if len(endpoint) > 2000 or not endpoint_ok(endpoint):
+        raise ValueError("that is not a browser push service endpoint")
+    # Replace this user's row for the endpoint. Another user's row for it goes too only when this request proves it
+    # holds the same browser subscription (its keys): a shared browser now signed in as someone else must stop getting
+    # the previous user's alerts, but nobody can delete another user's subscription just by naming its endpoint.
+    t = db.push_subscriptions
+    for row in db.rows(sa.select(t.c.id, t.c.user_id, t.c.sub).where(t.c.endpoint == endpoint)):
+        if row["user_id"] == user_id or _same_keys(row["sub"], sub):
+            db.run(sa.delete(t).where(t.c.id == row["id"]))
     db.insert(db.push_subscriptions, {"user_id": user_id, "endpoint": endpoint, "sub": sub, "kinds": kinds or DEFAULT_KINDS,
                                       "created_at": time.time(), "ua": ua[:200]})
 
@@ -61,11 +98,14 @@ def _send_one(sub: dict, payload: dict) -> bool:
     """True if the subscription is still good."""
     if _sender is not None:
         return _sender(sub, payload)
+    if not endpoint_ok(sub.get("endpoint") or ""):
+        return False   # stored before the endpoint check existed: dropped, the browser re-subscribes on its next visit
     from pywebpush import WebPushException, webpush
     keys = vapid()
     try:
         webpush(subscription_info=sub["sub"], data=json.dumps(payload), vapid_private_key=keys["private_pem"],
-                vapid_claims={"sub": f"mailto:{settings.push_contact or 'admin@' + settings.public_url.split('//')[-1]}"}, ttl=3600)
+                vapid_claims={"sub": f"mailto:{settings.push_contact or 'admin@' + settings.public_url.split('//')[-1]}"}, ttl=3600,
+                timeout=SEND_TIMEOUT_S)
         return True
     except WebPushException as e:
         code = getattr(getattr(e, "response", None), "status_code", None)

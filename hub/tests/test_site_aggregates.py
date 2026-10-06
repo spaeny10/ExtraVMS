@@ -151,7 +151,7 @@ def test_push_title_names_the_site(world):
     oid, a, solo, root = (world[k] for k in ("oid", "a", "solo", "root"))
     row = lambda s: db.one(sa.select(db.sites).where(db.sites.c.id == s["id"]))  # noqa: E731
     assert push.title_name(row(a)) == "Campus · Gate" and push.title_name(row(solo)) == "Solo"
-    assert root.post("/api/push/subscribe", json={"subscription": {"endpoint": "https://push.example/agg"}, "kinds": ["offline"]}).status_code == 200
+    assert root.post("/api/push/subscribe", json={"subscription": {"endpoint": "https://fcm.googleapis.com/fcm/send/agg"}, "kinds": ["offline"]}).status_code == 200
     sent = []
     push.set_sender(lambda sub, payload: sent.append(payload) or True)
     try:
@@ -159,5 +159,5 @@ def test_push_title_names_the_site(world):
         asyncio.run(push.notify_alert(oid, row(solo), "offline", {}))
     finally:
         push.set_sender(None)
-        root.post("/api/push/unsubscribe", json={"endpoint": "https://push.example/agg"})
+        root.post("/api/push/unsubscribe", json={"endpoint": "https://fcm.googleapis.com/fcm/send/agg"})
     assert [(p["title"], p["location_id"]) for p in sent] == [("Campus · Gate is offline", a["location_id"]), ("Solo is offline", solo["location_id"])]

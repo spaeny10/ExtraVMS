@@ -146,13 +146,13 @@ def test_fleet_features(hub_server, superuser):
         push.set_sender(lambda sub, payload: sent.append((sub["endpoint"], payload)) or True)
         vap = owner.get("/api/push/vapid").json()
         assert vap["public_key"] and "offline" in vap["kinds"]
-        assert owner.post("/api/push/subscribe", json={"subscription": {"endpoint": "https://push.example/abc", "keys": {"p256dh": "x", "auth": "y"}}, "kinds": ["event_policy"]}).status_code == 200
+        assert owner.post("/api/push/subscribe", json={"subscription": {"endpoint": "https://fcm.googleapis.com/fcm/send/abc", "keys": {"p256dh": "x", "auth": "y"}}, "kinds": ["event_policy"]}).status_code == 200
         site_row = db.one(sa.select(db.sites).where(db.sites.c.id == site_a["id"]))
         asyncio.run_coroutine_threadsafe(push.notify_alert(org["id"], site_row, "event_policy", {"id": 7, "camera_id": "cam1", "text": "Unknown truck towing"}), loop).result(5)
         asyncio.run_coroutine_threadsafe(push.notify_alert(org["id"], site_row, "offline", {}), loop).result(5)
         assert len(sent) == 1 and sent[0][1]["title"].endswith("site rule broken") and "/s/" in sent[0][1]["url"]
         push.set_sender(None)
-        assert owner.post("/api/push/unsubscribe", json={"endpoint": "https://push.example/abc"}).status_code == 200
+        assert owner.post("/api/push/unsubscribe", json={"endpoint": "https://fcm.googleapis.com/fcm/send/abc"}).status_code == 200
         assert owner.get("/api/push/vapid").json()["subscriptions"] == []
 
         # fleet events: fan-out with camera / class / group filters, tagged with the site
