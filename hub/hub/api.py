@@ -19,7 +19,7 @@ from pydantic import BaseModel, EmailStr, Field
 from . import __version__, alerts, auth, backups, cameras, dashboards, db, digest, direct, fleet_actions, proxy, push, soc_api, turn, vlm_proxy
 from . import fleet as fleet_mod
 from . import find as find_mod
-from . import geocode, security, soc, soc_reports
+from . import geocode, hosts, security, soc, soc_reports
 from fastapi.responses import StreamingResponse
 from .agents import registry
 from .config import settings
@@ -58,6 +58,7 @@ async def _sweeper() -> None:
     while True:
         try:
             await registry.sweep()
+            await hosts.registry.sweep()
             alerts.expire_event_alerts()
             db.run(sa.delete(db.sessions).where(db.sessions.c.expires_at < time.time()))
             db.run(sa.delete(db.claims).where(db.claims.c.expires_at < time.time() - 3600))
@@ -654,6 +655,8 @@ async def update_site(site_id: str, body: SiteIn, u: dict = Depends(user)):
             c.execute(sa.update(db.sites).where(db.sites.c.id == site_id).values(**vals))
             if target:
                 cameras.relocate(site_id, target["id"], c)
+                # a central instance's server moved: the instance (and its Peplink sheet) follows it
+                c.execute(sa.update(db.central_instances).where(db.central_instances.c.server_id == site_id).values(location_id=target["id"]))
         registry.refresh(site_id)   # broadcasts and proxy headers use the live connection's copy
     if target:
         _audit(u, site["org_id"], site_id, f"server moved: {site['name']} -> {target['name']}", {"location_id": target["id"]})
@@ -736,6 +739,7 @@ def _site_card(s: dict, ctx: dict | None = None) -> dict:
             "summary": summ, "open_alerts": ctx["alerts"].get(s["id"], 0), "retired_at": s.get("retired_at"),
             "location_id": s.get("location_id"), "location_name": ctx["locations"].get(s.get("location_id")),
             "cameras_total": cams_total, "cameras_online": cams_online,
+            "central": ctx.get("central", {}).get(s["id"]),   # a central recording instance: {mode, quota_gb, used_gb, ...}
             "direct": direct.info(summ)}   # Direct-on-LAN: lets the UI know whether to ask for a token at all
 
 
@@ -748,7 +752,7 @@ def _card_ctx(servers: list[dict]) -> dict:
     online = {s["id"] for s in servers if s["online"] and s["id"] in registry.by_site}
     loc_ids = list({s.get("location_id") for s in servers if s.get("location_id")})
     names = {r["id"]: r["name"] for r in db.rows(sa.select(db.locations.c.id, db.locations.c.name).where(db.locations.c.id.in_(loc_ids)))} if loc_ids else {}
-    return {"alerts": alerts_by, "cameras": cameras.counts(ids, online), "locations": names}
+    return {"alerts": alerts_by, "cameras": cameras.counts(ids, online), "locations": names, "central": hosts.by_server(ids)}
 
 
 def _cards(servers: list[dict]) -> list[dict]:
@@ -960,6 +964,9 @@ async def delete_location(location_id: str, move_to: str | None = None, u: dict 
     loc, _ = auth.location_access(u, location_id)
     auth.require_customer_role(u, loc["org_id"], "admin")   # deleting a Site is customer management, not SOC config
     servers = db.rows(sa.select(db.sites.c.id).where(db.sites.c.location_id == location_id))
+    if db.one(sa.select(db.central_instances.c.id).where(db.central_instances.c.location_id == location_id,
+                                                         db.central_instances.c.state.in_(hosts.LIVE_STATES))):
+        raise HTTPException(409, "this site has central recording: a hub administrator must remove it first (Servers tab)")
     target = None
     if servers:
         if not move_to:
@@ -1266,6 +1273,170 @@ async def hub_sites(include_retired: bool = False, u: dict = Depends(user)):
     return out
 
 
+# ---------------------------------------------------------------- central recording (hosts.py)
+# Hosts and placement are for hub administrators only. A Site's admins may read its central instance (mode, subnet or
+# public IP, and the Peplink settings sheet) to set up the BR1; everyone else gets what location_access gives.
+
+class HostIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    notes: str | None = Field(None, max_length=2000)
+    fusionhub: str | None = Field(None, max_length=200)
+
+
+class HostPatch(BaseModel):
+    name: str | None = Field(None, min_length=1, max_length=120)
+    notes: str | None = Field(None, max_length=2000)
+    fusionhub: str | None = Field(None, max_length=200)
+
+
+def _host_or_404(host_id: str) -> dict:
+    h = db.one(sa.select(db.hosts).where(db.hosts.c.id == host_id))
+    if not h:
+        raise HTTPException(404, "unknown host")
+    return h
+
+
+@app.get("/api/hub/hosts")
+async def list_hosts(u: dict = Depends(user)):
+    auth.require_super(u)
+    return {"hosts": hosts.list_hosts(), "install": hosts.install_command(), "host_agent_url": hosts.host_agent_url()}
+
+
+@app.post("/api/hub/hosts")
+async def create_host(body: HostIn, u: dict = Depends(user)):
+    """The token is in this answer only (stored hashed): it goes in the host's token file."""
+    auth.require_super(u)
+    row, token = hosts.create_host(body.name, (body.notes or "").strip() or None, (body.fusionhub or "").strip() or None)
+    _audit(u, None, None, f"host added: {row['name']}", {"host_id": row["id"]})
+    return {"host": hosts.host_out(row), "token": token, "install": hosts.install_command()}
+
+
+@app.patch("/api/hub/hosts/{host_id}")
+async def update_host(host_id: str, body: HostPatch, u: dict = Depends(user)):
+    auth.require_super(u)
+    h = _host_or_404(host_id)
+    vals = {k: (v.strip() or None) if isinstance(v, str) else v for k, v in body.model_dump(exclude_unset=True).items()}
+    if "name" in vals and not vals["name"]:
+        raise HTTPException(400, "a host needs a name")
+    if vals:
+        db.run(sa.update(db.hosts).where(db.hosts.c.id == host_id).values(**vals))
+        _audit(u, None, None, f"host updated: {h['name']}", {"host_id": host_id, "fields": sorted(vals)})
+    return hosts.host_out(_host_or_404(host_id), db.rows(sa.select(db.central_instances).where(db.central_instances.c.host_id == host_id)))
+
+
+@app.delete("/api/hub/hosts/{host_id}")
+async def delete_host(host_id: str, u: dict = Depends(user)):
+    auth.require_super(u)
+    h = _host_or_404(host_id)
+    try:
+        await hosts.delete_host(host_id)
+    except hosts.Conflict as e:
+        raise HTTPException(409, str(e))
+    _audit(u, None, None, f"host removed: {h['name']}", {"host_id": host_id})
+    return {"ok": True}
+
+
+@app.post("/api/hub/hosts/{host_id}/rotate-token")
+async def rotate_host_token(host_id: str, u: dict = Depends(user)):
+    """A new token (shown once); the host is disconnected until its agent runs with the new token file."""
+    auth.require_super(u)
+    h = _host_or_404(host_id)
+    token = await hosts.rotate_host_token(host_id)
+    _audit(u, None, None, f"host token rotated: {h['name']}", {"host_id": host_id})
+    return {"token": token, "install": hosts.install_command()}
+
+
+@app.get("/api/hub/central")
+async def all_central(include_deleted: bool = False, u: dict = Depends(user)):
+    auth.require_super(u)
+    return hosts.instances(include_deleted=include_deleted)
+
+
+class CentralIn(BaseModel):
+    host_id: str | None = Field(None, max_length=24)     # None = the hub picks the host with the most room
+    mode: Literal["vpn", "forward"] = "vpn"
+    subnet: str | None = Field(None, max_length=43)      # VPN mode: default 10.20.<site number>.0/24
+    public_ip: str | None = Field(None, max_length=253)  # port-forward mode: the BR1's public address
+    quota_gb: int = Field(ge=10, le=1_000_000)   # the host agent refuses less than 10 GB
+    gpu: int | None = Field(None, ge=0, le=64)           # None = the hub picks (an A10 first, the A40 only if alone)
+    name: str | None = Field(None, max_length=120)       # the server's name in the Site; default "Central"
+
+
+class CentralPatch(BaseModel):
+    quota_gb: int = Field(ge=10, le=1_000_000)   # the host agent refuses less than 10 GB
+
+
+def _central_of(location_id: str, ci_id: str) -> dict:
+    ci = hosts.get_instance(ci_id)
+    if not ci or ci["location_id"] != location_id:
+        raise HTTPException(404, "unknown central instance")
+    return ci
+
+
+@app.get("/api/locations/{location_id}/central")
+async def location_central(location_id: str, u: dict = Depends(user)):
+    """The Site's central instance and the Peplink settings sheet: Site admins (and hub administrators)."""
+    loc, _ = auth.location_access(u, location_id)
+    auth.require_role(u, loc["org_id"], "admin")
+    rows = hosts.instances(db.central_instances.c.location_id == location_id, hub_admin=bool(u.get("is_super")))
+    servers = [r["server_id"] for r in rows if r["server_id"]]
+    cams: dict[str, list] = {}
+    if servers:
+        for c in db.rows(sa.select(db.cameras.c.server_id, db.cameras.c.camera_id, db.cameras.c.name).where(
+                db.cameras.c.server_id.in_(servers), db.cameras.c.missing_since.is_(None)).order_by(db.cameras.c.first_seen_at)):
+            cams.setdefault(c["server_id"], []).append({"id": c["camera_id"], "name": c["name"]})
+    return {"instances": [{**r, "cameras": cams.get(r["server_id"] or "", [])} for r in rows], "can_provision": bool(u.get("is_super")),
+            "hosts": [{"id": h["id"], "name": h["name"], "online": h["online"], "capacity": h["capacity"], "instances": h["instances"]}
+                      for h in hosts.list_hosts()] if u.get("is_super") else []}
+
+
+@app.post("/api/locations/{location_id}/central")
+async def location_central_create(location_id: str, body: CentralIn, u: dict = Depends(user)):
+    """Provision: answers at once with the instance (phase provisioning); the page polls GET until it is running."""
+    auth.require_super(u)
+    auth.location_access(u, location_id)
+    try:
+        ci = await hosts.provision(location_id, body.host_id or None, body.mode, body.subnet, body.public_ip, body.quota_gb, u,
+                                   name=body.name, gpu=body.gpu)
+    except LookupError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except hosts.Conflict as e:
+        raise HTTPException(409, str(e))
+    return hosts.instances(db.central_instances.c.id == ci["id"])[0]
+
+
+@app.patch("/api/locations/{location_id}/central/{ci_id}")
+async def location_central_update(location_id: str, ci_id: str, body: CentralPatch, u: dict = Depends(user)):
+    auth.require_super(u)
+    _central_of(location_id, ci_id)
+    try:
+        await hosts.set_quota(ci_id, body.quota_gb, u)
+    except LookupError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except hosts.HostError as e:
+        raise HTTPException(502, str(e))
+    return hosts.instances(db.central_instances.c.id == ci_id, include_deleted=True)[0]
+
+
+@app.delete("/api/locations/{location_id}/central/{ci_id}")
+async def location_central_delete(location_id: str, ci_id: str, purge: bool = False, force: bool = False, u: dict = Depends(user)):
+    """Delete the instance on its host and retire its server. Recordings stay on the host unless purge; force forgets
+    it at the hub even when the host is offline or refuses."""
+    auth.require_super(u)
+    _central_of(location_id, ci_id)
+    try:
+        await hosts.deprovision(ci_id, u, purge=purge, force=force)
+    except LookupError as e:
+        raise HTTPException(404, str(e))
+    except hosts.HostError as e:
+        raise HTTPException(502, f"{e} (remove anyway to forget it at the hub)")
+    return hosts.instances(db.central_instances.c.id == ci_id, include_deleted=True)[0]
+
+
 # ---------------------------------------------------------------- fleet find / ask, digests, backups, push
 
 @app.get("/api/fleet/search")
@@ -1446,7 +1617,8 @@ async def site_backup_restore(site_id: str, backup_id: int, body: RestoreIn, u: 
 @app.get("/api/push/vapid")
 async def push_vapid(u: dict = Depends(user)):
     return {"public_key": push.vapid()["public"], "subscriptions": [{"endpoint": s["endpoint"], "kinds": s["kinds"], "ua": s["ua"]} for s in push.subscriptions_for(u["id"])],
-            "kinds": list(push.CUSTOMER_KINDS)}   # soc_incident is opt-in (push.INCIDENT_KIND)
+            # soc_incident is opt-in (push.INCIDENT_KIND); host_offline is offered to hub administrators only
+            "kinds": [*push.CUSTOMER_KINDS, *(alerts.HUB_KINDS if u.get("is_super") else ())]}
 
 
 class PushIn(BaseModel):
@@ -1700,6 +1872,12 @@ async def fleet_ws(ws: WebSocket, org: str):
 @app.websocket("/agent")
 async def agent(ws: WebSocket):
     await registry.serve(ws)
+
+
+@app.websocket("/host-agent")
+async def host_agent(ws: WebSocket):
+    """Central recording hosts (hosts.py): their own token and protocol, never the server tunnel."""
+    await hosts.registry.serve(ws)
 
 
 @app.get("/s/{site_id}/api/turn")

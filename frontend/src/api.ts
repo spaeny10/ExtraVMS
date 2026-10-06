@@ -97,6 +97,12 @@ export type Camera = {
   policies?: SiteRule[];
   retention_policy?: Partial<RetentionPolicy> | null;
   ptz_config?: PtzConfig | null;
+  /** port-forward mode: the camera's outside address and ports (empty = connect to host and its own ports) */
+  public_host?: string | null;
+  public_rtsp_port?: number | null;
+  public_onvif_port?: number | null;
+  /** which stream is recorded 24/7: "sub" saves cellular data (HD live view then pulls <id>_hd on demand) */
+  record_stream?: "main" | "sub";
   status?: {
     stream_ready: boolean;
     recording: boolean;
@@ -122,6 +128,21 @@ export type PtzInfo = {
   caps: { available: boolean; pan_tilt?: boolean; home_supported?: boolean; max_presets?: number; aux_commands?: string[]; tours?: boolean; relays?: number; inputs?: number } | null;
   status: PtzStatus; presets: PtzPreset[]; config: PtzConfig;
 };
+
+/** An ONVIF device found by POST /api/cameras/scan (backend onvif_soap.scan_subnet). */
+export type ScannedDevice = {
+  address: string; port: number; onvif: boolean; needs_auth: boolean; auth_failed?: boolean;
+  manufacturer?: string; model?: string; firmware?: string;
+  /** a camera on this server already at that address and ONVIF port */
+  camera_id?: string;
+};
+
+/** What the cameras send this server (backend health.StreamHealth.bandwidth): Mbit/s over 5 min, GB received. */
+export type Bandwidth = { mbps: number; today_gb: number; month_gb: number; cameras: Record<string, number | null> };
+
+export function bandwidthText(b: Bandwidth): string {
+  return `${b.mbps.toFixed(1)} Mbit/s · ${b.today_gb.toFixed(1)} GB today · ${b.month_gb.toFixed(1)} GB this month`;
+}
 
 /** From MediaMTX metrics, sampled every 10 s (backend/nvr/health.py). */
 export type StreamHealth = {
@@ -296,7 +317,7 @@ export type ParsedQuery = { since: number | null; until: number | null; time_lab
 
 /* ---- Home */
 /** A server health problem (backend nvr/detector.py health_alerts); the hub opens an alert of the same kind. */
-export type HealthAlert = { kind: "detector_fallback" | "detector_stalled" | string; text: string; since?: number | null; error?: string; queue?: number };
+export type HealthAlert = { kind: "detector_fallback" | "detector_stalled" | "site_link_down" | string; text: string; since?: number | null; error?: string; queue?: number };
 /** YOLO wanted on the Hailo but running elsewhere (or nowhere: using null). */
 export type YoloFallback = { wanted: string; using: string | null; since: number; error: string; last_retry?: number };
 export type HomeCamera = { id: string; name: string; stream_ready: boolean; metadata: boolean; metadata_last: number | null; onvif_events: boolean; today: Record<string, number>; health: StreamHealth };
@@ -306,6 +327,7 @@ export type HomeData = {
   disk: { free_gb: number; total_gb: number }; retention_alert: unknown; yolo_ready: boolean; vlm_ready: boolean;
   health_alerts?: HealthAlert[];
   queues: { verify: number; synopsis: number }; backup: { at: number; path: string } | null; baseline: BaselineCamera[];
+  bandwidth?: Bandwidth;
 };
 
 /* ---- People & vehicles */
@@ -324,6 +346,8 @@ export type HubStatus = {
   enabled: boolean; hub_url: string; connected: boolean; enrolled: boolean; site_id: string | null; org: string | null;
   claim_code: string | null; claim_expires: number | null; last_error: string | null; last_heartbeat: number | null; vlm_managed: boolean;
   location?: string | null; location_id?: string | null;   // the hub Site this server belongs to (newer hubs)
+  /** enrolling itself with NVR_HUB_ENROLL_TOKEN (central recording instance): no claim code to type */
+  enroll_token?: boolean;
 };
 
 export type SystemInfo = {
@@ -343,6 +367,9 @@ export type SystemInfo = {
   events: Record<string, number>;
   webrtc_port: number;
   backup?: { dir: string; last: { at: number; path: string; bytes: number; count: number } | null };
+  /** NVR_INSTANCE_NAME, e.g. "Main Street · Central" */
+  instance_name?: string | null;
+  bandwidth?: Bandwidth;
 };
 
 export type AdvisorFinding = {
@@ -493,6 +520,9 @@ export function makeApi(base: string, opts: ApiOptions = {}) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...c, enabled: Boolean(c.enabled) }),
     }),
+  /** Unicast ONVIF scan of a private subnet (at most a /22); credentials only read model names, never stored. */
+  scanCameras: (body: { subnet: string; ports?: number[]; username?: string; password?: string }) =>
+    req<{ subnet: string; devices: ScannedDevice[] }>("/api/cameras/scan", json("POST", body)),
   events: (p: EventQuery & { threat?: string; before_id?: number; sort?: "newest" | "priority" }) =>
     req<NvrEvent[]>(`/api/events?${qs(eventQs(p))}`),
   /** Find's compliance strip: counts for the same filters (backend db.summary). */

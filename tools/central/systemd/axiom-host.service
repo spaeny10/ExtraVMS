@@ -1,0 +1,19 @@
+# /etc/systemd/system/axiom-host.service: the host agent (dials the hub, provisions instances).
+# Root: it drives docker, nft and xfs_quota. It opens no port.
+[Unit]
+Description=Axiom Vision host agent (central recording instances)
+After=network-online.target docker.service axiom-firewall.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+# leading '-': a failed repair pass must not keep the agent (and the hub's view of this host) down
+ExecStartPre=-/opt/axiom-host/venv/bin/python /opt/axiom-host/axiom_host.py reconcile
+ExecStart=/opt/axiom-host/venv/bin/python /opt/axiom-host/axiom_host.py run --hub wss://hub.axiomvision.ai/host-agent --token-file /etc/axiom/host-token
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

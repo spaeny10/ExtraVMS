@@ -100,7 +100,8 @@ class Settings(BaseSettings):
     # .env only. Unset = everything runs on the local model. See nvr/vlmroute.py.
     remote_vlm_url: str = ""            # e.g. https://api.runpod.ai/v2/<endpoint_id>/openai/v1
     remote_vlm_key: str = ""
-    remote_vlm_model: str = ""          # e.g. Qwen/Qwen2.5-VL-32B-Instruct-AWQ
+    remote_vlm_model: str = ""
+    remote_vlm_no_think: str = "reasoning_effort"   # reasoning_effort | chat_template (vLLM) | off: see vlmroute.no_think          # e.g. Qwen/Qwen2.5-VL-32B-Instruct-AWQ
     remote_tasks: list[str] = ["assistant", "briefing", "journey", "unusual_review", "footage_verify"]
     remote_interactive_timeout_s: float = 12    # time to first token before a user-facing answer falls back to local
     remote_background_timeout_s: float = 240    # background work waits out a cold start
@@ -138,6 +139,13 @@ class Settings(BaseSettings):
     hub_url: str = "wss://hub.axiomvision.ai/agent"   # the settings table can override (Settings -> System)
     hub_insecure: bool = False                         # NVR_HUB_INSECURE=1: accept a self-signed hub cert (dev only)
     hub_allow_insecure: bool = False                   # NVR_HUB_ALLOW_INSECURE=1: allow a plain ws:// hub other than localhost (dev only)
+    # NVR_HUB_ENROLL_TOKEN: one-time enrollment token from the hub (central recording instances): an unenrolled
+    # server presents it instead of a claim code and enrolls itself into the hub Site the token is bound to.
+    # Ignored once enrolled; never logged.
+    hub_enroll_token: str = ""
+    # NVR_INSTANCE_NAME: a display name shown on Settings -> System, e.g. "Main Street · Central" for a central
+    # recording instance. No other effect.
+    instance_name: str = ""
 
     # Direct-on-LAN (direct.py): a browser that can reach this server on its LAN fetches live/playback/frames
     # straight from it, authorized by a short-lived token the hub mints, instead of through the hub tunnel.

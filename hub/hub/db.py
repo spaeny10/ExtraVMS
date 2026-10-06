@@ -214,6 +214,43 @@ soc_reports = Table("soc_reports", metadata,
                     Column("created_at", Float, nullable=False), Column("created_by", String(24), nullable=True),
                     Column("text", Text, nullable=True), Column("data", sa.JSON, nullable=True), Column("model", String(120), nullable=True))
 
+# ---- Central recording (hosts.py). A host is one datacenter machine running the axiom-host agent (it dials
+# /host-agent with its own token, hashed at rest); a central instance is one isolated server container on a host,
+# recording one customer Site's cameras over SpeedFusion (mode vpn, camera subnet 10.20.<site_number>.0/24) or locked
+# port forwards (mode forward, the Site's public IP). The instance enrolls itself into its Site with a single-use
+# token (central_enroll_tokens), after which it is an ordinary server (server_id). Hub administrators only.
+hosts = Table("hosts", metadata,
+              Column("id", String(24), primary_key=True), Column("name", String(120), nullable=False),
+              Column("token_hash", String(64), nullable=False, index=True), Column("created_at", Float, nullable=False),
+              Column("online", Boolean, nullable=False, default=False), Column("last_seen_at", Float, nullable=True),
+              Column("hostname", String(120), nullable=True), Column("version", String(32), nullable=True),
+              Column("capacity", sa.JSON, nullable=True),   # hello/heartbeat: {cpus, load, ram_gb, gpus, disks, instances}
+              Column("notes", Text, nullable=True),
+              Column("fusionhub", String(200), nullable=True),   # the FusionHub (SpeedFusion peer) address for VPN-mode Sites
+              Column("agent_ip", String(64), nullable=True))
+central_instances = Table("central_instances", metadata,
+                          Column("id", String(24), primary_key=True), Column("host_id", String(24), nullable=False, index=True),
+                          Column("location_id", String(24), nullable=False, index=True), Column("org_id", String(24), nullable=False, index=True),
+                          Column("server_id", String(24), nullable=True, index=True),   # set when the instance enrolls
+                          Column("name", String(120), nullable=False),
+                          Column("mode", String(8), nullable=False),            # vpn | forward
+                          Column("subnet", String(43), nullable=True), Column("public_ip", String(64), nullable=True),
+                          Column("site_number", Integer, nullable=True, unique=True),   # 1..250; freed (NULL) once deleted
+                          Column("quota_gb", Integer, nullable=False), Column("gpu", Integer, nullable=True),   # NULL = no GPU
+                          Column("state", String(16), nullable=False, index=True),   # provisioning | running | failed | deleting | deleted
+                          Column("last_error", Text, nullable=True),
+                          Column("created_at", Float, nullable=False), Column("created_by", String(24), nullable=True),
+                          Column("updated_at", Float, nullable=True),
+                          Column("ready_at", Float, nullable=True),     # the host reported the instance created (then: waiting to enroll)
+                          Column("info", sa.JSON, nullable=True),       # the host's last report: {state, used_gb, quota_gb, gpu, mode, ...}
+                          Column("info_at", Float, nullable=True))
+central_enroll_tokens = Table("central_enroll_tokens", metadata,
+                              Column("token_hash", String(64), primary_key=True),
+                              Column("instance_id", String(24), nullable=False, index=True),
+                              Column("org_id", String(24), nullable=False), Column("location_id", String(24), nullable=False),
+                              Column("created_at", Float, nullable=False), Column("expires_at", Float, nullable=False),
+                              Column("used_at", Float, nullable=True), Column("server_id", String(24), nullable=True))
+
 _engine: Engine | None = None
 
 

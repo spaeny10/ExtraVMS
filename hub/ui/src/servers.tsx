@@ -6,6 +6,7 @@ import { useState } from "react";
 import { confirmDialog, promptDialog, toast } from "@site/ui";
 import { type Backup, type Server, type Site, ago, api, fmtTime } from "./api";
 import { consoleHref } from "./nav";
+import { fmtGB, fmtMbps, quotaText, serverBandwidth } from "./central";
 
 /** Status card. With `children` (actions) it is a plain box whose name links to `href`; without, the whole card is the link. */
 export function ServerCard({ s, now, href = consoleHref(s.id), children }: { s: Server; now: number; href?: string; children?: React.ReactNode }) {
@@ -15,6 +16,7 @@ export function ServerCard({ s, now, href = consoleHref(s.id), children }: { s: 
   const today = Object.entries(sm.today ?? {}).map(([k, v]) => `${v} ${k}`).join(" · ");
   const diskDays = sm.disk && sm.bitrate_mbps ? Math.round(sm.disk.free_gb / ((sm.bitrate_mbps * 86400) / 8 / 1000)) : null;
   const cls = `site-card ${s.online ? "" : "offline"} ${s.retired_at ? "retired" : ""}`;
+  const bw = serverBandwidth(s);
   const body = (
     <>
       <div className="head">
@@ -31,12 +33,15 @@ export function ServerCard({ s, now, href = consoleHref(s.id), children }: { s: 
         <div><span>Disk</span> {sm.disk ? `${sm.disk.free_gb.toLocaleString()} GB free${diskDays != null && isFinite(diskDays) ? ` · ~${diskDays} d` : ""}` : "—"}</div>
         <div><span>AI</span> {sm.yolo_ready ? "YOLO ✓" : "YOLO …"} · {sm.vlm_ready ? "Qwen ✓" : "Qwen …"}{sm.queues?.synopsis ? ` (${sm.queues.synopsis} waiting)` : ""}</div>
         <div><span>Stream</span> {sm.bitrate_mbps != null ? `${sm.bitrate_mbps} Mbps` : "—"}</div>
+        {bw && <div><span>Upload</span> {fmtMbps(bw.mbps)}{bw.month_gb != null ? ` · ${fmtGB(bw.month_gb)} this month` : ""}</div>}
+        {s.central && <div><span>Storage</span> {quotaText(s.central.used_gb, s.central.quota_gb)} <span className="muted">(central)</span></div>}
         <div><span>Version</span> {s.version ?? "—"}{s.clock_skew_s != null && Math.abs(s.clock_skew_s) > 30 ? ` · clock ${s.clock_skew_s > 0 ? "+" : ""}${Math.round(s.clock_skew_s)} s` : ""}</div>
       </div>
       {cams.length > 0 && (
         <div className="cams">{cams.map((c) => <span key={c.id} className={`cam ${!c.stream_ready || c.problems?.length ? "bad" : ""}`} title={(c.problems ?? []).join("; ") || (c.stream_ready ? "streaming" : "no stream")}>
           {c.name}{c.ptz && !c.ptz.at_home ? " ↗" : ""}</span>)}</div>
       )}
+      {sm.site_link_down && <div className="alerts">⚠ No camera reachable: the link to the site may be down</div>}
       {s.open_alerts > 0 && <div className="alerts">⚠ {s.open_alerts} open alert{s.open_alerts > 1 ? "s" : ""}</div>}
     </>
   );

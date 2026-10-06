@@ -20,7 +20,7 @@ from typing import Callable
 
 from . import mediamtx
 from .config import settings
-from .onvif_soap import ACTION_PULL, Onvif, OnvifError, escape, find, find_all, local, simple_items, text
+from .onvif_soap import ACTION_PULL, Onvif, OnvifError, discover_services, escape, find, find_all, local, simple_items, text
 from .rtsp_client import Rtsp, keepalive, play_track, rtp_payload
 
 log = logging.getLogger("nvr.ingest")
@@ -212,33 +212,35 @@ class EventPuller(threading.Thread):
 
     def _session(self) -> None:
         c = self.cam
-        onvif = Onvif(c["host"], c["onvif_port"], c["username"], c["password"])
+        # Port-forward mode: the client connects to the outside address, and every URL the camera returns (the
+        # events XAddr, the subscription manager) is rewritten to it (onvif_soap.rewrite)
+        onvif = Onvif.for_camera(c)
         self._sync_clock(onvif)
-        body = onvif.call(onvif.device_url, "<tds:GetServices><tds:IncludeCapability>false</tds:IncludeCapability></tds:GetServices>")
-        events_url = next((text(s, "XAddr") for s in find_all(body, "Service")
-                           if text(s, "Namespace") == "http://www.onvif.org/ver10/events/wsdl"), None)
+        events_url = discover_services(onvif).get("events")
         if not events_url:
             raise OnvifError("camera has no events service")
         body = onvif.call(events_url, "<tev:CreatePullPointSubscription>"
                                       "<tev:InitialTerminationTime>PT300S</tev:InitialTerminationTime>"
                                       "</tev:CreatePullPointSubscription>")
-        address = text(find(body, "SubscriptionReference"), "Address")
+        address = text(find(body, "SubscriptionReference"), "Address")   # as the camera reported it
         if not address:
             raise OnvifError("no subscription address")
+        manager = onvif.rewrite(address)    # where the requests go
         self.connected = True
-        log.info("[%s] ONVIF event subscription %s", c["id"], address)
+        log.info("[%s] ONVIF event subscription %s%s", c["id"], address, f" (via {manager})" if manager != address else "")
 
         def wsa(action: str) -> str:
+            # wsa:To keeps the address the camera issued: it names the subscription, whatever route reaches it
             return (f"<wsa:Action>{action}</wsa:Action><wsa:To>{escape(address)}</wsa:To>"
                     f"<wsa:MessageID>urn:uuid:{uuid.uuid4()}</wsa:MessageID>")
 
         last_renew = time.time()
         while not self.stop_event.is_set():
             if time.time() - last_renew > 120:
-                onvif.call(address, "<wsnt:Renew><wsnt:TerminationTime>PT300S</wsnt:TerminationTime></wsnt:Renew>",
+                onvif.call(manager, "<wsnt:Renew><wsnt:TerminationTime>PT300S</wsnt:TerminationTime></wsnt:Renew>",
                            header=wsa(ACTION_RENEW))
                 last_renew = time.time()
-            resp = onvif.call(address, "<tev:PullMessages><tev:Timeout>PT10S</tev:Timeout>"
+            resp = onvif.call(manager, "<tev:PullMessages><tev:Timeout>PT10S</tev:Timeout>"
                                        "<tev:MessageLimit>100</tev:MessageLimit></tev:PullMessages>",
                               header=wsa(ACTION_PULL), timeout=20)
             for n in find_all(resp, "NotificationMessage"):

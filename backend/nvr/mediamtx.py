@@ -52,6 +52,16 @@ def camera_problem(cam: dict, partial: bool = False) -> str | None:
         v = cam.get(k)
         if isinstance(v, bool) or not isinstance(v, int) or not 1 <= v <= 65535:
             return f"camera {cid}: {k} must be a port number 1-65535"
+    # port-forward mode (optional; empty = connect to host / the ports above): the same rules
+    ph = cam.get("public_host")
+    if ph not in (None, "") and not (isinstance(ph, str) and valid_host(ph)):
+        return f"camera {cid}: outside address {str(ph)[:60]!r} is not an IP address or hostname"
+    for k in ("public_rtsp_port", "public_onvif_port"):
+        v = cam.get(k)
+        if v is not None and (isinstance(v, bool) or not isinstance(v, int) or not 1 <= v <= 65535):
+            return f"camera {cid}: {k} must be a port number 1-65535 (or empty)"
+    if cam.get("record_stream") not in (None, "main", "sub"):
+        return f"camera {cid}: record_stream must be main or sub"
     return None
 
 
@@ -100,9 +110,34 @@ def auth_users() -> list[dict]:
 
 
 def camera_url(cam: dict, path: str) -> str:
+    """The camera's RTSP URL: its outside address and RTSP port in port-forward mode (public_host /
+    public_rtsp_port), else host / rtsp_port."""
+    from .onvif_soap import outside
     user = urllib.parse.quote(cam["username"], safe="")
     pw = urllib.parse.quote(cam["password"], safe="")
-    return f"rtsp://{user}:{pw}@{cam['host']}:{cam['rtsp_port']}{path}"
+    host, _, port = outside(cam)
+    return f"rtsp://{user}:{pw}@{host}:{port}{path}"
+
+
+def records_sub(cam: dict) -> bool:
+    """The camera records its sub stream continuously (record_stream "sub": saves cellular data)."""
+    return cam.get("record_stream") == "sub"
+
+
+def local_url(path: str) -> str:
+    """This MediaMTX's own RTSP URL for `path`, with the NVR's reader password when rtsp_auth is on."""
+    base = settings.mediamtx_rtsp.rstrip("/")
+    cred = reader_credentials()
+    if cred:
+        scheme, rest = base.split("://", 1)
+        base = f"{scheme}://{urllib.parse.quote(cred[0], safe='')}:{urllib.parse.quote(cred[1], safe='')}@{rest}"
+    return f"{base}/{path}"
+
+
+def camera_paths(cam: dict) -> list[str]:
+    """MediaMTX paths whose bytes come from the camera itself (bandwidth from the site): the recorded path
+    and the on-demand one pulling the other stream. In sub mode <id>_sub relays <id> locally (not counted)."""
+    return [cam["id"], f"{cam['id']}_hd"] if records_sub(cam) else [cam["id"], f"{cam['id']}_sub"]
 
 
 def build_config(cameras: list[dict]) -> dict:
@@ -116,6 +151,18 @@ def build_config(cameras: list[dict]) -> dict:
             # the others recording.
             log.error("[%s] %s: camera left out of MediaMTX", cam.get("id"), problem)
             continue
+        on_demand = {"rtspTransport": "tcp", "sourceOnDemand": True, "sourceOnDemandCloseAfter": "30s"}
+        if records_sub(cam):
+            # record_stream "sub" (cellular sites): the path named after the camera pulls and records the SUB stream
+            # 24/7, so everything keyed by the camera id keeps working unchanged on the smaller picture: playback,
+            # Timeline, event clips (pipeline fetch_clip), frames, verification and the ONVIF metadata reader
+            # (the camera must send metadata on its sub-stream profile). <id>_sub (SD live view) relays that same
+            # stream from this MediaMTX, so watching costs no extra upload; <id>_hd pulls the main stream from the
+            # camera only while someone watches in HD.
+            paths[cam["id"]] = {"source": camera_url(cam, cam["sub_path"]), "rtspTransport": "tcp", "record": True}
+            paths[f"{cam['id']}_sub"] = {**on_demand, "source": local_url(cam["id"])}
+            paths[f"{cam['id']}_hd"] = {**on_demand, "source": camera_url(cam, cam["main_path"])}
+            continue
         # Main stream: always pulled and recorded 24/7. The NVR also reads the ONVIF
         # metadata track from this path, so the camera only serves one main session.
         paths[cam["id"]] = {
@@ -124,12 +171,7 @@ def build_config(cameras: list[dict]) -> dict:
             "record": True,
         }
         # Sub stream: H.264, used for browser live view; pulled only while watched.
-        paths[f"{cam['id']}_sub"] = {
-            "source": camera_url(cam, cam["sub_path"]),
-            "rtspTransport": "tcp",
-            "sourceOnDemand": True,
-            "sourceOnDemandCloseAfter": "30s",
-        }
+        paths[f"{cam['id']}_sub"] = {**on_demand, "source": camera_url(cam, cam["sub_path"])}
     return {
         "logLevel": "info",
         "logDestinations": ["stdout", "file"],

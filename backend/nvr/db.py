@@ -265,6 +265,11 @@ MIGRATIONS = [
     ("identities", "watch_note", "TEXT NOT NULL DEFAULT ''"),
     ("events", "watched", "TEXT"),              # name of the watched identity this sighting matched
     ("events", "areas", "TEXT"),                # JSON [{name, from, to}]: named areas the object walked into             # none|low|medium|high: max(threat, unusualness), operator wins
+    # port-forward mode (central recording): the camera's outside address and ports; NULL = connect to host / its ports
+    ("cameras", "public_host", "TEXT"),
+    ("cameras", "public_rtsp_port", "INTEGER"),
+    ("cameras", "public_onvif_port", "INTEGER"),
+    ("cameras", "record_stream", "TEXT NOT NULL DEFAULT 'main'"),   # main | sub: which stream is recorded 24/7 (mediamtx.build_config)
     ("events", "migrated_from", "TEXT"),        # JSON {site, site_id, event_id, camera_id}: copied here by a fleet move (siteconfig.import_history)
 ]
 JSON_FIELDS = ("path", "rules", "detections", "synopsis_json", "synopsis_original", "feedback", "anomaly_json", "areas", "policy", "migrated_from")
@@ -419,8 +424,12 @@ class Database:
     def upsert_camera(self, cam: dict) -> None:
         cols = ["id", "name", "host", "onvif_port", "rtsp_port", "username", "password",
                 "main_path", "sub_path", "enabled", "zones", "retention_days", "scene_notes", "retention_policy",
-                "synopsis_labels", "policies"]
+                "synopsis_labels", "policies", "public_host", "public_rtsp_port", "public_onvif_port", "record_stream"]
         data = {**cam, "zones": json.dumps(cam.get("zones", []))}
+        if "public_host" in data:
+            data["public_host"] = data["public_host"] or None   # "" = not in port-forward mode
+        if "record_stream" in data:
+            data["record_stream"] = data["record_stream"] or "main"
         if "policies" in data:
             data["policies"] = json.dumps(data["policies"] or [])
         if "retention_policy" in data:

@@ -5,12 +5,25 @@
 import { useState } from "react";
 import type { Server, Site } from "../api";
 import { ago } from "../api";
+import { fmtGB, fmtMbps, quotaText, serverBandwidth } from "../central";
 import { go, siteHref } from "../nav";
 import { ServerActions, ServerCard } from "../servers";
 
 type View = "table" | "cards";
 const VIEW_KEY = "customerServersView";
 const loadView = (): View => { try { return localStorage.getItem(VIEW_KEY) === "cards" ? "cards" : "table"; } catch { return "table"; } };
+
+/** Upload from the cameras (summary.bandwidth) and, for a central instance, its storage quota: what billing reads. */
+function Usage({ s }: { s: Server }) {
+  const bw = serverBandwidth(s);
+  if (!bw && !s.central) return <span className="muted">—</span>;
+  return (
+    <>
+      {bw && <div>{fmtMbps(bw.mbps)}{bw.month_gb != null ? ` · ${fmtGB(bw.month_gb)} this month` : ""}</div>}
+      {s.central && <div title={s.central.mode === "vpn" ? "Central recording over SpeedFusion" : "Central recording over port forwards"}>Storage {quotaText(s.central.used_gb, s.central.quota_gb)}</div>}
+    </>
+  );
+}
 
 export function ServersBox({ servers, sites, admin, onChanged }: { servers: Server[]; sites: Site[]; admin: boolean; onChanged: () => void }) {
   const [view, setViewState] = useState<View>(loadView);
@@ -30,12 +43,13 @@ export function ServersBox({ servers, sites, admin, onChanged }: { servers: Serv
         <div className="site-grid" style={{ marginTop: 10 }}>{servers.map((s) => <ServerCard key={s.id} s={s} now={now} />)}</div>
       ) : (
         <table className="hub-table stack">
-          <thead><tr><th>Server</th><th>Site</th><th>Status</th><th>Host</th><th>Version</th><th /></tr></thead>
+          <thead><tr><th>Server</th><th>Site</th><th>Status</th><th>Usage</th><th>Host</th><th>Version</th><th /></tr></thead>
           <tbody>{servers.map((s) => (
             <tr key={s.id}>
               <td className="lead">{s.name} <span className="muted small">{s.id}</span>{s.location && <div className="muted small">{s.location}</div>}</td>
               <td>{s.location_id ? <a href={siteHref(s.location_id, "servers")} onClick={go(siteHref(s.location_id, "servers"))}>{s.location_name ?? s.location_id}</a> : <span className="muted">unassigned</span>}</td>
               <td>{s.online ? "online" : `offline · ${ago(s.last_seen_at)}`}{s.retired_at ? <> · <span className="alert-kind">retired</span></> : null}</td>
+              <td className="small"><Usage s={s} /></td>
               <td className="muted small">{s.hostname}</td>
               <td data-label={s.version ? "Version" : undefined}>{s.version}</td>
               <td className="row wide"><ServerActions s={s} admin={admin} sites={sites} onChanged={onChanged} /></td>

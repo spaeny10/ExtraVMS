@@ -1,0 +1,18 @@
+# /etc/systemd/system/axiom-firewall.service: load the instance isolation rules BEFORE Docker starts the
+# instances (restart: unless-stopped), so no instance ever runs without them after a reboot. Uses the hub
+# addresses resolved last time (DNS may not be up yet); axiom-host refreshes them once it runs.
+[Unit]
+Description=Axiom Vision instance isolation firewall (nftables table inet axiom)
+DefaultDependencies=no
+After=local-fs.target nftables.service
+Before=docker.service network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/python3 /opt/axiom-host/axiom_host.py apply-firewall --offline
+
+[Install]
+WantedBy=multi-user.target
+RequiredBy=docker.service

@@ -15,7 +15,8 @@ from . import alerts, auth, db
 from .config import settings
 
 log = logging.getLogger("hub.push")
-DEFAULT_KINDS = ["offline", "event_policy", "event_watched", "event_high"]
+DEFAULT_KINDS = ["offline", "event_policy", "event_watched", "event_high", "site_link_down",
+                 "host_offline"]   # host_offline only ever reaches hub administrators (alerts.HUB_KINDS)
 _sender: Callable | None = None   # tests inject a fake
 
 
@@ -127,9 +128,15 @@ def title_name(site: dict) -> str:
 
 async def notify_alert(org_id: str, site: dict, kind: str, detail: dict) -> int:
     """Push an opened alert to every member of the org who may see this server and chose this kind. Returns pushes sent."""
+    supers = {u["id"] for u in db.rows(sa.select(db.users.c.id).where(db.users.c.is_super == True))}  # noqa: E712
+    if kind in alerts.HUB_KINDS:   # a central recording host: hub administrators only, never a customer
+        return await _send([s for s in db.rows(sa.select(db.push_subscriptions).where(db.push_subscriptions.c.user_id.in_(list(supers))))
+                            if kind in (s["kinds"] or DEFAULT_KINDS)] if supers else [],
+                           {"title": f"Host {site.get('name') or site['id']} is offline", "body": "Central recording host: its instances may be down too",
+                            "url": "/hub/hosts", "kind": kind, "host_id": site["id"]})
     members = db.rows(sa.select(db.memberships.c.user_id).where(db.memberships.c.org_id == org_id))
     uids = {m["user_id"] for m in members if auth.can_see_server(m["user_id"], org_id, site)}
-    uids |= {u["id"] for u in db.rows(sa.select(db.users.c.id).where(db.users.c.is_super == True))}  # noqa: E712
+    uids |= supers
     if not uids:
         return 0
     subs = db.rows(sa.select(db.push_subscriptions).where(db.push_subscriptions.c.user_id.in_(list(uids))))
@@ -137,9 +144,12 @@ async def notify_alert(org_id: str, site: dict, kind: str, detail: dict) -> int:
     title = {"offline": f"{name} is offline", "camera_down": f"{name}: camera down", "disk": f"{name}: disk low",
              "clock": f"{name}: clock skew", "detector_fallback": f"{name}: detection on the CPU",
              "detector_stalled": f"{name}: event verification stalled", "event_high": f"{name}: high-priority event",
-             "event_policy": f"{name}: site rule broken", "event_watched": f"{name}: watched person seen"}.get(kind, f"{name}: {kind}")
+             "event_policy": f"{name}: site rule broken", "event_watched": f"{name}: watched person seen",
+             "site_link_down": f"{name}: link to the site down"}.get(kind, f"{name}: {kind}")
     body = detail.get("text") or detail.get("synopsis") or detail.get("name") or ", ".join(detail.get("problems") or []) or ""
     url = f"/s/{site['id']}/#timeline?cam={detail.get('camera_id')}&event={detail.get('id')}" if detail.get("id") and detail.get("camera_id") else f"/s/{site['id']}/"
+    if kind == "site_link_down" and site.get("location_id"):
+        url = f"/sites/{site['location_id']}/servers"
     payload = {"title": title, "body": body[:180], "url": url, "kind": kind, "site_id": site["id"],
                "location_id": site.get("location_id")}
     sent = 0
@@ -162,7 +172,7 @@ SOC_KIND = "soc"                 # pages to SOC staff: sent to every subscriptio
 # The UI's PushCard lists it from GET /api/push/vapid `kinds` (label: "SOC incident at my site"); it only ever fires
 # for Sites the customer has opted into SOC monitoring.
 INCIDENT_KIND = "soc_incident"
-CUSTOMER_KINDS = (*alerts.KINDS, INCIDENT_KIND)   # every kind a customer subscription may choose
+CUSTOMER_KINDS = (*(k for k in alerts.KINDS if k not in alerts.HUB_KINDS), INCIDENT_KIND)   # every kind a customer subscription may choose
 
 
 def _incident_text(incident: dict) -> tuple[str, str]:

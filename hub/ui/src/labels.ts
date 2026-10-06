@@ -3,6 +3,10 @@ export const KIND_LABEL: Record<string, string> = {
   offline: "Server offline", camera_down: "Camera down", disk: "Disk low", clock: "Clock skew",
   detector_fallback: "Detection on CPU", detector_stalled: "Verification stalled",
   event_high: "High-priority event", event_policy: "Site rule broken", event_watched: "Watched person/vehicle",
+  // one alert instead of a camera_down per camera when the server can reach none of the Site's cameras
+  site_link_down: "Site link down",
+  // hub administrators only: a central recording host stopped heartbeating
+  host_offline: "Central host offline",
 };
 
 /**

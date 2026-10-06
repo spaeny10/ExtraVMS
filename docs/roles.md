@@ -52,6 +52,8 @@ A hub administrator is an owner of every Customer, present and future, without b
 
 Granting: Account › Hub administrators (type the email of an existing account), or on the hub server `python -m hub setsuper EMAIL` (`--off` to revoke). The person must have signed up first, normally through an invite to any Customer. The last hub administrator cannot be removed.
 
+Central recording is theirs alone: the Hosts page (datacenter hosts, their tokens), and on a Site's Servers tab adding, resizing or removing the Site's central recording instance. A Site's admins (Customer admins or owners who can see that Site) may read its central recording state and the Peplink settings sheet, to set up the site's router; nobody else sees it. Host outages (`host_offline`) notify hub administrators only.
+
 ## SOC roles
 
 The Security Operations Center is one internal team. A Customer opts a Site into monitoring (Site › Settings › Monitoring, with an arming schedule, holidays and overrides). SOC staff only ever see Customers that have at least one monitored Site.

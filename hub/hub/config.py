@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     heartbeat_s: float = 30.0
     max_streams_per_site: int = 32
     first_byte_timeout_s: float = 30.0
+    scan_timeout_s: float = 120.0        # POST /api/cameras/scan through the tunnel
     host: str = "0.0.0.0"
     port: int = 8000
     log_level: str = "info"
@@ -73,6 +74,16 @@ class Settings(BaseSettings):
     map_tiles: str = ""                       # Leaflet URL template; empty = MAP_TILES below (OpenStreetMap)
     map_attribution: str = ""                 # HTML; empty = OpenStreetMap's (required with its tiles)
 
+
+    # Central recording (hosts.py): datacenter hosts running axiom-host, one server instance per customer Site
+    central_vlm_url: str = "http://vllm:8000/v1"   # the shared vLLM every central instance uses (handed to the host)
+    datacenter_ip: str = ""                   # the datacenter's public IP: the only allowed source of port-forward rules
+    fusionhub_address: str = ""               # SpeedFusion peer for VPN-mode Sites when the host has none of its own
+    central_gpu_prefer: str = "A10"           # an instance gets the host GPU whose name has this model (least used first) ...
+    central_gpu_avoid: str = "A40"            # ... else the least used GPU that isn't this one (the A40 runs vLLM)
+    central_enroll_ttl_s: int = 86400         # how long an instance's single-use enrollment token stays valid
+    host_create_timeout_s: float = 600.0      # create_instance may pull images and set up quotas: minutes
+    host_command_timeout_s: float = 120.0     # every other host command
 
 settings = Settings()
 if not settings.secret:

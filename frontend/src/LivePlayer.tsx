@@ -10,8 +10,10 @@ import { WhepPlayer, type WhepState } from "./WhepPlayer";
 
 const FALLBACK_LAG = LIVE_LAG + 6;   // a chunk must exist on disk before it can be fetched
 
-export function LivePlayer({ path, port, className, onUnsupported, showSize, iceServers, videoRef, children, base, site, muted, onAudio, onState }: {
+export function LivePlayer({ path, camera, port, className, onUnsupported, showSize, iceServers, videoRef, children, base, site, muted, onAudio, onState }: {
   path: string; port: number; className?: string; onUnsupported?: () => void; showSize?: boolean;
+  /** the camera whose recording the fallback follows; default: the path without _sub / _hd */
+  camera?: string;
   iceServers?: RTCIceServer[]; videoRef?: React.MutableRefObject<HTMLVideoElement | null>; children?: ReactNode;
   /** connection state of the WebRTC player (the recording fallback counts as "playing") */
   onState?: (s: WhepState) => void;
@@ -27,7 +29,7 @@ export function LivePlayer({ path, port, className, onUnsupported, showSize, ice
     return <WhepPlayer path={path} port={port} className={className} onUnsupported={onUnsupported} showSize={showSize} base={base} site={site}
       iceServers={iceServers} videoRef={videoRef} muted={muted} onAudio={onAudio} onState={onState} onFallback={() => { onState?.("playing"); setFallback(true); }}>{children}</WhepPlayer>;
   }
-  return <RecordingFollow camera={path.replace(/_sub$/, "")} className={className} videoRef={videoRef} base={base} site={site} onGiveUp={() => { onState?.("connecting"); setFallback(false); }}>{children}</RecordingFollow>;
+  return <RecordingFollow camera={camera ?? path.replace(/_(sub|hd)$/, "")} className={className} videoRef={videoRef} base={base} site={site} onGiveUp={() => { onState?.("connecting"); setFallback(false); }}>{children}</RecordingFollow>;
 }
 
 /** Plays the recording from a few seconds ago and keeps loading the next chunk: live-ish without WebRTC. */

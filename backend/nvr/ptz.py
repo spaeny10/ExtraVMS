@@ -164,7 +164,8 @@ def _f(v: float) -> str:
 class PtzCamera:
     def __init__(self, cam: dict) -> None:
         self.cam = cam
-        self.onvif = Onvif(cam["host"], cam["onvif_port"], cam["username"], cam["password"], timeout=CALL_TIMEOUT)
+        # port-forward mode: the outside address, and the camera's service URLs rewritten to it (onvif_soap.rewrite)
+        self.onvif = Onvif.for_camera(cam, timeout=CALL_TIMEOUT)
         self.lock = asyncio.Lock()
         self.caps: dict | None = None          # None = not probed yet; {"available": False} = no PTZ
         self.profile: str | None = None

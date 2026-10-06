@@ -790,6 +790,11 @@ body:has(.drag-ghost) { cursor: grabbing; user-select: none; }
 .hub-claim { margin: 6px 0; }
 .hub-code { font-size: 28px; font-weight: 700; letter-spacing: .12em; font-variant-numeric: tabular-nums; }
 
+/* Settings -> Cameras -> Add camera: unicast ONVIF scan */
+.scan-box summary, details.field summary { cursor: pointer; }
+.scan-results { list-style: none; padding: 0; margin: 6px 0; max-height: 220px; overflow-y: auto; }
+.scan-results li { gap: 10px; padding: 3px 0; border-bottom: 1px solid var(--border); }
+
 /* ---- Home dashboard (frontend/src/dashboard): widget grid, chrome, camera tiles, feeds */
 .dash-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
 .dash-toolbar select { max-width: 260px; }

@@ -21,6 +21,12 @@ STARTED_AT = time.time()
 _OK = "status='verified' AND (feedback IS NULL OR json_extract(feedback, '$.verdict') IS NOT 'false_alarm')"
 
 
+def link_alert(state, cams: list[dict] | None = None) -> dict | None:
+    """The site_link_down health alert (health.StreamHealth.link_down) or None."""
+    h = getattr(state, "health", None)
+    return h.link_down(cams) if h is not None and hasattr(h, "link_down") else None
+
+
 async def site_summary(state, since: float | None = None, version: str = "") -> dict:
     """`since`: attention events after this time are listed (the hub raises alerts from them)."""
     now = time.time()
@@ -30,15 +36,22 @@ async def site_summary(state, since: float | None = None, version: str = "") -> 
     with contextlib.suppress(httpx.HTTPError):
         status = await mediamtx.path_status()
     cams = []
-    for c in db.cameras(enabled_only=True):
+    enabled = db.cameras(enabled_only=True)
+    link = link_alert(state, enabled)
+    for c in enabled:
         ing = state.ingests.get(c["id"])
         st = ing.status() if ing else {}
         h = state.health.camera(c["id"]) or {}
         ptz = state.ptz.status(c["id"]) if getattr(state, "ptz", None) else None
-        cams.append({"id": c["id"], "name": c["name"], "stream_ready": bool(status.get(c["id"], {}).get("ready")),
-                     "metadata": bool(st.get("metadata")), "onvif_events": bool(st.get("onvif_events")),
-                     "bitrate_mbps": h.get("bitrate_mbps"), "problems": h.get("problems") or [],
-                     "ptz": {"at_home": ptz["at_home"], "preset_name": ptz["preset_name"]} if ptz else None})
+        cam = {"id": c["id"], "name": c["name"], "stream_ready": bool(status.get(c["id"], {}).get("ready")),
+               "metadata": bool(st.get("metadata")), "onvif_events": bool(st.get("onvif_events")),
+               "bitrate_mbps": h.get("bitrate_mbps"), "problems": h.get("problems") or [],
+               "ptz": {"at_home": ptz["at_home"], "preset_name": ptz["preset_name"]} if ptz else None}
+        if link:
+            # the site link is down: one site_link_down alert, not one camera_down per camera (the hub skips
+            # camera_down for cameras marked link_down; their "no video" problems say nothing more)
+            cam.update(link_down=True, problems=[])
+        cams.append(cam)
     today: dict[str, int] = {}
     for r in db.all(f"SELECT camera_class, COUNT(*) n FROM events WHERE {_OK} AND start_ts >= ? GROUP BY 1", [day_start]):
         today[r["camera_class"]] = r["n"]
@@ -58,8 +71,12 @@ async def site_summary(state, since: float | None = None, version: str = "") -> 
         "retention_alert": retention.alert,
         "queues": {"verify": p.verify_q.qsize(), "synopsis": p.synopsis_q.qsize()},
         "yolo_ready": detector.yolo_status(p)["yolo_ready"], "vlm_ready": p.vlm_ready, "vlm_model": settings.vlm_model,
-        # detector_fallback / detector_stalled: the hub opens an alert per kind while it is listed (hub alerts.py)
-        "health_alerts": detector.health_alerts(p),
+        # detector_fallback / detector_stalled / site_link_down: the hub opens an alert per kind while it is listed
+        # (hub alerts.py)
+        "health_alerts": detector.health_alerts(p) + ([link] if link else []),
+        "site_link_down": bool(link),
+        # what the cameras send this server: {mbps (5-min average), today_gb, month_gb, cameras: {id: mbps}}
+        "bandwidth": state.health.bandwidth(enabled) if hasattr(state.health, "bandwidth") else None,
         "cameras": cams, "today": today, "attention": attention,
         # disabled cameras, separately: `cameras` stays "enabled only" for older hubs, newer ones mark these
         # off in their cameras registry instead of "missing"

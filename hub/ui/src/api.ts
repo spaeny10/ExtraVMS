@@ -25,11 +25,15 @@ export type Org = { id: string; name: string; slug: string; role: string; soc?: 
  * Hierarchy: Customer (wire: org) › Site (wire: location, /api/locations) › Server (wire: site, /api/sites) › Camera.
  * `Server` is what the hub's tables call a "site": one NVR box, one token, one tunnel at /s/<id>/.
  */
-export type ServerCamera = { id: string; name: string; stream_ready: boolean; metadata?: boolean; onvif_events?: boolean; bitrate_mbps?: number | null; problems: string[]; ptz?: { at_home: boolean; preset_name: string | null } | null };
+/** `link_down`: unreachable because the whole site link is down (summary.site_link_down); no camera_down then. */
+export type ServerCamera = { id: string; name: string; stream_ready: boolean; metadata?: boolean; onvif_events?: boolean; bitrate_mbps?: number | null; problems: string[]; ptz?: { at_home: boolean; preset_name: string | null } | null; link_down?: boolean };
+/** What a server pulls from its cameras (newer servers): now, today and this month, and per camera Mbit/s. */
+export type Bandwidth = { mbps: number; today_gb?: number; month_gb?: number; cameras?: Record<string, number> };
 export type ServerSummary = {
   now?: number; version?: string; uptime_s?: number; disk?: { free_gb: number; total_gb: number }; retention_alert?: unknown;
   queues?: { verify: number; synopsis: number }; yolo_ready?: boolean; vlm_ready?: boolean; vlm_model?: string;
   cameras?: ServerCamera[]; today?: Record<string, number>; attention?: unknown[]; backup_last?: number | null; bitrate_mbps?: number;
+  site_link_down?: boolean; bandwidth?: Bandwidth;
 };
 /** `location` is the server's own free-text note (older than Sites); `location_id/location_name` is the Site it belongs to. */
 export type Server = {
@@ -38,7 +42,32 @@ export type Server = {
   location_id?: string | null; location_name?: string | null; cameras_total?: number; cameras_online?: number;
   /** Direct-on-LAN (newer hubs): the server's own addresses a browser on its LAN can reach without the tunnel. */
   direct?: DirectInfo;
+  /** A central recording instance (hub hosts.py): its storage quota and what it uses, from its host's heartbeat. */
+  central?: CentralUsage | null;
 };
+export type CentralUsage = { id: string; mode: CentralMode; quota_gb: number; used_gb: number | null; site_number: number | null; state: string };
+
+// ---- Central recording (hub/hub/hosts.py): datacenter hosts and the per-Site server instances on them
+export type CentralMode = "vpn" | "forward";
+export type HostGpu = { index: number; name: string; mem_total_mb?: number; mem_used_mb?: number; util?: number };
+export type HostCapacity = { cpus?: number; load?: number; ram_gb?: { total: number; free: number }; gpus?: HostGpu[]; disks?: { path: string; total_gb?: number; free_gb?: number }[]; instances?: number };
+/** `offline_since`: when its open host_offline alert opened (null = none open). */
+export type Host = {
+  id: string; name: string; created_at: number; online: boolean; last_seen_at: number | null; hostname: string | null; version: string | null;
+  capacity: HostCapacity | null; notes: string | null; fusionhub: string | null; agent_ip: string | null; instances: number; quota_gb: number; offline_since: number | null;
+};
+/** What the Peplink settings sheet shows (central.ts lays out the port-forward table from the bases). */
+export type Peplink = { mode: CentralMode; subnet: string | null; lan_gateway: string | null; public_ip: string | null; fusionhub: string | null; datacenter_ip: string | null; rtsp_base: number; onvif_base: number };
+/** One Site's central instance. The host_* / gpu / last_error fields are sent to hub administrators only. */
+export type CentralInstance = {
+  id: string; location_id: string; location_name: string | null; org_id: string; org_name: string | null; server_id: string | null; server_online: boolean;
+  name: string; mode: CentralMode; subnet: string | null; public_ip: string | null; site_number: number | null; quota_gb: number; used_gb: number | null;
+  state: "provisioning" | "running" | "failed" | "deleting" | "deleted"; phase: string; created_at: number; ready_at: number | null; info_at: number | null;
+  peplink: Peplink; cameras?: { id: string; name: string }[];
+  host_id?: string; host_name?: string | null; host_online?: boolean; gpu?: number | null; gpu_name?: string | null; last_error?: string | null; host_state?: string | null;
+};
+export type LocationCentral = { instances: CentralInstance[]; can_provision: boolean; hosts: Pick<Host, "id" | "name" | "online" | "capacity" | "instances">[] };
+export type CentralBody = { host_id?: string | null; mode: CentralMode; subnet?: string | null; public_ip?: string | null; quota_gb: number; gpu?: number | null; name?: string | null };
 /**
  * `urls`: candidate base URLs of the server itself (`local` = only works from a browser on that machine, e.g.
  * http://localhost:8080); `fingerprint`: its self-signed certificate's SHA-256, for the "accept the certificate" prompt.
@@ -291,6 +320,20 @@ export const api = {
   hubAudit: (limit = 20) => req<AuditRow[]>(`/api/hub/audit?${qs({ limit })}`),
   hubSites: (include_retired?: boolean) => req<HubSitesOrg[]>(`/api/hub/sites?${qs({ include_retired: include_retired || undefined })}`),
   patchOrg: (org: string, b: { name?: string; ai_shared?: boolean }) => req<Org>(`/api/orgs/${org}`, json("PATCH", b)),
+  // central recording: hosts are hub administrators' business; a Site's admins read its instance and Peplink sheet
+  hosts: () => req<{ hosts: Host[]; install: string; host_agent_url: string }>("/api/hub/hosts"),
+  /** The token is in this answer only (the hub keeps a hash). */
+  addHost: (b: { name: string; notes?: string; fusionhub?: string }) => req<{ host: Host; token: string; install: string }>("/api/hub/hosts", json("POST", b)),
+  updateHost: (id: string, b: { name?: string; notes?: string | null; fusionhub?: string | null }) => req<Host>(`/api/hub/hosts/${encodeURIComponent(id)}`, json("PATCH", b)),
+  removeHost: (id: string) => req(`/api/hub/hosts/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  rotateHost: (id: string) => req<{ token: string; install: string }>(`/api/hub/hosts/${encodeURIComponent(id)}/rotate-token`, { method: "POST" }),
+  hubCentral: () => req<CentralInstance[]>("/api/hub/central"),
+  locationCentral: (loc: string) => req<LocationCentral>(`/api/locations/${loc}/central`),
+  provisionCentral: (loc: string, b: CentralBody) => req<CentralInstance>(`/api/locations/${loc}/central`, json("POST", b)),
+  setCentralQuota: (loc: string, ci: string, quota_gb: number) => req<CentralInstance>(`/api/locations/${loc}/central/${ci}`, json("PATCH", { quota_gb })),
+  /** purge also deletes the recordings on the host; force forgets the instance at the hub when its host can't. */
+  removeCentral: (loc: string, ci: string, o: { purge?: boolean; force?: boolean } = {}) =>
+    req<CentralInstance>(`/api/locations/${loc}/central/${ci}?${qs({ purge: o.purge || undefined, force: o.force || undefined })}`, { method: "DELETE" }),
   // SOC monitoring per Site: config for customer admins and SOC supervisors, arm/disarm now for operators of either side
   monitoring: (loc: string) => req<Monitoring>(`/api/locations/${loc}/monitoring`),
   setMonitoring: (loc: string, b: MonitoringConfig) => req<Monitoring>(`/api/locations/${loc}/monitoring`, json("PUT", b)),

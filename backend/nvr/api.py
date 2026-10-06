@@ -27,9 +27,11 @@ from . import assistant, backup, baseline, footage, frames, health, identities, 
 from . import synopsis as vlm
 from . import advisor, ai_serve, detector, direct, hub_agent, lan_guard, site_actions, siteconfig
 from . import vlmroute
+from . import summary as summary_mod
 from .config import ROOT, settings
 from .db import JOURNEY_CAMS_SQL, LOCKED_SQL, PRIORITY_RANK_SQL, db, event_filters
 from .ingest import CameraIngest
+from . import onvif_soap
 from .onvif_soap import OnvifError
 from .pipeline import Pipeline
 from .seed import seed_cameras_from_env
@@ -119,6 +121,7 @@ async def lifespan(app: FastAPI):
     for ing in state.ingests.values():
         ing.stop()
     await state.mtx.stop()
+    state.health.flush()   # bytes received today since the last save
     if state.ollama is not None:   # a site without a local model has no Ollama to stop
         await state.ollama.stop()
     if https is not None:
@@ -503,11 +506,13 @@ async def hub_configure(body: HubIn):
 
 PUBLIC_CAMERA_FIELDS = ("id", "name", "host", "onvif_port", "rtsp_port", "username", "main_path",
                         "sub_path", "enabled", "zones", "retention_days", "scene_notes", "retention_policy",
-                        "synopsis_labels", "policies", "ptz_config")
+                        "synopsis_labels", "policies", "ptz_config", "public_host", "public_rtsp_port", "public_onvif_port",
+                        "record_stream")
+CAMERA_KEPT_FIELDS = ("public_host", "public_rtsp_port", "public_onvif_port", "record_stream")   # omitted on PUT = unchanged
 
 
 def public_camera(c: dict) -> dict:
-    return {k: c[k] for k in PUBLIC_CAMERA_FIELDS}
+    return {k: c.get(k) for k in PUBLIC_CAMERA_FIELDS}
 
 
 # ---------------------------------------------------------------- cameras
@@ -539,12 +544,31 @@ class CameraIn(BaseModel):
     retention_policy: dict | None = None  # partial override of the site retention policy; None = inherit
     synopsis_labels: list[Literal["person", "vehicle"]] | None = None  # what Qwen describes; None = site default
     policies: list[SiteRule] = []  # site rules checked after Qwen describes a vehicle (policy.py)
+    # Port-forward mode (a central server reaching the camera through the site router's forwards): the outside
+    # address and ports; every URL the camera reports is rewritten to them (onvif_soap.rewrite). Empty = off.
+    # Omitted on update = keep what is stored (like password).
+    public_host: str | None = Field(None, pattern=r"^[A-Za-z0-9][A-Za-z0-9.\-]{0,252}$", description="outside IP address or hostname")
+    public_rtsp_port: int | None = None
+    public_onvif_port: int | None = None
+    # "sub": record the sub stream 24/7 instead of the main one (cellular sites); HD live pulls main on demand
+    record_stream: Literal["main", "sub"] = "main"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _empty_is_none(cls, data):
+        if isinstance(data, dict):   # a cleared form field arrives as "" (or 0 for a port)
+            data = {**data}
+            for k in ("public_host", "public_rtsp_port", "public_onvif_port"):
+                if k in data and data[k] in ("", 0):
+                    data[k] = None
+        return data
 
     @model_validator(mode="after")
     def _rtsp_safe(self):
         # main_path / sub_path are appended to rtsp://user:pass@host:port: "@evil:554/x" would send the camera
         # password to another host. Same rules as a config import (mediamtx.camera_problem).
-        problem = mediamtx.camera_problem(self.model_dump(include={"id", "host", "main_path", "sub_path", "rtsp_port", "onvif_port"}))
+        problem = mediamtx.camera_problem(self.model_dump(include={"id", "host", "main_path", "sub_path", "rtsp_port", "onvif_port",
+                                                                   "public_host", "public_rtsp_port", "public_onvif_port", "record_stream"}))
         if problem:
             raise ValueError(problem)
         return self
@@ -570,15 +594,49 @@ async def list_cameras():
     return out
 
 
+class ScanIn(BaseModel):
+    subnet: str = Field(max_length=43, description="e.g. 10.20.7.0/24: private or CGNAT, at most a /22")
+    ports: list[int] = Field(default_factory=lambda: list(onvif_soap.SCAN_PORTS), min_length=1, max_length=6)
+    # optional: read each device's model when it refuses to tell an anonymous caller (never stored or logged)
+    username: str | None = Field(None, max_length=64)
+    password: str | None = Field(None, max_length=128)
+
+    @model_validator(mode="after")
+    def _ports_valid(self):
+        if any(isinstance(p, bool) or not 1 <= p <= 65535 for p in self.ports):
+            raise ValueError("ports must be 1-65535")
+        return self
+
+
+@app.post("/api/cameras/scan")
+async def scan_cameras(body: ScanIn):
+    """Unicast ONVIF scan of a subnet (WS-Discovery multicast does not cross a VPN tunnel): every host on the given
+    ports, 64 at a time, 1.5 s per request. Admin only through the hub (POST /api/cameras/*). Returns
+    {subnet, devices: [{address, port, onvif, needs_auth, manufacturer?, model?, firmware?, auth_failed?,
+    camera_id?}]}; camera_id = a camera here already at that address and ONVIF port."""
+    try:
+        found = await onvif_soap.scan_subnet(body.subnet, body.ports, body.username or None, body.password)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    known = {(c["host"], c["onvif_port"]): c["id"] for c in db.cameras()}
+    for d in found:
+        if (d["address"], d["port"]) in known:
+            d["camera_id"] = known[(d["address"], d["port"])]
+    return {"subnet": body.subnet, "devices": found}
+
+
 @app.put("/api/cameras/{camera_id}")
 async def put_camera(camera_id: str, cam: CameraIn):
     if cam.id != camera_id:
         raise HTTPException(400, "id mismatch")
     data = cam.model_dump()
     data["enabled"] = int(data["enabled"])
+    existing = db.one("SELECT * FROM cameras WHERE id=?", [camera_id])
     if data["password"] is None:
-        existing = db.one("SELECT password FROM cameras WHERE id=?", [camera_id])
         data["password"] = existing["password"] if existing else ""
+    for k in CAMERA_KEPT_FIELDS:   # a client that doesn't know these fields (older hub UI) must not clear them
+        if k not in cam.model_fields_set and existing:
+            data[k] = existing.get(k)
     db.upsert_camera(data)
     if camera_id in state.ingests:  # restart readers with new settings
         state.ingests.pop(camera_id).stop()
@@ -1984,14 +2042,27 @@ async def system():
         "vlm_state": state.pipeline.vlm_state, "vlm_down_since": state.pipeline.vlm_down_since,
         **detector.yolo_status(state.pipeline),   # yolo_ready, yolo_device, yolo_fallback (Hailo -> CPU)
         "yolo_model": settings.yolo_model,
-        "health_alerts": detector.health_alerts(state.pipeline),
+        "health_alerts": _health_alerts(),
         "yolo_frame_ms": _median(getattr(state.pipeline.verifier, "frame_ms", None)),
         "events": counts,
         "webrtc_port": settings.mediamtx_webrtc_port,
         "backup": backup.status(),
         "tz_offset_s": time.localtime().tm_gmtoff,                  # fleet actions read "3-4 pm today" in site time
         "synopsis_labels_default": list(settings.synopsis_labels),
+        "instance_name": settings.instance_name or None,            # NVR_INSTANCE_NAME, e.g. "Main Street · Central"
+        "bandwidth": _bandwidth(),                                  # {mbps, today_gb, month_gb, cameras: {id: mbps}}
     }
+
+
+def _bandwidth() -> dict | None:
+    h = getattr(state, "health", None)
+    return h.bandwidth() if h is not None else None
+
+
+def _health_alerts() -> list[dict]:
+    """Detector problems plus site_link_down (every camera silent: the link to the site is down)."""
+    link = summary_mod.link_alert(state)
+    return detector.health_alerts(state.pipeline) + ([link] if link else [])
 
 
 @app.post("/api/backup")
@@ -2041,9 +2112,9 @@ async def home(since: float | None = None):
     return {"now": now, "since": since, "new_since": new_since, "attention": attention, "recent": recent, "cameras": cams,
             "briefing": b, "disk": {"free_gb": round(rec.free / 1e9), "total_gb": round(rec.total / 1e9)},
             "retention_alert": retention.alert, "yolo_ready": detector.yolo_status(p)["yolo_ready"], "vlm_ready": p.vlm_ready,
-            "health_alerts": detector.health_alerts(p),
+            "health_alerts": _health_alerts(),
             "queues": {"verify": p.verify_q.qsize(), "synopsis": p.synopsis_q.qsize()}, "backup": backup.status()["last"],
-            "baseline": baseline.status()}
+            "baseline": baseline.status(), "bandwidth": _bandwidth()}
 
 
 # ---------------------------------------------------------------- people & vehicles

@@ -39,7 +39,8 @@ def _check_cameras(cams, remap_ids: bool = False) -> None:
         if problem:
             raise InvalidCamera(problem.replace("camera x:", f"camera {str(c.get('id'))[:40]!r}:") if remap_ids else problem)
 CAMERA_COLS = ("name", "host", "onvif_port", "rtsp_port", "username", "main_path", "sub_path", "enabled", "zones",
-               "retention_days", "scene_notes", "retention_policy", "synopsis_labels", "policies")
+               "retention_days", "scene_notes", "retention_policy", "synopsis_labels", "policies",
+               "public_host", "public_rtsp_port", "public_onvif_port", "record_stream")
 
 
 def _export_identities() -> list[dict]:
@@ -141,7 +142,9 @@ def handoff(camera_ids: list[str] | None = None) -> dict:
 
 
 def _address(c: dict) -> tuple:
-    return (str(c.get("host") or "").lower(), int(c.get("rtsp_port") or 554), c.get("main_path") or "/main")
+    # where the server reaches it: two port-forwarded cameras may share an internal address behind different routers
+    return (str(c.get("public_host") or c.get("host") or "").lower(), int(c.get("public_rtsp_port") or c.get("rtsp_port") or 554),
+            c.get("main_path") or "/main")
 
 
 def _free_id(want: str, taken: set[str]) -> str:

@@ -8,12 +8,15 @@ of tunnelproto, and a hub-side abort cancels the request task.
 
 Enrollment: an unenrolled site connects with `Authorization: Claim <code>` and shows the code on Settings →
 System; when the owner enters it at the hub, the hub answers `enrolled` with a device token, which is stored
-in the settings table and used as `Authorization: Bearer` from then on. The hub also pushes shared-AI
+in the settings table and used as `Authorization: Bearer` from then on. A central recording instance instead
+presents `Authorization: Enroll <NVR_HUB_ENROLL_TOKEN>` (a one-time token bound to a hub Site) and the hub
+answers `enrolled` at once; a token the hub refuses (HTTP 401/403) falls back to the claim code. The hub also pushes shared-AI
 (`vlm`) and TURN configuration, which are applied at runtime and remembered.
 """
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import random
 import secrets
@@ -79,6 +82,11 @@ def check_hub_url(url: str) -> None:
 BULK_FRAME = 1024 * 1024         # video bodies go up the tunnel in 1 MB frames (uvicorn's WebSocket limit at the hub is 16 MB)
 
 
+def _fingerprint(token: str) -> str:
+    """Remembers which enrollment token was used without storing it."""
+    return hashlib.sha256(token.encode()).hexdigest()[:16]
+
+
 def new_claim() -> dict:
     code = "".join(secrets.choice(CLAIM_ALPHABET) for _ in range(8))
     return {"code": f"{code[:4]}-{code[4:]}", "expires": time.time() + CLAIM_TTL_S}
@@ -100,6 +108,8 @@ class HubAgent:
         self.streams: dict[int, Stream] = {}
         self._ws = None
         self._parked_code: str | None = None   # the claim code this open connection presented to the hub (unenrolled)
+        self._enrolling = False                # this connection presented NVR_HUB_ENROLL_TOKEN
+        self._enroll_rejected = False          # the hub refused it (401/403): claim codes from now on
         self._tasks: list[asyncio.Task] = []
         self._send_lock = asyncio.Lock()
         self._last_summary_at = time.time()
@@ -129,6 +139,8 @@ class HubAgent:
                 "enrolled": self.enrolled, "site_id": self.site_id, "org": self.org,
                 "location": self.location, "location_id": self.location_id, "claim_code": c["code"] if c else None,
                 "claim_expires": c["expires"] if c else None, "last_error": self.last_error, "last_heartbeat": self.last_heartbeat,
+                # enrolling itself with NVR_HUB_ENROLL_TOKEN (central instance): no claim code to type
+                "enroll_token": not self.enrolled and self._enroll_token() is not None,
                 "vlm_managed": bool(db.get_setting("hub_vlm"))}
 
     async def configure(self, hub_url: str | None = None, unenrol: bool = False) -> None:
@@ -181,11 +193,28 @@ class HubAgent:
             await asyncio.sleep(backoff + random.uniform(0, backoff / 2))
             backoff = min(backoff * 2, 60)
 
+    def _enroll_token(self) -> str | None:
+        """NVR_HUB_ENROLL_TOKEN while it is still worth presenting: not enrolled, not rejected by the hub in this
+        process, and not the token this server already enrolled with once (single use; after an unenroll the
+        server falls back to a claim code)."""
+        tok = (settings.hub_enroll_token or "").strip()
+        if not tok or self._enroll_rejected or db.get_setting("hub_enroll_used") == _fingerprint(tok):
+            return None
+        return tok
+
     def _auth_header(self) -> str:
         token = db.get_setting("hub_token")
+        self._enrolling = False
         if token:
             self._parked_code = None
             return f"Bearer {token}"
+        enroll = self._enroll_token()
+        if enroll:
+            # central recording instance: the hub answers "enrolled" exactly as for a claimed code, binding this
+            # server to the Site the token was issued for
+            self._parked_code = None
+            self._enrolling = True
+            return f"Enroll {enroll}"
         code = self.claim()["code"]
         self._parked_code = code
         return f"Claim {code}"
@@ -204,8 +233,19 @@ class HubAgent:
             kw["ssl"] = ctx
         # compression=None: the client library enables permessage-deflate by default, and zlib-compressing
         # incompressible H.265 playback ate a whole CPU core (88% of the process in deflate; ~20 MB/s cap).
-        async with websockets.connect(url, additional_headers={"Authorization": self._auth_header()},
-                                      max_size=CHUNK + 1024, ping_interval=None, open_timeout=15, compression=None, **kw) as ws:
+        auth = self._auth_header()
+        try:
+            conn = await websockets.connect(url, additional_headers={"Authorization": auth},
+                                            max_size=CHUNK + 1024, ping_interval=None, open_timeout=15, compression=None, **kw)
+        except websockets.exceptions.InvalidStatus as e:
+            if self._enrolling and e.response.status_code in (401, 403):
+                # an expired, used or unknown enrollment token: say so once (never the token itself) and show a
+                # claim code from the next attempt on
+                self._enroll_rejected = True
+                log.warning("hub: the enrollment token (NVR_HUB_ENROLL_TOKEN) was refused (HTTP %s); "
+                            "falling back to a claim code", e.response.status_code)
+            raise
+        async with conn as ws:
             self._ws = ws
             cams = [{"id": c["id"], "name": c["name"]} for c in db.cameras(enabled_only=True)]
             await self._send({"t": "hello", "proto": PROTO, "site_version": __version__, "cameras": cams, "now": time.time(),
@@ -264,6 +304,8 @@ class HubAgent:
             db.set_setting("hub_token", m["token"])
             db.set_setting("hub_site_id", m.get("site_id"))
             db.set_setting("hub_claim", None)
+            if self._enrolling:   # single use: never presented again, even after an unenroll
+                db.set_setting("hub_enroll_used", _fingerprint(settings.hub_enroll_token.strip()))
             self.enrolled, self.site_id = True, m.get("site_id")
             log.info("hub: enrolled as %s; reconnecting with the device token", self.site_id)
             await self.reconnect()

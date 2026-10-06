@@ -25,4 +25,8 @@ describe("KIND_LABEL", () => {
     expect(KIND_LABEL.detector_fallback).toBe("Detection on CPU");
     expect(KIND_LABEL.detector_stalled).toBe("Verification stalled");
   });
+  it("names the central recording alerts", () => {
+    expect(KIND_LABEL.site_link_down).toBe("Site link down");
+    expect(KIND_LABEL.host_offline).toBe("Central host offline");
+  });
 });

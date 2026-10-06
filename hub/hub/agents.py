@@ -1,7 +1,9 @@
 """Site tunnels: the /agent WebSocket each site keeps open, and the registry the proxy uses.
 
 An unenrolled site connects with `Authorization: Claim XXXX-XXXX`; the connection is parked until an admin
-enters the code (then it gets `enrolled` and reconnects with its token). An enrolled site connects with
+enters the code (then it gets `enrolled` and reconnects with its token). A central instance (hosts.py) connects once
+with `Authorization: Enroll <token>`: a valid single-use token makes it a server of the token's Site at once (the same
+`enrolled` frame); an unknown, used or expired one is refused at the handshake (403). An enrolled site connects with
 `Authorization: Bearer <device token>` and gets `welcome`. Requests from the proxy become `req` streams
 (odd ids); the site answers `res` + binary chunks + `end`, paced by the tunnelproto credit window.
 """
@@ -16,7 +18,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from tunnelproto import CHUNK, WINDOW, Stream, chunk, decode, encode, split
 
-from . import alerts, cameras, db, soc, turn
+from . import alerts, cameras, db, hosts, soc, turn
 from .config import settings
 
 log = logging.getLogger("hub.agents")
@@ -172,6 +174,15 @@ class AgentRegistry:
             if not site:
                 await ws.close(code=4401, reason="unknown token")
                 return
+        elif scheme == "Enroll" and cred:
+            ip = ws.client.host if ws.client else None
+            if hosts.enroll_check(cred.strip()) is None:
+                hosts.log_bad_enroll(cred.strip(), ip)
+                await ws.close(code=4403, reason="invalid enrollment token")   # before accept: the handshake gets 403
+                return
+            await ws.accept()
+            await self._enroll(ws, cred.strip(), ip)
+            return
         elif scheme == "Claim" and cred:
             claim_code = cred.strip().upper()
             if len(claim_code) > 16:
@@ -190,6 +201,40 @@ class AgentRegistry:
             log.exception("agent %s: connection failed", conn.site_id or claim_code)
         finally:
             await self._detach(conn)
+
+    async def _enroll(self, ws: WebSocket, token: str, ip: str | None) -> None:
+        """A central instance with a valid enrollment token: wait for its hello (hostname, version), create the server
+        in the token's Site and hand it a device token exactly like a claim does, then close; it reconnects with Bearer."""
+        hello: dict = {}
+        try:
+            m = await asyncio.wait_for(ws.receive(), 15)
+            if m["type"] == "websocket.disconnect":
+                return
+            frame = decode(m["text"]) if m.get("text") is not None else None
+            if isinstance(frame, dict) and frame.get("t") == "hello":
+                hello = frame
+        except asyncio.TimeoutError:
+            pass
+        except Exception:
+            log.exception("enrollment: reading hello")
+        got = hosts.enroll(token, hello, ip)
+        try:
+            if got is None:
+                hosts.log_bad_enroll(token, ip)
+                await ws.close(code=4403, reason="invalid enrollment token")
+                return
+            site, device = got
+        except Exception:
+            return
+        try:
+            await ws.send_text(encode({"t": "enrolled", "site_id": site["id"], "token": device}))
+        except Exception:
+            hosts.enroll_undo(token, site["id"])   # it never got its device token: the same token may try again
+            return
+        try:
+            await ws.close(code=1000, reason="enrolled")
+        except Exception:
+            pass
 
     async def _loop(self, conn: AgentConn) -> None:
         while True:

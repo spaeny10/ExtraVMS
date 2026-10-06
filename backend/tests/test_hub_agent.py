@@ -234,6 +234,113 @@ def test_claim_code_stays_put_while_parked():
     assert agent.claim()["code"] != code
 
 
+class EnrollHub:
+    """Central instance enrollment: `Authorization: Enroll <token>` gets `enrolled` at once for the good token, a
+    401 at the handshake for any other; Bearer gets welcome; Claim is parked (no answer)."""
+
+    def __init__(self, good: str):
+        self.good, self.auth = good, []
+
+    def process_request(self, connection, request):
+        auth = request.headers.get("Authorization", "")
+        self.auth.append(auth)
+        if auth.startswith("Enroll ") and auth[len("Enroll "):] != self.good:
+            return connection.respond(401, "unknown enrollment token\n")
+        return None
+
+    async def handler(self, ws):
+        auth = ws.request.headers.get("Authorization", "")
+        try:
+            async for raw in ws:
+                m = decode(raw)
+                if isinstance(m, tuple) or m.get("t") != "hello":
+                    continue
+                if auth.startswith("Enroll "):
+                    await ws.send(encode({"t": "enrolled", "site_id": "s_central", "token": "device-token-c"}))
+                elif auth.startswith("Bearer "):
+                    await ws.send(encode({"t": "welcome", "site_id": "s_central", "org": "Acme", "heartbeat_s": 5}))
+        except websockets.ConnectionClosed:
+            pass
+
+
+class LogCapture:
+    def __init__(self):
+        import logging
+        self.records: list[str] = []
+        handler = logging.Handler()
+        handler.emit = lambda r: self.records.append(r.getMessage())
+        logging.getLogger("nvr.hub").addHandler(handler)
+        logging.getLogger("nvr.hub").setLevel(logging.INFO)
+
+
+async def _wait(cond, timeout=10):
+    t0 = time.time()
+    while not cond():
+        await asyncio.sleep(0.05)
+        assert time.time() - t0 < timeout, "timed out"
+
+
+async def _run_enroll(token: str, good: str, logs: LogCapture):
+    from nvr.config import settings
+    for k in ("hub_token", "hub_site_id", "hub_claim", "hub_enroll_used", "hub_vlm", "hub_turn"):
+        db.set_setting(k, None)
+    settings.hub_enroll_token = token
+    hub = EnrollHub(good)
+    async with websockets.serve(hub.handler, "127.0.0.1", 0, process_request=hub.process_request) as server:
+        db.set_setting("hub_url", f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}/agent")
+        agent = hub_agent.HubAgent(site_app, state, summary_fn=lambda st, since: _summary())
+        assert agent.status()["enroll_token"] is True
+        task = asyncio.create_task(agent.run())
+        try:
+            if token == good:
+                await _wait(lambda: agent.connected)
+                assert hub.auth[:2] == [f"Enroll {token}", "Bearer device-token-c"], hub.auth
+                assert agent.enrolled and agent.site_id == "s_central" and db.get_setting("hub_token") == "device-token-c"
+                used = db.get_setting("hub_enroll_used")
+                assert used and token not in used and agent.status()["enroll_token"] is False
+                # single use: after an unenroll the server shows a claim code, it never presents the token again
+                await agent.configure(unenrol=True)
+                await _wait(lambda: hub.auth[-1].startswith("Claim "))
+                assert sum(a.startswith("Enroll ") for a in hub.auth) == 1 and agent.status()["claim_code"]
+            else:
+                await _wait(lambda: len(hub.auth) >= 2, timeout=15)
+                assert hub.auth[0] == f"Enroll {token}" and hub.auth[1].startswith("Claim "), hub.auth
+                assert not agent.enrolled and agent.status()["enroll_token"] is False and agent.status()["claim_code"]
+                assert token not in (agent.last_error or "")
+                assert sum("enrollment token" in r and "refused" in r for r in logs.records) == 1, logs.records
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            settings.hub_enroll_token = ""
+    assert not any(token in r for r in logs.records), "the enrollment token was logged"
+
+
+def test_enroll_token():
+    logs = LogCapture()
+    asyncio.run(_run_enroll("tok-central-7f3a", "tok-central-7f3a", logs))
+
+
+def test_enroll_token_refused_falls_back_to_claim():
+    logs = LogCapture()
+    asyncio.run(_run_enroll("tok-expired-0000", "tok-central-7f3a", logs))
+
+
+def test_enroll_token_ignored_once_enrolled():
+    from nvr.config import settings
+    db.set_setting("hub_token", "device-token-x")
+    db.set_setting("hub_enroll_used", None)
+    settings.hub_enroll_token = "tok-central-7f3a"
+    try:
+        agent = hub_agent.HubAgent(None, SimpleNamespace())
+        assert agent._auth_header() == "Bearer device-token-x" and agent.status()["enroll_token"] is False
+    finally:
+        settings.hub_enroll_token = ""
+        db.set_setting("hub_token", None)
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

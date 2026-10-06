@@ -52,6 +52,11 @@ services:
       HUB_GEOCODER_COUNTRY: ${HUB_GEOCODER_COUNTRY:-US}
       HUB_MAP_TILES: ${HUB_MAP_TILES:-}
       HUB_MAP_ATTRIBUTION: ${HUB_MAP_ATTRIBUTION:-}
+      # Central recording (Hosts page): the vLLM central instances use, the datacenter's public IP (port-forward
+      # sites allow only it) and the default FusionHub (SpeedFusion peer) for VPN-mode sites
+      HUB_CENTRAL_VLM_URL: ${HUB_CENTRAL_VLM_URL:-http://vllm:8000/v1}
+      HUB_DATACENTER_IP: ${HUB_DATACENTER_IP:-}
+      HUB_FUSIONHUB_ADDRESS: ${HUB_FUSIONHUB_ADDRESS:-}
     depends_on:
       postgres: { condition: service_healthy }
     expose: ["8000"]

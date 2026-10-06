@@ -61,7 +61,9 @@ async def proxy_api(site_id: str, path: str, request: Request):
     except TooManyStreams:
         raise HTTPException(429, "too many requests to this site at once")
     try:
-        await asyncio.wait_for(s.head.wait(), settings.first_byte_timeout_s)
+        # a subnet scan (POST /api/cameras/scan) answers only when every address was probed: up to ~72 s for a /22
+        wait = settings.scan_timeout_s if api_path.rstrip("/").endswith("/api/cameras/scan") else settings.first_byte_timeout_s
+        await asyncio.wait_for(s.head.wait(), wait)
     except asyncio.TimeoutError:
         await conn.abort(s, "timeout")
         raise HTTPException(504, "the site did not answer in time")

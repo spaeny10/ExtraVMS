@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { BASE, api, fmtTime, frameUrl, type BaselineCamera, type FootageStatus, type RemoteStatus, type Camera, type FeedbackStats, type HubStatus, type NvrEvent, type RetentionPolicy, type SiteApi, type SystemInfo, type Zone } from "./api";
+import { BASE, api, bandwidthText, fmtTime, frameUrl, type Bandwidth, type BaselineCamera, type FootageStatus, type RemoteStatus, type Camera, type FeedbackStats, type HubStatus, type NvrEvent, type RetentionPolicy, type ScannedDevice, type SiteApi, type SystemInfo, type Zone } from "./api";
 import { EventCard } from "./Events";
 import { EventDetail } from "./EventDetail";
 import { LivePlayer } from "./LivePlayer";
@@ -27,6 +27,13 @@ function loadQuality(): Record<string, Quality> {
   }
 }
 
+/** The MediaMTX path for live view. SD is always <id>_sub. HD is <id> (the recorded main stream), except on a
+ *  camera recording its sub stream (record_stream "sub"), where <id>_hd pulls the main stream on demand. */
+export function livePath(c: Pick<Camera, "id" | "record_stream">, hd: boolean): string {
+  if (!hd) return `${c.id}_sub`;
+  return c.record_stream === "sub" ? `${c.id}_hd` : c.id;
+}
+
 /** One live camera: the WHEP player with the paint-a-region overlay and the tile bar. */
 export function LiveTile({ c, hd, port, active, onUnsupported, bar, phone, onSwipe, iceServers, site = api, regionKey }: {
   c: Camera; hd: boolean; port: number; active?: NvrEvent; onUnsupported?: () => void; bar: React.ReactNode; phone?: boolean; onSwipe?: (dir: -1 | 1) => void;
@@ -46,7 +53,7 @@ export function LiveTile({ c, hd, port, active, onUnsupported, bar, phone, onSwi
   return (
     <div className={`tile ${active ? "alerting" : ""} ${painting ? "painting" : ""} ${ptzOn ? "ptz" : ""}`}
       {...(phone && onSwipe && !painting && !ptzOn ? swipeHandlers(onSwipe) : {})}>
-      <LivePlayer key={`${c.id}-${hd ? "hd" : "sd"}`} path={hd ? c.id : `${c.id}_sub`} port={port} showSize className={hd ? "hd" : ""}
+      <LivePlayer key={`${c.id}-${hd ? "hd" : "sd"}`} path={livePath(c, hd)} camera={c.id} port={port} showSize className={hd ? "hd" : ""}
         site={site === api ? undefined : site}
         onUnsupported={onUnsupported} videoRef={videoRef} iceServers={iceServers} muted={!sound} onAudio={setHasAudio}>
         {!ptzOn && <RegionOverlay cam={regionKey ?? c.id} videoRef={videoRef} editing={painting} onDone={() => setPainting(false)} camera={c} fallbackAspect={aspect} site={site} />}
@@ -291,6 +298,10 @@ export function CamerasView({ cameras, port, reload }: { cameras: Camera[]; port
             </header>
             <div className="modal-grid">
               <div className="form">
+                {!cameras.some((c) => c.id === edit.id) && (
+                  <ScanBox cameras={cameras} username={edit.username} password={edit.password}
+                    onUse={(d) => setEdit({ ...edit, host: d.address, onvif_port: d.port, name: edit.name || [d.manufacturer, d.model].filter(Boolean).join(" ") })} />
+                )}
                 <Field label="ID"><input value={edit.id} disabled={cameras.some((c) => c.id === edit.id)} onChange={(e) => setEdit({ ...edit, id: e.target.value })} /></Field>
                 <Field label="Name"><input value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} /></Field>
                 <Field label="Host / IP"><input value={edit.host} onChange={(e) => setEdit({ ...edit, host: e.target.value })} /></Field>
@@ -298,6 +309,25 @@ export function CamerasView({ cameras, port, reload }: { cameras: Camera[]; port
                   <Field label="ONVIF port"><input type="number" value={edit.onvif_port} onChange={(e) => setEdit({ ...edit, onvif_port: +e.target.value })} /></Field>
                   <Field label="RTSP port"><input type="number" value={edit.rtsp_port} onChange={(e) => setEdit({ ...edit, rtsp_port: +e.target.value })} /></Field>
                 </div>
+                <details className="field" open={Boolean(edit.public_host)}>
+                  <summary>Port forwarding (outside address)</summary>
+                  <Field label="Outside address"><input value={edit.public_host ?? ""} placeholder="the site router's public IP or name"
+                    onChange={(e) => setEdit({ ...edit, public_host: e.target.value.trim() || null })} /></Field>
+                  <div className="row">
+                    <Field label="Outside ONVIF port"><input type="number" value={edit.public_onvif_port ?? ""} placeholder={String(edit.onvif_port)}
+                      onChange={(e) => setEdit({ ...edit, public_onvif_port: e.target.value ? +e.target.value : null })} /></Field>
+                    <Field label="Outside RTSP port"><input type="number" value={edit.public_rtsp_port ?? ""} placeholder={String(edit.rtsp_port)}
+                      onChange={(e) => setEdit({ ...edit, public_rtsp_port: e.target.value ? +e.target.value : null })} /></Field>
+                  </div>
+                  <span className="small">For a camera reached through the site router's port forwards. This server connects to the outside address and ports, and the addresses the camera reports (events, PTZ, streams) are rewritten to them. Host / IP and the ports above stay the camera's own. Leave empty on the same network or over a VPN.</span>
+                </details>
+                <Field label="Record continuously">
+                  <select value={edit.record_stream ?? "main"} onChange={(e) => setEdit({ ...edit, record_stream: e.target.value as "main" | "sub" })}>
+                    <option value="main">Main stream (full resolution)</option>
+                    <option value="sub">Sub stream (saves cellular data)</option>
+                  </select>
+                </Field>
+                <span className="small">Sub stream saves cellular data: 5 cameras recording 4K continuously upload about 20-30 Mbit/s (7-10 TB a month). With the sub stream, recordings, clips and detection use the smaller picture; HD live view still pulls the main stream while someone watches.</span>
                 <div className="row">
                   <Field label="Username"><input value={edit.username} onChange={(e) => setEdit({ ...edit, username: e.target.value })} /></Field>
                   <Field label="Password"><input type="password" placeholder="unchanged" autoComplete="new-password" value={edit.password ?? ""} onChange={(e) => setEdit({ ...edit, password: e.target.value })} /></Field>
@@ -416,6 +446,61 @@ function Health({ ok }: { ok?: boolean }) {
   return <span className={`dot ${ok ? "ok" : "bad"}`} />;
 }
 
+/** A guess at the subnet to scan: the /24 of the first camera with an IPv4 address. */
+function guessSubnet(cameras: Camera[]): string {
+  const ip = cameras.map((c) => /^(\d+\.\d+\.\d+)\.\d+$/.exec(c.host)?.[1]).find(Boolean);
+  return ip ? `${ip}.0/24` : "";
+}
+
+/** Unicast ONVIF scan (POST /api/cameras/scan): finds cameras where WS-Discovery can't (over a VPN tunnel). */
+function ScanBox({ cameras, username, password, onUse }: {
+  cameras: Camera[]; username?: string; password?: string; onUse: (d: ScannedDevice) => void;
+}) {
+  const [subnet, setSubnet] = useState(() => guessSubnet(cameras));
+  const [ports, setPorts] = useState("80, 8000, 8080");
+  const [busy, setBusy] = useState(false);
+  const [found, setFound] = useState<ScannedDevice[] | null>(null);
+  const [err, setErr] = useState("");
+  const scan = async () => {
+    setBusy(true); setErr(""); setFound(null);
+    try {
+      const p = ports.split(/[\s,]+/).filter(Boolean).map(Number);
+      const r = await api.scanCameras({ subnet: subnet.trim(), ports: p.length ? p : undefined,
+        ...(password ? { username, password } : {}) });
+      setFound(r.devices);
+    } catch (e) {
+      setErr(errorText(e));
+    }
+    setBusy(false);
+  };
+  return (
+    <details className="field scan-box">
+      <summary>Scan a subnet</summary>
+      <div className="row">
+        <input value={subnet} placeholder="10.20.7.0/24" onChange={(e) => setSubnet(e.target.value)} title="A private subnet, at most a /22" />
+        <input value={ports} onChange={(e) => setPorts(e.target.value)} title="ONVIF ports to try" style={{ maxWidth: 140 }} />
+        <button className="ghost small" disabled={busy || !subnet.trim()} onClick={scan}>{busy ? "Scanning…" : "Scan"}</button>
+      </div>
+      <span className="small">Asks every address for ONVIF (works over a VPN, where discovery doesn't). Type the camera password below first to see model names on cameras that hide them.</span>
+      {err && <p className="error small">{err}</p>}
+      {found && !found.length && <p className="muted small">No ONVIF devices answered.</p>}
+      {found && found.length > 0 && (
+        <ul className="scan-results">
+          {found.map((d) => (
+            <li key={`${d.address}:${d.port}`} className="row small">
+              <span><strong>{d.address}</strong>:{d.port}</span>
+              <span className="muted">{[d.manufacturer, d.model, d.firmware && `fw ${d.firmware}`].filter(Boolean).join(" · ")
+                || (d.auth_failed ? "password refused" : d.needs_auth ? "needs credentials" : "ONVIF device")}</span>
+              {d.camera_id ? <span className="muted">added as {d.camera_id}</span>
+                : <button className="ghost small" onClick={() => onUse(d)}>Use</button>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </details>
+  );
+}
+
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <label className="field">
@@ -473,7 +558,10 @@ function HubPanel() {
       value={<><Status ok={h.connected} /> {state}</>}
       sub={h.last_error && !h.connected ? `Can't reach the hub yet · ${h.last_error}` : h.last_heartbeat ? `last heartbeat ${fmtTime(h.last_heartbeat)}${h.vlm_managed ? " · Qwen managed by the hub" : ""}` : undefined}
       action={h.enrolled ? <button className="ghost small" onClick={async () => { if (await confirmDialog("Unenroll this site from the hub?", { confirmLabel: "Unenroll", danger: true })) { await api.setHub({ unenrol: true }); load(); } }}>Unenroll</button> : undefined}>
-      {!h.enrolled && h.claim_code && (
+      {!h.enrolled && h.enroll_token && (
+        <div className="muted small">Enrolling automatically with the hub's enrollment token (NVR_HUB_ENROLL_TOKEN): no claim code needed.</div>
+      )}
+      {!h.enrolled && !h.enroll_token && h.claim_code && (
         <div className="hub-claim">
           <div className="hub-code" title="Type this at the hub: Add site">{h.claim_code}</div>
           <div className="muted small">Claim code · renews every 15 minutes</div>
@@ -509,6 +597,11 @@ export function SystemView() {
       <Advisor onAsk={(q) => { try { sessionStorage.setItem("findAsk", q); } catch { /* ignore */ } window.dispatchEvent(new CustomEvent("nvr:go", { detail: "Find" })); }} />
       <section className="sys-group">
         <h3>Status</h3>
+        {s.instance_name && <Row label="Server" value={<strong>{s.instance_name}</strong>} hint="NVR_INSTANCE_NAME in .env" />}
+        {(s.health_alerts ?? []).filter((a) => a.kind === "site_link_down").map((a) => (
+          <Row key={a.kind} label="Site link" value={<><Status ok={false} /> {a.text}</>} sub={a.since ? `no video from any camera since ${fmtTime(a.since)}` : undefined} />
+        ))}
+        {s.bandwidth && <BandwidthRow b={s.bandwidth} />}
         <Row label="Recording disk" value={<><strong>{s.recordings_disk.free_gb.toLocaleString()} GB</strong> free of {s.recordings_disk.total_gb.toLocaleString()} GB</>}
           sub={`${s.retention_days} days continuous, then AI-selected`}>
           <div className="meter"><div style={{ width: `${used * 100}%` }} /></div>
@@ -547,6 +640,15 @@ export function SystemView() {
 }
 
 const Status = ({ ok }: { ok: boolean }) => <span className={`dot ${ok ? "ok" : "bad"}`} />;
+
+/** What the cameras send this server: matters on a cellular site or a central recording server. */
+function BandwidthRow({ b }: { b: Bandwidth }) {
+  const per = Object.entries(b.cameras).filter(([, v]) => v != null);
+  return (
+    <Row label="Camera bandwidth" hint="Video received from the cameras (every stream pulled from them), averaged over 5 minutes. On a cellular site this is the upload the data plan pays for."
+      value={bandwidthText(b)} sub={per.length > 1 ? per.map(([id, v]) => `${id} ${(v as number).toFixed(1)}`).join(" · ") : undefined} />
+  );
+}
 
 /** Nightly database copy (backup.py): the part of the NVR that can't be re-recorded. */
 function BackupRow({ s }: { s: SystemInfo }) {

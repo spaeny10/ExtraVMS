@@ -1,0 +1,17 @@
+{
+  "root": "/srv/axiom",
+  "image": "axiom/instance:latest",
+  "pool": "10.200.0.0/16",
+  "vllm_container": "axiom-vllm",
+  "vlm_url": "http://vllm:8000/v1",
+  "ai_env": "/etc/axiom/ai.env",
+  "dns": ["1.1.1.1", "9.9.9.9"],
+  "hub_url": "wss://hub.axiomvision.ai/agent",
+  "hub_ips": [],
+  "hub_tcp_ports": ["443", "3478"],
+  "hub_udp_ports": ["3478", "49152-49252"],
+  "forward_tcp_ports": [],
+  "mem_gb": 8,
+  "cpus": 4,
+  "read_only": true
+}

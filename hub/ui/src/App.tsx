@@ -13,6 +13,7 @@ import { CustomerPage } from "./customer/CustomerPage";
 import { UndoButton } from "./customer/FleetActionsPage";
 import { FindPage } from "./FindPage";
 import { HomePage } from "./HomePage";
+import { HostsPage } from "./hosts/HostsPage";
 import { InvitePage } from "./InvitePage";
 import { type CustomerTab, fullBleed, go, matchRoute, navigate, topNav, usePath } from "./nav";
 import { SitePage } from "./SitePage";
@@ -79,7 +80,7 @@ export default function App() {
       <header className="hub-top">
         <span className="brand"><img className="logo" src="/axiom.webp" alt="Axiom Vision" /></span>
         {/* inside a Site the customer-wide Find/Alerts step aside for the Site's own tabs (nav.ts topNav) */}
-        <nav>{topNav(page, soc).map((n) => (
+        <nav>{topNav(page, soc, me.user.is_super).map((n) => (
           <a key={n.path} href={n.path} title={n.title} className={n.pages.includes(page) ? "active" : ""} onClick={go(n.path)}>
             <span className="tab-icon"><Icon name={n.icon} size={20} /></span>{n.label}
           </a>
@@ -112,8 +113,9 @@ export default function App() {
         {page === "customer" && current && <CustomerPage org={current} me={me} tab={(route.tab ?? "sites") as CustomerTab} onChanged={reload} />}
         {page === "audit" && current && <AuditPage org={current} />}
         {page === "account" && <AccountPage me={me} onChanged={reload} />}
+        {page === "hosts" && (me.user.is_super ? <HostsPage /> : <p className="muted">Hosts are managed by hub administrators.</p>)}
         {page === "soc" && (soc ? <SocRouter me={me} route={route} /> : <p className="muted">You're not in the SOC. Ask a hub administrator.</p>)}
-        {!current && page !== "account" && page !== "soc" && !landing && <p className="muted">You're not a member of any customer yet. {me.user.is_super ? "Create one under Customer." : "Ask an owner to add you."}</p>}
+        {!current && page !== "account" && page !== "soc" && page !== "hosts" && !landing && <p className="muted">You're not a member of any customer yet. {me.user.is_super ? "Create one under Customer." : "Ask an owner to add you."}</p>}
       </main>
       <Toaster />
       <Dialogs />
@@ -154,7 +156,8 @@ function Login({ onDone }: { onDone: () => void }) {
 
 function PushCard() {
   const [info, setInfo] = useState<PushInfo | null>(null);
-  const [kinds, setKinds] = useState<string[]>(["offline", "event_policy", "event_watched", "event_high"]);
+  // hub push.DEFAULT_KINDS (host_offline only ever reaches hub administrators)
+  const [kinds, setKinds] = useState<string[]>(["offline", "event_policy", "event_watched", "event_high", "site_link_down", "host_offline"]);
   const load = () => api.pushInfo().then(setInfo).catch(() => setInfo(null));
   useEffect(() => { load(); }, []);
   const supported = "serviceWorker" in navigator && "PushManager" in window && window.isSecureContext;

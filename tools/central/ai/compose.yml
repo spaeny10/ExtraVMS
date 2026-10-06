@@ -1,0 +1,69 @@
+# Shared Qwen for every instance on this host: one vLLM (OpenAI-compatible /v1) on the A40.
+#
+#   sudo install -m 600 tools/central/ai/ai.env.example /etc/axiom/ai.env    # then set VLLM_API_KEY etc.
+#   sudo docker compose -f tools/central/ai/compose.yml --env-file /etc/axiom/ai.env up -d
+#
+# Nothing is published to the host. The container lives on its own `axiom-ai` network (model downloads go out
+# through it) and axiom_host.py connects it into every instance's network with the alias `vllm` and a fixed
+# address, so an instance reaches http://vllm:8000/v1 on a network it shares with no other instance. A compose
+# recreate drops those extra connections; the host agent re-attaches them within a minute (`reconcile`).
+#
+# What the instances send (backend/nvr/vlmroute.py OpenAIBackend): POST /v1/chat/completions with
+# `Authorization: Bearer <VLLM_API_KEY>`, model = AXIOM_VLM_MODEL, images as data:image/jpeg;base64 parts
+# (4 per synopsis, up to 8 for chat/find), `response_format: json_schema`, `reasoning_effort: "none"`, streaming
+# for chat. Pick an *Instruct* (non-thinking) Qwen-VL so the thinking switch never matters (README: check that this
+# vLLM build accepts reasoning_effort "none").
+#
+# GPU memory (A40, 48 GB): Qwen2.5-VL-32B-Instruct-AWQ weights are ~20 GB; at 0.90 utilization vLLM gets ~43 GB,
+# leaving ~18-20 GB of KV cache after the vision encoder and CUDA graphs: about 70k tokens, i.e. 15+ concurrent
+# 4-image requests (~4-5k tokens each). The A40 runs nothing else; instance YOLO goes on the A10.
+name: axiom-ai
+
+services:
+  vllm:
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:latest}   # pin a tested tag in ai.env once Phase 1 has passed
+    container_name: axiom-vllm
+    restart: unless-stopped
+    env_file: /etc/axiom/ai.env                      # VLLM_API_KEY (required), HF_TOKEN (optional)
+    # Refuse to start without a key: without one the model answers anything that can reach it.
+    entrypoint: ["/bin/sh", "-c", 'if [ -z "$$VLLM_API_KEY" ]; then echo "set VLLM_API_KEY in /etc/axiom/ai.env" >&2; exit 1; fi; exec python3 -m vllm.entrypoints.openai.api_server "$$@"', "vllm"]
+    command:
+      - --model=${AXIOM_VLM_MODEL:-Qwen/Qwen2.5-VL-32B-Instruct-AWQ}
+      - --host=0.0.0.0
+      - --port=8000
+      - --max-model-len=${AXIOM_VLM_MAX_LEN:-16384}
+      - --gpu-memory-utilization=${AXIOM_VLM_GPU_UTIL:-0.90}
+      - --max-num-seqs=${AXIOM_VLM_MAX_SEQS:-16}
+      - '--limit-mm-per-prompt={"image": 8}'
+    volumes:
+      - /srv/axiom/ai/hf-cache:/root/.cache/huggingface
+    shm_size: 16g
+    networks:
+      axiom-ai:
+        ipv4_address: 10.201.0.10
+    logging:
+      driver: json-file
+      options: { max-size: 50m, max-file: "5" }
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 60s
+      timeout: 10s
+      start_period: 900s     # first start downloads the model (tens of GB)
+      retries: 3
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${AXIOM_VLM_GPU:-0}"]   # nvidia-smi index of the A40 (check: nvidia-smi -L)
+              capabilities: [gpu]
+
+networks:
+  axiom-ai:
+    name: axiom-ai
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: axai0
+    ipam:
+      config:
+        - subnet: 10.201.0.0/24

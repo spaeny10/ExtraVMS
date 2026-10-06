@@ -39,12 +39,12 @@ export type SocTab = "queue" | "incident" | "supervisor" | "reports";
 export const SOC_REPORTS = ["operators", "false-alarms", "shifts", "customers"] as const;
 export type SocReport = (typeof SOC_REPORTS)[number];
 
-export type Page = "home" | "sites" | "site" | "server" | "find" | "alerts" | "customer" | "audit" | "account" | "invite" | "soc";
+export type Page = "home" | "sites" | "site" | "server" | "find" | "alerts" | "customer" | "audit" | "account" | "invite" | "soc" | "hosts";
 /**
  * The header's top-level items: path, label, icon (phone tab bar), the pages that light it up, an optional tooltip,
- * `soc` (shown to SOC staff only) and `siteOwned` (hidden inside a Site, see topNav).
+ * `soc` (shown to SOC staff only), `hubAdmin` (hub administrators only) and `siteOwned` (hidden inside a Site, see topNav).
  */
-export type TopNavItem = { path: string; label: string; icon: string; pages: Page[]; title?: string; soc?: boolean; siteOwned?: boolean };
+export type TopNavItem = { path: string; label: string; icon: string; pages: Page[]; title?: string; soc?: boolean; hubAdmin?: boolean; siteOwned?: boolean };
 export const TOP_NAV: TopNavItem[] = [
   { path: "/", label: "Home", icon: "home", pages: ["home"] },
   { path: "/sites", label: "Sites", icon: "grid", pages: ["sites", "site", "server"] },
@@ -54,6 +54,8 @@ export const TOP_NAV: TopNavItem[] = [
   { path: "/soc", label: "SOC", icon: "lock", pages: ["soc"], soc: true },
   { path: "/customer", label: "Customer", icon: "settings", pages: ["customer"] },
   { path: "/audit", label: "Audit", icon: "events", pages: ["audit"] },
+  // central recording hosts in the datacenter (hub/hub/hosts.py): hub administrators only
+  { path: "/hub/hosts", label: "Hosts", icon: "timeline", pages: ["hosts"], title: "Central recording hosts", hubAdmin: true },
   { path: "/account", label: "Account", icon: "user", pages: ["account"] },
 ];
 
@@ -65,8 +67,8 @@ export const inSite = (page: Page) => page === "site" || page === "server";
  * also called Find and Alerts but are scoped to the Site, and two same-named links that go to different places
  * confused customers. Outside a Site they show as before (the Sites list also links to both).
  */
-export function topNav(page: Page, socUser: boolean): TopNavItem[] {
-  return TOP_NAV.filter((n) => (!n.soc || socUser) && !(n.siteOwned && inSite(page)));
+export function topNav(page: Page, socUser: boolean, hubAdmin = false): TopNavItem[] {
+  return TOP_NAV.filter((n) => (!n.soc || socUser) && (!n.hubAdmin || hubAdmin) && !(n.siteOwned && inSite(page)));
 }
 
 /**
@@ -128,6 +130,8 @@ export function matchRoute(path: string): Route {
     case "alerts": return { page: "alerts" };
     case "audit": return { page: "audit" };
     case "account": return { page: "account" };
+    // hub-wide administration (hub administrators only; App shows a notice to anyone else)
+    case "hub": return a === "hosts" ? { page: "hosts" } : { page: "hosts", redirect: "/hub/hosts" };
     // public: the accept page works signed out (App renders it before the sign-in check)
     case "invite": return a ? { page: "invite", code: a } : { page: "home", redirect: "/" };
     default: return { page: "home" };

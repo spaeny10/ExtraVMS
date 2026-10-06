@@ -123,6 +123,14 @@ describe("topNav", () => {
     }
   });
 
+  it("Hosts only for hub administrators", () => {
+    expect(topNav("home", false, true).map((n) => n.label)).toEqual(["Home", "Sites", "Find", "Alerts", "Customer", "Audit", "Hosts", "Account"]);
+    expect(labels("/")).not.toContain("Hosts");
+    expect(matchRoute("/hub/hosts")).toEqual({ page: "hosts" });
+    expect(matchRoute("/hub")).toEqual({ page: "hosts", redirect: "/hub/hosts" });
+    expect(topNav("hosts", false, true).find((n) => n.label === "Hosts")!.pages).toContain("hosts");
+  });
+
   it("SOC only for SOC staff", () => {
     expect(labels("/", true)).toEqual(["Home", "Sites", "Find", "Alerts", "SOC", "Customer", "Audit", "Account"]);
     expect(labels("/soc", false)).not.toContain("SOC");

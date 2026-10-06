@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<env:Envelope xmlns:env="http://www.w3.org/2003/05/soap-envelope" xmlns:tds="http://www.onvif.org/ver10/device/wsdl">
+<env:Body><tds:GetDeviceInformationResponse><tds:Manufacturer>Hikvision</tds:Manufacturer><tds:Model>DS-2CD2387G2-LU</tds:Model>
+<tds:FirmwareVersion>V5.7.15 build 230920</tds:FirmwareVersion><tds:SerialNumber>DS-2CD2387G2-LU20231001AAWRL12345678</tds:SerialNumber><tds:HardwareId>88</tds:HardwareId>
+</tds:GetDeviceInformationResponse></env:Body></env:Envelope>

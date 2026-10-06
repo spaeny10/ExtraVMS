@@ -13,6 +13,7 @@ export function HealthWidget({ widget: w, source }: { widget: Widget<"health">; 
           <strong>{s.name}</strong>
           <span className="muted small">{s.online ? `${s.camerasUp}/${s.cameras} cams` : "offline"}</span>
           {s.online && s.diskFreeGb != null && <span className="muted small">{s.diskFreeGb >= 1000 ? `${(s.diskFreeGb / 1000).toFixed(1)} TB` : `${Math.round(s.diskFreeGb)} GB`} free</span>}
+          {s.online && s.bandwidth && <span className="muted small" title="Video from the cameras (5-min average) · received this month">{s.bandwidth.mbps.toFixed(1)} Mbit/s · {s.bandwidth.month_gb.toFixed(0)} GB/mo</span>}
           <span className="spacer" />
           {s.openAlerts > 0 && <span className="bad-text small">{s.openAlerts} alert{s.openAlerts > 1 ? "s" : ""}</span>}
           {s.online && s.camerasUp < s.cameras && <span className="bad-text small">{s.cameras - s.camerasUp} cam down</span>}

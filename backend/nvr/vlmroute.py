@@ -52,6 +52,19 @@ def parse_json(content: str) -> dict:
 # ---------------------------------------------------------------- backends
 # messages: [{"role": "system"|"user"|"assistant", "content": str, "images": [jpeg bytes]}]
 
+
+def no_think(body: dict) -> dict:
+    """Ask a remote OpenAI-compatible model to answer directly (Qwen3.x otherwise spends the budget thinking).
+    NVR_REMOTE_VLM_NO_THINK picks how: "reasoning_effort" (default; Ollama /v1 and most hosted APIs),
+    "chat_template" (vLLM: chat_template_kwargs.enable_thinking=false, since some vLLM builds reject
+    reasoning_effort "none"), or "off" (send nothing)."""
+    how = (settings.remote_vlm_no_think or "reasoning_effort").strip().lower()
+    if how == "reasoning_effort":
+        body["reasoning_effort"] = "none"
+    elif how == "chat_template":
+        body["chat_template_kwargs"] = {"enable_thinking": False}
+    return body
+
 class OllamaBackend:
     kind = "local"
 
@@ -128,9 +141,9 @@ class OpenAIBackend:
 
     async def chat_json(self, messages: list[dict], schema: dict, num_predict: int, temperature: float,
                         timeout: float) -> dict:
-        body = {"model": self.model, "messages": self._messages(messages), "max_tokens": num_predict,
-                "temperature": temperature, "reasoning_effort": "none",   # no hidden thinking: the answer, not the budget
-                "response_format": {"type": "json_schema", "json_schema": {"name": "answer", "schema": schema}}}
+        body = no_think({"model": self.model, "messages": self._messages(messages), "max_tokens": num_predict,
+                         "temperature": temperature,
+                         "response_format": {"type": "json_schema", "json_schema": {"name": "answer", "schema": schema}}})
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=15)) as c:
             r = await c.post(self._url(), json=body, headers=self._headers())
             if r.status_code >= 400:
@@ -139,8 +152,8 @@ class OpenAIBackend:
 
     async def stream(self, messages: list[dict], num_predict: int, temperature: float,
                      first_token_timeout: float) -> AsyncIterator[str]:
-        body = {"model": self.model, "messages": self._messages(messages), "max_tokens": num_predict,
-                "temperature": temperature, "stream": True, "reasoning_effort": "none"}
+        body = no_think({"model": self.model, "messages": self._messages(messages), "max_tokens": num_predict,
+                         "temperature": temperature, "stream": True})
         timeout = httpx.Timeout(connect=15, read=first_token_timeout, write=30, pool=15)
         async with httpx.AsyncClient(timeout=timeout) as c:
             async with c.stream("POST", self._url(), json=body, headers=self._headers()) as r:

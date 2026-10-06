@@ -1,0 +1,20 @@
+# Build context for tools/central/instance/Dockerfile is the repository root. BuildKit reads this file instead of
+# the root .dockerignore (which excludes models/ and frontend/dist for the hub image). Allow-list: only what the
+# instance image copies; never .env files, databases, recordings or the dev PC's TLS keys.
+*
+!backend/nvr
+!backend/requirements.txt
+!tunnelproto
+!frontend
+!models
+frontend/node_modules
+frontend/dist
+frontend/tsconfig.tsbuildinfo
+**/__pycache__
+**/*.pyc
+**/.env
+**/*.db
+**/*.db-*
+**/*.key
+**/*.crt
+models/**/.locks

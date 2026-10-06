@@ -8,7 +8,14 @@ import sqlalchemy as sa
 
 from . import cameras, db
 
-KINDS = ("offline", "camera_down", "disk", "clock", "detector_fallback", "detector_stalled", "event_high", "event_policy", "event_watched")
+KINDS = ("offline", "camera_down", "disk", "clock", "detector_fallback", "detector_stalled", "event_high", "event_policy", "event_watched",
+         "site_link_down", "host_offline")
+# site_link_down  the server's heartbeat says every camera is unreachable at once (summary.site_link_down): the link to
+#                 the Site (SpeedFusion tunnel, port forwards, the BR1's cellular uplink) is probably down. One alert for
+#                 the server instead of one camera_down per camera; cameras flagged link_down raise no camera_down.
+# host_offline    a central recording host (hosts.py) stopped heartbeating. Hub-level: org_id hosts.HUB_ORG, site_id =
+#                 the host id; only hub administrators are notified (HUB_KINDS).
+HUB_KINDS = ("host_offline",)
 # Server detector health, from the heartbeat's `health_alerts` list (backend nvr/detector.py): open while listed.
 #   detector_fallback  the Hailo accelerator is missing or failing; YOLO runs on the CPU (or nothing can detect)
 #   detector_stalled   the verify queue has had events for 15 min and none finished
@@ -50,18 +57,39 @@ def close(site: dict, kind: str, key: str = "") -> None:
                                       db.alerts.c.closed_at.is_(None)).values(closed_at=time.time()))
 
 
+def link_down_text(site: dict) -> str:
+    loc = db.one(sa.select(db.locations.c.name).where(db.locations.c.id == site["location_id"])) if site.get("location_id") else None
+    return f"All cameras at {(loc or {}).get('name') or site.get('name') or 'the site'} are unreachable: the link to the site may be down"
+
+
 def on_heartbeat(site: dict, summary: dict, skew_s: float) -> None:
     off = cameras.disabled_ids(site["id"])   # a camera switched off at the server is not "down"
     for cid in off:
         _camera_strikes.pop((site["id"], cid), None)
         close(site, "camera_down", cid)
+    link_down = summary.get("site_link_down") is True
+    if link_down:
+        open(site, "site_link_down", "", {"text": link_down_text(site)})
+    else:
+        close(site, "site_link_down")
+    live = [c for c in summary.get("cameras") or [] if isinstance(c, dict) and c.get("id") and c["id"] not in off]
+    # Every camera of a server dark at once is most likely the site's link: the server says so after 90 s
+    # (site_link_down). Wait 4 heartbeats (~2 min) instead of 2 before camera_down, so one link drop doesn't
+    # push five camera alerts first.
+    all_dark = len(live) >= 2 and all(not c.get("stream_ready") for c in live)
+    strikes_needed = 4 if all_dark else 2
     for cam in summary.get("cameras") or []:
         if not isinstance(cam, dict) or not cam.get("id") or cam["id"] in off:
+            continue
+        if link_down and (cam.get("link_down") is True or (cam.get("link_down") is None and not cam.get("stream_ready"))):
+            # covered by the one site_link_down alert: no camera_down, and any opened just before the server noticed closes
+            _camera_strikes.pop((site["id"], cam["id"]), None)
+            close(site, "camera_down", cam["id"])
             continue
         k = (site["id"], cam["id"])
         bad = not cam.get("stream_ready") or bool(cam.get("problems"))
         _camera_strikes[k] = _camera_strikes.get(k, 0) + 1 if bad else 0
-        if _camera_strikes[k] >= 2:
+        if _camera_strikes[k] >= strikes_needed:
             open(site, "camera_down", cam["id"], {"name": cam.get("name"), "problems": cam.get("problems") or [], "stream_ready": cam.get("stream_ready")})
         elif not bad:
             close(site, "camera_down", cam["id"])

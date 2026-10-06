@@ -13,7 +13,9 @@ export type SourceCamera = { site: string; siteName: string; id: string; name: s
   server?: string; serverName?: string; siteId?: string; locationName?: string };
 /** A physical Site and the servers in it, for grouping pickers (Site → Server → cameras). */
 export type SourceSiteGroup = { id: string; name: string; servers: string[] };
-export type SourceSite = { id: string; name: string; location?: string; online: boolean; camerasUp: number; cameras: number; diskFreeGb?: number | null; openAlerts: number; version?: string | null };
+export type SourceSite = { id: string; name: string; location?: string; online: boolean; camerasUp: number; cameras: number; diskFreeGb?: number | null; openAlerts: number; version?: string | null;
+  /** Mbit/s the cameras send the server (5-min average) and GB this month: shown when known */
+  bandwidth?: { mbps: number; month_gb: number } | null };
 export type SourceAlert = { id: number; site_id: string; site_name: string; kind: string; opened_at: number; acked_by: string | null; detail: Record<string, unknown> };
 export type SourceDigest = { day: string; text: string; model: string | null; created_at: number } | null;
 export type FleetMessage =

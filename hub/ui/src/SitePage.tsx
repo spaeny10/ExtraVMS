@@ -11,6 +11,8 @@ import { Breadcrumbs } from "./Breadcrumbs";
 import { DirectChips } from "./DirectChip";
 import { SETTINGS_SECTIONS, SITE_TABS, type SettingsSection, type SiteTab, consoleHref, go, navigate, serverHref, settingsHref, siteHref } from "./nav";
 import { AddressBox } from "./site/AddressBox";
+import { CentralBox } from "./site/CentralBox";
+import { siteBandwidth, uploadLine } from "./central";
 import { ContactsBox } from "./site/ContactsBox";
 import { MonitoringBox } from "./site/MonitoringBox";
 import { ProceduresBox } from "./site/ProceduresBox";
@@ -120,15 +122,22 @@ function ServersTab({ site, admin, onChanged }: { site: Site; admin: boolean; on
   const [sites, setSites] = useState<Site[]>([]);
   useEffect(() => { if (admin) api.locations(site.org_id).then(setSites).catch(() => setSites([])); }, [admin, site.org_id]);
   const now = Date.now() / 1000;
-  if (site.servers.length === 0) return <p className="muted">No servers in this site yet.{admin ? <> Enroll one under <a href="/customer/servers" onClick={go("/customer/servers")}>Customer → Servers</a>.</> : ""}</p>;
+  // what the Site's servers pull from its cameras (a central instance: the site's cellular upload)
+  const upload = uploadLine(siteBandwidth(site.servers));
   return (
-    <div className="site-grid">
-      {site.servers.map((s) => (
-        <ServerCard key={s.id} s={s} now={now} href={serverHref(site.id, s.id)}>
-          <ServerActions s={s} admin={admin} sites={sites} onChanged={onChanged} />
-        </ServerCard>
-      ))}
-    </div>
+    <>
+      {admin && <CentralBox site={site} onChanged={onChanged} />}
+      {upload && <p className="small site-upload">{upload}</p>}
+      {site.servers.length === 0 ? <p className="muted">No servers in this site yet.{admin ? <> Enroll one under <a href="/customer/servers" onClick={go("/customer/servers")}>Customer → Servers</a>.</> : ""}</p> : (
+        <div className="site-grid">
+          {site.servers.map((s) => (
+            <ServerCard key={s.id} s={s} now={now} href={serverHref(site.id, s.id)}>
+              <ServerActions s={s} admin={admin} sites={sites} onChanged={onChanged} />
+            </ServerCard>
+          ))}
+        </div>
+      )}
+    </>
   );
 }
 

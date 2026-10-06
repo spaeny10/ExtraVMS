@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { api, fmtTime, type Camera, type HomeData, type NvrEvent, type SiteDashboard } from "./api";
+import { api, bandwidthText, fmtTime, type Camera, type HomeData, type NvrEvent, type SiteDashboard } from "./api";
 import { Dashboard } from "./dashboard/Dashboard";
 import { nextFree } from "./dashboard/grid";
 import { LOCAL, makeLocalSource } from "./dashboard/localSource";
@@ -130,7 +130,9 @@ export function HomeView({ cameras, port, onGo }: { cameras: Camera[]; port: num
   if (err && !h) return <div className="view error">{err}</div>;
   if (!h || !list || !current) return <div className="view home"><Skeleton lines={1} /><Skeleton lines={4} /></div>;
   const problems: string[] = [];
-  for (const c of h.cameras) {
+  // the link to the site is down: one line ("All cameras unreachable …", below) instead of one per camera
+  const linkDown = (h.health_alerts ?? []).some((a) => a.kind === "site_link_down");
+  for (const c of linkDown ? [] : h.cameras) {
     if (!c.stream_ready) problems.push(`${c.name} is not recording`);
     for (const p of c.health?.problems ?? []) problems.push(`${c.name}: ${p}`);
     if (c.stream_ready && c.metadata_last && h.now - c.metadata_last > 1800) problems.push(`${c.name}: no detections for ${Math.round((h.now - c.metadata_last) / 60)} min`);
@@ -150,6 +152,7 @@ export function HomeView({ cameras, port, onGo }: { cameras: Camera[]; port: num
           ? <span>All {h.cameras.length} cameras recording · {h.disk.free_gb.toLocaleString()} GB free ({usedPct}% used)
             {h.queues.verify + h.queues.synopsis > 0 && <span className="muted"> · {h.queues.verify} verifying, {h.queues.synopsis} awaiting Qwen</span>}</span>
           : <span>{problems.join(" · ")}</span>}
+        {h.bandwidth && h.cameras.length > 0 && <span className="muted small" title="Video received from the cameras, averaged over 5 minutes">{bandwidthText(h.bandwidth)}</span>}
         <span className="spacer" />
         <button className="ghost small" onClick={() => onGo("Settings")}>Settings</button>
         <button className="ghost small" onClick={() => onGo("Live")}>Live view</button>
