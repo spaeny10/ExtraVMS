@@ -107,12 +107,12 @@ describe("hrefs", () => {
 describe("topNav", () => {
   const labels = (path: string, soc = false) => topNav(matchRoute(path).page, soc).map((n) => n.label);
 
-  it("outside a Site: the customer-wide Find and Alerts are there", () => {
-    expect(labels("/")).toEqual(["Home", "Sites", "Find", "Alerts", "Customer", "Audit", "Account"]);
-    expect(labels("/sites")).toEqual(["Home", "Sites", "Find", "Alerts", "Customer", "Audit", "Account"]);
-    expect(labels("/find")).toContain("Find");
-    expect(labels("/alerts")).toContain("Alerts");
-    expect(labels("/customer/members")).toContain("Find");
+  it("Find and Alerts are not in the top menu; their customer-wide pages still open and light up Sites", () => {
+    for (const p of ["/", "/sites", "/find", "/alerts", "/customer/members"])
+      expect(labels(p)).toEqual(["Home", "Sites", "Customer", "Audit", "Account"]);
+    const sites = topNav("home", false).find((n) => n.label === "Sites")!;
+    expect(sites.pages).toContain(matchRoute("/find").page);
+    expect(sites.pages).toContain(matchRoute("/alerts").page);
   });
 
   it("inside a Site (every tab and the server panel): no Find or Alerts, the Site's tabs own them", () => {
@@ -124,7 +124,7 @@ describe("topNav", () => {
   });
 
   it("Hosts only for hub administrators", () => {
-    expect(topNav("home", false, true).map((n) => n.label)).toEqual(["Home", "Sites", "Find", "Alerts", "Customer", "Audit", "Hosts", "Account"]);
+    expect(topNav("home", false, true).map((n) => n.label)).toEqual(["Home", "Sites", "Customer", "Audit", "Hosts", "Account"]);
     expect(labels("/")).not.toContain("Hosts");
     expect(matchRoute("/hub/hosts")).toEqual({ page: "hosts" });
     expect(matchRoute("/hub")).toEqual({ page: "hosts", redirect: "/hub/hosts" });
@@ -132,14 +132,8 @@ describe("topNav", () => {
   });
 
   it("SOC only for SOC staff", () => {
-    expect(labels("/", true)).toEqual(["Home", "Sites", "Find", "Alerts", "SOC", "Customer", "Audit", "Account"]);
+    expect(labels("/", true)).toEqual(["Home", "Sites", "SOC", "Customer", "Audit", "Account"]);
     expect(labels("/soc", false)).not.toContain("SOC");
-  });
-
-  it("the customer-wide items say so in their tooltip", () => {
-    const byLabel = Object.fromEntries(topNav("home", false).map((n) => [n.label, n]));
-    expect(byLabel.Find.title).toBe("Find (all sites)");
-    expect(byLabel.Alerts.title).toBe("Alerts (all sites)");
   });
 
   it("Sites stays lit inside a Site", () => {

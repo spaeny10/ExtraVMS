@@ -47,10 +47,9 @@ export type Page = "home" | "sites" | "site" | "server" | "find" | "alerts" | "c
 export type TopNavItem = { path: string; label: string; icon: string; pages: Page[]; title?: string; soc?: boolean; hubAdmin?: boolean; siteOwned?: boolean };
 export const TOP_NAV: TopNavItem[] = [
   { path: "/", label: "Home", icon: "home", pages: ["home"] },
-  { path: "/sites", label: "Sites", icon: "grid", pages: ["sites", "site", "server"] },
-  // labels stay short; the tooltip says they span every Site (a Site's own Find/Alerts are its tabs)
-  { path: "/find", label: "Find", icon: "find", pages: ["find"], title: "Find (all sites)", siteOwned: true },
-  { path: "/alerts", label: "Alerts", icon: "alert", pages: ["alerts"], title: "Alerts (all sites)", siteOwned: true },
+  // customer-wide Find and Alerts (/find, /alerts) are reached from the Sites page's "Find across all sites" and
+  // "All alerts" buttons, so Sites stays lit there; a Site's own Find and Alerts are its tabs
+  { path: "/sites", label: "Sites", icon: "grid", pages: ["sites", "site", "server", "find", "alerts"] },
   { path: "/soc", label: "SOC", icon: "lock", pages: ["soc"], soc: true },
   { path: "/customer", label: "Customer", icon: "settings", pages: ["customer"] },
   { path: "/audit", label: "Audit", icon: "events", pages: ["audit"] },
@@ -63,9 +62,9 @@ export const TOP_NAV: TopNavItem[] = [
 export const inSite = (page: Page) => page === "site" || page === "server";
 
 /**
- * The top items to show on `page`. Inside a Site the customer-wide Find and Alerts are hidden: the Site's own tabs are
- * also called Find and Alerts but are scoped to the Site, and two same-named links that go to different places
- * confused customers. Outside a Site they show as before (the Sites list also links to both).
+ * The top items to show on `page`. Find and Alerts are not top items: customer-wide search and alerts open from the
+ * Sites page, and a Site's own Find and Alerts are its tabs (two same-named links going to different places
+ * confused customers). `siteOwned` items, if any are added again, are hidden inside a Site.
  */
 export function topNav(page: Page, socUser: boolean, hubAdmin = false): TopNavItem[] {
   return TOP_NAV.filter((n) => (!n.soc || socUser) && (!n.hubAdmin || hubAdmin) && !(n.siteOwned && inSite(page)));
