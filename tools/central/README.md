@@ -8,8 +8,8 @@ G481 (Ubuntu 24.04, Docker + NVIDIA Container Toolkit)
 ├─ axiom-vllm (compose, A40) ── Qwen-VL, OpenAI /v1, on network axiom-ai               ai/compose.yml
 ├─ FusionHub (KVM VM) ── terminates every VPN-mode site's SpeedFusion tunnel          PEPLINK.md
 └─ instances, one per Site: container axiom-<id>, network axiom-<id> (a /28), uid 20000+slot,
-   YOLO on the A10 (--gpus device=N), XFS project quota, nftables egress allow-list    instance/Dockerfile
-   /srv/axiom/instances/<id>/{instance.env,data/}   /srv/axiom/recordings/<id>/
+   YOLO on the A10 (--gpus device=N), ZFS datasets with quotas, nftables egress allow-list   instance/Dockerfile
+   /srv/axiom/instances/<id>/{instance.env,data/}   /srv/axiom/recordings/<id>/   (each a ZFS dataset)
 ```
 
 Files here:
@@ -32,7 +32,29 @@ Everything below runs as root on the console or over SSH from an admin address.
 ### Ubuntu and storage
 
 1. Ubuntu Server 24.04 LTS on the boot SSDs. Keep the OS disk separate from recordings.
-2. Recordings array: one large block device (hardware RAID or `mdadm` RAID 6/10) formatted **XFS** and mounted at `/srv/axiom` with project quotas:
+2. Recordings array: a **ZFS raidz2 pool** named `axiom` (recommended; XFS with project quotas is the alternative below). The data disks go to ZFS directly: no hardware RAID volume underneath (set the controller to HBA/JBOD mode).
+   ```bash
+   apt install -y zfsutils-linux
+   ls -l /dev/disk/by-id/                           # name the disks by id, never sdX (those change between boots)
+   zpool create -o ashift=12 \
+     -O compression=lz4 -O atime=off -O xattr=sa -O acltype=posixacl -O mountpoint=/srv/axiom \
+     axiom raidz2 /dev/disk/by-id/<disk1> /dev/disk/by-id/<disk2> ...      # ALL DATA ON THESE DISKS IS LOST
+   zfs create -o recordsize=1M  axiom/recordings    # /srv/axiom/recordings: large sequential video segments
+   zfs create -o recordsize=64K axiom/instances     # /srv/axiom/instances: SQLite databases and small files
+   zfs create -o recordsize=1M  axiom/ai            # /srv/axiom/ai: the vLLM model cache
+   zfs list -o name,mountpoint,recordsize,compression,quota
+   findmnt -no FSTYPE,SOURCE --mountpoint /srv/axiom/recordings      # "zfs axiom/recordings"
+   ```
+   The children inherit their mountpoints (`/srv/axiom/<name>`) and lz4/atime/xattr/acl settings from `axiom`. Do not put anything else in `axiom/recordings` or `axiom/instances`: `axiom_host.py` creates one child dataset per instance in each.
+
+   Why ZFS:
+   - **Per-Site datasets with quotas.** `create-instance` creates `axiom/recordings/<id>` (quota = the Site's `quota_gb`) and `axiom/instances/<id>` (quota = `instance_dir_quota_gb` in `host.json`, default 50 GB). Each instance sees its quota as its disk (section 4), `set-quota` is one `zfs set`, usage is exact and free to read, and `delete-instance --purge` is a `zfs destroy` of just those two datasets instead of an `rm -rf` through millions of segment files.
+   - **Checksums.** Every block is checksummed; a bad sector or a disk returning wrong data is detected on read and repaired from parity instead of silently corrupting footage or a Site's database. raidz2 survives any two failed disks.
+   - **Scrubs.** A scrub reads every block and repairs what it finds before a second disk failure can make it unrecoverable. Ubuntu's `zfsutils-linux` already schedules one: `/etc/cron.d/zfsutils-linux` scrubs every imported pool on the second Sunday of each month. Leave it in place (check the file exists after install), and look at the result with `zpool status axiom` (`scan: scrub repaired 0B ... with 0 errors`). `zpool status -x` prints `all pools are healthy` when nothing needs attention; `zfs-zed` (installed with zfsutils) can mail on disk faults if `ZED_EMAIL_ADDR` is set in `/etc/zfs/zed.d/zed.rc` and the host can send mail.
+   - Boot: `zfs-import-cache` and `zfs-mount` (enabled by the package) import and mount the pool before `local-fs.target`, so before `axiom-firewall` and Docker. If the pool ever fails to import, the per-instance directories do not exist and Docker refuses to start the instances (`--mount type=bind` needs its source), so nothing records onto the boot disk; fix the pool (`zpool import axiom`), then `systemctl restart axiom-host`.
+   - Snapshots count against a dataset's quota and make `zfs destroy` refuse. Do not snapshot `axiom/recordings/*`; if a purge reports `could not destroy ZFS dataset`, list them with `zfs list -t snapshot -r axiom/recordings/<id>` and remove them by hand. The agent never uses `zfs destroy -r` or `-f`.
+
+   **Alternative: XFS with project quotas.** One large block device (hardware RAID or `mdadm` RAID 6/10) formatted XFS and mounted at `/srv/axiom`:
    ```bash
    apt install -y xfsprogs
    mkfs.xfs -L axiom /dev/md0                       # ALL DATA ON IT IS LOST
@@ -41,7 +63,9 @@ Everything below runs as root on the console or over SSH from an admin address.
    mount /srv/axiom
    xfs_quota -x -c state /srv/axiom                 # "Project quota state ... Accounting: ON, Enforcement: ON"
    ```
-   It must be its own filesystem: project quotas on the root filesystem need kernel boot flags.
+   It must be its own filesystem: project quotas on the root filesystem need kernel boot flags. XFS has no data checksums and no scrub of footage, and a purge is an `rm -rf`.
+
+   `quota_mode` `auto` (the default for `create-instance`) picks `zfs` when `/srv/axiom/recordings` is the mountpoint of a ZFS dataset, else `xfs` when `/srv/axiom` is XFS mounted with `prjquota`, else `none`. The mode is stored per instance, so a host keeps managing existing instances the way they were created.
 3. `apt install -y chrony nftables jq curl` and `systemctl enable --now chrony`. Instances use the host's clock (a container cannot set time), so the host's NTP is the one that matters.
 
 ### NVIDIA driver, Docker, Container Toolkit
@@ -126,7 +150,7 @@ systemctl daemon-reload
 systemctl enable --now axiom-firewall axiom-host
 journalctl -u axiom-host -f                                                     # "connected to wss://..."
 ```
-The agent runs on the host, not in a container, because it drives `docker`, `nft` and `xfs_quota` as root; containerizing it would need a privileged container with the Docker socket, which is the same trust with more moving parts.
+The agent runs on the host, not in a container, because it drives `docker`, `nft` and `zfs` (or `xfs_quota`) as root; containerizing it would need a privileged container with the Docker socket, which is the same trust with more moving parts.
 
 ## 2. Instances
 
@@ -145,8 +169,9 @@ docker logs -f axiom-acme-gate
 Within a minute the instance enrolls itself into the Site and appears on the hub as "Acme Gate · Central"; add its cameras there (PEPLINK.md). The agent then removes the spent token from `instance.env`.
 
 What `create-instance` does, in order (if a step fails, the earlier ones are rolled back):
-1. `/srv/axiom/instances/<id>/` (root, 711), `data/` and `/srv/axiom/recordings/<id>/` (owned by the instance's uid `20000+slot`, 700).
-2. XFS project `70000+slot` covering both `data/` and the recordings folder, hard limit = `quota_gb`.
+1. `/srv/axiom/instances/<id>/` (root, 711), `data/` and `/srv/axiom/recordings/<id>/` (owned by the instance's uid `20000+slot`, 700). On ZFS the two folders are new datasets, created before the folders' owner and mode are set:
+   `zfs create -o quota=<bytes> axiom/instances/<id>` (`instance_dir_quota_gb`, default 50 GB) and `zfs create -o quota=<bytes> axiom/recordings/<id>` (`quota_gb`). Quotas are passed in bytes because `quota_gb` is decimal GB and ZFS's `G` suffix means GiB. If `/srv/axiom/instances` is not a ZFS dataset, `instances/<id>` is a plain folder without a quota (the result says so).
+2. XFS only: project `70000+slot` covering both `data/` and the recordings folder, hard limit = `quota_gb`.
 3. `instance.env` (root, 600): hub URL, enrollment token, `NVR_INSTANCE_NAME`, `NVR_DIRECT_ENABLED=0`, `NVR_HOST=127.0.0.1`, `NVR_LOCAL_VLM_ENABLED=0`, the vLLM URL/key/model, `NVR_YOLO_DEVICE=cuda:0` (or CPU settings), container paths.
 4. Docker network `axiom-<id>`: its own /28 from `10.200.0.0/16` (gateway .1, instance .2, vLLM .3), bridge `axb<slot>`.
 5. Firewall regenerated and loaded (before the container's first packet).
@@ -162,6 +187,7 @@ axiom_host.py set-quota --id acme-gate --quota-gb 6000
 axiom_host.py restart-instance --id acme-gate        # docker restart
 axiom_host.py restart-instance --id acme-gate --image axiom/instance:<tag>    # upgrade one instance
 axiom_host.py delete-instance --id acme-gate --keep-data    # or --purge to delete the footage too (one is required)
+axiom_host.py delete-instance --id acme-gate --purge --dry-run   # ZFS: prints the two `zfs destroy` commands, runs nothing
 axiom_host.py render-firewall                        # print the ruleset; nft list table inet axiom shows counters
 axiom_host.py reconcile                              # re-apply firewall/quotas/networks/vLLM links (also at agent start)
 ```
@@ -187,20 +213,36 @@ Read-only root: if a library needs to write outside `/tmp`, `/data` or `/recordi
 
 ## 4. Storage quota
 
-With XFS project quotas, the instance sees its quota as its disk: `statfs` on a project directory reports the project's limit and usage. The server's existing retention therefore works unchanged: its free-space floor (`keep.default_min_free_gb`: 10 % of the disk, at most 200 GB, editable under System → Retention) applies to the quota, and continuous footage is trimmed before the instance reaches the hard limit. Recordings and the database/event media share the one project, so `retention.same_volume()` is true and one floor covers both. `used_gb` in the heartbeat is exact and free to read.
+**ZFS** (`quota_mode: zfs`): the instance's `/recordings` is the dataset `axiom/recordings/<id>` and its `/data` lives in `axiom/instances/<id>`, each a filesystem of its own with a ZFS quota, so `statfs` inside the container reports the quota as the disk size. The server's retention works unchanged: its free-space floor (`keep.default_min_free_gb`: 10 % of the disk, at most 200 GB, editable under System → Retention) applies to the recordings quota, and continuous footage is trimmed before the dataset reaches it. Recordings and `/data` are separate filesystems, so `retention.same_volume()` is false and the database/event media side gets the server's own small emergency floor (5-20 GB) inside the instance dataset's quota. `quota_gb` limits the recordings dataset only; each instance also takes up to `instance_dir_quota_gb` (default 50 GB, set in `host.json` before creating; raise it for Sites that keep many event clips). `used_gb` in the heartbeat is the `used` of both datasets (exact, read with `zfs get -Hp`), and `set-quota` refuses a quota below the recordings dataset's own `used` unless forced. A ZFS quota counts snapshots too: another reason not to snapshot recordings.
 
-**Without XFS project quotas** (`quota_mode: none`, e.g. ext4): nothing enforces `quota_gb`. The server has no environment setting that caps its usage: the retention floor is a free-space floor stored in each instance's database, and on a shared filesystem every instance sees the same free space, so floors cannot divide the disk. The first instance to write fills it, and then every instance trims together when the shared disk reaches the floor. The agent still reports `used_gb` (from `du`, every 30 minutes) so the hub can flag Sites over their plan, and `set-quota` refuses to go below usage, but it is accounting, not a limit. Use XFS for production; if a host must run without it, a per-instance loop-mounted XFS image file is the workaround (not automated).
+The agent's ZFS commands, all on exactly `<dataset at /srv/axiom/recordings>/<id>` and `<dataset at /srv/axiom/instances>/<id>` (it refuses any name in the registry that is not that direct child, so it can never act on a parent, a sibling or the pool):
+
+| Operation | Commands |
+|---|---|
+| detect (`auto`) | `findmnt -n -o FSTYPE,SOURCE --mountpoint /srv/axiom/recordings` (and `.../instances`) |
+| `create-instance` | `zfs list -H -o name <ds>` (refuse if it exists), `zfs create -o quota=<instance_dir_quota_gb × 10⁹> axiom/instances/<id>`, `zfs create -o quota=<quota_gb × 10⁹> axiom/recordings/<id>`; rolled back with `zfs destroy <ds>` if a later step fails |
+| `set-quota` | `zfs get -Hp -o name,property,value used axiom/recordings/<id>`, then `zfs set quota=<bytes> axiom/recordings/<id>` |
+| `delete-instance --purge` | `zfs destroy axiom/recordings/<id>`, `zfs destroy axiom/instances/<id>` (no `-r`, no `-f`; a failure is reported in the result, not forced) |
+| `delete-instance --keep-data` | none: both datasets stay, quotas included, and block re-creating the same id |
+| `reconcile` | `zfs set quota=...` on both datasets again (repairs hand edits) |
+| usage, capacity | `zfs get -Hp -o name,property,value used <both datasets>`; host disk: `zfs get ... used,available axiom axiom/recordings` |
+
+Host capacity on ZFS: `disks[0].total_gb` is the pool's usable size (`used` + `available` of the `axiom` dataset, after raidz2 parity) and `free_gb` is `available` of `axiom/recordings`. `statvfs` on `/srv/axiom` would be wrong there (it leaves out every child dataset's data).
+
+**XFS** (`quota_mode: xfs`): with XFS project quotas, the instance sees its quota as its disk: `statfs` on a project directory reports the project's limit and usage. The server's existing retention therefore works unchanged: its free-space floor (`keep.default_min_free_gb`: 10 % of the disk, at most 200 GB, editable under System → Retention) applies to the quota, and continuous footage is trimmed before the instance reaches the hard limit. Recordings and the database/event media share the one project, so `retention.same_volume()` is true and one floor covers both. `used_gb` in the heartbeat is exact and free to read.
+
+**Without XFS project quotas** (`quota_mode: none`, e.g. ext4): nothing enforces `quota_gb`. The server has no environment setting that caps its usage: the retention floor is a free-space floor stored in each instance's database, and on a shared filesystem every instance sees the same free space, so floors cannot divide the disk. The first instance to write fills it, and then every instance trims together when the shared disk reaches the floor. The agent still reports `used_gb` (from `du`, every 30 minutes) so the hub can flag Sites over their plan, and `set-quota` refuses to go below usage, but it is accounting, not a limit. Use ZFS (or XFS) for production; if a host must run without either, a per-instance loop-mounted XFS image file is the workaround (not automated).
 
 ## 5. Capacity (to confirm in the Phase 0 spike)
 
 - CPU is the first limit: an instance with 5 cameras at 4 CPUs/8 GB (defaults; `--cpus`, `--mem-gb` per instance) means ~16-18 instances on 80 threads with room for vLLM, FusionHub and the host. RAM (768 GB) is not the limit.
 - A10 (24 GB): YOLO11s at 1280 + CLIP + OSNet + PPE take roughly 1.5-2.5 GB per instance, so ~8-10 instances per A10 by memory; spread across A10s as more are added (`--gpu`).
 - A40: one vLLM for every instance on the host; synopsis throughput is the number to measure.
-- Storage: plan quotas against usable space; `capacity.allocated.quota_gb` vs `disks[].total_gb` is what the hub uses for placement.
+- Storage: plan quotas against usable space; `capacity.allocated.quota_gb` vs `disks[].total_gb` is what the hub uses for placement. On ZFS add `instance_dir_quota_gb` (50 GB) per instance, and keep the pool below about 80 % full: ZFS slows down as a pool fills.
 
 ## 6. Adding a second host
 
-Repeat section 1 on the new server (Ubuntu, XFS `/srv/axiom`, driver, Docker, toolkit, image, vLLM, agent), with its own host token from the hub. Instance networks and the pool are local to each host, so the same `10.200.0.0/16` is reused. For VPN-mode sites, the new host routes `10.20.0.0/16` to the existing FusionHub over the shared `10.19.0.0/24` VLAN (PEPLINK.md); no second FusionHub is needed. Storage stays on each host: moving a Site between hosts uses the existing move/migrate fleet actions.
+Repeat section 1 on the new server (Ubuntu, the `axiom` ZFS pool or XFS `/srv/axiom`, driver, Docker, toolkit, image, vLLM, agent), with its own host token from the hub. Instance networks and the pool are local to each host, so the same `10.200.0.0/16` is reused. For VPN-mode sites, the new host routes `10.20.0.0/16` to the existing FusionHub over the shared `10.19.0.0/24` VLAN (PEPLINK.md); no second FusionHub is needed. Storage stays on each host: moving a Site between hosts uses the existing move/migrate fleet actions.
 
 ## 7. Troubleshooting
 

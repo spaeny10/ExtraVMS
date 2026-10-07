@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import shutil
 import sys
 import tempfile
 import unittest
@@ -43,6 +44,79 @@ class FakeExec(ah.Exec):
 
     def cmds(self, prefix: str) -> list[list[str]]:
         return [c for c in self.calls if " ".join(c).startswith(prefix)]
+
+
+class ZfsState:
+    """A pretend pool: datasets {name: {used, quota, available, busy}} and mounts {path: dataset}."""
+
+    def __init__(self, root: Path, instances_on_zfs: bool = True) -> None:
+        self.root = root
+        self.datasets: dict[str, dict] = {
+            "axiom": {"used": 2_000_000_000_000, "available": 48_000_000_000_000},
+            "axiom/recordings": {"used": 1_900_000_000_000, "available": 48_000_000_000_000},
+            "axiom/instances": {"used": 10_000_000_000, "available": 48_000_000_000_000},
+        }
+        self.mounts: dict[str, str] = {str(root): "axiom", str(root / "recordings"): "axiom/recordings"}
+        if instances_on_zfs:
+            self.mounts[str(root / "instances")] = "axiom/instances"
+        for p in self.mounts:
+            Path(p).mkdir(parents=True, exist_ok=True)
+
+
+class ZfsExec(FakeExec):
+    """FakeExec on a ZFS host: findmnt and zfs answer from a ZfsState and zfs create/destroy/set change it.
+    dry_run=True runs nothing but the read-only queries (like the real Exec)."""
+
+    def __init__(self, state: ZfsState, dry_run: bool = False) -> None:
+        super().__init__()
+        self.dry_run = dry_run
+        self.state = state
+
+    def _run(self, argv, input, timeout):
+        self.calls.append(list(argv))
+        st = self.state
+        if argv[0] == "findmnt":
+            if "--mountpoint" in argv:
+                ds = st.mounts.get(argv[-1])
+                return ah.Result(0, f"zfs {ds}\n", "") if ds else ah.Result(1, "", "")
+            return ah.Result(0, f"{st.root} zfs rw,xattr,posixacl\n", "")
+        if argv[0] != "zfs":
+            self.calls.pop()   # FakeExec records it
+            return super()._run(argv, input, timeout)
+        sub, name = argv[1], argv[-1]
+        if sub == "list":
+            return ah.Result(0 if name in st.datasets else 1, name + "\n" if name in st.datasets else "", "")
+        if sub == "get":
+            props, names = argv[5].split(","), argv[6:]
+            out = [f"{n}\t{p}\t{st.datasets[n].get(p, 0)}" for n in names if n in st.datasets for p in props]
+            missing = [n for n in names if n not in st.datasets]
+            return ah.Result(1 if missing else 0, "\n".join(out) + "\n", "".join(f"{n}: dataset does not exist\n" for n in missing))
+        if sub == "create":
+            parent, _, leaf = name.rpartition("/")
+            if name in st.datasets or parent not in st.datasets:
+                return ah.Result(1, "", f"cannot create '{name}'\n")
+            pmount = next(p for p, d in st.mounts.items() if d == parent)
+            mount = Path(pmount) / leaf
+            mount.mkdir()
+            st.mounts[str(mount)] = name
+            st.datasets[name] = {"used": 0, "available": 48_000_000_000_000,
+                                 "quota": int(argv[argv.index("-o") + 1].split("=")[1])}
+            return ah.Result(0, "", "")
+        if sub == "set":
+            if name not in st.datasets:
+                return ah.Result(1, "", f"cannot open '{name}'\n")
+            st.datasets[name]["quota"] = int(argv[2].split("=")[1])
+            return ah.Result(0, "", "")
+        if sub == "destroy":
+            if name not in st.datasets or st.datasets[name].get("busy"):
+                return ah.Result(1, "", f"cannot destroy '{name}': filesystem has dependent snapshots\n")
+            del st.datasets[name]
+            for p, d in list(st.mounts.items()):
+                if d == name:
+                    del st.mounts[p]
+                    shutil.rmtree(p)
+            return ah.Result(0, "", "")
+        return ah.Result(2, "", "unexpected zfs call")
 
 
 def make_host(tmp: Path, exe: ah.Exec) -> ah.Host:
@@ -232,6 +306,7 @@ class Isolation(unittest.TestCase):
         self.assertTrue(self.exe.cmds("docker rm -f axiom-acme-gate"))
         self.assertTrue(self.exe.cmds("docker network rm axiom-acme-gate"))
         self.assertTrue([c for c in self.exe.cmds("xfs_quota") if "bhard=0 70000" in c[3]])
+        self.assertFalse(self.exe.cmds("zfs"))                            # XFS hosts never call zfs
         # the next instance does not reuse slot 0 (or its uid / project id)
         c = self.host.create_instance({**VPN_ARGS, "id": "delta", "subnet": "10.20.9.0/24"})["instance"]
         self.assertEqual(c["network"], "10.200.0.32/28")
@@ -265,6 +340,17 @@ class Isolation(unittest.TestCase):
         with self.assertRaises(ah.OpError):
             self.host.set_quota({"id": "beta-yard", "quota_gb": 1000})
         self.host.set_quota({"id": "beta-yard", "quota_gb": 1000, "force": True})
+        self.assertFalse(self.exe.cmds("zfs"))
+
+    def test_quota_mode_none(self):
+        out = self.host.create_instance({**VPN_ARGS, "id": "nq", "subnet": "10.20.13.0/24", "quota_mode": "none"})
+        self.assertIn("NOT enforced", out["detail"])
+        n = len(self.exe.cmds("xfs_quota"))
+        self.assertIn("not enforced", self.host.set_quota({"id": "nq", "quota_gb": 50})["detail"])
+        self.host.delete_instance({"id": "nq", "purge": True})
+        self.assertEqual(len(self.exe.cmds("xfs_quota")), n)
+        self.assertFalse(self.exe.cmds("zfs"))
+        self.assertFalse(self.host.rec_dir("nq").exists())
 
     def test_finish_enroll_scrubs_token(self):
         self.exe.answers["docker exec axiom-acme-gate"] = json.dumps({"enrolled": True, "site_id": "s1", "cameras": 0})
@@ -295,7 +381,234 @@ class Isolation(unittest.TestCase):
         self.assertIsNone(views["beta-yard"]["gpu"])
 
 
+ZVPN = {**VPN_ARGS, "quota_mode": "auto"}
+ZFWD = {**FWD_ARGS, "quota_mode": "auto"}
+REC_DS, INST_DS = "axiom/recordings/acme-gate", "axiom/instances/acme-gate"
+
+
+class ZfsMode(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.state = ZfsState(self.tmp / "srv")
+        self.exe = ZfsExec(self.state)
+        self.host = make_host(self.tmp, self.exe)
+
+    def zfs_calls(self, sub: str) -> list[list[str]]:
+        return [c for c in self.exe.calls if c[:2] == ["zfs", sub]]
+
+    def test_auto_detects_zfs(self):
+        self.assertEqual(self.host.quota_mode_auto(), "zfs")
+        self.assertEqual(self.host.zfs_parents(), {"recordings": "axiom/recordings", "instance": "axiom/instances"})
+        # a ZFS root alone is not enough: the recordings directory itself must be a dataset's mountpoint
+        del self.state.mounts[str(self.tmp / "srv" / "recordings")]
+        self.assertNotEqual(self.host.quota_mode_auto(), "zfs")
+        # and the XFS host of the other tests is still detected as XFS
+        self.assertEqual(make_host(Path(tempfile.mkdtemp()), FakeExec()).quota_mode_auto(), "xfs")
+
+    def test_create_makes_child_datasets_with_byte_quotas(self):
+        out = self.host.create_instance(dict(ZVPN))
+        self.assertEqual(self.zfs_calls("create"), [
+            ["zfs", "create", "-o", "quota=50000000000", INST_DS],      # 50 GB instance dir (host.json default)
+            ["zfs", "create", "-o", "quota=4000000000000", REC_DS]])   # 4000 decimal GB, in bytes (not 4000G = GiB)
+        self.assertFalse(self.exe.cmds("xfs_quota"))
+        rec = self.host.load()["instances"]["acme-gate"]
+        self.assertEqual(rec["quota_mode"], "zfs")
+        self.assertEqual(rec["datasets"], {"recordings": REC_DS, "instance": INST_DS})
+        self.assertEqual(out["instance"]["quota_mode"], "zfs")
+        self.assertNotIn("NOT enforced", out["detail"])
+        # the dataset mountpoints are the instance's directories
+        self.assertEqual(self.state.mounts[str(self.host.rec_dir("acme-gate"))], REC_DS)
+        self.assertEqual(self.state.mounts[str(self.host.inst_dir("acme-gate"))], INST_DS)
+        self.assertTrue((self.host.inst_dir("acme-gate") / "data").is_dir())
+        self.assertTrue(self.host.env_path("acme-gate").exists())
+        # the zfs creates come before anything is written into those directories
+        order = [" ".join(c[:2]) for c in self.exe.calls]
+        self.assertLess(max(i for i, c in enumerate(order) if c == "zfs create"), order.index("nft -f"))
+        # instance dir quota from host.json
+        self.host.cfg["instance_dir_quota_gb"] = 20
+        self.host.create_instance(dict(ZFWD))
+        self.assertIn(["zfs", "create", "-o", "quota=20000000000", "axiom/instances/beta-yard"], self.zfs_calls("create"))
+        self.assertIn(["zfs", "create", "-o", "quota=2000000000000", "axiom/recordings/beta-yard"], self.zfs_calls("create"))
+
+    def test_used_gb_and_capacity(self):
+        self.host.create_instance(dict(ZVPN))
+        self.state.datasets[REC_DS]["used"] = 812_400_000_000
+        self.state.datasets[INST_DS]["used"] = 3_000_000_000
+        view = self.host.list_instances()["instances"][0]
+        self.assertEqual(view["used_gb"], 815.4)                       # recordings + instance dir
+        self.assertFalse(self.exe.cmds("du"))
+        self.host.refresh_du()
+        self.assertFalse(self.exe.cmds("du"))                           # exact usage needs no du pass
+        disk = self.host.capacity()["disks"][0]
+        self.assertEqual(disk["fs"], "zfs")
+        self.assertEqual(disk["quota_mode"], "zfs")
+        self.assertEqual(disk["dataset"], "axiom/recordings")
+        self.assertEqual(disk["total_gb"], 50000.0)                     # pool root used + available
+        self.assertEqual(disk["free_gb"], 48000.0)                      # what axiom/recordings can still get
+        self.assertTrue(self.exe.cmds("zfs get -Hp -o name,property,value used,available axiom axiom/recordings"))
+
+    def test_create_dry_run_runs_no_zfs(self):
+        dry = ZfsExec(self.state, dry_run=True)
+        out = make_host(self.tmp, dry).create_instance(dict(ZVPN))
+        steps = [s["cmd"] for s in out["dry_run"]["steps"] if "cmd" in s]
+        self.assertIn(["zfs", "create", "-o", "quota=4000000000000", REC_DS], steps)
+        self.assertIn(["zfs", "create", "-o", "quota=50000000000", INST_DS], steps)
+        self.assertFalse([c for c in dry.calls if c[:2] in (["zfs", "create"], ["zfs", "destroy"], ["zfs", "set"])])
+        self.assertNotIn(REC_DS, self.state.datasets)
+        self.assertEqual(self.host.load()["instances"], {})
+
+    def test_create_refusals(self):
+        self.state.datasets[REC_DS] = {"used": 5, "available": 1}       # kept from an earlier instance
+        with self.assertRaises(ah.OpError):
+            self.host.create_instance(dict(ZVPN))
+        del self.state.datasets[REC_DS]
+        del self.state.mounts[str(self.tmp / "srv" / "recordings")]
+        with self.assertRaises(ah.OpError):                             # explicit zfs, but no dataset there
+            self.host.create_instance({**ZVPN, "quota_mode": "zfs"})
+        self.assertFalse(self.zfs_calls("create"))
+
+    def test_instances_dir_not_on_zfs(self):
+        del self.state.mounts[str(self.tmp / "srv" / "instances")]
+        out = self.host.create_instance(dict(ZVPN))
+        self.assertEqual(self.zfs_calls("create"), [["zfs", "create", "-o", "quota=4000000000000", REC_DS]])
+        self.assertIn("data/ has no quota", out["detail"])
+        self.assertEqual(self.host.load()["instances"]["acme-gate"]["datasets"]["instance"], None)
+        self.host.delete_instance({"id": "acme-gate", "purge": True})
+        self.assertEqual(self.zfs_calls("destroy"), [["zfs", "destroy", REC_DS]])
+        self.assertFalse(self.host.inst_dir("acme-gate").exists())     # plain directory: removed as before
+
+    def test_rollback_destroys_new_datasets(self):
+        real = self.exe._run
+
+        def fail_docker_run(argv, input, timeout):
+            if argv[:2] == ["docker", "run"]:
+                self.exe.calls.append(list(argv))
+                return ah.Result(125, "", "docker: image not found")
+            return real(argv, input, timeout)
+        self.exe._run = fail_docker_run
+        with self.assertRaises(ah.CmdError):
+            self.host.create_instance(dict(ZVPN))
+        self.assertEqual(self.zfs_calls("destroy"), [["zfs", "destroy", REC_DS], ["zfs", "destroy", INST_DS]])
+        self.assertNotIn(REC_DS, self.state.datasets)
+        self.assertEqual(self.host.load()["instances"], {})
+
+    def test_set_quota(self):
+        self.host.create_instance(dict(ZVPN))
+        self.state.datasets[REC_DS]["used"] = 2_900_000_000_000
+        self.state.datasets[INST_DS]["used"] = 600_000_000_000         # not under quota_gb: not in the guard
+        with self.assertRaises(ah.OpError) as cm:
+            self.host.set_quota({"id": "acme-gate", "quota_gb": 2000})
+        self.assertIn("already uses 2900 GB", str(cm.exception))
+        self.assertFalse(self.zfs_calls("set"))
+        out = self.host.set_quota({"id": "acme-gate", "quota_gb": 3000})
+        self.assertEqual(self.zfs_calls("set"), [["zfs", "set", "quota=3000000000000", REC_DS]])
+        self.assertNotIn("not enforced", out["detail"])
+        self.assertEqual(self.state.datasets[REC_DS]["quota"], 3_000_000_000_000)
+        self.host.set_quota({"id": "acme-gate", "quota_gb": 1000, "force": True})
+        self.assertEqual(self.zfs_calls("set")[-1], ["zfs", "set", "quota=1000000000000", REC_DS])
+        self.assertEqual(self.host.load()["instances"]["acme-gate"]["quota_gb"], 1000)
+        self.assertFalse(self.exe.cmds("xfs_quota"))
+
+    def test_delete_purge_destroys_only_the_two_children(self):
+        self.host.create_instance(dict(ZVPN))
+        self.host.create_instance(dict(ZFWD))
+        out = self.host.delete_instance({"id": "acme-gate", "purge": True})
+        self.assertIn("data removed", out["detail"])
+        self.assertEqual(self.zfs_calls("destroy"), [["zfs", "destroy", REC_DS], ["zfs", "destroy", INST_DS]])
+        self.assertFalse([c for c in self.exe.calls if c[0] == "zfs" and {"-r", "-R", "-f"} & set(c)])
+        for kept in ("axiom", "axiom/recordings", "axiom/instances", "axiom/recordings/beta-yard"):
+            self.assertIn(kept, self.state.datasets)
+        self.assertNotIn(REC_DS, self.state.datasets)
+        self.assertNotIn("acme-gate", self.host.load()["instances"])
+        # the id can be used again
+        self.host.create_instance(dict(ZVPN))
+
+    def test_delete_keep_leaves_datasets(self):
+        self.host.create_instance(dict(ZVPN))
+        out = self.host.dispatch("delete_instance", {"id": "acme-gate"})   # neither flag: keep
+        self.assertIn("data kept", out["detail"])
+        self.assertFalse(self.zfs_calls("destroy"))
+        self.assertFalse(self.zfs_calls("set"))
+        self.assertEqual(self.state.datasets[REC_DS]["quota"], 4_000_000_000_000)
+        self.assertNotIn(TOKEN, self.host.env_path("acme-gate").read_text(encoding="utf-8"))
+        with self.assertRaises(ah.OpError):                             # kept data blocks re-creating the id
+            self.host.create_instance(dict(ZVPN))
+
+    def test_delete_refuses_names_that_are_not_the_instance_child(self):
+        self.host.create_instance(dict(ZVPN))
+        bad = ["axiom/recordings", "axiom", "axiom/recordings/beta-yard", "axiom/recordings/acme-gate/x",
+               "axiom/recordings/acme-gate@snap", "other/recordings/acme-gate", "axiom/instances/acme-gate",
+               "axiom/recordings/acme-gate "]
+        for name in bad:
+            reg = self.host.load()
+            reg["instances"]["acme-gate"]["datasets"]["recordings"] = name
+            self.host.save(reg)
+            with self.assertRaises(ah.OpError, msg=name):
+                self.host.delete_instance({"id": "acme-gate", "purge": True})
+            self.assertIn("acme-gate", self.host.load()["instances"], name)   # refused before anything changed
+            self.assertFalse(self.exe.cmds("docker rm"), name)
+        self.assertFalse(self.zfs_calls("destroy"))
+        # the parent dataset is no longer mounted where it was: refuse rather than guess
+        reg = self.host.load()
+        reg["instances"]["acme-gate"]["datasets"]["recordings"] = REC_DS
+        self.host.save(reg)
+        del self.state.mounts[str(self.tmp / "srv" / "recordings")]
+        with self.assertRaises(ah.OpError):
+            self.host.delete_instance({"id": "acme-gate", "purge": True})
+        self.assertFalse(self.zfs_calls("destroy"))
+
+    def test_zfs_child_names(self):
+        self.assertEqual(ah.zfs_child("axiom/recordings", "ci_1a2b3c4d5e6f"), "axiom/recordings/ci_1a2b3c4d5e6f")
+        for parent, iid in (("axiom/recordings", "../x"), ("axiom/recordings", "a/b"), ("axiom/recordings", ""),
+                            ("axiom/recordings", "Acme"), ("", "acme"), (None, "acme"), ("axiom@s", "acme"),
+                            ("axiom/", "acme"), ("/axiom", "acme")):
+            with self.assertRaises(ah.OpError, msg=(parent, iid)):
+                ah.zfs_child(parent, iid)
+        self.assertEqual(ah.check_zfs_child(REC_DS, "axiom/recordings", "acme-gate"), REC_DS)
+        with self.assertRaises(ah.OpError):
+            ah.check_zfs_child("axiom/recordings", "axiom/recordings", "acme-gate")
+
+    def test_delete_dry_run_prints_destroys_and_runs_nothing(self):
+        self.host.create_instance(dict(ZVPN))
+        dry = ZfsExec(self.state, dry_run=True)
+        dhost = make_host(self.tmp, dry)
+        out = dhost.delete_instance({"id": "acme-gate", "keep_data": False}) | ah._plan(dhost)
+        steps = [s["cmd"] for s in out["dry_run"]["steps"] if "cmd" in s]
+        self.assertIn(["zfs", "destroy", REC_DS], steps)
+        self.assertIn(["zfs", "destroy", INST_DS], steps)
+        self.assertFalse([s for s in out["dry_run"]["steps"] if "rmtree" in s])   # datasets, not rm -rf
+        self.assertFalse([c for c in dry.calls if c[0] in ("zfs", "docker", "nft") and c[:2] not in
+                          (["zfs", "get"], ["zfs", "list"], ["docker", "ps"])])
+        self.assertIn(REC_DS, self.state.datasets)
+        self.assertIn("acme-gate", self.host.load()["instances"])
+
+    def test_destroy_failure_is_reported_not_forced(self):
+        self.host.create_instance(dict(ZVPN))
+        self.state.datasets[REC_DS]["busy"] = True
+        out = self.host.delete_instance({"id": "acme-gate", "purge": True})
+        self.assertIn(f"could not destroy ZFS dataset {REC_DS}", out["detail"])
+        self.assertNotIn("data removed", out["detail"])
+        self.assertIn(REC_DS, self.state.datasets)
+        self.assertNotIn(INST_DS, self.state.datasets)
+        self.assertTrue(self.host.rec_dir("acme-gate").exists())        # its files were not rm -rf'd either
+
+    def test_reconcile_reapplies_zfs_quotas(self):
+        self.host.create_instance(dict(ZVPN))
+        self.state.datasets[REC_DS]["quota"] = 0                        # someone cleared it by hand
+        self.host.reconcile(resolve=False)
+        self.assertIn(["zfs", "set", "quota=4000000000000", REC_DS], self.zfs_calls("set"))
+        self.assertIn(["zfs", "set", "quota=50000000000", INST_DS], self.zfs_calls("set"))
+        self.assertEqual(self.state.datasets[REC_DS]["quota"], 4_000_000_000_000)
+
+
 class Parsing(unittest.TestCase):
+    def test_zfs_get(self):
+        p = ah.parse_zfs_get("axiom/recordings/a\tused\t812400000000\naxiom/recordings/a\tquota\t0\n"
+                             "axiom/recordings/a\tavailable\t-\nbroken line\n")
+        self.assertEqual(p, {"axiom/recordings/a": {"used": 812400000000, "quota": 0, "available": None}})
+        self.assertEqual(ah.gb_bytes(4000), 4_000_000_000_000)
+        self.assertEqual(ah.gb_bytes(0.5), 500_000_000)
+
     def test_nvidia_smi(self):
         g = ah.parse_nvidia_smi(NVIDIA_SMI + "2, NVIDIA RTX PRO 4000, Blackwell, 24467, [N/A], [N/A]\njunk\n")
         self.assertEqual(g[0], {"index": 0, "name": "NVIDIA A40", "mem_total_mb": 46068, "mem_used_mb": 41234,

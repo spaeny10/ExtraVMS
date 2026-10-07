@@ -2,8 +2,9 @@
 """axiom-host: provisions and reports Axiom Vision central recording instances on one Docker host.
 
 One instance = one customer Site's recording server (the ordinary site server in the `axiom/instance` image),
-in its own container, Docker network, Unix uid, XFS project quota and nftables egress allow-list. The hub
-drives this agent over a WebSocket (see PROTOCOL.md); the same operations work from the command line.
+in its own container, Docker network, Unix uid, storage quota (its own ZFS datasets, or an XFS project) and
+nftables egress allow-list. The hub drives this agent over a WebSocket (see PROTOCOL.md); the same operations
+work from the command line.
 
     axiom_host.py create-instance --id acme-gate --location loc_123 --name "Acme Gate · Central" \
         --mode vpn --subnet 10.20.7.0/24 --quota-gb 4000 --gpu 1 --enroll-token-file /root/t [--dry-run]
@@ -14,7 +15,7 @@ drives this agent over a WebSocket (see PROTOCOL.md); the same operations work f
     axiom_host.py run --hub wss://hub.axiomvision.ai/host-agent --token-file /etc/axiom/host-token
 
 Python 3.12, standard library plus `websockets` (agent mode only) and `certifi` (optional, for the CA bundle).
-Docker, nft and xfs_quota are driven through their command-line tools. Run as root (systemd unit in systemd/).
+Docker, nft, zfs and xfs_quota are driven through their command-line tools. Run as root (systemd unit in systemd/).
 """
 from __future__ import annotations
 
@@ -47,6 +48,8 @@ log = logging.getLogger("axiom-host")
 
 ID_RE = re.compile(r"^[a-z0-9](?:[a-z0-9_-]{0,30}[a-z0-9])?$")   # the hub sends e.g. ci_1a2b3c4d5e6f
 TOKEN_RE = re.compile(r"^[A-Za-z0-9._~+/=-]{8,512}$")
+ZFS_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]*(?:/[A-Za-z0-9][A-Za-z0-9_.:-]*)*$")   # no @snap, #bookmark
+QUOTA_MODES = ("auto", "zfs", "xfs", "none")
 MODES = ("vpn", "forward")
 
 DEFAULTS: dict[str, Any] = {
@@ -67,6 +70,7 @@ DEFAULTS: dict[str, Any] = {
     "cpus": 4,
     "uid_base": 20000,                          # instance uid = uid_base + slot
     "project_base": 70000,                      # XFS project id = project_base + slot
+    "instance_dir_quota_gb": 50,                # ZFS mode: quota of each instances/<id> dataset (database, event media)
     "tmpfs_mb": 1024,
     "shm_mb": 1024,
     "pids_limit": 4096,
@@ -314,6 +318,45 @@ def _chain(rec: dict) -> str:
     return "inst_" + rec["id"].replace("-", "_")
 
 
+def gb_bytes(gb: float) -> int:
+    """quota_gb is decimal GB (like the server's own disk figures); zfs's G suffix is GiB, so quotas go in bytes."""
+    return int(round(float(gb) * 1e9))
+
+
+def parse_zfs_get(text: str) -> dict[str, dict[str, int | None]]:
+    """`zfs get -Hp -o name,property,value <props> <datasets>` -> {dataset: {property: int or None}}.
+    -p prints exact byte counts; "-" (not applicable) becomes None, and quota 0 means no quota."""
+    out: dict[str, dict[str, int | None]] = {}
+    for line in text.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        try:
+            v: int | None = int(parts[2])
+        except ValueError:
+            v = None
+        out.setdefault(parts[0], {})[parts[1]] = v
+    return out
+
+
+def zfs_child(parent: str | None, iid: str) -> str:
+    """The dataset name of instance `iid` under `parent`. Refuses anything that is not exactly one level below
+    `parent` with a leaf matching the instance id rule, so no caller can ever name the parent itself, a sibling
+    tree, a snapshot or a pool root."""
+    if not parent or not ZFS_NAME_RE.fullmatch(parent):
+        raise OpError(f"no usable ZFS parent dataset ({parent!r}) for instance {iid!r}")
+    if not ID_RE.fullmatch(iid):
+        raise OpError(f"refusing ZFS dataset for instance id {iid!r}")
+    return f"{parent}/{iid}"
+
+
+def check_zfs_child(name: str, parent: str | None, iid: str) -> str:
+    """`name` must be exactly zfs_child(parent, iid). Used before every zfs set/destroy on a registry entry."""
+    if not isinstance(name, str) or name != zfs_child(parent, iid):
+        raise OpError(f"refusing to touch ZFS dataset {name!r}: it is not {parent}/{iid}, the dataset of instance {iid}")
+    return name
+
+
 def _ip_list(v: Any) -> list[str]:
     if v is None or v == "":
         return []
@@ -333,7 +376,7 @@ class Host:
         self._depth = 0
         self._inst_locks: dict[str, threading.Lock] = collections.defaultdict(threading.Lock)
         self.probe_cache: dict[str, dict] = {}       # id -> {"at", "cameras", "enrolled"}
-        self.du_cache: dict[str, float] = {}         # id -> used GB (non-XFS hosts)
+        self.du_cache: dict[str, float] = {}         # id -> used GB (hosts without XFS or ZFS quotas)
 
     # -- registry
     @property
@@ -413,7 +456,44 @@ class Host:
         parts = r.out.split()
         return (parts[0], parts[1], parts[2]) if r.rc == 0 and len(parts) >= 3 else ("", "", "")
 
+    def zfs_dataset_at(self, path: Path) -> str | None:
+        """The ZFS dataset mounted exactly at `path` (not merely somewhere above it), or None."""
+        r = self.exe.query(["findmnt", "-n", "-o", "FSTYPE,SOURCE", "--mountpoint", str(path)])
+        lines = [ln.split() for ln in r.out.splitlines() if ln.strip()] if r.rc == 0 else []
+        if lines and len(lines[-1]) >= 2 and lines[-1][0] == "zfs" and ZFS_NAME_RE.fullmatch(lines[-1][1]):
+            return lines[-1][1]   # the last line is the topmost mount
+        return None
+
+    def zfs_parents(self) -> dict[str, str | None]:
+        """{"recordings": dataset at <root>/recordings, "instance": dataset at <root>/instances} (None = not ZFS)."""
+        return {"recordings": self.zfs_dataset_at(self.root / "recordings"),
+                "instance": self.zfs_dataset_at(self.root / "instances")}
+
+    def zfs_get(self, names: list[str], props: tuple[str, ...]) -> dict[str, dict[str, int | None]]:
+        if not names:
+            return {}
+        r = self.exe.query(["zfs", "get", "-Hp", "-o", "name,property,value", ",".join(props), *names])
+        return parse_zfs_get(r.out)   # a missing dataset is an error line on stderr; the others still parse
+
+    def zfs_owned(self, rec: dict, kind: str, parents: dict[str, str | None] | None = None) -> str | None:
+        """The registry's dataset of `kind` for this instance, checked against what is mounted now."""
+        name = (rec.get("datasets") or {}).get(kind)
+        if not name:
+            return None
+        return check_zfs_child(name, (parents or self.zfs_parents())[kind], rec["id"])
+
+    def zfs_set_quota_cmds(self, rec: dict, parents: dict[str, str | None] | None = None) -> list[list[str]]:
+        parents = parents or self.zfs_parents()
+        cmds = []
+        for kind, gb in (("recordings", rec["quota_gb"]), ("instance", rec.get("instance_quota_gb"))):
+            ds = self.zfs_owned(rec, kind, parents)
+            if ds and gb:
+                cmds.append(["zfs", "set", f"quota={gb_bytes(gb)}", ds])
+        return cmds
+
     def quota_mode_auto(self) -> str:
+        if self.zfs_dataset_at(self.root / "recordings"):
+            return "zfs"
         _, fstype, opts = self.fs_info()
         return "xfs" if fstype == "xfs" and ({"prjquota", "pquota"} & set(opts.split(","))) else "none"
 
@@ -527,15 +607,33 @@ class Host:
         if not (1 <= mem_gb <= 512 and 0.5 <= cpus <= 128):
             raise OpError("mem_gb must be 1-512 and cpus 0.5-128")
         qm = a.get("quota_mode") or "auto"
-        if qm not in ("auto", "xfs", "none"):
-            raise OpError("quota_mode must be auto, xfs or none")
+        if qm not in QUOTA_MODES:
+            raise OpError("quota_mode must be auto, zfs, xfs or none")
+        qm = self.quota_mode_auto() if qm == "auto" else qm
         ai = self.ai_env()
         for p in (self.inst_dir(iid), self.rec_dir(iid)):
             if p.exists() and any(p.iterdir()):
                 raise OpError(f"{p} holds data from an earlier instance {iid}; remove it or choose another id")
+        zfs: dict = {}
+        if qm == "zfs":
+            parents = self.zfs_parents()
+            if not parents["recordings"]:
+                raise OpError(f"quota_mode zfs needs a ZFS dataset mounted at {self.root / 'recordings'} (see README)")
+            try:
+                inst_q = float(self.cfg["instance_dir_quota_gb"])
+            except (TypeError, ValueError):
+                inst_q = 0.0
+            if not 1 <= inst_q <= 10_000_000:
+                raise OpError("host.json instance_dir_quota_gb must be between 1 and 10,000,000")
+            datasets = {"recordings": zfs_child(parents["recordings"], iid),
+                        "instance": zfs_child(parents["instance"], iid) if parents["instance"] else None}
+            for ds in filter(None, datasets.values()):
+                if self.exe.query(["zfs", "list", "-H", "-o", "name", ds]).rc == 0:
+                    raise OpError(f"ZFS dataset {ds} already exists (data kept from an earlier instance {iid}?); "
+                                  "destroy it or choose another id")
+            zfs = {"datasets": datasets, "instance_quota_gb": inst_q}
         return {"id": iid, "location_id": loc, "name": name, "mode": mode, "subnets": subnets, "public_ips": public_ips,
-                "quota_gb": quota, "gpu": gpu, "mem_gb": mem_gb, "cpus": cpus,
-                "quota_mode": self.quota_mode_auto() if qm == "auto" else qm,
+                "quota_gb": quota, "gpu": gpu, "mem_gb": mem_gb, "cpus": cpus, "quota_mode": qm, **zfs,
                 "image": a.get("image") or self.cfg["image"], "hub_url": hub_url,
                 "vlm_url": a.get("vlm_url") or self.cfg["vlm_url"],
                 "vlm_model": a.get("vlm_model") or self.cfg["vlm_model"] or ai.get("AXIOM_VLM_MODEL", ""),
@@ -623,14 +721,30 @@ class Host:
             if not (rec["vlm_model"] and vlm_key):
                 warnings.append(f"no vLLM key/model in {self.cfg['ai_env']}: the instance uses the hub's shared AI")
             if rec["quota_mode"] == "none":
-                warnings.append("no XFS project quota on this filesystem: quota_gb is NOT enforced (see README)")
+                warnings.append("no ZFS dataset or XFS project quota here: quota_gb is NOT enforced (see README)")
+            ds = rec.get("datasets") or {}
+            if rec["quota_mode"] == "zfs" and not ds.get("instance"):
+                warnings.append(f"{self.root / 'instances'} is not a ZFS dataset: the instance's data/ has no quota")
             undo: list[Callable[[], None]] = []
+
+            def zfs_create(name: str, gb: float) -> None:
+                # a child of the dataset mounted at <root>/recordings (or /instances): it inherits the mountpoint
+                # <parent mountpoint>/<id>, compression and recordsize, and zfs mounts it on creation
+                self.exe.run(["zfs", "create", "-o", f"quota={gb_bytes(gb)}", name])
+                undo.append(lambda: self.exe.run(["zfs", "destroy", name], check=False))
+
             try:
-                self.exe.mkdir(self.inst_dir(iid), 0o711)
-                undo.append(lambda: self.exe.rmtree(self.inst_dir(iid)))
+                if ds.get("instance"):
+                    zfs_create(ds["instance"], rec["instance_quota_gb"])
+                self.exe.mkdir(self.inst_dir(iid), 0o711)   # on ZFS: sets mode/owner of the new mountpoint
+                if not ds.get("instance"):
+                    undo.append(lambda: self.exe.rmtree(self.inst_dir(iid)))
                 self.exe.mkdir(self.inst_dir(iid) / "data", 0o700, rec["uid"])
+                if ds.get("recordings"):
+                    zfs_create(ds["recordings"], rec["quota_gb"])
                 self.exe.mkdir(self.rec_dir(iid), 0o700, rec["uid"])
-                undo.append(lambda: self.exe.rmtree(self.rec_dir(iid)))
+                if not ds.get("recordings"):
+                    undo.append(lambda: self.exe.rmtree(self.rec_dir(iid)))
                 if rec["quota_mode"] == "xfs":
                     mount = self.fs_info()[0] or str(self.root)
                     for cmd in self.xfs_cmds(rec, mount, setup=True):
@@ -679,10 +793,23 @@ class Host:
         # Footage is kept unless the caller says otherwise: the hub sends `purge` (true = delete), the CLI
         # `keep_data`. Neither = keep.
         keep = bool(a["keep_data"]) if "keep_data" in a else not bool(a.get("purge"))
+        problems: list[str] = []
         with self.locked():
             reg = self.load()
             rec = self._get(reg, a)
             iid = rec["id"]
+            # ZFS purge: exactly <recordings parent>/<id> and <instances parent>/<id>, never -r, never a parent.
+            # Checked before anything is touched, so a name that does not match refuses the whole delete.
+            destroy: dict[Path, str] = {}
+            if rec["quota_mode"] == "zfs" and not keep:
+                parents = self.zfs_parents()
+                for kind, path in (("recordings", self.rec_dir(iid)), ("instance", self.inst_dir(iid))):
+                    if (name := self.zfs_owned(rec, kind, parents)) is not None:
+                        destroy[path] = name
+            if not keep:
+                for p in (self.inst_dir(iid), self.rec_dir(iid)):
+                    if p not in destroy and p.resolve().parent.parent != self.root.resolve():
+                        raise OpError(f"refusing to remove {p}")
             with self._inst_locks[iid]:
                 self.exe.run(["docker", "rm", "-f", self.cname(iid)], check=False)
                 self.exe.run(["docker", "network", "disconnect", "-f", self.netname(iid), self.cfg["vllm_container"]],
@@ -696,16 +823,23 @@ class Host:
                     self.exe.run(["xfs_quota", "-x", "-c", f"limit -p bsoft=0 bhard=0 {rec['project_id']}", mount],
                                  check=False)
                 if not keep:
-                    for p in (self.inst_dir(iid), self.rec_dir(iid)):
-                        if p.resolve().parent.parent != self.root.resolve():
-                            raise OpError(f"refusing to remove {p}")
-                        self.exe.rmtree(p)
-                else:
+                    for p in (self.rec_dir(iid), self.inst_dir(iid)):
+                        if p in destroy:
+                            try:
+                                self.exe.run(["zfs", "destroy", destroy[p]])
+                            except CmdError as e:   # e.g. snapshots exist: left for an admin, not forced
+                                problems.append(f"could not destroy ZFS dataset {destroy[p]} ({e.err.strip()[-200:]}); "
+                                                "remove it by hand")
+                        else:
+                            self.exe.rmtree(p)
+                else:   # kept ZFS datasets stay as they are, quota included
                     env = self.env_path(iid)
                     if env.exists() and not self.exe.dry_run:
                         self.exe.write(env, scrub_enroll_token(env.read_text(encoding="utf-8")), 0o600)
         self.probe_cache.pop(iid, None)
         kept = f"; data kept in {self.inst_dir(iid)} and {self.rec_dir(iid)}" if keep else "; data removed"
+        if problems:
+            kept = "; " + "; ".join(problems)
         return {"detail": f"deleted {iid}{kept}"}
 
     def set_quota(self, a: dict) -> dict:
@@ -718,7 +852,9 @@ class Host:
         with self.locked():
             reg = self.load()
             rec = self._get(reg, a)
-            used = self.used_gb(rec)
+            zfs_rec = self.zfs_owned(rec, "recordings") if rec["quota_mode"] == "zfs" else None
+            # ZFS: quota_gb limits the recordings dataset alone (the instance dir has its own), so compare with that
+            used = self.zfs_used_gb([zfs_rec]) if zfs_rec else self.used_gb(rec)
             if used is not None and quota < used and not a.get("force"):
                 raise OpError(f"{rec['id']} already uses {used:.0f} GB; a {quota:.0f} GB quota would make it delete "
                               "footage at once (pass force to do it anyway)")
@@ -727,8 +863,10 @@ class Host:
                 mount = self.fs_info()[0] or str(self.root)
                 for cmd in self.xfs_cmds(rec, mount, setup=False):
                     self.exe.run(cmd)
+            if zfs_rec:
+                self.exe.run(["zfs", "set", f"quota={gb_bytes(quota)}", zfs_rec])
             self.save(reg)
-        note = "" if rec["quota_mode"] == "xfs" else " (not enforced: no XFS project quota on this host)"
+        note = "" if rec["quota_mode"] in ("xfs", "zfs") else " (not enforced: no ZFS dataset or XFS project quota)"
         return {"detail": f"{rec['id']} quota {quota:g} GB{note}", "instance": self.view(rec)}
 
     def restart_instance(self, a: dict) -> dict:
@@ -776,7 +914,18 @@ class Host:
                 out[iid] = state.strip()
         return out
 
+    def zfs_used_gb(self, names: list[str]) -> float | None:
+        """Sum of `zfs get -Hp used` over the datasets (data + snapshots + children), None if any is unreadable."""
+        props = self.zfs_get(names, ("used",))
+        vals = [props.get(n, {}).get("used") for n in names]
+        if not names or any(v is None for v in vals):
+            return None
+        return round(sum(vals) / 1e9, 1)
+
     def used_gb(self, rec: dict) -> float | None:
+        if rec.get("quota_mode") == "zfs":   # recordings dataset + instance dir dataset
+            names = [n for n in (rec.get("datasets") or {}).values() if n]
+            return self.zfs_used_gb(names) if names else None
         if rec.get("quota_mode") == "xfs" and hasattr(os, "statvfs"):
             try:   # on a project-quota directory XFS reports the project's own usage and limit
                 st = os.statvfs(self.rec_dir(rec["id"]))
@@ -787,7 +936,7 @@ class Host:
 
     def refresh_du(self) -> None:
         for rec in self.load()["instances"].values():
-            if rec.get("quota_mode") == "xfs":
+            if rec.get("quota_mode") in ("xfs", "zfs"):   # exact usage is free to read there
                 continue
             r = self.exe.query(["du", "-s", "-B1", str(self.rec_dir(rec["id"])), str(self.inst_dir(rec["id"]) / "data")],
                                timeout=1800)
@@ -820,14 +969,34 @@ class Host:
             g["instances"] = sum(1 for r in insts if r.get("gpu") == g["index"])
         disks = []
         if self.root.exists():
-            du = shutil.disk_usage(self.root)
-            _, fstype, _ = self.fs_info()
-            disks.append({"path": str(self.root), "total_gb": round(du.total / 1e9, 1), "free_gb": round(du.free / 1e9, 1),
-                          "fs": fstype or None, "project_quota": self.quota_mode_auto() == "xfs"})
+            mode = self.quota_mode_auto()
+            disk = self.zfs_disk() if mode == "zfs" else None
+            if disk is None:
+                du = shutil.disk_usage(self.root)
+                _, fstype, _ = self.fs_info()
+                disk = {"path": str(self.root), "total_gb": round(du.total / 1e9, 1), "free_gb": round(du.free / 1e9, 1),
+                        "fs": fstype or None}
+            disks.append({**disk, "project_quota": mode == "xfs", "quota_mode": mode})
         return {"cpus": os.cpu_count(), "load": load, "ram_gb": ram, "gpus": gpus, "disks": disks,
                 "instances": len(insts),
                 "allocated": {"quota_gb": sum(r["quota_gb"] for r in insts), "mem_gb": sum(r["mem_gb"] for r in insts),
                               "cpus": sum(r["cpus"] for r in insts)}}
+
+    def zfs_disk(self) -> dict | None:
+        """Disk entry for a ZFS host. statvfs (shutil.disk_usage) is wrong here: on a dataset it reports only that
+        dataset's own data plus the free space (children not counted) and, under a quota, the quota. Total = the
+        pool's root dataset used + available (usable space after raidz parity); free = `available` of the dataset
+        mounted at <root>/recordings, i.e. what new instance datasets can still get from the pool."""
+        ds = self.zfs_dataset_at(self.root / "recordings")
+        if not ds:
+            return None
+        pool = ds.split("/")[0]
+        p = self.zfs_get(list(dict.fromkeys([pool, ds])), ("used", "available"))
+        used, avail, free = p.get(pool, {}).get("used"), p.get(pool, {}).get("available"), p.get(ds, {}).get("available")
+        if used is None or avail is None or free is None:
+            return None
+        return {"path": str(self.root), "total_gb": round((used + avail) / 1e9, 1), "free_gb": round(free / 1e9, 1),
+                "fs": "zfs", "dataset": ds}
 
     # -- upkeep (agent loop, `reconcile`, boot)
     def probe(self, rec: dict) -> dict | None:
@@ -884,6 +1053,7 @@ class Host:
             self.apply_firewall(reg, resolve=resolve)
             self.save(reg)
             mount = None
+            parents = None
             states = self.docker_states()
             nets = set(self.exe.query(["docker", "network", "ls", "--format", "{{.Name}}"]).out.split())
             created = []
@@ -892,6 +1062,13 @@ class Host:
                     mount = mount or self.fs_info()[0] or str(self.root)
                     for cmd in self.xfs_cmds(rec, mount, setup=False):
                         self.exe.run(cmd, check=False)
+                if rec["quota_mode"] == "zfs":   # quotas persist in the pool; this only repairs hand edits
+                    parents = parents or self.zfs_parents()
+                    try:
+                        for cmd in self.zfs_set_quota_cmds(rec, parents):
+                            self.exe.run(cmd, check=False)
+                    except OpError as e:
+                        log.warning("%s: %s", rec["id"], e)
                 if self.netname(rec["id"]) not in nets:
                     self.exe.run(self.network_argv(rec), check=False)
                 if rec["id"] not in states:
@@ -1127,7 +1304,7 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--mem-gb", type=float)
     c.add_argument("--cpus", type=float)
     c.add_argument("--image")
-    c.add_argument("--quota-mode", choices=("auto", "xfs", "none"), default="auto")
+    c.add_argument("--quota-mode", choices=QUOTA_MODES, default="auto")
     c.add_argument("--dry-run", action="store_true", help="print the plan (commands, env, firewall); change nothing")
 
     d = sub.add_parser("delete-instance", help="stop and remove an instance; say what happens to its footage")

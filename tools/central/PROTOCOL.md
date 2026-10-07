@@ -44,7 +44,8 @@ How a central host's `axiom_host.py run` talks to the hub. The hub side lives in
     {"index": 0, "name": "NVIDIA A40", "mem_total_mb": 46068, "mem_used_mb": 41234, "util": 87, "instances": 0},
     {"index": 1, "name": "NVIDIA A10", "mem_total_mb": 23028, "mem_used_mb": 3120,  "util": 12, "instances": 4}
   ],
-  "disks": [{"path": "/srv/axiom", "total_gb": 61440.0, "free_gb": 58210.5, "fs": "xfs", "project_quota": true}],
+  "disks": [{"path": "/srv/axiom", "total_gb": 61440.0, "free_gb": 58210.5, "fs": "zfs", "dataset": "axiom/recordings",
+             "project_quota": false, "quota_mode": "zfs"}],
   "instances": 4,
   "allocated": {"quota_gb": 16000, "mem_gb": 32, "cpus": 16}
 }
@@ -53,6 +54,7 @@ How a central host's `axiom_host.py run` talks to the hub. The hub side lives in
 - `gpus` comes from `nvidia-smi --query-gpu=index,name,memory.total,memory.used,utilization.gpu --format=csv,noheader,nounits`; unreadable values are `null`; `util` is percent. `gpus[].instances` = instances assigned to that GPU for YOLO.
 - `allocated`: the sum of every instance's storage quota, memory limit and CPU limit (for placement: storage is promised, not used).
 - `load` is `null` and `ram_gb` values `null` where the OS doesn't provide them.
+- `disks[].quota_mode`: what a new instance would get with `quota_mode: auto` (`zfs`, `xfs` or `none`); `project_quota` is true only for `xfs`. On ZFS, `total_gb` is the pool's usable size (`used` + `available` of its root dataset) and `free_gb` the `available` of `dataset` (the one mounted at `<root>/recordings`); elsewhere both come from `statvfs` on the root.
 
 ### instance object
 ```json
@@ -65,9 +67,9 @@ How a central host's `axiom_host.py run` talks to the hub. The hub side lives in
 ```
 - `state`: Docker's container state (`running`, `restarting`, `exited`, `created`, `paused`, `dead`), or `missing` when the container is gone; `created`/`planned` in a command's own result.
 - `cameras`: from the instance's own `/api/cameras`, refreshed every 5 minutes; `null` until known.
-- `used_gb`: recordings + database + event media. Exact and free to read on XFS (the project quota); on other filesystems from `du` every 30 minutes, `null` until the first pass.
+- `used_gb`: recordings + database + event media. Exact and free to read on ZFS (`used` of the instance's two datasets) and XFS (the project quota); on other filesystems from `du` every 30 minutes, `null` until the first pass. On ZFS `quota_gb` limits the recordings dataset only (the instance dir has its own, host-wide quota), so `used_gb` can exceed `quota_gb` by up to that amount.
 - `gpu`: the host GPU index the instance's YOLO uses, or `null` for CPU.
-- `quota_mode`: `xfs` (hard limit) or `none` (not enforced: see README).
+- `quota_mode`: `zfs` (per-instance datasets with quotas), `xfs` (project hard limit) or `none` (not enforced: see README).
 - `enroll_pending`: true until the instance has enrolled into its Site with the one-time token.
 
 ## Hub → agent
@@ -80,8 +82,8 @@ How a central host's `axiom_host.py run` talks to the hub. The hub side lives in
 
 | op | args | notes |
 |---|---|---|
-| `create_instance` | `id`, `location` (alias `location_id`), `name`, `mode` (`vpn`\|`forward`), `subnet` (string or list; vpn), `public_ip` (string or list; forward), `quota_gb`, `gpu` (int, or `null`/`"none"` for CPU), `enroll_token`, `hub_url`, `vlm_url`; optional `vlm_model`, `mem_gb` (default 8), `cpus` (default 4), `image`, `quota_mode` (`auto`\|`xfs`\|`none`), `dry_run` | Creates dirs, quota, `instance.env`, network, firewall rules, then starts the container. Refused if the id exists, the site subnet or public IP is already used by another instance, or leftover data for that id exists. |
-| `delete_instance` | `id`, `purge` (default false), `dry_run`; the CLI's `keep_data` is accepted too (`keep_data` wins if both are sent) | Removes the container, network, firewall rules and quota limit. Recordings and database **stay on the host** unless `purge` is true; the hub confirms a purge with the admin first. Kept data blocks re-creating the same id. |
+| `create_instance` | `id`, `location` (alias `location_id`), `name`, `mode` (`vpn`\|`forward`), `subnet` (string or list; vpn), `public_ip` (string or list; forward), `quota_gb`, `gpu` (int, or `null`/`"none"` for CPU), `enroll_token`, `hub_url`, `vlm_url`; optional `vlm_model`, `mem_gb` (default 8), `cpus` (default 4), `image`, `quota_mode` (`auto`\|`zfs`\|`xfs`\|`none`), `dry_run` | Creates dirs, quota, `instance.env`, network, firewall rules, then starts the container. Refused if the id exists, the site subnet or public IP is already used by another instance, or leftover data for that id exists. |
+| `delete_instance` | `id`, `purge` (default false), `dry_run`; the CLI's `keep_data` is accepted too (`keep_data` wins if both are sent) | Removes the container, network, firewall rules and (XFS) quota limit. On ZFS a purge destroys exactly the instance's two datasets; kept datasets stay with their quotas. Recordings and database **stay on the host** unless `purge` is true; the hub confirms a purge with the admin first. Kept data blocks re-creating the same id. |
 | `set_quota` | `id`, `quota_gb`, `force`, `dry_run` | Refused below current usage unless `force`. |
 | `restart_instance` | `id`, `recreate` (default false), `image`, `dry_run` | `recreate` or a new `image` removes and re-runs the container (picks up a new image or a scrubbed env file); otherwise `docker restart`. |
 | `list` | none | Result carries `instances`. |
