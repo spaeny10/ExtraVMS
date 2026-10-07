@@ -626,6 +626,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .detail-tabs { margin: 10px 16px 0; display: flex; }
 .detail-tabs button { flex: 1; padding: 10px 6px; }
 .modal-grid.phone { grid-template-columns: minmax(0, 1fr); padding: 12px; }
+/* the event viewer on a phone shows the whole synopsis under the clip: the 3-line clamp is for event cards in lists */
+.modal-grid.phone > div > .synopsis { display: block; -webkit-line-clamp: unset; overflow: visible; font-size: 15px; line-height: 1.5; margin-top: 10px; }
 @media (max-width: 700px) {
   .tl-controls.phone button { min-height: 44px; padding: 8px 12px; font-size: 15px; }
   .tl-controls.phone select, .tl-controls.phone input { min-height: 44px; }
@@ -737,6 +739,14 @@ body:has(.drag-ghost) { cursor: grabbing; user-select: none; }
 .rule-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 4px 0; }
 .rule-row input { flex: 1 1 160px; min-width: 120px; }
 .d-line.rule-broken { color: var(--danger, #e5484d); }
+/* weapon check (weaponcheck.py): confirmed / cleared by the second look / unconfirmed, needs a person */
+.badge.weapon-check { text-transform: none; }
+.badge.weapon-check.confirmed { background: var(--t-high); color: #fff; }
+.badge.weapon-check.cleared { background: color-mix(in srgb, var(--ok) 22%, transparent); color: var(--ok); }
+.badge.weapon-check.unconfirmed { background: color-mix(in srgb, var(--bad) 20%, transparent); color: var(--bad); }
+.d-line.weapon-line { border-left: 3px solid var(--muted); padding-left: 8px; }
+.d-line.weapon-line.confirmed, .d-line.weapon-line.unconfirmed { border-left-color: var(--bad); }
+.d-line.weapon-line.cleared { border-left-color: var(--ok); }
 
 /* paint a region (RegionPaint.tsx): canvas over the video's picture; tools pill; badges */
 .region-canvas { position: absolute; pointer-events: none; z-index: 2; display: block; }
