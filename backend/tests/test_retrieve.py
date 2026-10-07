@@ -134,7 +134,12 @@ def test_last_seen_includes_events():
 
 def test_period_question_counts_and_lists():
     PLANNER.plans = [{"calls": [{"tool": "get_briefing", "since": "2026-10-05 18:00"}]}]
-    r = asyncio.run(api.assistant_retrieve(api.RetrieveIn(question="What happened overnight?", now=NOW)))
+    real_time = api.time.time
+    api.time.time = lambda: NOW   # the route only trusts a client "now" near the server's clock: pin the clock to the fixture day
+    try:
+        r = asyncio.run(api.assistant_retrieve(api.RetrieveIn(question="What happened overnight?", now=NOW)))
+    finally:
+        api.time.time = real_time
     assert r["window"]["label"] == "overnight"
     count = next(x for x in r["results"] if x["kind"] == "count")
     assert count["counts"]["events"] == 2 and count["counts"]["by_label"] == {"person": 1, "vehicle": 1}
