@@ -362,8 +362,10 @@
   .cov-bar { max-width: none; }
 }
 
-/* ---------- Site › Ask (site/SiteAsk.tsx): conversations left, the conversation right; a drawer on phones ---------- */
-.site-ask { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 12px; min-height: 360px; }
+/* ---------- Site › Ask (site/SiteAsk.tsx): conversations, the conversation and its References (>1100 px); at 701–1100 px the
+   References are a drawer over the conversation; phones get a drawer for the conversations and a sheet for the References ---------- */
+.site-ask { position: relative; display: grid; grid-template-columns: 260px minmax(0, 2fr) minmax(0, 1fr); gap: 12px; min-height: 360px; }
+.site-ask > * { min-width: 0; }
 .sa-threads { display: flex; flex-direction: column; gap: 6px; min-height: 0; overflow: auto; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; }
 .sa-threads-head { display: flex; align-items: center; gap: 6px; }
 .sa-threads-head .spacer { flex: 1; }
@@ -378,7 +380,11 @@
 .sa-thread-list li:hover button, .sa-thread-list li.active button, .sa-thread-list li button:focus-visible { opacity: .8; }
 .sa-private { margin-top: auto; padding-top: 6px; }
 .sa-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); }
-.sa-phone-bar { display: none; }
+.sa-bar { display: none; }
+.sa-bar-title { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sa-refs-toggle.active { background: var(--panel-2); }
+.sa-refs-count { margin-left: 6px; padding: 0 6px; border-radius: 99px; font-size: 11px; font-weight: 600;
+  background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
 .sa-log { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 14px; }
 .site-ask .ask-msg.assistant { background: var(--bg); white-space: normal; }
 .site-ask .ask-msg.user { white-space: pre-wrap; }
@@ -405,6 +411,47 @@
 .sa-src-group code { font-size: 11px; color: var(--muted); }
 .sa-src-group .linkish { text-align: left; }
 .sa-veil { display: none; }
+@media (min-width: 701px) { .site-ask .ask-msg.assistant.selected { box-shadow: inset 3px 0 0 var(--accent); } }
+.site-ask .cite.hot { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* the References column: the selected answer's evidence, cited first */
+.sa-refs { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); }
+.sa-refs-head { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+.sa-refs-title { display: flex; align-items: center; gap: 6px; min-height: 26px; }
+.sa-refs-title .spacer { flex: 1; }
+.sa-refs-close { display: none; }
+.sa-refs-for { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sa-refs-list { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; padding: 8px; }
+.sa-refs-empty { margin: auto 0; padding: 24px 8px; text-align: center; }
+.sa-ref-card { flex-shrink: 0; display: grid; grid-template-columns: 124px minmax(0, 1fr); gap: 10px; align-items: start; width: 100%; padding: 6px; text-align: left;
+  background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 8px; cursor: pointer; }
+.sa-ref-card:hover, .sa-ref-card.hot { border-color: var(--accent); }
+.sa-ref-card.hot { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent); }
+.sa-ref-thumb { position: relative; display: block; aspect-ratio: 16 / 9; overflow: hidden; border-radius: 6px; background: var(--panel-2); }
+.sa-ref-thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.sa-ref-ph { position: absolute; inset: 0; display: grid; place-items: center; font-size: 20px; opacity: .45; }
+.sa-ref-kind { position: absolute; left: 4px; bottom: 4px; padding: 0 5px; border-radius: 4px; font-size: 10px; font-weight: 600; background: rgb(0 0 0 / .6); color: #fff; }
+.sa-ref-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.sa-ref-top { display: flex; align-items: baseline; gap: 6px; min-width: 0; font-size: 13px; }
+.sa-ref-cam { min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sa-ref-time { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.sa-ref-tag { padding: 0 5px; border-radius: 4px; font-size: 11px; white-space: nowrap; background: var(--panel-2); color: var(--muted); }
+.sa-ref-card.cited .sa-ref-tag, .sa-ref-row.cited .sa-ref-tag { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+.sa-ref-badges { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.sa-ref-text { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; font-size: 12.5px; line-height: 1.35; overflow-wrap: anywhere; }
+.sa-ref-rows { list-style: none; display: flex; flex-direction: column; gap: 2px; margin: 4px 0 0; padding: 6px 0 0; border-top: 1px solid var(--border); }
+.sa-ref-row { display: flex; align-items: baseline; gap: 6px; width: 100%; padding: 4px 6px; text-align: left; font-size: 12px;
+  background: none; color: var(--text); border: 1px solid transparent; border-radius: 6px; }
+button.sa-ref-row { cursor: pointer; }
+button.sa-ref-row:hover, .sa-ref-row.hot { background: var(--panel-2); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.sa-ref-row-text { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 1100px) {
+  .site-ask { grid-template-columns: 260px minmax(0, 1fr); }
+  .sa-bar { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  .sa-bar-phone { display: none; }
+  .sa-refs { display: none; position: absolute; z-index: 8; top: 0; right: 0; bottom: 0; width: min(420px, 75%); box-shadow: -8px 0 24px rgb(0 0 0 / .3); }
+  .sa-refs.open { display: flex; }
+  .sa-refs-close { display: inline-flex; }
+}
 .find-ask-hint { margin: -4px 0 8px; color: var(--muted); }
 @media (max-width: 700px) {
   .site-ask { grid-template-columns: minmax(0, 1fr); }
@@ -414,8 +461,10 @@
   .sa-drawer-close { display: inline-flex; }
   .sa-veil { display: block; position: fixed; inset: 0; z-index: 39; background: rgba(0, 0, 0, .35); }
   .sa-thread-list li button { opacity: .8; }
-  .sa-phone-bar { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--border); }
-  .sa-phone-title { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center; }
+  .sa-bar-phone { display: inline-flex; }
+  .sa-bar-title { text-align: center; }
+  .sa-refs { position: fixed; z-index: 35; inset: 0; width: auto; border: 0; border-radius: 0; box-shadow: none;
+    padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
   .sa-log { padding: 10px; }
   .site-ask .ask-msg { max-width: 100%; }
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { SiteAskSource } from "../api";
-import { askQuery, citations, citedSource, groupSources, looksLikeQuestion, orderThreads, parseAnswer, parseInline, sendKey, serversLine } from "./siteAskData";
+import { askQuery, buildReferences, citations, citedSource, clockIn, groupSources, looksLikeQuestion, orderThreads, parseAnswer, parseInline, pickAnswer,
+  refCountsLine, sendKey, serversLine } from "./siteAskData";
 
 const src = (o: Partial<SiteAskSource>): SiteAskSource => ({ kind: "event", server_id: "s1", server_name: "Alpha", ...o });
 
@@ -89,5 +90,65 @@ describe("Find's question hint", () => {
   it("not searches, short text or instructions", () => {
     for (const t of ["white pickup truck", "person at the back door", "show vans", "who?", "", "Quiet alerts tonight", "Rename cam3 to Dock",
       "is it"]) expect(looksLikeQuestion(t), t).toBe(false);
+  });
+});
+
+describe("References panel", () => {
+  const msgs = [{ id: 1, role: "user" as const }, { id: 2, role: "assistant" as const }, { id: 3, role: "user" as const }, { id: 4, role: "assistant" as const }];
+
+  it("follows the latest answer unless one was picked; the one being written while it streams", () => {
+    expect(pickAnswer(msgs, null, false)).toBe(4);
+    expect(pickAnswer(msgs, 2, false)).toBe(2);
+    expect(pickAnswer(msgs, 2, true)).toBe(2);               // a picked answer stays picked while a new one is written
+    expect(pickAnswer(msgs, null, true)).toBe("pending");
+    expect(pickAnswer(msgs, "pending", false)).toBe(4);       // written and stored: the latest again
+    expect(pickAnswer(msgs, 3, false)).toBe(4);               // a question is not an answer
+    expect(pickAnswer(msgs, 99, false)).toBe(4);              // gone (another conversation)
+    expect(pickAnswer([], null, false)).toBeNull();
+    expect(pickAnswer([{ id: 1, role: "user" }], null, false)).toBeNull();
+  });
+
+  it("cited first in citation order, then the rest newest first; notes left out", () => {
+    const items = [
+      src({ ref: "9", event_id: 9, camera: "Gate", ts: 900 }),
+      src({ ref: "F2", kind: "footage", camera_id: "c2", camera: "Dock", ts: 800 }),
+      src({ ref: "7a", event_id: 7, camera: "Lobby", ts: 700 }),
+      src({ ref: "7b", event_id: 7, server_id: "s2", camera: "Gate", ts: 600 }),
+      src({ ref: "F1", kind: "footage", camera_id: "c2", camera: "Dock", ts: 500 }),
+      src({ ref: "4", kind: "journey", event_id: 4, cameras: ["Lobby", "Gate"], ts: 400 }),
+      src({ kind: "gap", camera: "Dock", ts: 300, minutes: 20 }),
+      src({ kind: "note", text: "recorded continuously: Lobby" }),
+      src({ kind: "briefing", text: "A quiet night.", ts: 100 }),
+    ];
+    const r = buildReferences(items, "Twice in the lobby [#7b] and [F1], then [#7b] again and [#4]; also [#99] (made up).");
+    expect(r.cards.map((x) => x.ref)).toEqual(["7b", "F1", "9", "F2", "7a"]);
+    expect([...r.cited]).toEqual(["7b", "F1", "4"]);
+    expect(r.rows.map((x) => x.ref ?? x.kind)).toEqual(["4", "gap", "briefing"]);
+    expect(refCountsLine(r)).toBe("3 events · 2 footage moments · 1 journey · 1 recording gap");
+  });
+
+  it("no citations: newest first; nothing at all", () => {
+    const r = buildReferences([src({ ref: "1", event_id: 1, ts: 1 }), src({ ref: "2", event_id: 2, ts: 2 })], "Nothing cited.");
+    expect(r.cards.map((x) => x.ref)).toEqual(["2", "1"]);
+    expect(r.cited.size).toBe(0);
+    expect(refCountsLine(r)).toBe("2 events");
+    const none = buildReferences(undefined, "");
+    expect(none.cards).toEqual([]);
+    expect(refCountsLine(none)).toBe("Nothing matched");
+    expect(refCountsLine({ events: 1, footage: 1, journeys: 0, gaps: 0 })).toBe("1 event · 1 footage moment");
+  });
+
+  it("an event without an id or footage without a camera is a row, not a card", () => {
+    const r = buildReferences([src({ ts: 5, camera: "Lobby" }), src({ kind: "footage", ts: 4 })], "");
+    expect(r.cards).toEqual([]);
+    expect(r.rows.length).toBe(2);
+  });
+
+  it("times in the Site's time zone, the date only on other days", () => {
+    const now = Date.UTC(2026, 9, 7, 18, 0) / 1000;            // Oct 7, 2:00 PM in New York
+    expect(clockIn(Date.UTC(2026, 9, 7, 13, 10) / 1000, "America/New_York", now)).toBe("9:10 AM");
+    expect(clockIn(Date.UTC(2026, 9, 7, 3, 5) / 1000, "America/New_York", now)).toBe("Oct 6 11:05 PM");
+    expect(clockIn(Date.UTC(2026, 9, 7, 3, 5) / 1000, "Asia/Tokyo", now)).toBe("Oct 7 12:05 PM");   // already Oct 8 there
+    expect(clockIn(now, "Not/AZone", now)).toMatch(/^\d{1,2}:\d{2} [AP]M$/);
   });
 });

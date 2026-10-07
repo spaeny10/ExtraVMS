@@ -6,9 +6,11 @@
  *  - groupSources: the Sources disclosure, by camera (newest sighting first), server only shown there;
  *  - orderThreads: conversations newest first;
  *  - looksLikeQuestion: Find's hint ("Looks like a question — Ask this site");
- *  - sendKey, askQuery: Enter sends (Shift+Enter is a new line); a question prefilled from ?q=.
+ *  - sendKey, askQuery: Enter sends (Shift+Enter is a new line); a question prefilled from ?q=;
+ *  - pickAnswer, buildReferences, refCountsLine, clockIn: the References panel (the evidence of the selected answer,
+ *    cited first) and its times in the Site's time zone.
  */
-import type { SiteAskServer, SiteAskSource, SiteAskThread } from "../api";
+import type { SiteAskMessage, SiteAskServer, SiteAskSource, SiteAskThread } from "../api";
 import { looksLikeInstruction } from "../customer/fleetActions";
 
 export type Inline = { t: "text"; text: string } | { t: "bold"; text: string } | { t: "cite"; ref: string; footage: boolean };
@@ -135,3 +137,84 @@ export const SUGGESTIONS = [
   "Did anyone come in after hours?",
   "Was any camera offline in the last 24 hours?",
 ];
+
+// ---------------------------------------------------------------- the References panel
+
+/** An answer on the page: a stored message's id, or the one being written. */
+export type AnswerKey = number | "pending";
+
+/**
+ * The answer the References panel follows: the one the user picked (while it is still on the page), else the one being
+ * written, else the latest answer of the conversation; null when there is no answer yet.
+ */
+export function pickAnswer(messages: readonly Pick<SiteAskMessage, "id" | "role">[], pick: AnswerKey | null, pending: boolean): AnswerKey | null {
+  if (pick === "pending" && pending) return "pending";
+  if (typeof pick === "number" && messages.some((m) => m.id === pick && m.role === "assistant")) return pick;
+  if (pending) return "pending";
+  for (let i = messages.length - 1; i >= 0; i--) if (messages[i].role === "assistant") return messages[i].id;
+  return null;
+}
+
+export type References = {
+  /** events (with an id) and footage moments: thumbnail cards */
+  cards: SiteAskSource[];
+  /** journeys, recording gaps and briefings: one-line rows below the cards */
+  rows: SiteAskSource[];
+  /** the refs the answer cites that exist in its evidence */
+  cited: Set<string>;
+  events: number; footage: number; journeys: number; gaps: number;
+};
+
+/**
+ * The selected answer's evidence for the References panel: what the answer cites first (in the order it cites them),
+ * then the rest newest first. Recording notes ("recorded continuously: Lobby") are left out: they add nothing there.
+ */
+export function buildReferences(items: readonly SiteAskSource[] | undefined, text: string): References {
+  const list = items ?? [];
+  const refs = new Set(list.map((x) => x.ref).filter((r): r is string => !!r));
+  const order = new Map(citations(text).filter((r) => refs.has(r)).map((r, i) => [r, i]));
+  const rank = (x: SiteAskSource) => (x.ref != null ? order.get(x.ref) ?? Infinity : Infinity);
+  const sorted = [...list].sort((a, b) => {
+    const ra = rank(a), rb = rank(b);
+    if (ra !== rb) return ra < rb ? -1 : 1;
+    return (b.ts ?? -1) - (a.ts ?? -1);
+  });
+  const isCard = (x: SiteAskSource) => (x.kind === "event" && x.event_id != null) || (x.kind === "footage" && !!x.camera_id && x.ts != null);
+  const cards = sorted.filter(isCard);
+  const rows = sorted.filter((x) => !isCard(x) && x.kind !== "note");
+  const n = (k: SiteAskSource["kind"]) => list.filter((x) => x.kind === k).length;
+  return { cards, rows, cited: new Set(order.keys()), events: cards.filter((x) => x.kind === "event").length, footage: n("footage"),
+    journeys: n("journey"), gaps: n("gap") };
+}
+
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+/** "6 events · 2 footage moments · 1 journey"; "Nothing matched" when there is no evidence. */
+export function refCountsLine(r: Pick<References, "events" | "footage" | "journeys" | "gaps">): string {
+  const parts: string[] = [];
+  if (r.events) parts.push(plural(r.events, "event"));
+  if (r.footage) parts.push(plural(r.footage, "footage moment"));
+  if (r.journeys) parts.push(plural(r.journeys, "journey"));
+  if (r.gaps) parts.push(plural(r.gaps, "recording gap"));
+  return parts.length ? parts.join(" · ") : "Nothing matched";
+}
+
+const dtf = new Map<string, Intl.DateTimeFormat>();
+function fmt(tz: string | null | undefined, opts: Intl.DateTimeFormatOptions): Intl.DateTimeFormat {
+  const key = `${tz ?? ""}|${JSON.stringify(opts)}`;
+  let f = dtf.get(key);
+  if (!f) {
+    try { f = new Intl.DateTimeFormat("en-US", tz ? { ...opts, timeZone: tz } : opts); }
+    catch { f = new Intl.DateTimeFormat("en-US", opts); }   // an unknown zone: the browser's own
+    dtf.set(key, f);
+  }
+  return f;
+}
+
+/** "9:10 AM" today, "Oct 6 9:10 AM" on other days, in the Site's time zone (the browser's when the Site has none). */
+export function clockIn(ts: number, tz: string | null | undefined, now = Date.now() / 1000): string {
+  const day = fmt(tz, { year: "numeric", month: "numeric", day: "numeric" });
+  const d = new Date(ts * 1000);
+  const time = fmt(tz, { hour: "numeric", minute: "2-digit" }).format(d).replace(/ /g, " ");
+  return day.format(d) === day.format(new Date(now * 1000)) ? time : `${fmt(tz, { month: "short", day: "numeric" }).format(d)} ${time}`;
+}
