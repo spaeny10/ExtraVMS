@@ -9,7 +9,9 @@ A typical site: up to 5 cameras behind a Peplink BR1 Pro 5G, the cameras being t
 | ONVIF events, metadata, PTZ | Work unchanged | Need the server's ONVIF address rewriting (Phase 2) |
 | Central side | FusionHub VM | Nothing |
 | Overhead | A few % bandwidth, a few ms | None |
-| `create-instance` | `--mode vpn --subnet 10.20.<n>.0/24` | `--mode forward --public-ip <SIM IP>` |
+| `create-instance` | `--mode vpn --subnet 10.20.<n>.0/24` | `--mode forward --public-ip <SIM IP>` (or `--host <dynamic DNS name>`) |
+
+A Site can also mix both: its instance's camera addresses (README, "Camera addresses") may hold LAN/VPN subnets and the public IPs or dynamic DNS names of other routers with port forwards at the same time. Each such router gets the port-forward settings of mode 2.
 
 ## Site numbering (both modes)
 

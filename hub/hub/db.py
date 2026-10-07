@@ -243,7 +243,10 @@ central_instances = Table("central_instances", metadata,
                           Column("updated_at", Float, nullable=True),
                           Column("ready_at", Float, nullable=True),     # the host reported the instance created (then: waiting to enroll)
                           Column("info", sa.JSON, nullable=True),       # the host's last report: {state, used_gb, quota_gb, gpu, mode, ...}
-                          Column("info_at", Float, nullable=True))
+                          Column("info_at", Float, nullable=True),
+                          # the instance's camera allow-list on its host: {subnets, public_ips, hosts}; NULL = from before
+                          # camera networks (mode vpn: [subnet]; forward: [public_ip]; hosts.camera_network derives it)
+                          Column("camera_network", sa.JSON, nullable=True))
 central_enroll_tokens = Table("central_enroll_tokens", metadata,
                               Column("token_hash", String(64), primary_key=True),
                               Column("instance_id", String(24), nullable=False, index=True),
@@ -302,7 +305,7 @@ ADDED_COLUMNS = [("sites", "retired_at"), ("sites", "location_id"), ("membership
                  ("users", "soc_role"), ("locations", "monitored"), ("locations", "arm_schedule"), ("locations", "arm_holidays"),
                  ("locations", "arm_override"), ("locations", "soc_group_minutes"),
                  ("locations", "lat"), ("locations", "lon"), ("locations", "address_parts"), ("locations", "geocoded_at"),
-                 ("locations", "geocode_source"), ("users", "totp_last_step")]
+                 ("locations", "geocode_source"), ("users", "totp_last_step"), ("central_instances", "camera_network")]
 
 
 def upgrade(eng: Engine) -> None:

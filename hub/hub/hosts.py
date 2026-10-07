@@ -9,17 +9,19 @@ rest like a server's device token) and keeps the socket open. Protocol (JSON tex
                {"t": "heartbeat", "capacity": {...}, "instances": [{id, location_id, name, state, quota_gb, used_gb, gpu, mode}]}
                {"t": "result", "id": int, "ok": bool, "detail": str, "instance"?: {...}}
                {"t": "ping"}                                   -> hub answers {"t": "pong"}
-  hub -> host  {"t": "cmd", "id": int, "op": create_instance | delete_instance | set_quota | restart_instance | list,
-                 "args": {...}}
+  hub -> host  {"t": "cmd", "id": int, "op": create_instance | delete_instance | set_quota | set_camera_network |
+                 restart_instance | list, "args": {...}}
     create_instance  {id, location, name, mode, subnet, public_ip, quota_gb, gpu, enroll_token, hub_url, vlm_url}
     delete_instance  {id, purge}        purge false = the recordings and database stay on the host
     set_quota        {id, quota_gb}
+    set_camera_network {id, subnets, public_ips, hosts}   the instance's camera allow-list (the hub sends all three)
     restart_instance {id}
     list             {}
 
 A central instance is one isolated server container recording one customer Site's cameras, over SpeedFusion (mode
 vpn: the BR1's LAN is 10.20.<site_number>.0/24) or port forwards locked to the datacenter's IP (mode forward: the
-Site's public IP). provision() places it (host with room, GPU), mints a single-use enrollment token bound to the
+Site's public IP). Its camera allow-list (camera_network: LAN/VPN subnets, public IPs, dynamic DNS names) can be
+changed afterwards, so one Site can mix cameras on a routed LAN with remote ones behind port forwards. provision() places it (host with room, GPU), mints a single-use enrollment token bound to the
 Site, and asks the host to create it; the instance then dials /agent with `Authorization: Enroll <token>` and
 becomes an ordinary server of that Site (agents.py -> enroll_check / enroll_consume). Every change is audited.
 """
@@ -41,7 +43,7 @@ from .config import settings
 log = logging.getLogger("hub.hosts")
 
 PROTO = 1
-OPS = ("create_instance", "delete_instance", "set_quota", "restart_instance", "list")
+OPS = ("create_instance", "delete_instance", "set_quota", "set_camera_network", "restart_instance", "list")
 STATES = ("provisioning", "running", "failed", "deleting", "deleted")
 LIVE_STATES = ("provisioning", "running", "failed", "deleting")   # everything but deleted: holds its site number
 MODES = ("vpn", "forward")
@@ -184,7 +186,7 @@ class HostRegistry:
         for inst in (frame.get("instances") or [])[:1000] if isinstance(frame.get("instances"), list) else []:
             if not isinstance(inst, dict) or not inst.get("id"):
                 continue
-            info = {k: inst.get(k) for k in ("state", "used_gb", "quota_gb", "gpu", "mode", "location_id", "name")}
+            info = {k: inst.get(k) for k in ("state", "used_gb", "quota_gb", "gpu", "mode", "location_id", "name", "host_ips")}
             # only this host's own instances: a host can never report on (or overwrite) another host's rows
             db.run(sa.update(db.central_instances).where(db.central_instances.c.id == str(inst["id"])[:24],
                                                          db.central_instances.c.host_id == conn.host_id).values(info=info, info_at=now))
@@ -422,6 +424,107 @@ def _check_subnet(subnet: str) -> str:
     return str(net)
 
 
+# ---- camera allow-list (axiom_host.py check_camera_network applies the same rules again on the host)
+CAMERA_KEYS = ("subnets", "public_ips", "hosts")
+MAX_CAMERA_ENTRIES = 32
+_CAMERA_NETS = tuple(ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"))
+# the host's instance pool and AI network (tools/central/host.json defaults): never a camera network
+_HOST_NETS = ((ipaddress.ip_network("10.200.0.0/16"), "the host's instance pool 10.200.0.0/16"),
+              (ipaddress.ip_network("10.201.0.0/24"), "the host's AI network 10.201.0.0/24"),
+              (ipaddress.ip_network("10.19.0.0/24"), "the FusionHub network 10.19.0.0/24"))
+
+
+def _is_ip(s: str) -> bool:
+    try:
+        ipaddress.ip_address(s)
+        return True
+    except ValueError:
+        return False
+
+
+def _is_hostname(name: str) -> bool:
+    labels = name.split(".")
+    if not 1 <= len(name) <= 253 or len(labels) < 2 or labels[-1].isdigit():
+        return False
+    return all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", lb) for lb in labels)
+
+
+def _str_list(v, what: str) -> list[str]:
+    if v is None:
+        return []
+    if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+        raise ValueError(f"{what} must be a list of strings")
+    return [x.strip() for x in v if x.strip()]
+
+
+def check_camera_network(subnets, public_ips, names) -> dict:
+    """Validate and normalize a central instance's camera allow-list ({subnets, public_ips, hosts}); ValueError says
+    what is wrong. subnets: private (10/8, 172.16/12, 192.168/16) or carrier-grade NAT (100.64/10) IPv4 networks of
+    /16 or smaller (host bits are dropped: 192.168.105.7/24 -> 192.168.105.0/24); public_ips: IPv4 addresses that
+    are not loopback, link-local, multicast, unspecified or reserved; hosts: DNS names (dynamic DNS), lowercased.
+    Nothing may touch the host's instance pool or AI network; at most 32 entries in all; duplicates dropped. The host
+    agent checks again (and also refuses the hub's own addresses)."""
+    out: dict[str, list[str]] = {"subnets": [], "public_ips": [], "hosts": []}
+    for s in _str_list(subnets, "subnets"):
+        try:
+            net = ipaddress.ip_network(s, strict=False)
+        except ValueError:
+            raise ValueError(f"{s} is not a subnet like 192.168.105.0/24")
+        if net.version != 4:
+            raise ValueError(f"{s}: IPv4 subnets only")
+        if net.prefixlen < 16:
+            raise ValueError(f"{s} is broader than a /16")
+        if not any(net.subnet_of(c) for c in _CAMERA_NETS):
+            raise ValueError(f"{s} is not a private network (10.x, 172.16-31.x, 192.168.x or 100.64-127.x)")
+        for f, what in _HOST_NETS:
+            if net.overlaps(f):
+                raise ValueError(f"{s} overlaps {what}")
+        if str(net) not in out["subnets"]:
+            out["subnets"].append(str(net))
+    for p in _str_list(public_ips, "public_ips"):
+        try:
+            ip = ipaddress.ip_address(p)
+        except ValueError:
+            raise ValueError(f"{p} is not an IP address (put DNS names under host names)")
+        if ip.version != 4 or ip.is_loopback or ip.is_multicast or ip.is_unspecified or ip.is_link_local or ip.is_reserved:
+            raise ValueError(f"{p} is not a usable camera address")
+        for f, what in _HOST_NETS:
+            if ip in f:
+                raise ValueError(f"{p} is inside {what}")
+        if str(ip) not in out["public_ips"]:
+            out["public_ips"].append(str(ip))
+    for h in _str_list(names, "hosts"):
+        name = h.lower().rstrip(".")
+        if _is_ip(name):
+            raise ValueError(f"{h} is an IP address: put it under public IPs")
+        if not _is_hostname(name) or name.endswith(".localhost"):
+            raise ValueError(f"{h} is not a DNS name like cam1.example.net")
+        if name not in out["hosts"]:
+            out["hosts"].append(name)
+    n = sum(len(v) for v in out.values())
+    if n > MAX_CAMERA_ENTRIES:
+        raise ValueError(f"{n} camera addresses: at most {MAX_CAMERA_ENTRIES} per instance")
+    return out
+
+
+def _split_public(public: str | None) -> dict:
+    """The Site's single public address (create): an IP is a public IP, a DNS name a camera host name."""
+    if not public:
+        return {"public_ips": [], "hosts": []}
+    return {"public_ips": [public], "hosts": []} if _is_ip(public) else {"public_ips": [], "hosts": [public]}
+
+
+def camera_network(ci: dict) -> dict:
+    """{subnets, public_ips, hosts} the instance's firewall allows. Rows from before camera networks have none
+    stored: what the host's create_instance allowed then (vpn: the subnet; forward: the public address)."""
+    cn = ci.get("camera_network")
+    if isinstance(cn, dict):
+        return {k: [x for x in (cn.get(k) or []) if isinstance(x, str)] for k in CAMERA_KEYS}
+    if ci.get("mode") == "vpn":
+        return {"subnets": [ci["subnet"]] if ci.get("subnet") else [], "public_ips": [], "hosts": []}
+    return {"subnets": [], **_split_public(ci.get("public_ip"))}
+
+
 # ---------------------------------------------------------------- provisioning
 
 def _audit(user: dict | None, org_id: str | None, site_id: str | None, action: str, detail: dict, conn=None) -> None:
@@ -509,7 +612,9 @@ async def provision(location_id: str, host_id: str | None, mode: str, subnet: st
                 ci = {"id": db.new_id("ci_"), "host_id": host["id"], "location_id": location_id, "org_id": loc["org_id"], "server_id": None,
                       "name": (name or "").strip()[:120] or "Central", "mode": mode, "subnet": sub, "public_ip": public, "site_number": n,
                       "quota_gb": quota_gb, "gpu": gpu, "state": "provisioning", "last_error": None, "created_at": t,
-                      "created_by": (by_user or {}).get("id"), "updated_at": t, "ready_at": None, "info": None, "info_at": None}
+                      "created_by": (by_user or {}).get("id"), "updated_at": t, "ready_at": None, "info": None, "info_at": None,
+                      # what the host's create_instance allows: the subnet and the public address, whatever the mode
+                      "camera_network": {"subnets": [sub] if sub else [], **_split_public(public)}}
                 c.execute(db.central_instances.insert().values(**ci))
             break
         except sa.exc.IntegrityError:
@@ -602,6 +707,41 @@ async def set_quota(ci_id: str, quota_gb: int, by_user: dict | None) -> dict:
     loc = db.one(sa.select(db.locations.c.name).where(db.locations.c.id == ci["location_id"])) or {"name": ci["location_id"]}
     _audit(by_user, ci["org_id"], ci["server_id"], f"central recording quota: {loc['name']} {ci['quota_gb']} -> {quota_gb} GB",
            {"location_id": ci["location_id"], "instance_id": ci_id, "from": ci["quota_gb"], "to": quota_gb})
+    return get_instance(ci_id) or ci
+
+
+async def set_camera_network(ci_id: str, subnets, public_ips, names, by_user: dict | None) -> dict:
+    """Replace the instance's camera allow-list on its host (set_camera_network), then store and audit it. ValueError
+    = bad input, Conflict = another Site's instance already has that address, HostError = the host is offline or
+    refused (nothing is stored then)."""
+    ci = get_instance(ci_id)
+    if not ci or ci["state"] in ("deleting", "deleted"):
+        raise LookupError("unknown central instance")
+    new = check_camera_network(subnets, public_ips, names)
+    mine = [ipaddress.ip_network(s) for s in new["subnets"]]
+    for o in db.rows(sa.select(db.central_instances).where(db.central_instances.c.state.in_(LIVE_STATES),
+                                                           db.central_instances.c.id != ci_id)):
+        theirs = camera_network(o)
+        for s in mine:
+            if any(s.overlaps(ipaddress.ip_network(t)) for t in theirs["subnets"]):
+                raise Conflict(f"{s} overlaps another Site's camera subnet: every Site needs its own")
+        for p in new["public_ips"]:
+            if p in theirs["public_ips"]:
+                raise Conflict(f"{p} is already a camera address of another Site")
+        for h in new["hosts"]:
+            if h in theirs["hosts"]:
+                raise Conflict(f"{h} is already a camera address of another Site")
+    res = await registry.command(ci["host_id"], "set_camera_network", {"id": ci_id, **new})
+    if not res.get("ok"):
+        raise HostError(str(res.get("detail") or "the host refused"))
+    old = camera_network(ci)
+    vals: dict = {"camera_network": new}
+    if isinstance(res.get("instance"), dict):   # the names' resolved addresses, until the next heartbeat
+        vals |= {"info": {**(ci.get("info") or {}), "host_ips": res["instance"].get("host_ips")}, "info_at": time.time()}
+    _set(ci_id, **vals)
+    loc = db.one(sa.select(db.locations.c.name).where(db.locations.c.id == ci["location_id"])) or {"name": ci["location_id"]}
+    _audit(by_user, ci["org_id"], ci["server_id"], f"central recording camera addresses: {loc['name']}",
+           {"location_id": ci["location_id"], "instance_id": ci_id, "from": old, "to": new})
     return get_instance(ci_id) or ci
 
 
@@ -725,6 +865,8 @@ def instance_out(ci: dict, names: dict, hub_admin: bool) -> dict:
            "public_ip": ci["public_ip"], "site_number": ci["site_number"], "quota_gb": ci["quota_gb"],
            "used_gb": info.get("used_gb") if isinstance(info.get("used_gb"), (int, float)) else None,
            "state": ci["state"], "phase": phase(ci), "created_at": ci["created_at"], "ready_at": ci.get("ready_at"), "info_at": ci.get("info_at"),
+           # resolved: {DNS name: [IPv4]} as the host last resolved them (the firewall allows exactly those)
+           "camera_network": {**camera_network(ci), "resolved": info["host_ips"] if isinstance(info.get("host_ips"), dict) else {}},
            "peplink": peplink(ci, host)}
     if hub_admin:
         out |= {"host_id": ci["host_id"], "host_name": host.get("name"), "host_online": registry.online(ci["host_id"]),
@@ -740,7 +882,10 @@ def peplink(ci: dict, host: dict) -> dict:
             gw = str(next(ipaddress.ip_network(ci["subnet"]).hosts()))
         except (ValueError, StopIteration):
             gw = None
+    cn = camera_network(ci)
     return {"mode": ci["mode"], "subnet": ci.get("subnet"), "lan_gateway": gw, "public_ip": ci.get("public_ip"),
+            # the routers whose port forwards the instance reaches: the port-forward table applies to each
+            "forward_addresses": [*cn["public_ips"], *cn["hosts"]],
             "fusionhub": (host or {}).get("fusionhub") or settings.fusionhub_address or None,
             "datacenter_ip": settings.datacenter_ip or None, "rtsp_base": RTSP_BASE, "onvif_base": ONVIF_BASE}
 

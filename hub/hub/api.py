@@ -1432,6 +1432,13 @@ class CentralPatch(BaseModel):
     quota_gb: int = Field(ge=10, le=1_000_000)   # the host agent refuses less than 10 GB
 
 
+class CentralCameras(BaseModel):
+    """The instance's whole camera allow-list (each list replaces the stored one; hosts.check_camera_network)."""
+    subnets: list[str] = Field(default_factory=list, max_length=32)      # LAN / VPN subnets, any protocol
+    public_ips: list[str] = Field(default_factory=list, max_length=32)   # routers' public IPs (port forwards, TCP)
+    hosts: list[str] = Field(default_factory=list, max_length=32)        # their dynamic DNS names (TCP)
+
+
 def _central_of(location_id: str, ci_id: str) -> dict:
     ci = hosts.get_instance(ci_id)
     if not ci or ci["location_id"] != location_id:
@@ -1486,6 +1493,25 @@ async def location_central_update(location_id: str, ci_id: str, body: CentralPat
     except hosts.HostError as e:
         raise HTTPException(502, str(e))
     return hosts.instances(db.central_instances.c.id == ci_id, include_deleted=True)[0]
+
+
+@app.put("/api/locations/{location_id}/central/{ci_id}/cameras")
+async def location_central_cameras(location_id: str, ci_id: str, body: CentralCameras, u: dict = Depends(user)):
+    """Replace the instance's camera allow-list on its host (LAN/VPN subnets, public IPs, dynamic DNS names). Hub
+    administrators only, like the quota. Stored and audited only once the host has applied it."""
+    auth.require_super(u)
+    _central_of(location_id, ci_id)
+    try:
+        await hosts.set_camera_network(ci_id, body.subnets, body.public_ips, body.hosts, u)
+    except LookupError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except hosts.Conflict as e:
+        raise HTTPException(409, str(e))
+    except hosts.HostError as e:
+        raise HTTPException(502, f"{e}: nothing was changed")
+    return hosts.instances(db.central_instances.c.id == ci_id)[0]
 
 
 @app.delete("/api/locations/{location_id}/central/{ci_id}")

@@ -29,7 +29,7 @@ How a central host's `axiom_host.py run` talks to the hub. The hub side lives in
 ```
 - `id`: the command's id, echoed back unchanged.
 - `ok`: false when the command was refused or failed; `detail` then says why in plain words (safe to show an admin; never contains secrets).
-- `instance`: present for `create_instance`, `set_quota` and `restart_instance` when they succeed.
+- `instance`: present for `create_instance`, `set_quota`, `set_camera_network` and `restart_instance` when they succeed.
 - `instances`: present (a list of `{instance}`) for `list`.
 - `dry_run`: present when the command was sent with `"dry_run": true` (the planned commands, env file with secrets masked, firewall).
 - A result that could not be sent because the connection dropped is queued (up to 200) and sent right after the next `hello`. The hub should accept results for ids it no longer tracks (log and drop) and rely on the heartbeat's `instances` as the source of truth.
@@ -61,10 +61,13 @@ How a central host's `axiom_host.py run` talks to the hub. The hub side lives in
 {
   "id": "acme-gate", "location_id": "loc_acme1", "name": "Acme Gate · Central",
   "state": "running", "cameras": 5, "quota_gb": 4000, "used_gb": 812.4, "gpu": 1, "mode": "vpn",
-  "subnets": ["10.20.7.0/24"], "public_ips": [], "quota_mode": "xfs", "enroll_pending": false,
+  "subnets": ["10.20.7.0/24", "192.168.105.0/24"], "public_ips": ["203.0.113.7"], "hosts": ["cam1.example.net"],
+  "host_ips": {"cam1.example.net": ["203.0.113.21"]}, "quota_mode": "xfs", "enroll_pending": false,
   "mem_gb": 8, "cpus": 4, "image": "axiom/instance:latest", "network": "10.200.0.0/28"
 }
 ```
+- `subnets`, `public_ips`, `hosts`: the instance's camera allow-list (see `set_camera_network`). `mode` no longer decides what is allowed; it says how the site connects (the hub's Peplink sheet).
+- `host_ips`: each name in `hosts` → the IPv4 addresses it last resolved to (what the firewall allows for it; `[]` = not resolved yet). Re-resolved every 10 minutes with the hub names.
 - `state`: Docker's container state (`running`, `restarting`, `exited`, `created`, `paused`, `dead`), or `missing` when the container is gone; `created`/`planned` in a command's own result.
 - `cameras`: from the instance's own `/api/cameras`, refreshed every 5 minutes; `null` until known.
 - `used_gb`: recordings + database + event media. Exact and free to read on ZFS (`used` of the instance's two datasets) and XFS (the project quota); on other filesystems from `du` every 30 minutes, `null` until the first pass. On ZFS `quota_gb` limits the recordings dataset only (the instance dir has its own, host-wide quota), so `used_gb` can exceed `quota_gb` by up to that amount.
@@ -82,9 +85,10 @@ How a central host's `axiom_host.py run` talks to the hub. The hub side lives in
 
 | op | args | notes |
 |---|---|---|
-| `create_instance` | `id`, `location` (alias `location_id`), `name`, `mode` (`vpn`\|`forward`), `subnet` (string or list; vpn), `public_ip` (string or list; forward), `quota_gb`, `gpu` (int, or `null`/`"none"` for CPU), `enroll_token`, `hub_url`, `vlm_url`; optional `vlm_model`, `mem_gb` (default 8), `cpus` (default 4), `image`, `quota_mode` (`auto`\|`zfs`\|`xfs`\|`none`), `dry_run` | Creates dirs, quota, `instance.env`, network, firewall rules, then starts the container. Refused if the id exists, the site subnet or public IP is already used by another instance, or leftover data for that id exists. |
+| `create_instance` | `id`, `location` (alias `location_id`), `name`, `mode` (`vpn`\|`forward`), `subnet` (string or list), `public_ip` (string or list; a DNS name here counts as a `hosts` entry), optional `subnets`, `public_ips`, `hosts` (lists, added to the former), `quota_gb`, `gpu` (int, or `null`/`"none"` for CPU), `enroll_token`, `hub_url`, `vlm_url`; optional `vlm_model`, `mem_gb` (default 8), `cpus` (default 4), `image`, `quota_mode` (`auto`\|`zfs`\|`xfs`\|`none`), `dry_run` | Creates dirs, quota, `instance.env`, network, firewall rules, then starts the container. The camera allow-list is the union of all subnets, public IPs and host names, whatever the `mode`, validated as for `set_camera_network`; at least one entry is required. Refused if the id exists, a camera address is already used by another instance, or leftover data for that id exists. |
 | `delete_instance` | `id`, `purge` (default false), `dry_run`; the CLI's `keep_data` is accepted too (`keep_data` wins if both are sent) | Removes the container, network, firewall rules and (XFS) quota limit. On ZFS a purge destroys exactly the instance's two datasets; kept datasets stay with their quotas. Recordings and database **stay on the host** unless `purge` is true; the hub confirms a purge with the admin first. Kept data blocks re-creating the same id. |
 | `set_quota` | `id`, `quota_gb`, `force`, `dry_run` | Refused below current usage unless `force`. |
+| `set_camera_network` | `id`, `subnets`, `public_ips`, `hosts` (each a list or comma-separated string; `[]` empties it; absent or `null` keeps it), `dry_run` | Replaces the instance's camera allow-list, saves the registry and regenerates and loads the whole firewall (one `nft -f`, as on create/delete). Idempotent. `subnets`: IPv4 networks inside 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 or 100.64.0.0/10, /16 or smaller, no host bits set; any protocol. `public_ips`: IPv4 addresses, not loopback, link-local, multicast, unspecified or reserved; TCP only (ports: `forward_tcp_ports` in host.json, default any). `hosts`: DNS names (letters, digits, `-`, two or more labels, lowercased), resolved to IPv4 and re-resolved every 10 minutes; TCP only like `public_ips`; a resolved address that would be refused as a public IP (or is in the pool, the AI network or a hub address) is left out. Nothing may overlap the instance pool, the AI network (`ai_network`, 10.201.0.0/24) or the hub's addresses; another instance's subnet, public IP or host name is refused; at most 32 entries in all. On an `nft` failure the old rules and registry stay. `dry_run` returns `dry_run.firewall` (the ruleset) and changes nothing. The hub sends all three lists. |
 | `restart_instance` | `id`, `recreate` (default false), `image`, `dry_run` | `recreate` or a new `image` removes and re-runs the container (picks up a new image or a scrubbed env file); otherwise `docker restart`. |
 | `list` | none | Result carries `instances`. |
 

@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
-  capacityBars, centralFormError, defaultSubnet, fmtGB, fmtMbps, forwardCount, forwardRows, lanGateway, nextSiteNumber, pct, phaseStep,
-  quotaText, settling, siteBandwidth, uploadLine,
+  cameraEntryError, cameraNetworkError, cameraNetworkOf, cameraNetworkSummary, capacityBars, centralFormError, cleanCameraNetwork, defaultSubnet,
+  fmtGB, fmtMbps, forwardCount, forwardRows, forwardTargets, isHostName, lanGateway, nextSiteNumber, parseIPv4, pct, phaseStep, quotaText,
+  resolvedLines, settling, siteBandwidth, uploadLine,
 } from "./central";
 import type { ServerSummary } from "./api";
 
@@ -81,5 +82,57 @@ describe("phases and capacity", () => {
       disks: [{ path: "/srv/axiom", total_gb: 10000, free_gb: 2500 }] });
     expect(bars.map((b) => [b.label, b.pct])).toEqual([["CPU", 25], ["RAM", 22], ["GPU 1 · A10", 50], ["Disk /srv/axiom", 75]]);
     expect(capacityBars(null)).toEqual([]);
+  });
+});
+
+describe("camera addresses", () => {
+  it("accepts LAN / VPN subnets, public IPs and DNS names", () => {
+    for (const v of ["192.168.105.0/24", "10.20.7.0/24", "172.16.0.0/16", "100.64.12.0/24", "192.168.105.7/24", "10.30.1.5/32", ""])
+      expect(cameraEntryError("subnets", v), v).toBeNull();
+    for (const v of ["203.0.113.7", "93.184.216.34", "192.168.1.20"]) expect(cameraEntryError("public_ips", v), v).toBeNull();
+    for (const v of ["cam1.example.net", "Cam-2.Dyn.Example.ORG.", "x.y"]) expect(cameraEntryError("hosts", v), v).toBeNull();
+  });
+  it("refuses what the hub refuses", () => {
+    for (const v of ["0.0.0.0/0", "10.0.0.0/8", "192.168.0.0/15", "8.8.8.0/24", "10.200.3.0/24", "10.200.0.0/16", "10.201.0.0/24",
+      "10.201.0.128/25", "127.0.0.0/16", "192.168.105.0", "192.168.105.0/33", "999.1.1.0/24", "nonsense"])
+      expect(cameraEntryError("subnets", v), v).not.toBeNull();
+    expect(cameraEntryError("subnets", "10.0.0.0/8")).toBe("Broader than a /16");
+    expect(cameraEntryError("subnets", "10.200.3.0/24")).toContain("instance pool");
+    for (const v of ["127.0.0.1", "0.0.0.0", "169.254.1.1", "224.0.0.1", "255.255.255.255", "240.0.0.1", "10.200.0.2", "10.201.0.10", "1.2.3", "cam.example.net"])
+      expect(cameraEntryError("public_ips", v), v).not.toBeNull();
+    expect(cameraEntryError("public_ips", "cam.example.net")).toBe("A DNS name: put it under host names");
+    for (const v of ["localhost", "cam", "-cam.example.net", "cam-.example.net", "cam..example.net", "cam_1.example.net", "1.2.3.4", "999.1.1.1",
+      "cam.localhost", "cam example.net", `${"a".repeat(64)}.example.net`])
+      expect(cameraEntryError("hosts", v), v).not.toBeNull();
+    expect(cameraEntryError("hosts", "1.2.3.4")).toBe("An IP address: put it under public IPs");
+    expect(isHostName("x.".repeat(130) + "net")).toBe(false);
+    expect(parseIPv4("192.168.1.256")).toBeNull();
+    expect(parseIPv4("255.255.255.255")).toBe(0xffffffff);
+  });
+  it("cleans, checks the whole list and caps it at 32", () => {
+    const l = { subnets: [" 192.168.105.0/24 ", "", "192.168.105.0/24"], public_ips: ["203.0.113.7"], hosts: ["Cam1.Example.net.", "cam1.example.net"] };
+    expect(cleanCameraNetwork(l)).toEqual({ subnets: ["192.168.105.0/24"], public_ips: ["203.0.113.7"], hosts: ["cam1.example.net"] });
+    expect(cameraNetworkError(l)).toBeNull();
+    expect(cameraNetworkError({ ...l, public_ips: ["cam.example.net"] })).toBe("cam.example.net: A DNS name: put it under host names");
+    const many = { subnets: Array.from({ length: 30 }, (_, i) => `10.30.${i}.0/24`), public_ips: ["203.0.113.7", "203.0.113.8"], hosts: ["cam1.example.net"] };
+    expect(cameraNetworkError(many)).toBe("33 addresses: at most 32");
+    expect(cameraNetworkError({ ...many, hosts: [] })).toBeNull();
+  });
+  it("summary line, resolved names and the routers the port-forward table applies to", () => {
+    const l = { subnets: ["192.168.105.0/24"], public_ips: ["203.0.113.7"], hosts: ["cam1.example.net"] };
+    expect(cameraNetworkSummary(l)).toBe("Cameras reachable at: 192.168.105.0/24 · 203.0.113.7 · cam1.example.net");
+    expect(cameraNetworkSummary({ subnets: [], public_ips: [], hosts: [] })).toBe("Cameras reachable at: none");
+    expect(resolvedLines(["cam1.example.net", "cam2.example.net"], { "cam1.example.net": ["203.0.113.21"] }))
+      .toEqual(["cam1.example.net → 203.0.113.21", "cam2.example.net → not resolved yet"]);
+    expect(forwardTargets({ forward_addresses: ["203.0.113.7", "cam1.example.net"], public_ip: null })).toEqual(["203.0.113.7", "cam1.example.net"]);
+    expect(forwardTargets({ public_ip: "93.184.216.34" })).toEqual(["93.184.216.34"]);   // an older hub's answer
+    expect(forwardTargets({ forward_addresses: [], public_ip: "93.184.216.34" })).toEqual([]);
+  });
+  it("reads the instance's camera network, or derives it from an older answer", () => {
+    expect(cameraNetworkOf({ mode: "vpn", subnet: "10.20.7.0/24", public_ip: null, camera_network: { subnets: ["192.168.105.0/24"], public_ips: [], hosts: ["a.example.net"] } }))
+      .toEqual({ subnets: ["192.168.105.0/24"], public_ips: [], hosts: ["a.example.net"] });
+    expect(cameraNetworkOf({ mode: "vpn", subnet: "10.20.7.0/24", public_ip: null })).toEqual({ subnets: ["10.20.7.0/24"], public_ips: [], hosts: [] });
+    expect(cameraNetworkOf({ mode: "forward", subnet: null, public_ip: "93.184.216.34" })).toEqual({ subnets: [], public_ips: ["93.184.216.34"], hosts: [] });
+    expect(cameraNetworkOf({ mode: "forward", subnet: null, public_ip: "yard.dyn.example.net" })).toEqual({ subnets: [], public_ips: [], hosts: ["yard.dyn.example.net"] });
   });
 });

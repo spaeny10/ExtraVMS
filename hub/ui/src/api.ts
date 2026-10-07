@@ -61,13 +61,18 @@ export type Host = {
   capacity: HostCapacity | null; notes: string | null; fusionhub: string | null; agent_ip: string | null; instances: number; quota_gb: number; offline_since: number | null;
 };
 /** What the Peplink settings sheet shows (central.ts lays out the port-forward table from the bases). */
-export type Peplink = { mode: CentralMode; subnet: string | null; lan_gateway: string | null; public_ip: string | null; fusionhub: string | null; datacenter_ip: string | null; rtsp_base: number; onvif_base: number };
+/** `forward_addresses`: the routers' public IPs and DNS names the port-forward table applies to (from the camera network). */
+export type Peplink = { mode: CentralMode; subnet: string | null; lan_gateway: string | null; public_ip: string | null; forward_addresses?: string[]; fusionhub: string | null; datacenter_ip: string | null; rtsp_base: number; onvif_base: number };
+/** The instance's camera allow-list on its host: LAN / VPN subnets (any protocol), public IPs and DNS names (TCP). */
+export type CameraNetwork = { subnets: string[]; public_ips: string[]; hosts: string[] };
+/** `resolved`: each DNS name's IPv4 addresses as the host last resolved them. */
+export type CentralCameraNetwork = CameraNetwork & { resolved?: Record<string, string[] | null> | null };
 /** One Site's central instance. The host_* / gpu / last_error fields are sent to hub administrators only. */
 export type CentralInstance = {
   id: string; location_id: string; location_name: string | null; org_id: string; org_name: string | null; server_id: string | null; server_online: boolean;
   name: string; mode: CentralMode; subnet: string | null; public_ip: string | null; site_number: number | null; quota_gb: number; used_gb: number | null;
   state: "provisioning" | "running" | "failed" | "deleting" | "deleted"; phase: string; created_at: number; ready_at: number | null; info_at: number | null;
-  peplink: Peplink; cameras?: { id: string; name: string }[];
+  peplink: Peplink; cameras?: { id: string; name: string }[]; camera_network?: CentralCameraNetwork;
   host_id?: string; host_name?: string | null; host_online?: boolean; gpu?: number | null; gpu_name?: string | null; last_error?: string | null; host_state?: string | null;
 };
 export type LocationCentral = { instances: CentralInstance[]; can_provision: boolean; hosts: Pick<Host, "id" | "name" | "online" | "capacity" | "instances">[] };
@@ -369,6 +374,8 @@ export const api = {
   locationCentral: (loc: string) => req<LocationCentral>(`/api/locations/${loc}/central`),
   provisionCentral: (loc: string, b: CentralBody) => req<CentralInstance>(`/api/locations/${loc}/central`, json("POST", b)),
   setCentralQuota: (loc: string, ci: string, quota_gb: number) => req<CentralInstance>(`/api/locations/${loc}/central/${ci}`, json("PATCH", { quota_gb })),
+  /** Replaces the instance's camera allow-list on its host (hub administrators). */
+  setCentralCameras: (loc: string, ci: string, b: CameraNetwork) => req<CentralInstance>(`/api/locations/${loc}/central/${ci}/cameras`, json("PUT", b)),
   /** purge also deletes the recordings on the host; force forgets the instance at the hub when its host can't. */
   removeCentral: (loc: string, ci: string, o: { purge?: boolean; force?: boolean } = {}) =>
     req<CentralInstance>(`/api/locations/${loc}/central/${ci}?${qs({ purge: o.purge || undefined, force: o.force || undefined })}`, { method: "DELETE" }),

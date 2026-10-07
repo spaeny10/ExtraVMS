@@ -472,3 +472,110 @@ def test_real_server_agent_enrolls_with_its_token(world):
         site_db.set_setting("hub_token", None)
         loop.call_soon_threadsafe(loop.stop)
         fh.close()
+
+
+def test_check_camera_network():
+    ok = hosts.check_camera_network(["192.168.105.7/24", "10.20.7.0/24", "100.64.3.0/24", "10.20.7.0/24"], ["203.0.113.7", " 198.51.100.9 "],
+                                    ["Cam1.Example.NET.", "cam1.example.net"])
+    assert ok == {"subnets": ["192.168.105.0/24", "10.20.7.0/24", "100.64.3.0/24"], "public_ips": ["203.0.113.7", "198.51.100.9"],
+                  "hosts": ["cam1.example.net"]}
+    assert hosts.check_camera_network([], [], []) == {"subnets": [], "public_ips": [], "hosts": []}
+    for subnets, ips, names in ((["0.0.0.0/0"], [], []), (["10.0.0.0/8"], [], []), (["8.8.8.0/24"], [], []), (["10.200.4.0/24"], [], []),
+                                (["10.201.0.0/24"], [], []), (["127.0.0.0/16"], [], []), (["fd00::/64"], [], []), (["nope"], [], []),
+                                ([], ["cam.example.net"], []), ([], ["127.0.0.1"], []), ([], ["169.254.1.1"], []), ([], ["224.0.0.1"], []),
+                                ([], ["10.200.0.2"], []), ([], [], ["1.2.3.4"]), ([], [], ["localhost"]), ([], [], ["bad name.example.net"]),
+                                ([], [], ["-x.example.net"]), ([f"10.30.{i}.0/24" for i in range(33)], [], []), ("10.20.7.0/24", [], [])):
+        with pytest.raises(ValueError):
+            hosts.check_camera_network(subnets, ips, names)
+    # rows from before camera networks: what the host allowed then
+    assert hosts.camera_network({"mode": "vpn", "subnet": "10.20.7.0/24", "public_ip": None}) == {"subnets": ["10.20.7.0/24"], "public_ips": [], "hosts": []}
+    assert hosts.camera_network({"mode": "forward", "subnet": None, "public_ip": "93.184.216.34"}) == {"subnets": [], "public_ips": ["93.184.216.34"], "hosts": []}
+    assert hosts.camera_network({"mode": "forward", "subnet": None, "public_ip": "yard.dyn.example.net"})["hosts"] == ["yard.dyn.example.net"]
+
+
+def test_camera_addresses(world, superuser):
+    base, root, org, a = world["base"], world["root"], world["org"], world["a"]
+    e = root.post(f"/api/orgs/{org['id']}/locations", json={"name": "Yard E"}).json()
+    host = root.post("/api/hub/hosts", json={"name": "Camnet host"}).json()
+
+    def answer(cmd):
+        if cmd["op"] == "create_instance":
+            return {"ok": True, "detail": "created", "instance": {"id": cmd["args"]["id"], "state": "running"}}
+        if cmd["op"] == "set_camera_network":
+            return {"ok": True, "detail": "set", "instance": {"id": cmd["args"]["id"], "hosts": cmd["args"]["hosts"],
+                                                              "host_ips": {h: ["203.0.113.21"] for h in cmd["args"]["hosts"]}}}
+        return {"ok": True, "detail": "done"}
+    fh = FakeHost(base, host["token"], capacity(), answer, "camnet")
+    made: list[dict] = []
+    try:
+        wait(lambda: hosts.registry.online(host["host"]["id"]))
+        ci = root.post(f"/api/locations/{a['id']}/central", json={"mode": "vpn", "quota_gb": 100, "host_id": host["host"]["id"]}).json()
+        made.append(ci)
+        n = ci["site_number"]
+        assert ci["camera_network"] == {"subnets": [f"10.20.{n}.0/24"], "public_ips": [], "hosts": [], "resolved": {}}
+        assert ci["peplink"]["forward_addresses"] == []
+        wait(lambda: hosts.get_instance(ci["id"])["ready_at"])
+        url = f"/api/locations/{a['id']}/central/{ci['id']}/cameras"
+        body = {"subnets": ["192.168.105.0/24", f"10.20.{n}.0/24"], "public_ips": ["203.0.113.7"], "hosts": ["Cam1.example.net"]}
+
+        # who may: hub administrators only (like the quota); the Site's own admins read it but cannot change it
+        sa_ = _login(base, "siteadmin@central.example", PW)
+        viewer = _login(base, "viewer@central.example", PW)
+        assert sa_.get(f"/api/locations/{a['id']}/central").status_code == 200
+        assert sa_.put(url, json=body).status_code == 403
+        assert viewer.put(url, json=body).status_code == 403
+        assert httpx.put(base + url, json=body).status_code == 401
+        sent_before = len(fh.cmds)
+        # bad input: refused, nothing sent to the host
+        for bad in ({"subnets": ["0.0.0.0/0"]}, {"subnets": ["10.200.1.0/24"]}, {"subnets": ["8.8.8.0/24"]}, {"public_ips": ["cam.example.net"]},
+                    {"hosts": ["bad name"]}, {"hosts": ["10.1.2.3"]}, {"subnets": [f"10.30.{i}.0/24" for i in range(20)],
+                                                                      "public_ips": [f"198.51.100.{i}" for i in range(1, 14)]}):
+            r = root.put(url, json=bad)
+            assert r.status_code == 400, (bad, r.text)
+        assert root.put(url, json={"subnets": "10.20.7.0/24"}).status_code == 422
+        assert len(fh.cmds) == sent_before
+        # a Site that isn't the instance's
+        assert root.put(f"/api/locations/{e['id']}/central/{ci['id']}/cameras", json=body).status_code == 404
+
+        r = root.put(url, json=body)
+        assert r.status_code == 200, r.text
+        out = r.json()
+        want = {"subnets": ["192.168.105.0/24", f"10.20.{n}.0/24"], "public_ips": ["203.0.113.7"], "hosts": ["cam1.example.net"]}
+        assert fh.cmds[-1]["op"] == "set_camera_network" and fh.cmds[-1]["args"] == {"id": ci["id"], **want}
+        assert out["camera_network"] == {**want, "resolved": {"cam1.example.net": ["203.0.113.21"]}}
+        assert out["peplink"]["forward_addresses"] == ["203.0.113.7", "cam1.example.net"]
+        assert out["mode"] == "vpn" and out["subnet"] == f"10.20.{n}.0/24"          # the BR1 LAN of the Peplink sheet stays
+        assert hosts.get_instance(ci["id"])["camera_network"] == want
+        audit = db.rows(sa.select(db.audit_log).where(db.audit_log.c.org_id == org["id"], db.audit_log.c.action.like("central recording camera addresses%")))
+        assert len(audit) == 1 and audit[0]["detail"]["to"] == want and audit[0]["detail"]["from"]["subnets"] == [f"10.20.{n}.0/24"]
+        assert audit[0]["user_email"] == superuser["email"]
+        # the Site's admins see it
+        seen = sa_.get(f"/api/locations/{a['id']}/central").json()["instances"][0]
+        assert seen["camera_network"]["hosts"] == ["cam1.example.net"]
+
+        # another Site's instance cannot take the same subnet, public IP or DNS name
+        ci_e = root.post(f"/api/locations/{e['id']}/central", json={"mode": "forward", "public_ip": "93.184.216.40", "quota_gb": 100,
+                                                                    "host_id": host["host"]["id"]}).json()
+        made.append(ci_e)
+        assert ci_e["camera_network"] == {"subnets": [], "public_ips": ["93.184.216.40"], "hosts": [], "resolved": {}}
+        url_e = f"/api/locations/{e['id']}/central/{ci_e['id']}/cameras"
+        for clash in ({"subnets": ["192.168.105.128/25"]}, {"public_ips": ["203.0.113.7"]}, {"hosts": ["cam1.example.net"]}):
+            assert root.put(url_e, json=clash).status_code == 409, clash
+
+        # the host refuses: 502, nothing stored or audited
+        fh.answer = lambda cmd: {"ok": False, "detail": "subnet 192.168.106.0/24 overlaps the hub address"}
+        r = root.put(url, json={"subnets": ["192.168.106.0/24"]})
+        assert r.status_code == 502 and "overlaps the hub" in r.text and "nothing was changed" in r.text
+        assert hosts.get_instance(ci["id"])["camera_network"] == want
+        # the host offline: a clear error, nothing stored
+        fh.close()
+        wait(lambda: not hosts.registry.online(host["host"]["id"]))
+        r = root.put(url, json={"subnets": ["192.168.106.0/24"]})
+        assert r.status_code == 502 and "offline" in r.text
+        assert hosts.get_instance(ci["id"])["camera_network"] == want
+        assert len(db.rows(sa.select(db.audit_log).where(db.audit_log.c.org_id == org["id"],
+                                                         db.audit_log.c.action.like("central recording camera addresses%")))) == 1
+    finally:
+        fh.close()
+        for c in made:
+            root.delete(f"/api/locations/{c['location_id']}/central/{c['id']}?force=true")

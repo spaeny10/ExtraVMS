@@ -3,7 +3,7 @@
  * and the bandwidth / storage numbers shown on Site → Servers and Customer → Servers. Kept apart from the components
  * so they are unit-tested (central.test.ts).
  */
-import type { CentralInstance, HostCapacity, Server } from "./api";
+import type { CentralInstance, HostCapacity, Peplink, Server } from "./api";
 
 /** provisioning (the host is creating it) → waiting_enroll (created, not dialed in yet) → running. */
 export const PHASE_LABEL: Record<string, string> = {
@@ -126,4 +126,105 @@ export function nextSiteNumber(used: (number | null | undefined)[]): number | nu
   const taken = new Set(used.filter((n): n is number => typeof n === "number"));
   for (let n = 1; n <= 250; n++) if (!taken.has(n)) return n;
   return null;
+}
+
+// ---- Camera addresses: the instance's camera allow-list on its host (hub hosts.check_camera_network decides; these
+// checks mirror it so the editor can flag a row before saving)
+export type CameraKind = "subnets" | "public_ips" | "hosts";
+export const CAMERA_KINDS: CameraKind[] = ["subnets", "public_ips", "hosts"];
+export const MAX_CAMERA_ENTRIES = 32;
+export type CameraLists = Record<CameraKind, string[]>;
+
+/** "192.168.1.7" → its 32-bit value; null unless four 0-255 decimal parts. */
+export function parseIPv4(s: string): number | null {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(s.trim());
+  if (!m) return null;
+  const p = m.slice(1).map(Number);
+  if (p.some((x) => x > 255)) return null;
+  return ((p[0] << 24) >>> 0) + (p[1] << 16) + (p[2] << 8) + p[3];
+}
+
+const net = (cidr: string): [number, number] => { const [a, n] = cidr.split("/"); return [parseIPv4(a)!, Number(n)]; };
+const mask = (bits: number) => (bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0);
+const inNet = (ip: number, [base, bits]: [number, number]) => ((ip & mask(bits)) >>> 0) === ((base & mask(bits)) >>> 0);
+/** Two networks overlap when one contains the other's base at the shorter prefix. */
+const overlaps = (a: [number, number], b: [number, number]) => { const bits = Math.min(a[1], b[1]); return ((a[0] & mask(bits)) >>> 0) === ((b[0] & mask(bits)) >>> 0); };
+const PRIVATE = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"].map(net);
+const HOST_NETS: [[number, number], string][] = [[net("10.200.0.0/16"), "the host's instance pool 10.200.0.0/16"], [net("10.201.0.0/24"), "the host's AI network 10.201.0.0/24"]];
+
+/** cam1.example.net: two or more labels of letters, digits and '-', the last not all digits. */
+export function isHostName(s: string): boolean {
+  const name = s.trim().toLowerCase().replace(/\.$/, "");
+  const labels = name.split(".");
+  if (name.length < 1 || name.length > 253 || labels.length < 2 || /^\d+$/.test(labels[labels.length - 1]) || name.endsWith(".localhost")) return false;
+  return labels.every((l) => /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(l));
+}
+
+/** What is wrong with one row of the editor (null = fine, or empty: empty rows are dropped on save). */
+export function cameraEntryError(kind: CameraKind, value: string): string | null {
+  const v = value.trim();
+  if (!v) return null;
+  if (kind === "subnets") {
+    const m = /^([\d.]+)\/(\d{1,2})$/.exec(v);
+    const ip = m ? parseIPv4(m[1]) : null;
+    if (!m || ip == null || Number(m[2]) > 32) return "A subnet like 192.168.105.0/24";
+    const n: [number, number] = [ip, Number(m[2])];
+    if (n[1] < 16) return "Broader than a /16";
+    if (!PRIVATE.some((p) => n[1] >= p[1] && inNet(n[0], p))) return "Must be a private network (10.x, 172.16-31.x, 192.168.x or 100.64-127.x)";
+    const bad = HOST_NETS.find(([h]) => overlaps(n, h));
+    return bad ? `Overlaps ${bad[1]}` : null;
+  }
+  if (kind === "public_ips") {
+    const ip = parseIPv4(v);
+    if (ip == null) return isHostName(v) ? "A DNS name: put it under host names" : "An IPv4 address like 203.0.113.7";
+    const first = ip >>> 24;
+    if (ip === 0 || first === 127 || first >= 224 || inNet(ip, net("169.254.0.0/16"))) return "Not a usable camera address";
+    const bad = HOST_NETS.find(([h]) => inNet(ip, h));
+    return bad ? `Inside ${bad[1]}` : null;
+  }
+  if (parseIPv4(v) != null) return "An IP address: put it under public IPs";
+  return isHostName(v) ? null : "A DNS name like cam1.example.net";
+}
+
+/** Trimmed, empty rows dropped, host names lowercased, duplicates dropped: what Save sends. */
+export function cleanCameraNetwork(l: CameraLists): CameraLists {
+  const uniq = (xs: string[]) => [...new Set(xs)];
+  return {
+    subnets: uniq(l.subnets.map((s) => s.trim()).filter(Boolean)),
+    public_ips: uniq(l.public_ips.map((s) => s.trim()).filter(Boolean)),
+    hosts: uniq(l.hosts.map((s) => s.trim().toLowerCase().replace(/\.$/, "")).filter(Boolean)),
+  };
+}
+
+/** The first problem in the whole list (null = Save may go ahead). */
+export function cameraNetworkError(l: CameraLists): string | null {
+  for (const k of CAMERA_KINDS) for (const v of l[k]) { const e = cameraEntryError(k, v); if (e) return `${v.trim()}: ${e}`; }
+  const c = cleanCameraNetwork(l);
+  const n = c.subnets.length + c.public_ips.length + c.hosts.length;
+  return n > MAX_CAMERA_ENTRIES ? `${n} addresses: at most ${MAX_CAMERA_ENTRIES}` : null;
+}
+
+/** The instance's camera network; from subnet / public_ip for an answer without one (an older hub). */
+export function cameraNetworkOf(ci: Pick<CentralInstance, "mode" | "subnet" | "public_ip" | "camera_network">): CameraLists {
+  const c = ci.camera_network;
+  if (c) return { subnets: [...(c.subnets ?? [])], public_ips: [...(c.public_ips ?? [])], hosts: [...(c.hosts ?? [])] };
+  if (ci.mode === "vpn") return { subnets: ci.subnet ? [ci.subnet] : [], public_ips: [], hosts: [] };
+  const p = ci.public_ip ?? "";
+  return { subnets: [], public_ips: p && parseIPv4(p) != null ? [p] : [], hosts: p && parseIPv4(p) == null ? [p] : [] };
+}
+
+/** "Cameras reachable at: 192.168.105.0/24 · 203.0.113.7 · cam1.example.net" (or "none"). */
+export function cameraNetworkSummary(l: CameraLists): string {
+  const all = [...l.subnets, ...l.public_ips, ...l.hosts];
+  return `Cameras reachable at: ${all.length ? all.join(" · ") : "none"}`;
+}
+
+/** "cam1.example.net → 203.0.113.21", one per DNS name ("not resolved yet" when the host has no address for it). */
+export function resolvedLines(hosts: string[], resolved: Record<string, string[] | null> | null | undefined): string[] {
+  return hosts.map((h) => { const ips = resolved?.[h] ?? []; return `${h} → ${ips.length ? ips.join(", ") : "not resolved yet"}`; });
+}
+
+/** The routers whose port forwards the instance uses (the port-forward table applies to each). */
+export function forwardTargets(p: Pick<Peplink, "forward_addresses" | "public_ip">): string[] {
+  return p.forward_addresses ?? (p.public_ip ? [p.public_ip] : []);
 }

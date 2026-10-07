@@ -601,6 +601,246 @@ class ZfsMode(unittest.TestCase):
         self.assertEqual(self.state.datasets[REC_DS]["quota"], 4_000_000_000_000)
 
 
+class FakeDNS:
+    """A resolver: name -> addresses; a missing name (or one set to None) does not resolve."""
+
+    def __init__(self, table: dict | None = None) -> None:
+        self.table = dict(table or {})
+        self.asked: list[str] = []
+
+    def __call__(self, name: str) -> list[str]:
+        self.asked.append(name)
+        got = self.table.get(name)
+        if got is None:
+            raise OSError(f"{name}: Name or service not known")
+        return list(got)
+
+
+FORBID = [(ah.ipaddress.ip_network("10.200.0.0/16"), "the instance pool"),
+          (ah.ipaddress.ip_network("10.201.0.0/24"), "the AI network"),
+          (ah.ipaddress.ip_network(f"{HUB}/32"), "the hub")]
+
+
+class CameraNetwork(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.exe = FakeExec()
+        self.dns = FakeDNS({"cam1.example.net": ["203.0.113.21"], "cam2.dyn.example.org": ["198.51.100.40", "198.51.100.41"]})
+        self.host = make_host(self.tmp, self.exe)
+        self.host.resolver = self.dns
+        self.host.create_instance(dict(VPN_ARGS))
+        self.host.create_instance(dict(FWD_ARGS))
+
+    def fw(self) -> str:
+        return (self.tmp / "srv" / "firewall.nft").read_text()
+
+    def test_validation_accepts(self):
+        out = ah.check_camera_network(["192.168.105.0/24", "10.20.7.0/24", "100.64.12.0/24", "172.16.0.0/16", "192.168.105.0/24"],
+                                      "203.0.113.7, 198.51.100.7", ["Cam1.Example.NET.", "cam1.example.net", "a-b.c-d.example"], FORBID)
+        self.assertEqual(out, {"subnets": ["192.168.105.0/24", "10.20.7.0/24", "100.64.12.0/24", "172.16.0.0/16"],
+                               "public_ips": ["203.0.113.7", "198.51.100.7"],
+                               "hosts": ["cam1.example.net", "a-b.c-d.example"]})
+        self.assertEqual(ah.check_camera_network(None, "", [], FORBID), {"subnets": [], "public_ips": [], "hosts": []})
+        self.assertEqual(len(ah.check_camera_network([f"10.30.{i}.0/24" for i in range(32)], [], [], FORBID)["subnets"]), 32)
+
+    def test_validation_refuses(self):
+        bad_subnets = ["0.0.0.0/0", "10.0.0.0/8", "192.168.0.0/15", "8.8.8.0/24", "203.0.113.0/24", "10.200.3.0/24",
+                       "10.200.0.0/16", "10.201.0.0/24", "10.201.0.128/25", "127.0.0.0/16", "169.254.1.0/24", "224.0.0.0/24",
+                       "10.20.7.1/24", "fd00::/64", "nonsense", "10.20.7.0/33"]
+        for s in bad_subnets:
+            with self.assertRaises(ah.OpError, msg=s):
+                ah.check_camera_network([s], [], [], FORBID)
+        with self.assertRaises(ah.OpError):   # a subnet holding the hub's address
+            ah.check_camera_network(["10.9.0.0/16"], [], [], FORBID + [(ah.ipaddress.ip_network("10.9.1.1/32"), "the hub")])
+        for p in ("127.0.0.1", "0.0.0.0", "169.254.10.1", "224.1.1.1", "255.255.255.255", "240.0.0.1", "10.200.0.5",
+                  "10.201.0.10", HUB, "2001:db8::1", "cam.example.net", "1.2.3"):
+            with self.assertRaises(ah.OpError, msg=p):
+                ah.check_camera_network([], [p], [], FORBID)
+        for h in ("localhost", "cam", "-cam.example.net", "cam-.example.net", "cam..example.net", "cam_1.example.net",
+                  "1.2.3.4", "999.1.1.1", "x." * 130 + "net", "a" * 64 + ".example.net", "cam.localhost", "cam example.net",
+                  "cam.example.net/24", ""):
+            if not h:
+                continue
+            with self.assertRaises(ah.OpError, msg=h):
+                ah.check_camera_network([], [], [h], FORBID)
+        with self.assertRaises(ah.OpError) as cm:   # 33 entries in all
+            ah.check_camera_network([f"10.30.{i}.0/24" for i in range(20)], [f"203.0.113.{i}" for i in range(30, 42)],
+                                    ["cam.example.net"], FORBID)
+        self.assertIn("at most 32", str(cm.exception))
+
+    def test_set_mixes_lan_vpn_and_remote_cameras(self):
+        before = len(self.exe.cmds("nft -f"))
+        out = self.host.dispatch("set_camera_network", {"id": "acme-gate", "subnets": ["192.168.105.0/24", "10.20.7.0/24"],
+                                                         "public_ips": ["203.0.113.7"], "hosts": ["cam1.example.net", "cam2.dyn.example.org"]})
+        self.assertIn("acme-gate cameras: 192.168.105.0/24, 10.20.7.0/24, 203.0.113.7, cam1.example.net, cam2.dyn.example.org", out["detail"])
+        self.assertEqual(len(self.exe.cmds("nft -f")), before + 1)   # loaded, the same way create/delete do
+        c = chain(self.fw(), "inst_acme_gate")
+        self.assertIn('ip daddr { 10.20.7.0/24, 192.168.105.0/24 } accept comment "camera networks', c)
+        self.assertIn("ip daddr { 198.51.100.40, 198.51.100.41, 203.0.113.7, 203.0.113.21 } meta l4proto tcp accept", c)
+        self.assertIn("# cam1.example.net: 203.0.113.21", c)
+        self.assertTrue(c.strip().splitlines()[-1].strip().startswith("counter drop"))
+        cb = chain(self.fw(), "inst_beta_yard")                       # the other instance is untouched
+        self.assertNotIn("192.168.105.0/24", cb)
+        self.assertNotIn("203.0.113.7", cb)
+        self.assertIn("ip daddr { 198.51.100.7 } meta l4proto tcp accept", cb)
+        rec = self.host.load()["instances"]["acme-gate"]
+        self.assertEqual(rec["hosts"], ["cam1.example.net", "cam2.dyn.example.org"])
+        self.assertEqual(rec["host_ips"], {"cam1.example.net": ["203.0.113.21"], "cam2.dyn.example.org": ["198.51.100.40", "198.51.100.41"]})
+        self.assertEqual(rec["mode"], "vpn")                         # mode stays (Peplink sheet)
+        view = out["instance"]
+        self.assertEqual((view["subnets"], view["public_ips"], view["hosts"]),
+                         (["192.168.105.0/24", "10.20.7.0/24"], ["203.0.113.7"], ["cam1.example.net", "cam2.dyn.example.org"]))
+        self.assertEqual(view["host_ips"]["cam1.example.net"], ["203.0.113.21"])
+        # idempotent: the same request again changes nothing
+        text = self.fw()
+        again = self.host.set_camera_network({"id": "acme-gate", "subnets": ["192.168.105.0/24", "10.20.7.0/24"],
+                                              "public_ips": ["203.0.113.7"], "hosts": ["cam1.example.net", "cam2.dyn.example.org"]})
+        self.assertIn("(unchanged)", again["detail"])
+        self.assertEqual(self.fw(), text)
+        # a list left out stays; [] empties one
+        self.host.set_camera_network({"id": "acme-gate", "hosts": []})
+        rec = self.host.load()["instances"]["acme-gate"]
+        self.assertEqual((rec["subnets"], rec["public_ips"], rec["hosts"], rec["host_ips"]),
+                         (["192.168.105.0/24", "10.20.7.0/24"], ["203.0.113.7"], [], {}))
+        self.assertNotIn("203.0.113.21", chain(self.fw(), "inst_acme_gate"))
+        # everything emptied: only hub, DNS and vLLM remain
+        out = self.host.set_camera_network({"id": "acme-gate", "subnets": [], "public_ips": ""})
+        self.assertIn("no camera addresses", out["detail"])
+        c = chain(self.fw(), "inst_acme_gate")
+        self.assertNotIn("camera networks", c)
+        self.assertNotIn("remote cameras", c)
+
+    def test_set_refusals_change_nothing(self):
+        text, reg = self.fw(), self.host.registry_path.read_text()
+        for args in ({"id": "acme-gate", "subnets": ["0.0.0.0/0"]},
+                     {"id": "acme-gate", "subnets": ["10.200.0.0/24"]},
+                     {"id": "acme-gate", "public_ips": ["198.51.100.7"]},          # beta-yard's public IP
+                     {"id": "beta-yard", "subnets": ["10.20.7.0/25"]},            # inside acme-gate's camera subnet
+                     {"id": "beta-yard", "public_ips": ["10.20.7.20"]},           # an address in acme-gate's subnet
+                     {"id": "acme-gate", "subnets": ["198.51.100.0/24"]},          # not private
+                     {"id": "acme-gate", "hosts": ["not a name"]},
+                     {"id": "nope", "subnets": ["192.168.105.0/24"]}):
+            with self.assertRaises(ah.OpError, msg=args):
+                self.host.set_camera_network(args)
+        self.host.set_camera_network({"id": "acme-gate", "hosts": ["cam1.example.net"]})
+        with self.assertRaises(ah.OpError):                               # same DNS name on two instances
+            self.host.set_camera_network({"id": "beta-yard", "hosts": ["CAM1.example.net"]})
+        self.host.set_camera_network({"id": "acme-gate", "hosts": []})
+        self.assertEqual(self.fw(), text)
+        self.assertEqual(json.loads(self.host.registry_path.read_text()), json.loads(reg))
+        # its own subnet again is no conflict
+        self.host.set_camera_network({"id": "acme-gate", "subnets": ["10.20.7.0/24", "192.168.105.0/24"]})
+
+    def test_nft_failure_keeps_old_rules_and_registry(self):
+        text, reg = self.fw(), json.loads(self.host.registry_path.read_text())
+        real = self.exe._run
+
+        def fail_nft(argv, input, timeout):
+            if argv[0] == "nft":
+                self.exe.calls.append(list(argv))
+                return ah.Result(1, "", "Error: syntax error")
+            return real(argv, input, timeout)
+        self.exe._run = fail_nft
+        with self.assertRaises(ah.CmdError):
+            self.host.set_camera_network({"id": "acme-gate", "subnets": ["192.168.105.0/24"]})
+        self.assertEqual(self.fw(), text)
+        self.assertEqual(json.loads(self.host.registry_path.read_text()), reg)
+
+    def test_dry_run_runs_nothing(self):
+        text, reg = self.fw(), self.host.registry_path.read_text()
+        n = len(self.exe.calls)
+        out = self.host.dispatch("set_camera_network", {"id": "acme-gate", "subnets": ["192.168.105.0/24"],
+                                                         "hosts": ["cam1.example.net"], "dry_run": True})
+        self.assertIn("192.168.105.0/24", chain(out["dry_run"]["firewall"], "inst_acme_gate"))
+        self.assertIn("203.0.113.21", chain(out["dry_run"]["firewall"], "inst_acme_gate"))   # the injected resolver
+        self.assertIn(["nft", "-f", str(self.tmp / "srv" / "firewall.nft")], [s.get("cmd") for s in out["dry_run"]["steps"]])
+        self.assertEqual(out["instance"]["state"], "planned")
+        self.assertEqual(len(self.exe.calls), n)                         # the real exec ran nothing
+        self.assertEqual(self.fw(), text)
+        self.assertEqual(self.host.registry_path.read_text(), reg)
+
+    def test_host_names_resolved_and_refreshed(self):
+        self.dns.table["evil.example.net"] = ["10.200.0.18", "127.0.0.1", HUB, "203.0.113.99"]
+        self.host.set_camera_network({"id": "acme-gate", "hosts": ["cam1.example.net", "evil.example.net", "gone.example.net"]})
+        rec = self.host.load()["instances"]["acme-gate"]
+        # pool, loopback and hub addresses a name resolves to are never opened; a name that does not resolve has none
+        self.assertEqual(rec["host_ips"], {"cam1.example.net": ["203.0.113.21"], "evil.example.net": ["203.0.113.99"],
+                                           "gone.example.net": []})
+        c = chain(self.fw(), "inst_acme_gate")
+        self.assertIn("ip daddr { 203.0.113.21, 203.0.113.99 } meta l4proto tcp accept", c)
+        self.assertIn("# gone.example.net: not resolved yet", c)
+        self.assertNotIn("10.200.0.18", c)
+        reg = self.host.load()
+        self.assertEqual(self.host.dns_changed(reg), "")
+        # the dynamic DNS address moves: the 10-minute check notices, reconcile re-resolves and reloads
+        self.dns.table["cam1.example.net"] = ["203.0.113.22"]
+        self.assertIn("camera host addresses changed", self.host.dns_changed(reg))
+        self.host.reconcile()
+        c = chain(self.fw(), "inst_acme_gate")
+        self.assertIn("203.0.113.22", c)
+        self.assertNotIn("203.0.113.21", c)
+        # a lookup that fails keeps the last known addresses
+        del self.dns.table["cam1.example.net"]
+        self.host.reconcile()
+        self.assertIn("203.0.113.22", chain(self.fw(), "inst_acme_gate"))
+        self.assertEqual(self.host.dns_changed(self.host.load()), "")
+        # resolve=False (boot, --offline) never asks DNS
+        asked = len(self.dns.asked)
+        self.host.reconcile(resolve=False)
+        self.assertEqual(len(self.dns.asked), asked)
+
+    def test_old_registry_migrates(self):
+        reg = json.loads(self.host.registry_path.read_text())
+        for rec in reg["instances"].values():
+            rec.pop("hosts")
+            rec.pop("host_ips")
+        self.host.registry_path.write_text(json.dumps(reg))
+        loaded = self.host.load()["instances"]
+        self.assertEqual((loaded["acme-gate"]["hosts"], loaded["acme-gate"]["host_ips"]), ([], {}))
+        fw = self.host.firewall_text(self.host.load())
+        self.assertIn("ip daddr { 10.20.7.0/24 } accept", chain(fw, "inst_acme_gate"))
+        self.assertIn("ip daddr { 198.51.100.7 } meta l4proto tcp accept", chain(fw, "inst_beta_yard"))
+        self.assertEqual(self.host.list_instances()["instances"][0]["hosts"], [])
+        self.host.set_camera_network({"id": "beta-yard", "hosts": ["cam1.example.net"]})
+        self.assertEqual(self.host.load()["instances"]["beta-yard"]["public_ips"], ["198.51.100.7"])
+
+    def test_create_with_lists(self):
+        out = self.host.create_instance({**VPN_ARGS, "id": "mixed", "subnet": None, "subnets": ["192.168.105.0/24"],
+                                         "public_ips": ["203.0.113.7"], "hosts": ["cam1.example.net"]})
+        v = out["instance"]
+        self.assertEqual((v["subnets"], v["public_ips"], v["hosts"]), (["192.168.105.0/24"], ["203.0.113.7"], ["cam1.example.net"]))
+        c = chain(self.fw(), "inst_mixed")
+        self.assertIn("ip daddr { 192.168.105.0/24 } accept", c)
+        self.assertIn("ip daddr { 203.0.113.7, 203.0.113.21 } meta l4proto tcp accept", c)
+        # the hub's forward mode with a DNS name as the Site's public address: a camera host name
+        out = self.host.create_instance({**FWD_ARGS, "id": "dyn", "public_ip": "cam2.dyn.example.org"})
+        self.assertEqual((out["instance"]["public_ips"], out["instance"]["hosts"]), ([], ["cam2.dyn.example.org"]))
+        self.assertIn("198.51.100.40", chain(self.fw(), "inst_dyn"))
+        with self.assertRaises(ah.OpError):                               # nothing at all
+            self.host.create_instance({**VPN_ARGS, "id": "empty", "subnet": None})
+
+    def test_cli(self):
+        ns = ah.argparse.Namespace(id="acme-gate", subnet=["192.168.105.0/24,10.20.7.0/24"], public_ip=None, host=None,
+                                   clear=["hosts"])
+        self.assertEqual(ah.camera_args(ns), {"id": "acme-gate", "subnets": ["192.168.105.0/24", "10.20.7.0/24"],
+                                              "public_ips": None, "hosts": []})
+        ns.clear, ns.subnet, ns.host = ["all"], None, ["cam1.example.net"]
+        self.assertEqual(ah.camera_args(ns), {"id": "acme-gate", "subnets": [], "public_ips": [], "hosts": ["cam1.example.net"]})
+        cfg = self.tmp / "host.json"
+        cfg.write_text(json.dumps({"root": str(self.tmp / "srv"), "hub_ips": [HUB], "ai_env": str(self.tmp / "ai.env")}))
+        text, reg = self.fw(), self.host.registry_path.read_text()
+        buf = __import__("io").StringIO()
+        with __import__("contextlib").redirect_stdout(buf):
+            rc = ah.main(["--config", str(cfg), "set-camera-network", "--id", "acme-gate", "--subnet", "192.168.105.0/24",
+                          "--public-ip", "203.0.113.7", "--dry-run"])
+        self.assertEqual(rc, 0)
+        printed = buf.getvalue()
+        self.assertIn("# dry run: nothing changed", printed)
+        self.assertIn("ip daddr { 192.168.105.0/24 } accept", printed)
+        self.assertIn("ip daddr { 203.0.113.7 } meta l4proto tcp accept", printed)
+        self.assertEqual((self.fw(), self.host.registry_path.read_text()), (text, reg))
+
+
 class Parsing(unittest.TestCase):
     def test_zfs_get(self):
         p = ah.parse_zfs_get("axiom/recordings/a\tused\t812400000000\naxiom/recordings/a\tquota\t0\n"

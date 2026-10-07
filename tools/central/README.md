@@ -184,6 +184,7 @@ What `create-instance` does, in order (if a step fails, the earlier ones are rol
 axiom_host.py list                                   # state, cameras, quota/used, GPU, mode
 axiom_host.py capacity                               # what the hub sees for placement
 axiom_host.py set-quota --id acme-gate --quota-gb 6000
+axiom_host.py set-camera-network --id acme-gate --subnet 192.168.105.0/24 --dry-run   # camera addresses (below)
 axiom_host.py restart-instance --id acme-gate        # docker restart
 axiom_host.py restart-instance --id acme-gate --image axiom/instance:<tag>    # upgrade one instance
 axiom_host.py delete-instance --id acme-gate --keep-data    # or --purge to delete the footage too (one is required)
@@ -194,13 +195,40 @@ axiom_host.py reconcile                              # re-apply firewall/quotas/
 
 Upgrading every instance: build and tag the new image, then `restart-instance --image` one instance at a time, checking each comes back on the hub before the next. Each restart is a ~30 s recording gap for that Site (cameras keep recording to their SD cards).
 
+### Camera addresses (mixing LAN, VPN and remote cameras in one instance)
+
+Each instance's firewall lets it reach exactly its **camera addresses**, three lists kept in the registry:
+
+| List | What | Allowed |
+|---|---|---|
+| `subnets` | Camera networks the host can route to: a LAN on the datacenter side (e.g. a test LAN `192.168.105.0/24`), the Site's SpeedFusion LAN `10.20.<n>.0/24` | any protocol |
+| `public_ips` | Public IPs of site routers that port-forward to their cameras (PEPLINK.md, mode 2) | TCP (all ports, or `forward_tcp_ports` in host.json) |
+| `hosts` | Dynamic DNS names of such routers | TCP, to whatever each name resolves to |
+
+`mode` (`vpn` / `forward`) only says how the Site mainly connects (the hub's Peplink sheet); the firewall allows the union of the three lists, so one Site can record cameras on a LAN or VPN subnet and remote cameras behind port forwards at the same time. `create-instance` fills them from `--subnet`, `--public-ip` and `--host`; change them later on the hub (Site → Servers → Central recording → **Camera addresses…**, hub administrators) or here:
+
+```bash
+axiom_host.py set-camera-network --id acme-gate --subnet 192.168.105.0/24 --subnet 10.20.7.0/24 \
+   --public-ip 203.0.113.7 --host cam1.example.net --dry-run       # prints the new ruleset, changes nothing
+axiom_host.py set-camera-network --id acme-gate ... (same, without --dry-run)
+axiom_host.py set-camera-network --id acme-gate --clear hosts      # empty one list (subnets, public-ips, hosts or all)
+nft list chain inet axiom inst_acme_gate                            # what is loaded now
+```
+Each list you name replaces that list; the others stay as they are. The registry is saved and the whole table reloaded in one `nft -f` (on a failure the old rules stay). The same request twice changes nothing. Rules (the hub checks the same before sending, the agent again):
+- subnets: IPv4 inside 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 or 100.64.0.0/10 (carrier-grade NAT), a /16 or smaller, written as the network (`192.168.105.0/24`, not `.7/24`). Never 0.0.0.0/0, the instance pool `10.200.0.0/16`, the AI network `10.201.0.0/24` (`ai_network`) or a range holding a hub address. A subnet, public IP or host name of another instance on the host is refused: every Site needs its own.
+- public IPs: IPv4, not loopback, link-local, multicast, unspecified or reserved, nor in the pool, the AI network or the hub's addresses.
+- host names: `cam1.example.net` style; looked up when set and again every 10 minutes together with the hub names (a change reloads the firewall; a failed lookup keeps the last known addresses; an address that would be refused as a public IP is left out and logged). `list` shows `host_ips`; the ruleset has a comment line per name with what it resolved to.
+- At most 32 entries per instance in all.
+
+The host must actually route to a subnet you add (a LAN on a host interface, or a route via FusionHub for `10.20.0.0/16`); the allow-list only opens the instance's firewall. Docker's default address pools include 192.168.0.0/16: check no Docker network on the host uses a camera subnet (`docker network ls -q | xargs docker network inspect -f '{{.Name}} {{range .IPAM.Config}}{{.Subnet}}{{end}}'`). For a camera behind a port forward, add it on the instance with its LAN address and set its outside address per camera (public host = that router's public IP or DNS name, public RTSP and ONVIF ports): the instance rewrites the addresses the camera hands back (ONVIF, RTSP URIs) to those, exactly as for a forward-mode Site.
+
 Read-only root: if a library needs to write outside `/tmp`, `/data` or `/recordings`, the instance crash-loops at start (`docker logs`). Set `"read_only": false` in `/etc/axiom/host.json` and `restart-instance --recreate`, then report it so the image can be fixed.
 
 ## 3. Isolation design
 
 - **Network**: each instance has its own Docker network; Docker already blocks traffic between different bridge networks, and the vLLM container is the only other member of each instance's network (it never initiates connections). Instances never share a network with each other, not even the AI one: vLLM is attached into each instance network instead.
-- **Egress allow-list** (`nft` table `inet axiom`, rendered from `/srv/axiom/registry.json`, replaced atomically by `nft -f` on every create/delete and at boot by `axiom-firewall.service` before Docker starts). Per instance, by its exact address:
-  - its site: `10.20.<n>.0/24` (VPN) or the site's public IP over TCP (forwards),
+- **Egress allow-list** (`nft` table `inet axiom`, rendered from `/srv/axiom/registry.json`, replaced atomically by `nft -f` on every create/delete/set-camera-network and at boot by `axiom-firewall.service` before Docker starts). Per instance, by its exact address:
+  - its camera addresses (section 2): its subnets (e.g. `10.20.<n>.0/24` over VPN, a LAN the host routes to), any protocol; its public IPs and the resolved addresses of its DNS names, TCP only (port forwards),
   - the hub's addresses (resolved from the hub host names; re-resolved every 10 minutes): TCP 443 and 3478, UDP 3478 and 49152-49252 (TURN, `hub/coturn`),
   - its own vLLM address, TCP 8000,
   - DNS to the resolvers in `host.json` (`--dns` on the container),
@@ -247,6 +275,6 @@ Repeat section 1 on the new server (Ubuntu, the `axiom` ZFS pool or XFS `/srv/ax
 ## 7. Troubleshooting
 
 - Instance not enrolling: `docker logs axiom-<id> | grep hub`; is the hub address in `nft list set inet axiom hub4`? (`axiom_host.py reconcile` re-resolves.)
-- Instance can't reach a camera: `nft list table inet axiom` (counter on the instance's final drop rising?), `ip route get 10.20.<n>.11` on the host (via 10.19.0.2?), SpeedFusion status in InControl 2.
+- Instance can't reach a camera: is its address in the instance's camera addresses (`axiom_host.py list`: `subnets`, `public_ips`, `hosts` / `host_ips`)? `nft list table inet axiom` (counter on the instance's final drop rising?), `ip route get 10.20.<n>.11` on the host (via 10.19.0.2?), SpeedFusion status in InControl 2.
 - No synopses: `docker inspect -f '{{json .NetworkSettings.Networks}}' axiom-vllm` lists `axiom-<id>`? `docker logs axiom-vllm`; the instance's Settings → System shows the remote model state.
 - After a reboot: `systemctl status axiom-firewall axiom-host`; `axiom-firewall` failing keeps Docker from starting on purpose (no instance runs unfiltered): fix the error it logs, or `systemctl start axiom-firewall` once `/srv/axiom` is mounted.
