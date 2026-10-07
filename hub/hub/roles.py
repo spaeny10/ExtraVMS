@@ -18,7 +18,7 @@ RANK = {r: i for i, r in enumerate(ROLES)}
 RULES: list[tuple[set[str], re.Pattern, str]] = [
     ({"GET", "HEAD"}, re.compile(r".*"), "viewer"),
     ({"POST"}, re.compile(r"^/api/whep/"), "viewer"),
-    ({"POST"}, re.compile(r"^/api/(assistant/ask|assistant/plan|assistant/warm|remote/warm|query/parse)$"), "viewer"),
+    ({"POST"}, re.compile(r"^/api/(assistant/ask|assistant/plan|assistant/retrieve|assistant/warm|remote/warm|query/parse)$"), "viewer"),
     ({"POST"}, re.compile(r"^/api/assistant/execute$"), "operator"),   # site actions; the site checks each verb's own role
     ({"POST"}, re.compile(r"^/api/events/\d+/chat$"), "viewer"),
     ({"POST"}, re.compile(r"^/api/footage/verify$"), "viewer"),

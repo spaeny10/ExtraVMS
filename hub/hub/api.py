@@ -19,6 +19,7 @@ from pydantic import BaseModel, EmailStr, Field
 from . import __version__, alerts, auth, backups, cameras, dashboards, db, digest, direct, fleet_actions, proxy, push, soc_api, turn, vlm_proxy
 from . import fleet as fleet_mod
 from . import find as find_mod
+from . import site_ask
 from . import coverage, geocode, hosts, security, soc, soc_reports
 from fastapi.responses import StreamingResponse
 from .agents import registry
@@ -988,6 +989,7 @@ async def delete_location(location_id: str, move_to: str | None = None, u: dict 
         c.execute(sa.delete(db.location_contacts).where(db.location_contacts.c.location_id == location_id))
         c.execute(sa.delete(db.location_procedures).where(db.location_procedures.c.location_id == location_id))
         find_mod.drop_views(c, location_id)
+        site_ask.drop_location(c, location_id)   # everyone's Ask conversations about this place
         c.execute(sa.delete(db.site_coverage).where(db.site_coverage.c.location_id == location_id))   # describes this place only
         c.execute(sa.delete(db.locations).where(db.locations.c.id == location_id))
     for srv in servers:
@@ -1158,6 +1160,64 @@ async def put_location_find_views(location_id: str, body: FindViewsIn, u: dict =
     _audit(u, loc["org_id"], None, f"site find views saved: {loc['name']}",
            {"location_id": loc["id"], "views": len(views), "added": sorted(after.keys() - before.keys()), "removed": sorted(before.keys() - after.keys())})
     return {"views": views, "can_edit": True}
+
+
+# ---- a Site's Ask tab (site_ask.py): one answer for the whole Site, conversations private to the user who asked
+
+class SiteAskIn(BaseModel):
+    question: str = Field(min_length=1, max_length=1000)
+    thread_id: int | None = None
+
+
+class SiteAskRenameIn(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+
+
+@app.get("/api/locations/{location_id}/ask/threads")
+async def site_ask_threads(location_id: str, limit: int = Query(50, ge=1, le=200), u: dict = Depends(user)):
+    """This user's own conversations about this Site, newest first (nobody else's, hub administrators' included)."""
+    loc, _ = auth.location_access(u, location_id)
+    return site_ask.list_threads(u, loc["id"], limit)
+
+
+@app.get("/api/locations/{location_id}/ask/threads/{thread_id}")
+async def site_ask_thread(location_id: str, thread_id: int, u: dict = Depends(user)):
+    loc, _ = auth.location_access(u, location_id)
+    t = site_ask.get_thread(u, loc["id"], thread_id)
+    if not t:
+        raise HTTPException(404, "no such conversation")
+    return t
+
+
+@app.patch("/api/locations/{location_id}/ask/threads/{thread_id}")
+async def rename_site_ask_thread(location_id: str, thread_id: int, body: SiteAskRenameIn, u: dict = Depends(user)):
+    loc, _ = auth.location_access(u, location_id)
+    t = site_ask.rename_thread(u, loc["id"], thread_id, body.title)
+    if not t:
+        raise HTTPException(404, "no such conversation")
+    return t
+
+
+@app.delete("/api/locations/{location_id}/ask/threads/{thread_id}")
+async def delete_site_ask_thread(location_id: str, thread_id: int, u: dict = Depends(user)):
+    loc, _ = auth.location_access(u, location_id)
+    if not site_ask.delete_thread(u, loc["id"], thread_id):
+        raise HTTPException(404, "no such conversation")
+    return {"ok": True}
+
+
+@app.post("/api/locations/{location_id}/ask")
+async def site_ask_post(location_id: str, body: SiteAskIn, u: dict = Depends(user)):
+    """Ask the Site: every online server looks it up (POST /api/assistant/retrieve), the shared AI writes one answer.
+    Streams NDJSON (site_ask.ask). Questions are not audited (they are private); the hub logs counts only."""
+    loc, _ = auth.location_access(u, location_id)
+    if body.thread_id is not None and not site_ask.get_thread(u, loc["id"], body.thread_id):
+        raise HTTPException(404, "no such conversation")
+    if site_ask.rate_limited(u["id"]):
+        raise HTTPException(429, f"at most {site_ask.RATE_LIMIT} questions a minute: wait a moment")
+    servers = site_ask.site_servers(auth.visible_sites(u, loc["org_id"]), loc["id"])
+    return StreamingResponse(site_ask.ask(u, loc, servers, body.thread_id, body.question), media_type="application/x-ndjson",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.get("/api/locations/{location_id}/backups")

@@ -7,25 +7,26 @@
  *  - saved views per Site on the hub (/find-views; operators and up save them), the starred default per Site in this
  *    browser;
  *  - media through mediaApi(server) (direct on the LAN when possible), a click opens HubEventDetail in place;
- *  - Ask is the hub's: every server's assistant answers (questions only); an instruction is not planned here, a note
- *    links to Customer › Actions with it prefilled (fleetAskPanel).
+ *  - Find is search and filters only: questions go to the Site's Ask tab (one answer for the whole Site, site/SiteAsk).
+ *    Text that reads as a question gets a one-line hint under the box linking there with it prefilled (?q=; sending
+ *    stays the user's action). A ?q= link here is a search.
  * Per-server features are hidden in this cut: identities (grouped by who), footage look-alike search, the compliance
  * summary strip and the server assistant's threads / plans (features.assistant false: FindView never calls the
  * server's /api/assistant/plan or /execute from here).
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Camera as ServerCam, NvrEvent, ParsedQuery } from "@site/api";
-import { FindView, type ExternalAsk } from "@site/Find";
+import { FindView } from "@site/Find";
 import type { FindSource } from "@site/findSource";
 import { camKey } from "@site/playback";
 import { type Org, type Site, api, subscribeFleet } from "./api";
+import { go, siteAskHref } from "./nav";
+import { looksLikeQuestion } from "./site/siteAskData";
 import { useDirectVersion } from "./direct";
 import { cameraNameFor } from "./eventOpen";
-import { FleetAskResults, useFleetAsk } from "./fleetAskPanel";
-import { useWhere } from "./FindPage";
 import { HubEventDetail } from "./HubEventDetail";
 import { mediaApi, siteApi } from "./hubSource";
-import { hubEventKey, hubFindParams, newerAcross, siteFindCameras, siteFindHandoff } from "./siteFindData";
+import { hubEventKey, hubFindParams, newerAcross, siteFindCameras } from "./siteFindData";
 
 const CAMERA_REFRESH_MS = 60000;
 type Tagged = NvrEvent & { site_id?: string };
@@ -104,17 +105,15 @@ export function SiteFind({ org, site }: { org: Org; site: Site }) {
     features: { assistant: false, footage: false, identities: false, summary: false },
   }), [site.id, org.id]);
 
-  // ---- Ask: the hub's, scoped to this Site
-  const { label } = useWhere(org, site);
-  const fa = useFleetAsk(org, label, site.id);
-  const [handoff] = useState(() => siteFindHandoff(location.search) ?? undefined);
-  const [lastAsk, setLastAsk] = useState("");
-  const ask: ExternalAsk = {
-    run: (text) => { setLastAsk(text); void fa.ask(text); },
-    busy: fa.asking,
-    label: "Ask this site",
-    title: "Every server's assistant answers from its own footage (Shift+Enter, or end with ?). Instructions such as \"Quiet alerts tonight\" run from Customer › Actions",
-    panel: <FleetAskResults answers={fa.answers} instruction={fa.instruction} onAskAnyway={() => void fa.ask(lastAsk, true)} />,
+  // ---- questions belong to the Ask tab: a hint under the box, prefilled there (never sent from here)
+  const queryHint = (text: string) => {
+    if (!looksLikeQuestion(text)) return null;
+    const href = siteAskHref(site.id, null, text);
+    return (
+      <p className="small find-ask-hint" role="status">
+        Looks like a question — <a href={href} onClick={go(href)}>Ask this site</a>
+      </p>
+    );
   };
 
   const offline = servers.filter((s) => !s.online);
@@ -126,7 +125,8 @@ export function SiteFind({ org, site }: { org: Org; site: Site }) {
           {offline.length === servers.length ? "Every server at this site is offline: nothing to search until one reconnects." : `Not included: ${offline.map((s) => s.name).join(", ")} (offline).`}
         </p>
       )}
-      <FindView key={site.id} cameras={cameras} source={source} ask={ask} handoff={handoff} />
+      <FindView key={site.id} cameras={cameras} source={source} queryHint={queryHint}
+        placeholder='Search "white pickup truck", "person at the back door"…  ( / )' />
     </>
   );
 }

@@ -315,6 +315,11 @@ export const api = {
   /** The Site's saved Find views (everyone who sees the Site reads them; operators and up save them). */
   locationFindViews: (id: string) => req<{ views: SavedFindView[]; can_edit: boolean }>(`/api/locations/${id}/find-views`),
   saveLocationFindViews: (id: string, views: SavedFindView[]) => req<{ views: SavedFindView[]; can_edit: boolean }>(`/api/locations/${id}/find-views`, json("PUT", { views })),
+  // a Site's Ask: the signed-in user's own conversations (site_ask.py); asking streams (siteAsk below)
+  siteAskThreads: (id: string) => req<SiteAskThread[]>(`/api/locations/${id}/ask/threads`),
+  siteAskThread: (id: string, tid: number | string) => req<SiteAskThreadFull>(`/api/locations/${id}/ask/threads/${tid}`),
+  renameSiteAskThread: (id: string, tid: number, title: string) => req<SiteAskThreadFull>(`/api/locations/${id}/ask/threads/${tid}`, json("PATCH", { title })),
+  deleteSiteAskThread: (id: string, tid: number) => req<{ ok: boolean }>(`/api/locations/${id}/ask/threads/${tid}`, { method: "DELETE" }),
   ack: (id: number) => req(`/api/alerts/${id}/ack`, { method: "POST" }),
   audit: (org: string, site?: string) => req<AuditRow[]>(`/api/audit?${qs({ org, site })}`),
   usage: (org: string, days = 30) => req<Usage>(`/api/orgs/${org}/usage?${qs({ days })}`),
@@ -396,6 +401,46 @@ export function subscribeFleet(org: string, onMessage: (m: FleetMessage) => void
   };
   connect();
   return () => { closed = true; ws?.close(); };
+}
+
+// ---- a Site's Ask tab (hub/hub/site_ask.py)
+/** One piece of the merged evidence an answer was written from. `ref` is what the answer cites: [#ref] for events and
+ * journeys ("123", or "123a"/"123b" when two servers' events share an id), [ref] for footage ("F1"). */
+export type SiteAskSource = {
+  ref?: string; kind: "event" | "footage" | "journey" | "gap" | "note" | "briefing";
+  server_id: string; server_name: string; event_id?: number; event_ids?: number[]; camera_id?: string; camera?: string; cameras?: string[];
+  ts?: number; end_ts?: number; label?: string; priority?: string; snapshot?: boolean; text?: string; synopsis?: string; earlier?: boolean; later?: boolean;
+  minutes?: number; ongoing?: boolean; background?: boolean;
+};
+export type SiteAskServer = { server_id: string; server_name: string; status: "ok" | "offline" | "error" | "timeout"; error?: string; last_seen_at?: number; duration_ms?: number };
+export type SiteAskCounts = { events?: number; by_label?: Record<string, number>; by_camera?: Record<string, number>; people?: [number, number] };
+export type SiteAskSources = {
+  items: SiteAskSource[]; servers: SiteAskServer[]; counts: SiteAskCounts; window: { from: number; to: number; label: string | null } | null;
+  question: string | null; dropped: number; fallback?: string;
+};
+export type SiteAskThread = { id: number; title: string; created_at: number; updated_at: number; messages: number };
+export type SiteAskMessage = { id: number; thread_id: number; role: "user" | "assistant"; content: string; sources: SiteAskSources | null; model: string | null; created_at: number; duration_ms: number | null };
+export type SiteAskThreadFull = Omit<SiteAskThread, "messages"> & { location_id: string; messages: SiteAskMessage[] };
+/** The stream's chunks: thread, user, status, sources, model, delta, fallback, done, instruction, error. */
+export type SiteAskChunk =
+  | { type: "thread"; thread_id: number } | { type: "user"; id: number } | { type: "status"; text: string; servers: number; online: number }
+  | ({ type: "sources" } & SiteAskSources) | { type: "model"; model: string | null } | { type: "delta"; text: string }
+  | { type: "fallback"; reason: string } | { type: "done"; id: number | null; duration_ms?: number }
+  | { type: "instruction"; text: string; href: string; message: string } | { type: "error"; error: string };
+
+/** Ask a Site (one answer for all its servers); chunks arrive as the hub writes them. */
+export async function siteAsk(location: string, body: { question: string; thread_id?: number | null }, onChunk: (c: SiteAskChunk) => void, signal?: AbortSignal) {
+  const r = await fetch(`/api/locations/${location}/ask`, { ...json("POST", { question: body.question, thread_id: body.thread_id ?? undefined }), signal });
+  if (!r.ok || !r.body) throw new Error(`${r.status} ${await r.text()}`);
+  const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let nl: number;
+    while ((nl = buf.indexOf("\n")) >= 0) { const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1); if (line) onChunk(JSON.parse(line) as SiteAskChunk); }
+  }
+  if (buf.trim()) onChunk(JSON.parse(buf) as SiteAskChunk);
 }
 
 /**

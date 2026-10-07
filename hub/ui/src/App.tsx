@@ -106,7 +106,7 @@ export default function App() {
         {page === "sites" && all && <AllSitesPage onOpenCustomer={openCustomer} />}
         {page === "sites" && !all && current && <SitesPage org={current} me={me} />}
         {(page === "site" || page === "server") && current && route.siteId && (
-          <SitePage key={route.siteId} org={current} me={me} siteId={route.siteId} tab={route.tab ?? "live"} section={route.section} serverId={route.serverId} onOrg={openCustomer} />
+          <SitePage key={route.siteId} org={current} me={me} siteId={route.siteId} tab={route.tab ?? "live"} section={route.section} serverId={route.serverId} threadId={route.threadId} onOrg={openCustomer} />
         )}
         {page === "alerts" && current && <AlertsPage org={current} />}
         {page === "find" && current && <FindPage org={current} />}

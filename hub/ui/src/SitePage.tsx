@@ -1,7 +1,8 @@
 /**
- * One Site: header with its rollup, tabs Live · Timeline · Find · Alerts · Servers · Settings, and the server panel at
- * /sites/:id/servers/:serverId. Live is the combined grid (SiteLive), Find the server UI's Find over the Site's servers
- * (SiteFind), Alerts the customer-wide page scoped to this Site (AlertsPage's SiteAlerts).
+ * One Site: header with its rollup, tabs Live · Timeline · Find · Ask · Alerts · Servers · Settings, and the server panel
+ * at /sites/:id/servers/:serverId. Live is the combined grid (SiteLive), Find the server UI's Find over the Site's
+ * servers (SiteFind: search and filters), Ask one answer for the whole Site in private conversations (site/SiteAsk,
+ * /sites/:id/ask/:thread), Alerts the customer-wide page scoped to this Site (AlertsPage's SiteAlerts).
  */
 import { useCallback, useEffect, useState } from "react";
 import { Icon, confirmDialog, promptDialog, toast } from "@site/ui";
@@ -23,12 +24,13 @@ import { ServerActions, ServerCard } from "./servers";
 import { SiteLive } from "./SiteLive";
 import { SiteTimeline } from "./SiteTimeline";
 import { SiteFind } from "./SiteFind";
+import { SiteAsk } from "./site/SiteAsk";
 import { SiteAlerts } from "./AlertsPage";
 import { useTabStrip } from "./tabStrip";
 import { type PlaceForm, cityState, fmtCoord, hasPoint, placePatch } from "./place";
 
 const TAB_LABEL: Record<SiteTab, [string, string]> = {
-  live: ["Live", "live"], timeline: ["Timeline", "timeline"], find: ["Find", "find"], alerts: ["Alerts", "alert"], servers: ["Servers", "grid"], settings: ["Settings", "settings"],
+  live: ["Live", "live"], timeline: ["Timeline", "timeline"], find: ["Find", "find"], ask: ["Ask", "sparkle"], alerts: ["Alerts", "alert"], servers: ["Servers", "grid"], settings: ["Settings", "settings"],
 };
 
 /** The Site with its servers (retired ones included, marked), refreshed every 15 s like the Sites list. */
@@ -59,12 +61,12 @@ function useCoverage(site: Site | null, me: Me) {
   return { cov, setCov };
 }
 
-export function SitePage({ org, me, siteId, tab, section = "general", serverId, onOrg }: {
-  org: Org; me: Me; siteId: string; tab: string; section?: SettingsSection; serverId?: string; onOrg: (id: string) => void;
+export function SitePage({ org, me, siteId, tab, section = "general", serverId, threadId, onOrg }: {
+  org: Org; me: Me; siteId: string; tab: string; section?: SettingsSection; serverId?: string; threadId?: string; onOrg: (id: string) => void;
 }) {
   const { site, error, reload } = useSite(siteId);
   const { cov, setCov } = useCoverage(site, me);
-  // phones: the six tabs scroll sideways, the current one kept in view (tabStrip.ts, hub.css .scroll-tabs)
+  // phones: the seven tabs scroll sideways, the current one kept in view (tabStrip.ts, hub.css .scroll-tabs)
   const strip = useTabStrip(tab);
   // a link into another customer's Site switches the header's Customer picker to it
   useEffect(() => { if (site && site.org_id !== org.id && me.orgs.some((o) => o.id === site.org_id)) onOrg(site.org_id); }, [site, org.id, me.orgs, onOrg]);
@@ -89,6 +91,7 @@ export function SitePage({ org, me, siteId, tab, section = "general", serverId, 
         : tab === "live" ? <SiteLive org={siteOrg} site={site} />
         : tab === "timeline" ? <SiteTimeline org={siteOrg} site={site} query={location.search} />
         : tab === "find" ? <SiteFind org={siteOrg} site={site} />
+        : tab === "ask" ? <SiteAsk site={site} threadId={threadId} />
         : tab === "alerts" ? <><SiteIncidents site={site} /><SiteAlerts org={siteOrg} site={site} /></>
         : tab === "servers" ? <ServersTab site={site} admin={admin} onChanged={reload} cov={cov} setCov={setCov} />
         : <SettingsSections site={site} org={siteOrg} me={me} section={section} admin={admin} onChanged={reload} cov={cov} />}

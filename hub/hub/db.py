@@ -266,6 +266,20 @@ coverage_usage = Table("coverage_usage", metadata,
                        Column("month", String(7), primary_key=True),       # YYYY-MM (UTC)
                        Column("units", Integer, nullable=False, default=0), Column("calls", Integer, nullable=False, default=0))
 
+# ---- A Site's Ask tab (site_ask.py): conversations private to the user who asked (per Site; nobody else reads them,
+# hub administrators included). sources = the merged evidence the answer was written from ({items, counts, servers, ...}).
+site_ask_threads = Table("site_ask_threads", metadata,
+                         Column("id", Integer, primary_key=True, autoincrement=True),
+                         Column("location_id", String(24), nullable=False, index=True), Column("org_id", String(24), nullable=False),
+                         Column("user_id", String(24), nullable=False, index=True), Column("title", String(200), nullable=False),
+                         Column("created_at", Float, nullable=False), Column("updated_at", Float, nullable=False))
+site_ask_messages = Table("site_ask_messages", metadata,
+                          Column("id", Integer, primary_key=True, autoincrement=True),
+                          Column("thread_id", Integer, nullable=False, index=True), Column("role", String(16), nullable=False),
+                          Column("content", Text, nullable=False), Column("sources", sa.JSON, nullable=True),
+                          Column("model", String(120), nullable=True), Column("created_at", Float, nullable=False),
+                          Column("duration_ms", Integer, nullable=True))
+
 _engine: Engine | None = None
 
 

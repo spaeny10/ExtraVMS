@@ -26,7 +26,7 @@ export const inPlace = (fn: () => void) => (e: React.MouseEvent) => {
 /** An <a> click that stays in the app (plain href kept so middle-click / open-in-new-tab still work). */
 export const go = (path: string) => inPlace(() => navigate(path));
 
-export const SITE_TABS = ["live", "timeline", "find", "alerts", "servers", "settings"] as const;
+export const SITE_TABS = ["live", "timeline", "find", "ask", "alerts", "servers", "settings"] as const;
 export type SiteTab = (typeof SITE_TABS)[number];
 export const CUSTOMER_TABS = ["sites", "servers", "members", "invites", "ai", "actions"] as const;
 export type CustomerTab = (typeof CUSTOMER_TABS)[number];
@@ -83,6 +83,8 @@ export const fullBleed = (page: Page) => inSite(page) || page === "soc";
 export type Route = {
   page: Page; siteId?: string; tab?: string; serverId?: string; code?: string; redirect?: string;
   section?: SettingsSection; socTab?: SocTab; incidentId?: string; report?: SocReport;
+  /** Site › Ask: the open conversation (/sites/:id/ask/:thread) */
+  threadId?: string;
 };
 
 const isOneOf = <T extends string>(list: readonly T[], v: string | undefined): v is T => !!v && (list as readonly string[]).includes(v);
@@ -101,6 +103,8 @@ export function matchRoute(path: string): Route {
         if (isOneOf(SETTINGS_SECTIONS, c)) return { page: "site", siteId: a, tab: "settings", section: c };
         return { page: "site", siteId: a, tab: "settings", section: "general", redirect: settingsHref(a, "general") };
       }
+      // Site › Ask: one conversation has its own path, so it can be bookmarked and Back works between conversations
+      if (b === "ask" && c) return { page: "site", siteId: a, tab: "ask", threadId: c };
       if (isOneOf(SITE_TABS, b)) return { page: "site", siteId: a, tab: b };
       return { page: "site", siteId: a, tab: "live", redirect: `/sites/${encodeURIComponent(a)}/live` };
     }
@@ -138,6 +142,12 @@ export function matchRoute(path: string): Route {
 }
 
 export const siteHref = (siteId: string, tab: SiteTab = "live") => `/sites/${encodeURIComponent(siteId)}/${tab}`;
+/** Site › Ask: a conversation (or a new one), optionally with a question prefilled in the box (?q=; never sent by itself). */
+export function siteAskHref(siteId: string, threadId?: string | number | null, q?: string): string {
+  const base = `/sites/${encodeURIComponent(siteId)}/ask${threadId != null && threadId !== "" ? `/${encodeURIComponent(String(threadId))}` : ""}`;
+  const t = (q ?? "").trim().slice(0, 1000);
+  return t ? `${base}?q=${encodeURIComponent(t)}` : base;
+}
 export const serverHref = (siteId: string, serverId: string) => `/sites/${encodeURIComponent(siteId)}/servers/${encodeURIComponent(serverId)}`;
 /** Site → Settings → section; General is the bare /settings path. */
 export const settingsHref = (siteId: string, section: SettingsSection = "general") =>

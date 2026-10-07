@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Camera } from "@site/api";
-import { hubEventKey, hubFindParams, newerAcross, siteFindCameras, siteFindHandoff } from "./siteFindData";
+import { hubEventKey, hubFindParams, newerAcross, siteFindCameras } from "./siteFindData";
 
 const cam = (id: string, name: string, zones: Camera["zones"] = []) => ({ id, name, zones }) as unknown as Camera;
 
@@ -34,14 +34,5 @@ describe("keys and order", () => {
   it("newest start first across servers, then id", () => {
     const list = [{ start_ts: 10, id: 9 }, { start_ts: 30, id: 1 }, { start_ts: 10, id: 12 }].sort(newerAcross);
     expect(list.map((e) => e.id)).toEqual([1, 12, 9]);
-  });
-});
-
-describe("siteFindHandoff", () => {
-  it("a bare ?q= is a question to ask; FindView's own ?view=…&q= is a search", () => {
-    expect(siteFindHandoff("?q=Anything%20unusual%3F")).toBe("Anything unusual?");
-    expect(siteFindHandoff("?view=attention&q=truck")).toBeNull();
-    expect(siteFindHandoff("")).toBeNull();
-    expect(siteFindHandoff("?q=%20")).toBeNull();
   });
 });

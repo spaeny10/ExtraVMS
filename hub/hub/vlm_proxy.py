@@ -15,6 +15,7 @@ while".
 from __future__ import annotations
 
 import asyncio
+import codecs
 import json
 import logging
 import time
@@ -186,6 +187,42 @@ async def complete(messages: list[dict], max_tokens: int = 500, temperature: flo
         log.warning("shared AI %s: %s", up.status_code, raw[:200])
         return None
     return json.loads(raw)["choices"][0]["message"]["content"].strip()
+
+
+def _sse_delta(line: str) -> str:
+    """The text of one `data:` line of a streamed chat completion ("" for usage, [DONE] and anything else)."""
+    if not line.startswith("data:"):
+        return ""
+    data = line[5:].strip()
+    if not data or data == "[DONE]":
+        return ""
+    try:
+        choices = json.loads(data).get("choices") or []
+    except ValueError:
+        return ""
+    return str(((choices[0] if choices else {}).get("delta") or {}).get("content") or "")
+
+
+async def stream_complete(messages: list[dict], max_tokens: int = 700, temperature: float = 0.2) -> AsyncIterator[str]:
+    """The answer's text as it is written, for hub-side features that stream (a Site's Ask). Raises (RuntimeError or
+    the HTTPException of an offline / busy upstream) before the first piece when the shared AI can't answer."""
+    if not configured():
+        raise RuntimeError("the shared AI is not configured on this hub")
+    body = {"model": settings.vllm_model, "messages": messages, "max_tokens": max_tokens, "temperature": temperature, "stream": True}
+    up = await _open(body, True)
+    if up.status_code != 200:
+        raw = await up.read_all()
+        raise RuntimeError(f"shared AI answered {up.status_code}: {raw[:200].decode(errors='replace')}")
+    dec = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    tail = ""
+    async for c in up.body:
+        lines = (tail + dec.decode(c)).split("\n")
+        tail = lines.pop()                     # a line may straddle two chunks
+        for line in lines:
+            if d := _sse_delta(line.strip()):
+                yield d
+    if d := _sse_delta((tail + dec.decode(b"", final=True)).strip()):
+        yield d
 
 
 # ---------------------------------------------------------------- the /v1 sites call

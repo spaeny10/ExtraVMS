@@ -1686,6 +1686,22 @@ async def assistant_ask(body: AskIn):
     return StreamingResponse(stream(), media_type="application/x-ndjson")
 
 
+class RetrieveIn(BaseModel):
+    question: str = Field(min_length=1, max_length=1000)
+    history: list[dict] = Field(default_factory=list, max_length=20)   # [{role, content}], the last few turns
+    now: float | None = None
+    tz: str | None = Field(None, max_length=64)
+
+
+@app.post("/api/assistant/retrieve")
+async def assistant_retrieve(body: RetrieveIn):
+    """The hub's Site Ask: plan + lookups like /api/assistant/ask, returned as structured evidence without an answer
+    and without writing a conversation (retrieve.py). Read-only, so viewers may call it (hub roles.py)."""
+    from . import retrieve
+    now = body.now if body.now is not None and abs(body.now - time.time()) < 300 else None   # the server's clock decides
+    return await retrieve.retrieve(body.question.strip(), body.history, now, body.tz)
+
+
 class BriefingSettingsIn(BaseModel):
     enabled: bool = True
     time: str = Field("07:00", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")

@@ -40,13 +40,3 @@ export function siteFindCameras(servers: { id: string; name: string }[], byServe
     name: whereLabel({ server: s.name, camera: c.name || c.id }, { showSite: false, serverCount: servers.length }),
   })));
 }
-
-/**
- * A question handed to the Site's Find in the URL (?q=… from a dashboard's Ask box): asked once. FindView's own URL
- * state also carries `q` (typed search text) but always with `view=`, so that one is a search, not a question.
- */
-export function siteFindHandoff(search: string): string | null {
-  const p = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
-  const q = p.get("q")?.trim();
-  return q && !p.has("view") ? q : null;
-}

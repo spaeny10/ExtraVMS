@@ -47,7 +47,7 @@ const INSTRUCTION = /^(please\s+)?(rename|set\s+(the\s+)?retention|keep\s+\d+|lo
  */
 export type ExternalAsk = { run: (text: string) => void; busy: boolean; label: string; title: string; panel?: React.ReactNode };
 
-export function FindView({ cameras = NO_CAMERAS, live = null, source: given, ask: external, handoff }: {
+export function FindView({ cameras = NO_CAMERAS, live = null, source: given, ask: external, handoff, queryHint, placeholder }: {
   /** the camera picker: `id` = the camera filter's value (see FindSource.cameraKey), `name` its label */
   cameras?: Camera[]; live?: NvrEvent | null;
   /** where the data comes from (default this server) */
@@ -56,6 +56,10 @@ export function FindView({ cameras = NO_CAMERAS, live = null, source: given, ask
   ask?: ExternalAsk;
   /** a question handed over (a dashboard's Ask box): asked once on open */
   handoff?: string;
+  /** a one-line note under the search box for the text being typed (the hub's Site Find: "Looks like a question — Ask this site") */
+  queryHint?: (text: string) => React.ReactNode;
+  /** the search box's placeholder (default: search or ask) */
+  placeholder?: string;
 }) {
   const local = useMemo(() => localFindSource(), []);
   const source = given ?? local;
@@ -442,13 +446,14 @@ export function FindView({ cameras = NO_CAMERAS, live = null, source: given, ask
       </div>
       <form className="search-bar" onSubmit={(e) => { e.preventDefault(); search(); }}>
         <input ref={searchInput} autoFocus value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={onKey}
-          placeholder='Search "white pickup truck", or ask "Was anyone near the trailers after 6pm?"  ( / )' />
+          placeholder={placeholder ?? 'Search "white pickup truck", or ask "Was anyone near the trailers after 6pm?"  ( / )'} />
         {submitted && <button type="button" className="ghost" onClick={clearSearch} title="Back to the latest events">✕</button>}
         <button type="submit" disabled={busy || !q.trim()}>{busy && submitted ? "Searching…" : "Search"}</button>
         {features.assistant
           ? <button type="button" className="ask-btn" disabled={!!pending || !q.trim()} onClick={() => askNvr()} title="Have Qwen look it up and answer in words (Shift+Enter, or end with ?)">✦ Ask</button>
           : external && <button type="button" className="ask-btn" disabled={external.busy || !q.trim()} onClick={() => askNvr()} title={external.title}>✦ {external.label}</button>}
       </form>
+      {queryHint?.(q)}
       <div className="toolbar search-filters">
         <button className="ghost small find-more-toggle" onClick={() => setMoreOpen(!moreOpen)} aria-expanded={moreOpen}
           title="Camera, type, time, priority, place, sort, confidence, status and flags">

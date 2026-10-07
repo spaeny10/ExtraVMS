@@ -9,6 +9,7 @@ def test_role_table_reads_right():
     assert required_role("GET", "/api/events") == "viewer"
     assert required_role("POST", "/api/whep/cam1") == "viewer"
     assert required_role("POST", "/api/assistant/ask") == "viewer"
+    assert required_role("POST", "/api/assistant/retrieve") == "viewer"   # the hub's Site Ask: read-only evidence
     assert required_role("POST", "/api/cameras/cam1/ptz/move") == "operator"
     assert required_role("POST", "/api/cameras/cam1/relay") == "operator"
     assert required_role("PUT", "/api/events/12/feedback") == "operator"

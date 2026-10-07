@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { consoleHref, consoleTimelineHref, fullBleed, incidentHref, matchRoute, reportHref, serverHref, settingsHref, siteHref, socHref, topNav } from "./nav";
+import { SITE_TABS, consoleHref, consoleTimelineHref, fullBleed, incidentHref, matchRoute, reportHref, serverHref, settingsHref, siteAskHref, siteHref, socHref, topNav } from "./nav";
 
 describe("invite route", () => {
   it("is public and carries the code", () => {
@@ -34,8 +34,18 @@ describe("matchRoute", () => {
   });
 
   it("site tabs", () => {
-    for (const tab of ["live", "timeline", "find", "alerts", "servers"])
+    for (const tab of ["live", "timeline", "find", "ask", "alerts", "servers"])
       expect(matchRoute(`/sites/l_abc/${tab}`)).toEqual({ page: "site", siteId: "l_abc", tab });
+    // Ask sits between Find and Alerts
+    expect(SITE_TABS.slice(2, 5)).toEqual(["find", "ask", "alerts"]);
+  });
+
+  it("site ask conversations", () => {
+    expect(matchRoute("/sites/l_abc/ask/12")).toEqual({ page: "site", siteId: "l_abc", tab: "ask", threadId: "12" });
+    expect(siteAskHref("l_abc")).toBe("/sites/l_abc/ask");
+    expect(siteAskHref("l_abc", 12)).toBe("/sites/l_abc/ask/12");
+    expect(siteAskHref("l_abc", null, "Was anyone at the gate after 6pm?")).toBe("/sites/l_abc/ask?q=Was%20anyone%20at%20the%20gate%20after%206pm%3F");
+    expect(siteAskHref("l_abc", undefined, "  ")).toBe("/sites/l_abc/ask");
   });
 
   it("settings sections; bare /settings is General", () => {
