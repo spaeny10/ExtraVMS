@@ -32,7 +32,8 @@ WORKDIR /mtx
 RUN set -eu; f="mediamtx_${MEDIAMTX_VERSION}_linux_amd64.tar.gz"; \
     base="https://github.com/bluenviron/mediamtx/releases/download/${MEDIAMTX_VERSION}"; \
     curl -fsSLO "$base/$f"; curl -fsSL "$base/checksums.sha256" -o checksums.sha256; \
-    grep " $f\$" checksums.sha256 | sha256sum -c -; \
+    grep -E " \*?$f\$" checksums.sha256 | grep -q . || { echo "no checksum for $f" >&2; exit 1; }; \
+    grep -E " \*?$f\$" checksums.sha256 | sha256sum -c -; \
     tar -xzf "$f" mediamtx; chmod 0755 mediamtx
 
 # ---- 3. the server
