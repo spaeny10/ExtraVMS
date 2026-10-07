@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   type NamedIdentity,
   api, fmtDuration, fmtTime, ppeItemsText, type SiteApi,
-  type ChatMessage, type Feedback, type Journey, type NvrEvent, type Synopsis, type Threat, type Verdict,
+  type ChatMessage, type Feedback, type Journey, type NvrEvent, type Synopsis, type Threat, type Verdict, type WeaponCheck,
 } from "./api";
 import { StatusBadge, placeholder, rejectedReason } from "./Events";
 import { useNav } from "./nav";
@@ -67,6 +67,7 @@ export function EventDetail({ id: initialId, cameraName, onClose, site = api, va
           </div>
           <div className="row">
             <StatusBadge e={e} />
+            <WeaponCheckBadge check={e.synopsis_json?.weapon_check} />
             {e.feedback?.verdict === "false_alarm" && <span className="badge status-error">Marked false alarm</span>}
             <button className="ghost" onClick={() => { openInTimeline(e); onClose(); }} title="Show this event on the Timeline, playing from just before it">⏱ Open in Timeline</button>
             <LockControl e={e} site={site} onChange={() => site.event(e.id).then(setE)} />
@@ -233,6 +234,33 @@ function WatchControl({ e, site, onChange }: { e: NvrEvent; site: SiteApi; onCha
   );
 }
 
+/** The description mentioned a weapon: what the second, full-resolution look decided (backend/nvr/weaponcheck.py). */
+const EMPTY_HANDS = ["nothing", "none", "empty", "empty hands", "hands empty", "nothing visible", "no object"];
+
+function weaponCheckText(c: WeaponCheck): { label: string; cls: string } {
+  const kind = c.kind === "knife" ? "knife" : c.kind === "firearm" ? "firearm" : "weapon";
+  const objects = [...new Set((c.persons ?? []).flatMap((p) => (p.held?.length ? p.held : [p.object]))
+    .filter((o) => o && !EMPTY_HANDS.includes(o)))];
+  if (c.verdict === "confirmed") return { label: `${kind[0].toUpperCase()}${kind.slice(1)} confirmed`, cls: "confirmed" };
+  if (c.verdict === "not_confirmed") return { label: `No weapon${objects.length ? `: ${objects.join(", ")}` : ""}`, cls: "cleared" };
+  return { label: `Possible ${kind}, unconfirmed — needs a person to look`, cls: "unconfirmed" };
+}
+
+function WeaponCheckBadge({ check }: { check?: WeaponCheck | null }) {
+  if (!check?.verdict) return null;
+  const { label, cls } = weaponCheckText(check);
+  return <span className={`badge weapon-check ${cls}`} title={`Second look at full resolution: ${check.reason}`}>{label}</span>;
+}
+
+function WeaponCheckLine({ check }: { check: WeaponCheck }) {
+  const { label, cls } = weaponCheckText(check);
+  return (
+    <div className={`d-line weapon-line ${cls}`} title="The description mentioned a weapon, so every person in the clip was looked at again at full camera resolution before the event was rated">
+      <strong>Weapon check:</strong> {label}. <span className="muted small">{check.reason}{check.model ? ` · ${check.model}` : ""}</span>
+    </div>
+  );
+}
+
 /** Lock keeps this event's footage (with padding) forever, exempt from retention. */
 function LockControl({ e, site, onChange }: { e: NvrEvent; site: SiteApi; onChange: () => void }) {
   const [asking, setAsking] = useState(false);
@@ -319,6 +347,7 @@ function Details({ e, site, setE, notes, onUnsave, seek }: {
                 ⚠ {e.anomaly_json.reasons.join("; ")}{e.priority && e.priority !== "none" ? ` · priority ${e.priority}` : ""}
               </div>
             ) : null}
+            {s?.weapon_check ? <WeaponCheckLine check={s.weapon_check} /> : null}
             {s?.threat_reason && s.threat_level !== "none" && <div className="d-line"><strong>Threat ({s.threat_level}):</strong> {s.threat_reason}</div>}
             {tags.length > 0 && <div className="tags">{tags.slice(0, 8).map((t) => <span key={t} className="tag">{t}</span>)}{tags.length > 8 && <span className="tag muted">+{tags.length - 8}</span>}</div>}
             {(activity || s?.objects?.length || s?.model || e.synopsis_original) && (

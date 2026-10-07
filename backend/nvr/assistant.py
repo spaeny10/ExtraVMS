@@ -111,6 +111,14 @@ def _event_line(e: dict) -> str:
         tc = e["synopsis_json"].get("towing_check")
     if tc and tc.get("reason"):  # the description said towing; the second look decided (policy.confirm_towing)
         extra.append(("towing confirmed: " if tc.get("confirmed") else "towing NOT confirmed: ") + tc["reason"][:160])
+    wc = e.get("weapon_check")
+    if isinstance(wc, str):
+        wc = json.loads(wc)
+    if wc is None and isinstance(e.get("synopsis_json"), dict):
+        wc = e["synopsis_json"].get("weapon_check")
+    if wc and wc.get("verdict"):  # the description mentioned a weapon; the full-resolution second look decided (weaponcheck)
+        extra.append({"confirmed": "WEAPON CONFIRMED", "not_confirmed": "weapon NOT confirmed"}.get(
+            wc["verdict"], "possible weapon, UNCONFIRMED, needs a person to look") + ": " + (wc.get("reason") or "")[:160])
     if an and an.get("reasons"):
         extra.append("unusual: " + "; ".join(an["reasons"]))
     fb = e.get("feedback")
@@ -479,7 +487,8 @@ def _where(a: dict, extra: list[str] | None = None) -> tuple[str, list]:
 
 EVENT_COLS = ("id, camera_id, camera_class, yolo_class, start_ts, end_ts, synopsis, snapshot, priority, anomaly, "
               "anomaly_json, feedback, journey_id, watched, areas, policy, "
-              "json_extract(CASE WHEN json_valid(synopsis_json) THEN synopsis_json END, '$.towing_check') AS towing_check")
+              "json_extract(CASE WHEN json_valid(synopsis_json) THEN synopsis_json END, '$.towing_check') AS towing_check, "
+              "json_extract(CASE WHEN json_valid(synopsis_json) THEN synopsis_json END, '$.weapon_check') AS weapon_check")
 
 
 def _coverage(words: list[str], r: dict) -> float:

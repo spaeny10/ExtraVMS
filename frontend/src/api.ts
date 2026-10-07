@@ -271,6 +271,22 @@ export type Synopsis = {
   tags: string[];
   /** which model wrote it (local 7B or the remote model) */
   model?: string | null;
+  /** the description mentioned a weapon: the second, full-resolution look (backend/nvr/weaponcheck.py) */
+  weapon_check?: WeaponCheck | null;
+};
+
+export type WeaponCheck = {
+  confirmed: boolean;
+  verdict: "confirmed" | "not_confirmed" | "unclear" | "error";
+  /** unclear / error: worded "possible firearm, unconfirmed" (a firearm stays high priority) until a person looks */
+  needs_review?: boolean;
+  kind?: "firearm" | "knife" | "weapon";
+  /** per person asked about: everything held, and the held object most like a weapon (`object`) */
+  persons: { object: string; held?: string[]; weapon: "yes" | "no" | "unclear"; confidence: "low" | "medium" | "high"; held_by?: string; resembles_weapon?: string }[];
+  reason: string;
+  model?: string | null;
+  evidence?: "clip" | "snapshot" | "keyframes" | null;
+  checked_at?: number;
 };
 
 export type Verdict = "correct" | "false_alarm" | "wrong_class";

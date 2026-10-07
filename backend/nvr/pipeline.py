@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 import cv2
 import httpx
 
-from . import baseline, cells, detector, identities, journeys, policy, ppe, retention, vlmroute, zones, merge
+from . import baseline, cells, detector, identities, journeys, policy, ppe, retention, vlmroute, weaponcheck, zones, merge
 from . import synopsis as vlm
 from .config import settings
 from .db import db
@@ -424,7 +424,12 @@ class Pipeline:
             # a door place visited and left again (event 8377) is not an entry; entries/exits come from apply_door_facts
             summary = (summary.rstrip(".") + ". " if summary else "") + "Went to " + ", then ".join(dict.fromkeys(names)) + "."
         result["summary"] = summary
-        db.update_event(event_id, synopsis=summary, synopsis_json=result, threat=result.get("threat_level"), error=None)
+        # A weapon in the description is checked at full resolution BEFORE anything is stored: the threat, priority
+        # and the hub's high-priority alert only ever see the checked wording (event 9118: a towel read as a handgun).
+        result, original = await weaponcheck.review(e, result, lambda: self.weapon_evidence(e))
+        summary = result.get("summary", summary)
+        extra = {"synopsis_original": original} if original is not None and not e.get("synopsis_original") else {}
+        db.update_event(event_id, synopsis=summary, synopsis_json=result, threat=result.get("threat_level"), error=None, **extra)
         if not e.get("ptz_preset"):
             await policy.confirm_towing(event_id)   # a towing claim needs a second, focused look before a rule can break
             policy.check(event_id, camera)          # site rules (who may tow what) now that Qwen has looked
@@ -432,6 +437,16 @@ class Pipeline:
         await self.reindex(event_id)
         self.synopsis_times.append(round(time.time() - t0, 1))
         log.info("event %s synopsis in %.1fs: %s", event_id, time.time() - t0, summary[:120])
+
+    async def weapon_evidence(self, e: dict) -> dict:
+        """Full-resolution crops of every person in the event for weaponcheck: the clip is decoded on a decode thread,
+        YOLO (the verifier's model) runs on the GPU thread like every other YOLO call."""
+        model = self.verifier.model if self.verifier else None
+        predict = None
+        if model is not None:
+            predict = lambda imgs: self.gpu.submit(weaponcheck.yolo_predict, model, imgs).result(  # noqa: E731
+                timeout=weaponcheck.COLLECT_TIMEOUT_S)
+        return await asyncio.get_running_loop().run_in_executor(self.decode, weaponcheck.gather_evidence, e, predict)
 
     @staticmethod
     def correction_examples(camera_id: str, n: int = 3, label: str | None = None) -> list[dict]:
