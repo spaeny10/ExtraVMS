@@ -88,7 +88,7 @@ function TokenBox({ name, token, install, onClose }: { name: string; token: stri
       <p className="small">Shown only now: the hub keeps a hash. On the host, save it as the token file (readable by root only), then start the agent.</p>
       <ol className="small">
         <li>Token: <code className="token">{token}</code> <button className="ghost small" onClick={() => copy(token)}>Copy</button><br />
-          <span className="muted">e.g. <code>sudo install -m 600 /dev/stdin /etc/axiom-host/token</code>, paste, then Ctrl-D</span></li>
+          <span className="muted">e.g. <code>sudo install -m 600 /dev/stdin /etc/axiom/host-token</code>, paste, press Enter, then Ctrl-D</span></li>
         <li>Run: <code>{install}</code> <button className="ghost small" onClick={() => copy(install)}>Copy</button></li>
       </ol>
     </div>

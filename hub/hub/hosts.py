@@ -265,7 +265,7 @@ async def delete_host(host_id: str) -> None:
     await registry.disconnect(host_id, "host removed at the hub")
 
 
-def install_command(token_file: str = "/etc/axiom-host/token") -> str:
+def install_command(token_file: str = "/etc/axiom/host-token") -> str:
     return f"python3 axiom_host.py run --hub {host_agent_url()} --token-file {token_file}"
 
 
