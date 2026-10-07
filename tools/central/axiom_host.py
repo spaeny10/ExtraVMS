@@ -246,7 +246,7 @@ def render_env(rec: dict, *, enroll_token: str | None, vlm_key: str | None, mask
         lines += [f"# the container sees only host GPU {rec['gpu']} (docker --gpus device={rec['gpu']}), as cuda:0",
                   "NVR_YOLO_DEVICE=cuda:0"]
     lines += ["NVR_RECORDINGS_DIR=/recordings", "NVR_DATA_DIR=/data", "NVR_RUNTIME_DIR=/data/runtime",
-              "NVR_BACKUP_DIR=/data/backups", "NVR_MEDIAMTX_EXE=/opt/nvr/bin/mediamtx/mediamtx"]
+              "NVR_BACKUP_DIR=/data/backups", "NVR_FOOTAGE_INDEX_DIR=/data/index", "NVR_MEDIAMTX_EXE=/opt/nvr/bin/mediamtx/mediamtx"]
     return "\n".join(lines) + "\n"
 
 

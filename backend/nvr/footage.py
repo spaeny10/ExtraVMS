@@ -53,7 +53,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS frame_vec USING vec0(
 
 class Index:
     def __init__(self, path: Path | None = None) -> None:
-        self.path = path or settings.recordings_dir.parent / "index" / "footage.db"
+        self.path = path or (settings.footage_index_dir or settings.recordings_dir.parent / "index") / "footage.db"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
         self.conn.enable_load_extension(True)
