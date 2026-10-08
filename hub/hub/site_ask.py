@@ -255,6 +255,10 @@ def merge(results: list[dict], cam_names: dict[tuple[str, str], str]) -> dict:
         entry = {k: r.get(k) for k in ("server_id", "server_name", "status", "error", "duration_ms", "last_seen_at") if r.get(k) is not None}
         if r["status"] == "ok":
             entry["notes"] = [str(n)[:200] for n in (d.get("notes") or [])][:5]
+            # lookups that did not finish (older servers only say so in their notes)
+            inc = d.get("incomplete") if isinstance(d.get("incomplete"), list) else                 [n for n in (d.get("notes") or []) if " skipped" in str(n) or "took too long" in str(n) or " failed: " in str(n)]
+            if inc:
+                entry["incomplete"] = [str(n)[:200] for n in inc][:5]
             entry["found"] = (d.get("counts") or {}).get("found")
             if d.get("utc_offset") is not None:
                 entry["utc_offset"] = d.get("utc_offset")
@@ -416,6 +420,11 @@ def not_checked_lines(merged: dict, server_cams: dict[str, list[str]], tz: dt.tz
     out = []
     for s in merged["servers"]:
         if s["status"] == "ok":
+            if s.get("incomplete"):
+                cams = server_cams.get(s["server_id"]) or []
+                cam_txt = f" (cameras: {', '.join(cams[:8])}{'…' if len(cams) > 8 else ''})" if cams else ""
+                out.append(f"INCOMPLETE: on the {s['server_name']} server some lookups did not finish "
+                           f"({'; '.join(s['incomplete'])}), so its cameras{cam_txt} may have matches that are not in these results.")
             continue
         cams = server_cams.get(s["server_id"]) or []
         cam_txt = f" (cameras: {', '.join(cams[:8])}{'…' if len(cams) > 8 else ''})" if cams else ""
@@ -435,7 +444,10 @@ ANSWER_SYSTEM = (
     "exactly as given, e.g. [#123] or [F2]; cite at most 6, and only handles from the evidence. Never mention servers or "
     "server names, except when the evidence has a NOT CHECKED line: then say plainly which server could not be checked and "
     "what that means for the answer (for example: 'The Jetstream HQ server was offline, so its cameras could not be "
-    "checked.'). If nothing matching was found, say so plainly and say what was checked. Never invent events, times, "
+    "checked.'). An INCOMPLETE line means part of the search did not finish: then never say nothing was found or that "
+    "something did not happen; say what was found, that the search could not finish (it usually works when asked again "
+    "a minute later), and which cameras it concerns. If nothing matching was found and nothing is INCOMPLETE, say so "
+    "plainly and say what was checked. Never invent events, times, "
     "counts or identities. Counts are sightings (events), not different people, unless a different-people estimate is "
     "given. A BACKGROUND ONLY briefing covers its own span: never report its contents as events of the period asked about. "
     "Lines marked EARLIER happened before the period asked about: say nothing matched in that period and mention the "
@@ -502,7 +514,7 @@ def fallback_answer(merged: dict, server_cams: dict[str, list[str]], tz: dt.tzin
         x = earlier[0]
         bullets.append(f"- The latest earlier match: [#{x['ref']}] {x.get('camera')}, {fmt_time(x['ts'], tz, now)}.")
     for line in not_checked_lines(merged, server_cams, tz, now):
-        bullets.append("- " + line.replace("NOT CHECKED: the", "Not checked: the"))
+        bullets.append("- " + line.replace("NOT CHECKED: the", "Not checked: the").replace("INCOMPLETE: on the", "Incomplete: on the"))
     parts = [" ".join(out), "\n".join(bullets)]
     if reason is not None:   # the AI was asked and failed (not when there was nothing for it to read)
         parts.append("(The AI that writes answers could not be reached, so this is a plain list of what the lookups found.)")

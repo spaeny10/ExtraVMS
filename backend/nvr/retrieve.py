@@ -37,7 +37,9 @@ from .db import db
 log = logging.getLogger("nvr.retrieve")
 
 PLAN_TIMEOUT_S = 12.0      # the planner's share; the hub waits ~25 s for the whole retrieve
-BUDGET_S = 20.0            # lookups stop starting after this (a note says so)
+BUDGET_S = 20.0            # slow lookups stop starting after this (a note says so)
+SLOW_TOOLS = {"search_footage"}   # CLIP + Qwen over video; everything else is a database lookup well under a second
+FAST_MIN_S = 8.0           # a database lookup still runs (with this long) when the budget is spent
 MAX_ITEMS = 60
 HISTORY_TURNS = 4
 
@@ -224,13 +226,17 @@ async def run(calls: list[dict], ev: Evidence, question: str, now: float, deadli
     summary: list[dict] = []
     items: list[dict] = []
     notes: list[str] = []
-    queue = list(calls)
+    # The fast database lookups first, and never skipped for time: a cold footage search (first question after a
+    # restart) must not leave the answer with no events at all ("White Truck?" found nothing while 12 matched).
+    queue = sorted(calls, key=lambda c: c["tool"] in SLOW_TOOLS)
     while queue:
         c = queue.pop(0)
         left = deadline - time.monotonic()
         if left < 1:
-            notes.append("Some lookups were skipped to answer in time: " + ", ".join(A.describe_call(x) for x in [c, *queue]))
-            break
+            if c["tool"] in SLOW_TOOLS:
+                notes.append(f"{A.describe_call(c)} was skipped to answer in time")
+                continue
+            left = FAST_MIN_S
         ev.call_events, ev.call_moments = [], []
         tool, a = c["tool"], c["args"]
         label = A.describe_call(c)
@@ -275,6 +281,10 @@ async def run(calls: list[dict], ev: Evidence, question: str, now: float, deadli
         if not queue and (fb := A.fallback_call(summary, question)):
             queue.append(fb)
     return [{**s, "args": _public_args(s["args"])} for s in summary], items, notes
+
+
+def is_incomplete_note(note: str) -> bool:
+    return " skipped" in note or "took too long" in note or " failed: " in note
 
 
 def _window(question: str, calls: list[dict], now: float) -> dict | None:
@@ -342,6 +352,8 @@ async def retrieve(question: str, history: list[dict] | None = None, now: float 
         "calls": summary, "results": _cap(items), "counts": counts, "plan_model": raw.get("_model"), "notes": notes,
         "now": now, "tz": tz, "server_tz": off.tzname(), "utc_offset": off.utcoffset().total_seconds() if off.utcoffset() else 0,
         "truncated": max(0, len(items) - MAX_ITEMS), "duration_ms": round((time.monotonic() - t0) * 1000),
+        # lookups that did not finish: the answer must not read their absence as "nothing found"
+        "incomplete": [n for n in notes if is_incomplete_note(n)],
     }
     log.info("retrieve: %d calls, %d events, %d items in %d ms (planner %s)", len(summary), len(events), len(items),
              out["duration_ms"], raw.get("_model") or "rules")

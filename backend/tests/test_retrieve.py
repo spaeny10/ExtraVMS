@@ -183,6 +183,26 @@ def test_planner_timeout_falls_back_to_rules():
     assert any("planner was slow" in n for n in r["notes"]) and r["plan_model"] is None
 
 
+def test_slow_footage_search_never_starves_the_event_search():
+    """First question after a restart: a cold footage search used the whole budget and the event search was skipped,
+    so the hub answered "no white truck" while 12 events matched. Database lookups now run first and always run."""
+    async def slow_footage(a, ev):
+        await asyncio.sleep(5)
+        return [], 0
+    PLANNER.plans = [{"calls": [{"tool": "search_footage", "text": "white truck"}, {"tool": "search_events", "text": "white truck"}]}]
+    old_budget, retrieve.BUDGET_S = retrieve.BUDGET_S, 0.3
+    old_tool, assistant.TOOL_FUNCS["search_footage"] = assistant.TOOL_FUNCS["search_footage"], slow_footage
+    try:
+        r = run("White truck?")
+    finally:
+        retrieve.BUDGET_S = old_budget
+        assistant.TOOL_FUNCS["search_footage"] = old_tool
+    ids = {e["event_id"] for e in events(r)}
+    assert IDS["truck"] in ids and IDS["old_truck"] in ids, r
+    assert r["calls"][0]["tool"] == "search_events", r["calls"]          # the fast lookup went first
+    assert r["incomplete"] and any("search_footage" in n or "footage" in n.lower() for n in r["incomplete"]), r["incomplete"]
+
+
 if __name__ == "__main__":
     setup_module()
     for name, fn in list(globals().items()):

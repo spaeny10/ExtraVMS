@@ -274,6 +274,18 @@ def test_old_or_failing_servers_are_noted(world):
     assert "NOT CHECKED: the Bravo server did not answer" in world["ai"].requests[-1]["messages"][-1]["content"]
 
 
+def test_incomplete_lookups_are_never_read_as_nothing_found():
+    data = {"results": [], "counts": {"events": 0}, "notes": ["search_footage(\"white truck\") took too long and was skipped"]}
+    merged = site_ask.merge([{"server_id": "s1", "server_name": "One", "status": "ok", "data": data}], {})
+    assert merged["servers"][0]["incomplete"] == data["notes"]           # an older server: read from its notes
+    lines = site_ask.not_checked_lines(merged, {"s1": ["Gate"]}, site_ask.dt.timezone.utc, 0)
+    assert lines and lines[0].startswith("INCOMPLETE: on the One server") and "Gate" in lines[0]
+    assert "INCOMPLETE line" in site_ask.ANSWER_SYSTEM and "never say nothing was found" in site_ask.ANSWER_SYSTEM
+    data2 = {"results": [], "counts": {"events": 0}, "notes": ["The planner was slow, so the built-in lookup rules chose the lookups."], "incomplete": []}
+    merged2 = site_ask.merge([{"server_id": "s1", "server_name": "One", "status": "ok", "data": data2}], {})
+    assert "incomplete" not in merged2["servers"][0] and site_ask.not_checked_lines(merged2, {}, site_ask.dt.timezone.utc, 0) == []
+
+
 def test_rate_limit(world, monkeypatch):
     monkeypatch.setattr(site_ask, "RATE_LIMIT", 0)
     r = world["v2"].post(f"/api/locations/{world['yard']['id']}/ask", json={"question": "anything?"})
