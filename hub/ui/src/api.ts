@@ -54,7 +54,7 @@ export type CentralUsage = { id: string; mode: CentralMode; quota_gb: number; us
 // ---- Central recording (hub/hub/hosts.py): datacenter hosts and the per-Site server instances on them
 export type CentralMode = "vpn" | "forward";
 export type HostGpu = { index: number; name: string; mem_total_mb?: number; mem_used_mb?: number; util?: number };
-export type HostCapacity = { cpus?: number; load?: number; ram_gb?: { total: number; free: number }; gpus?: HostGpu[]; disks?: { path: string; total_gb?: number; free_gb?: number }[]; instances?: number };
+export type HostCapacity = { cpus?: number; load?: number | number[]; ram_gb?: { total: number; free: number }; gpus?: HostGpu[]; disks?: { path: string; total_gb?: number; free_gb?: number }[]; instances?: number };
 /** `offline_since`: when its open host_offline alert opened (null = none open). */
 export type Host = {
   id: string; name: string; created_at: number; online: boolean; last_seen_at: number | null; hostname: string | null; version: string | null;

@@ -136,3 +136,11 @@ describe("camera addresses", () => {
     expect(cameraNetworkOf({ mode: "forward", subnet: null, public_ip: "yard.dyn.example.net" })).toEqual({ subnets: [], public_ips: [], hosts: ["yard.dyn.example.net"] });
   });
 });
+
+describe("host capacity from a real agent", () => {
+  it("reads the load averages list the host agent sends (a number crashed the Hosts page)", () => {
+    const bars = capacityBars({ cpus: 80, load: [0.31, 0.21, 0.4], ram_gb: { total: 791.2, free: 707.5 } });
+    expect(bars[0].text).toBe("load 0.3 on 80 cores");
+    expect(capacityBars({ cpus: 8, load: 2 })[0].used).toBe(2);
+  });
+});

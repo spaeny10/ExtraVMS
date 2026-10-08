@@ -32,7 +32,8 @@ export function capacityBars(c: HostCapacity | null | undefined): Bar[] {
   if (!c) return [];
   const out: Bar[] = [];
   if (c.cpus) {
-    const load = c.load ?? 0;
+    // the host agent sends the 1, 5 and 15 minute load averages; an older shape was one number
+    const load = (Array.isArray(c.load) ? c.load[0] : c.load) ?? 0;
     out.push({ label: "CPU", used: load, total: c.cpus, pct: pct(load, c.cpus) ?? 0, text: `load ${load.toFixed(1)} on ${c.cpus} cores` });
   }
   if (c.ram_gb?.total) {
