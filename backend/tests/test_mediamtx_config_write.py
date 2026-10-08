@@ -9,6 +9,9 @@ import tempfile
 from pathlib import Path
 
 os.environ["NVR_DATA_DIR"] = tempfile.mkdtemp(prefix="nvr-mtxwrite-test-")
+# never the real runtime folder: write_config there rewrote the RUNNING server's mediamtx.yml with no cameras, and
+# MediaMTX stopped recording every camera until the server rewrote it (~4 min per test run, 2026-10-06..08)
+os.environ["NVR_RUNTIME_DIR"] = tempfile.mkdtemp(prefix="nvr-mtxwrite-runtime-")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nvr import mediamtx  # noqa: E402
@@ -40,6 +43,7 @@ def test_write_config_uses_atomic_write():
     mediamtx.atomic_write = lambda path, text: calls.append(path) or real(path, text)
     try:
         m = mediamtx.MediaMTX()
+        assert Path(tempfile.gettempdir()) in m.config_path.parents, m.config_path   # a scratch folder, not the live server
         m.write_config([])
     finally:
         mediamtx.atomic_write = real
