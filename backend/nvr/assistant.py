@@ -280,9 +280,42 @@ def check_plan(raw: dict, question: str, now: float) -> list[dict]:
     return augment(out, question, now)
 
 
-_TIME_PHRASES = re.compile(r"\b(today|this morning|this afternoon|this evening|tonight|last night|overnight|yesterday|"
+WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+_WD = "|".join(WEEKDAYS)
+# Day names come first so "Tuesday last week" is one phrase, not "last week" with a stray "Tuesday".
+_TIME_PHRASES = re.compile(r"\b((?:on\s+)?(?:" + _WD + r")\s+(?:of\s+)?(?:last|the\s+previous|previous)\s+week|"
+                           r"(?:last|previous)\s+week'?s?\s+(?:" + _WD + r")|"
+                           r"(?:on\s+)?(?:last|this|past)\s+(?:" + _WD + r")|(?:on\s+)?(?:" + _WD + r")|"
+                           r"today|this morning|this afternoon|this evening|tonight|last night|overnight|yesterday|"
                            r"this week|(?:in the )?(?:last|past|previous)\s+(?:\d+(?:\.\d+)?|one|two|three|four|five|six|seven|twelve|a|an)?\s*"
                            r"(?:minute|hour|day|week)s?)\b")
+
+
+def _weekday_window(phrase: str, day: dt.datetime) -> tuple[float, float | None, str] | None:
+    """A day name: "Tuesday" = the most recent Tuesday (today included), "last Tuesday" = the one before today,
+    "Tuesday last week" = the Tuesday of the previous calendar week (weeks start Monday), "this Tuesday" = this week's."""
+    name = next((w for w in WEEKDAYS if w in phrase), None)
+    if name is None:
+        return None
+    target = WEEKDAYS.index(name)
+    monday = day - dt.timedelta(days=day.weekday())
+    # labels keep their own wording so a follow-up that reuses one ("and Friday?" -> "...Friday, Oct 2?") reads back
+    # as the same day
+    if "week" in phrase:
+        d = monday - dt.timedelta(days=7) + dt.timedelta(days=target)
+        label = f"{name.capitalize()} last week"
+    elif re.match(r"(?:on\s+)?this\b", phrase):
+        d = monday + dt.timedelta(days=target)
+        if d > day:
+            return None   # later this week: nothing recorded yet
+        label = f"this {name.capitalize()}"
+    elif re.match(r"(?:on\s+)?(?:last|past)\b", phrase):
+        d = day - dt.timedelta(days=(day.weekday() - target) % 7 or 7)
+        label = f"last {name.capitalize()}"
+    else:
+        d = day - dt.timedelta(days=(day.weekday() - target) % 7)
+        label = name.capitalize()
+    return d.timestamp(), (d + dt.timedelta(days=1)).timestamp(), f"{label}, {d:%b} {d.day}"
 
 
 def time_window(text: str, now: float | None = None) -> dict | None:
@@ -304,7 +337,14 @@ def time_window(text: str, now: float | None = None) -> dict | None:
         "yesterday": (yday.timestamp(), day.timestamp()),
         "this week": ((day - dt.timedelta(days=day.weekday())).timestamp(), None),
     }
-    if phrase in windows:
+    wd = _weekday_window(phrase, day)
+    if wd:
+        since, until, phrase = wd
+    elif re.fullmatch(r"(?:in the )?(?:last|previous)\s+week", phrase):
+        # "last week" is the previous calendar week (Monday to Sunday); "past week" / "last 7 days" stay rolling
+        monday = day - dt.timedelta(days=day.weekday())
+        since, until, phrase = (monday - dt.timedelta(days=7)).timestamp(), monday.timestamp(), "last week"
+    elif phrase in windows:
         since, until = windows[phrase]
     else:
         lm = LAST_N.search(phrase)
