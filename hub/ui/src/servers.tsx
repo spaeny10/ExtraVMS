@@ -6,10 +6,17 @@ import { useState } from "react";
 import { confirmDialog, promptDialog, toast } from "@site/ui";
 import { type Backup, type Server, type Site, ago, api, fmtTime } from "./api";
 import { consoleHref } from "./nav";
-import { fmtGB, fmtMbps, quotaText, serverBandwidth } from "./central";
+import { CENTRAL_TAG, fmtGB, fmtMbps, quotaText, serverBandwidth } from "./central";
 
-/** Status card. With `children` (actions) it is a plain box whose name links to `href`; without, the whole card is the link. */
-export function ServerCard({ s, now, href = consoleHref(s.id), children }: { s: Server; now: number; href?: string; children?: React.ReactNode }) {
+/**
+ * Status card. With `children` (actions) it is a plain box whose name links to `href`; without, the whole card is the link.
+ * A central recording server says so under its name (`central.line` replaces the plain tag, e.g. with the host for hub
+ * administrators); `central.stats` adds rows to the stats grid and `central.details` a block above the actions (Site →
+ * Servers, for those who may read the instance).
+ */
+export function ServerCard({ s, now, href = consoleHref(s.id), central, children }: {
+  s: Server; now: number; href?: string; central?: { line?: string; stats?: React.ReactNode; details?: React.ReactNode }; children?: React.ReactNode;
+}) {
   const sm = s.summary ?? {};
   const cams = sm.cameras ?? [];
   const bad = cams.filter((c) => !c.stream_ready || c.problems?.length);
@@ -26,6 +33,7 @@ export function ServerCard({ s, now, href = consoleHref(s.id), children }: { s: 
         <span className="spacer" />
         <span className="muted small">{s.online ? "online" : `offline · ${ago(s.last_seen_at, now)}`}</span>
       </div>
+      {s.central && <div className="loc central-tag">{central?.line ?? CENTRAL_TAG}</div>}
       {s.location && <div className="loc">{s.location}</div>}
       <div className="stats">
         <div><span>Cameras</span> {cams.length - bad.length}/{cams.length} up</div>
@@ -34,7 +42,8 @@ export function ServerCard({ s, now, href = consoleHref(s.id), children }: { s: 
         <div><span>AI</span> {sm.yolo_ready ? "YOLO ✓" : "YOLO …"} · {sm.vlm_ready ? "Qwen ✓" : "Qwen …"}{sm.queues?.synopsis ? ` (${sm.queues.synopsis} waiting)` : ""}</div>
         <div><span>Stream</span> {sm.bitrate_mbps != null ? `${sm.bitrate_mbps} Mbps` : "—"}</div>
         {bw && <div><span>Upload</span> {fmtMbps(bw.mbps)}{bw.month_gb != null ? ` · ${fmtGB(bw.month_gb)} this month` : ""}</div>}
-        {s.central && <div><span>Storage</span> {quotaText(s.central.used_gb, s.central.quota_gb)} <span className="muted">(central)</span></div>}
+        {s.central && <div><span>Storage</span> {quotaText(s.central.used_gb, s.central.quota_gb)}</div>}
+        {s.central && central?.stats}
         <div><span>Version</span> {s.version ?? "—"}{s.clock_skew_s != null && Math.abs(s.clock_skew_s) > 30 ? ` · clock ${s.clock_skew_s > 0 ? "+" : ""}${Math.round(s.clock_skew_s)} s` : ""}</div>
       </div>
       {cams.length > 0 && (
@@ -43,6 +52,7 @@ export function ServerCard({ s, now, href = consoleHref(s.id), children }: { s: 
       )}
       {sm.site_link_down && <div className="alerts">⚠ No camera reachable: the link to the site may be down</div>}
       {s.open_alerts > 0 && <div className="alerts">⚠ {s.open_alerts} open alert{s.open_alerts > 1 ? "s" : ""}</div>}
+      {central?.details}
     </>
   );
   return children ? <div className={cls}>{body}<div className="row server-actions">{children}</div></div> : <a className={cls} href={href}>{body}</a>;
@@ -50,18 +60,20 @@ export function ServerCard({ s, now, href = consoleHref(s.id), children }: { s: 
 
 /**
  * Rename, note, token, backups, retire, remove, and Move to another Site. `sites` = the customer's Sites for the move
- * picker (omit to hide it). Viewers get only the console link.
+ * picker (omit to hide it). Viewers get only the console link. A central recording server keeps only the console,
+ * Rename, Note and Backups: it stays in the Site it was allocated to, its token is the instance's own, and retiring or
+ * removing it is done on the Hosts page (the hub refuses them here); a retired one may still be restored.
  */
 export function ServerActions({ s, admin, sites, onChanged }: { s: Server; admin: boolean; sites?: Pick<Site, "id" | "name">[]; onChanged: () => void }) {
   const act = (f: () => Promise<unknown>, done?: string) => async () => { try { await f(); if (done) toast.success(done); onChanged(); } catch (e) { toast.error(e); } };
   const others = (sites ?? []).filter((l) => l.id !== s.location_id);
+  const box = admin && !s.central;   // actions for an ordinary server only
   return (
     <>
       <a className="small" href={consoleHref(s.id)} title="The server's own interface, through its tunnel">Open server console ↗</a>
       {admin && <button className="ghost small" onClick={async () => { const name = await promptDialog("Rename server", { initial: s.name, label: "Name" }); if (name?.trim()) await act(() => api.updateServer(s.id, { name: name.trim() }))(); }}>Rename</button>}
       {admin && <button className="ghost small" title="A free-text note on where this box is (rack, room…)" onClick={async () => { const loc = await promptDialog("Where is this server?", { initial: s.location, label: "Note (rack, room…)" }); if (loc != null) await act(() => api.updateServer(s.id, { location: loc.trim() }))(); }}>Note</button>}
-      {/* a central recording server stays in the Site it was allocated to (hub administrators manage it on the Hosts page) */}
-      {admin && !s.central && others.length > 0 && (
+      {box && others.length > 0 && (
         <select className="small" value="" aria-label="Move to site" onChange={async (e) => {
           const to = others.find((l) => l.id === e.target.value);
           if (to && await confirmDialog(`Move ${s.name} to ${to.name}?`, { message: "Its cameras, alerts and events follow it. People who can see only the old site stop seeing it.", confirmLabel: "Move" }))
@@ -71,11 +83,11 @@ export function ServerActions({ s, admin, sites, onChanged }: { s: Server; admin
           {others.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
         </select>
       )}
-      {admin && <button className="ghost small" title="Issue a new device token (the old one stops working after 10 minutes)" onClick={async () => { if (await confirmDialog(`Rotate ${s.name}'s token?`)) await act(() => api.rotateServer(s.id), "New token sent to the server")(); }}>Rotate token</button>}
+      {box && <button className="ghost small" title="Issue a new device token (the old one stops working after 10 minutes)" onClick={async () => { if (await confirmDialog(`Rotate ${s.name}'s token?`)) await act(() => api.rotateServer(s.id), "New token sent to the server")(); }}>Rotate token</button>}
       {admin && <BackupsButton server={s} />}
-      {admin && <button className="ghost small" title={s.retired_at ? "Show it in Sites, Home, Find and alerts again" : "Hide it from Sites, Home, Find and alerts (the server keeps running)"}
+      {admin && (!s.central || s.retired_at) && <button className="ghost small" title={s.retired_at ? "Show it in Sites, Home, Find and alerts again" : "Hide it from Sites, Home, Find and alerts (the server keeps running)"}
         onClick={async () => { if (s.retired_at || await confirmDialog(`Retire ${s.name}?`, { message: "It disappears from Sites, Home, Find, Ask and alerts. The server, its tunnel and its recordings are untouched; you can restore it under Customer → Servers.", confirmLabel: "Retire" })) await act(() => api.retireServer(s.id, !s.retired_at))(); }}>{s.retired_at ? "Restore" : "Retire"}</button>}
-      {admin && <button className="ghost small" onClick={async () => { if (await confirmDialog(`Remove ${s.name}?`, { message: "The server is told to unenroll; recordings stay on it.", confirmLabel: "Remove", danger: true })) await act(() => api.removeServer(s.id))(); }}>Remove</button>}
+      {box && <button className="ghost small" onClick={async () => { if (await confirmDialog(`Remove ${s.name}?`, { message: "The server is told to unenroll; recordings stay on it.", confirmLabel: "Remove", danger: true })) await act(() => api.removeServer(s.id))(); }}>Remove</button>}
     </>
   );
 }

@@ -1,10 +1,11 @@
 /**
- * Site → Servers: cellular coverage at the Site (hub coverage.py, the CoverageMap API). Which carrier, and will the
- * upload carry the cameras: carriers best first, each with LTE and 5G rows (overall score bar 0–10 with coverage,
- * reliability and performance; FCC signal with its band and the covered share at 0.5/1/2 km; nearby speed-test
- * medians with test and failure counts; measured vs estimated; the upload fit for the cameras' need). Hub
- * administrators and the Site's admins can look it up again (it costs units; confirmed first). On the trial plan the
- * card is for hub administrators only and says so.
+ * Site › Settings › General, next to the address and map: cellular coverage at the Site (hub coverage.py, the CoverageMap
+ * API). Which carrier, and will the upload carry the cameras: carriers best first, each with LTE and 5G rows (overall
+ * score bar 0–10 with coverage, reliability and performance; FCC signal with its band and the covered share at
+ * 0.5/1/2 km; nearby speed-test medians with test and failure counts; measured vs estimated; the upload fit for the
+ * cameras' need). Hub administrators and the Site's admins can look it up again (it costs units; confirmed first). On
+ * the trial plan it is for hub administrators only and says so. Beside the Settings card on wide screens, below it on
+ * narrower ones (it lays itself out by its own width: hub.css container query).
  */
 import { useState } from "react";
 import { confirmDialog, toast } from "@site/ui";
@@ -122,7 +123,7 @@ export function CoverageCard({ site, cov, onChanged }: { site: Site; cov: SiteCo
       {!cov.data ? (
         <p className="muted small" style={{ marginBottom: 0 }}>
           {cov.hidden ? "This Site's coverage was looked up during the evaluation and is being looked up again; it shows here once that is done."
-            : !cov.locatable ? "Set the Site's address (Settings › General) to look up its cellular coverage."
+            : !cov.locatable ? "Put the Site on the map (its address, then Save) to look up its cellular coverage."
             : cov.can_refresh ? "Not looked up yet. Look up shows each carrier's LTE and 5G scores, signal, nearby speed tests and whether the upload carries the cameras."
             : "Not looked up yet."}
         </p>

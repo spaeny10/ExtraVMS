@@ -1,7 +1,7 @@
 /**
- * Central recording (hub/hub/hosts.py), the pure parts: host capacity bars, instance phases, the Peplink settings sheet
- * and the bandwidth / storage numbers shown on Site → Servers and Customer → Servers. Kept apart from the components
- * so they are unit-tested (central.test.ts).
+ * Central recording (hub/hub/hosts.py), the pure parts: host capacity bars, instance phases, the Peplink settings sheet,
+ * the bandwidth / storage numbers shown on Site → Servers and Customer → Servers, and the instance's lines on its own
+ * server card (Site → Servers). Kept apart from the components so they are unit-tested (central.test.ts).
  */
 import type { CentralInstance, HostCapacity, HubSitesOrg, Peplink, Server } from "./api";
 
@@ -272,6 +272,54 @@ export function allocateFormError(f: AllocateFields, roomGb: number | null | und
   if (lim.error) return lim.error;
   if (roomGb != null && Number(f.quota_gb) > roomGb) return `The host has room for ${fmtGB(Math.max(0, roomGb))}`;
   return null;
+}
+
+// ---- Site › Servers: the instance folded into its own server card
+
+/** The Site's central instance behind this server card (matched by server_id). */
+export function instanceFor<T extends Pick<CentralInstance, "server_id">>(instances: T[] | null | undefined, serverId: string): T | undefined {
+  return (instances ?? []).find((c) => c.server_id === serverId);
+}
+
+/** Instances with no server card yet (not enrolled, or their server is not in the list): a placeholder card each. */
+export function unenrolledInstances<T extends Pick<CentralInstance, "server_id">>(instances: T[] | null | undefined, servers: { id: string }[]): T[] {
+  const ids = new Set(servers.map((s) => s.id));
+  return (instances ?? []).filter((c) => !c.server_id || !ids.has(c.server_id));
+}
+
+/** The tag every viewer of a central server's card sees. */
+export const CENTRAL_TAG = "Datacenter (central recording)";
+
+/**
+ * The card's datacenter line: hub administrators get "Datacenter · fred-001 · GPU 0 A40" (the host and GPU are sent to
+ * them only); everyone else the plain tag.
+ */
+export function datacenterLine(ci: Pick<CentralInstance, "host_id" | "host_name" | "host_online" | "gpu" | "gpu_name">, hubAdmin: boolean): string {
+  const host = ci.host_name ?? ci.host_id;
+  if (!hubAdmin || !host) return CENTRAL_TAG;
+  const gpu = ci.gpu != null ? `GPU ${ci.gpu}${ci.gpu_name ? ` ${shortGpu(ci.gpu_name)}` : ""}` : "no GPU";
+  return `Datacenter · ${host}${ci.host_online === false ? " (offline)" : ""} · ${gpu}`;
+}
+
+/** "VPN · 10.20.7.0/24" or "Port forwarding". */
+export const connectionText = (ci: Pick<CentralInstance, "mode" | "subnet">) => (ci.mode === "vpn" ? `VPN · ${ci.subnet ?? "—"}` : "Port forwarding");
+
+/** "3 of 5 cameras" (" · over" when the limit was lowered below the count), or "no limit". */
+export function limitText(count: number | null | undefined, limit: number | null | undefined): string {
+  if (limit == null) return "no limit";
+  return `${count ?? 0} of ${limit} camera${limit === 1 ? "" : "s"}${overLimit(count, limit) ? " · over" : ""}`;
+}
+
+/** "Cameras reachable at: 10.20.7.0/24 · opened for its cameras: cam1.example.net" (the Site networks first). */
+export function reachableText(ci: Pick<CentralInstance, "mode" | "subnet" | "public_ip" | "camera_network">): string {
+  const p = addressParts(ci);
+  return `Cameras reachable at: ${p.site.length ? p.site.join(" · ") : "no Site network"}${p.cameras.length ? ` · opened for its cameras: ${p.cameras.join(" · ")}` : ""}`;
+}
+
+/** The customer hint on the card: where cameras are added, and the limit. */
+export function addCamerasHint(limit: number | null | undefined): string {
+  return `Add cameras on its console, like on any server: their addresses open on the datacenter firewall by themselves.${
+    limit != null ? ` Up to ${limit} camera${limit === 1 ? "" : "s"}; ask Axiom Vision for more.` : ""}`;
 }
 
 /** What the firewall allows, split for display: the Site networks, and the cameras' own addresses not already among them. */

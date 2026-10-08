@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-  addressParts, allocateFormError, cameraEntryError, cameraNetworkError, cameraNetworkOf, cameraNetworkSummary, camerasText, capacityBars,
+  CENTRAL_TAG, addCamerasHint, addressParts, allocateFormError, cameraEntryError, cameraNetworkError, cameraNetworkOf, cameraNetworkSummary, camerasText, capacityBars,
   centralFormError, cleanCameraNetwork, defaultSubnet, fmtGB, fmtMbps, forwardCount, forwardRows, forwardTargets, isHostName, lanGateway,
   nextSiteNumber, overLimit, parseCameraLimit, parseIPv4, pct, phaseStep, quotaText, resolvedLines, settling, siteBandwidth, sitesWithoutCentral,
-  uploadLine,
+  connectionText, datacenterLine, instanceFor, limitText, reachableText, unenrolledInstances, uploadLine,
 } from "./central";
 import type { HubSitesOrg, ServerSummary, Site } from "./api";
 
@@ -188,5 +188,42 @@ describe("allocate form", () => {
       camera_network: { subnets: ["10.20.7.0/24"], public_ips: ["203.0.113.7"], hosts: [], auto: { public_ips: ["203.0.113.7", "93.184.216.77"], hosts: ["yard.dyn.example.net"] } } };
     expect(addressParts(ci)).toEqual({ site: ["10.20.7.0/24", "203.0.113.7"], cameras: ["93.184.216.77", "yard.dyn.example.net"] });
     expect(addressParts({ mode: "vpn", subnet: "10.20.8.0/24", public_ip: null })).toEqual({ site: ["10.20.8.0/24"], cameras: [] });
+  });
+});
+
+describe("central instance on its server card (Site › Servers)", () => {
+  const inst = [{ id: "c1", server_id: "s_central" }, { id: "c2", server_id: null }, { id: "c3", server_id: "s_elsewhere" }];
+  it("matches the instance to its server's card; the rest get placeholder cards", () => {
+    expect(instanceFor(inst, "s_central")?.id).toBe("c1");
+    expect(instanceFor(inst, "s_box")).toBeUndefined();
+    expect(instanceFor(null, "s_central")).toBeUndefined();
+    expect(unenrolledInstances(inst, [{ id: "s_central" }, { id: "s_box" }]).map((c) => c.id)).toEqual(["c2", "c3"]);
+    expect(unenrolledInstances(inst, [{ id: "s_central" }, { id: "s_elsewhere" }]).map((c) => c.id)).toEqual(["c2"]);
+    expect(unenrolledInstances(undefined, [])).toEqual([]);
+  });
+  it("datacenter line: host and GPU for hub administrators only", () => {
+    const ci = { host_id: "h_1", host_name: "fred-001", host_online: true, gpu: 0, gpu_name: "NVIDIA A40" };
+    expect(datacenterLine(ci, true)).toBe("Datacenter · fred-001 · GPU 0 A40");
+    expect(datacenterLine({ ...ci, host_online: false, gpu: null }, true)).toBe("Datacenter · fred-001 (offline) · no GPU");
+    expect(datacenterLine({ ...ci, host_name: null }, true)).toBe("Datacenter · h_1 · GPU 0 A40");
+    expect(datacenterLine(ci, false)).toBe(CENTRAL_TAG);
+    // a customer's answer has no host fields at all
+    expect(datacenterLine({}, true)).toBe("Datacenter (central recording)");
+  });
+  it("connection, limit, addresses and the customer hint", () => {
+    expect(connectionText({ mode: "vpn", subnet: "10.20.7.0/24" })).toBe("VPN · 10.20.7.0/24");
+    expect(connectionText({ mode: "vpn", subnet: null })).toBe("VPN · —");
+    expect(connectionText({ mode: "forward", subnet: null })).toBe("Port forwarding");
+    expect(limitText(3, 5)).toBe("3 of 5 cameras");
+    expect(limitText(undefined, 1)).toBe("0 of 1 camera");
+    expect(limitText(6, 5)).toBe("6 of 5 cameras · over");
+    expect(limitText(4, null)).toBe("no limit");
+    expect(reachableText({ mode: "vpn", subnet: "10.20.7.0/24", public_ip: null,
+      camera_network: { subnets: ["10.20.7.0/24"], public_ips: [], hosts: [], auto: { public_ips: [], hosts: ["yard.dyn.example.net"] } } }))
+      .toBe("Cameras reachable at: 10.20.7.0/24 · opened for its cameras: yard.dyn.example.net");
+    expect(reachableText({ mode: "forward", subnet: null, public_ip: null, camera_network: { subnets: [], public_ips: [], hosts: [] } })).toBe("Cameras reachable at: no Site network");
+    expect(addCamerasHint(5)).toMatch(/console.*Up to 5 cameras; ask Axiom Vision for more\.$/);
+    expect(addCamerasHint(1)).toMatch(/Up to 1 camera;/);
+    expect(addCamerasHint(null)).not.toMatch(/Up to/);
   });
 });
