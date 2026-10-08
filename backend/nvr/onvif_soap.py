@@ -249,13 +249,30 @@ def outside(cam: dict) -> tuple[str, int, int]:
             int(cam.get("public_rtsp_port") or cam.get("rtsp_port") or 554))
 
 
+def _private_ip(host: str | None) -> bool:
+    try:
+        ip = ipaddress.ip_address((host or "").strip("[]"))
+    except ValueError:
+        return False
+    return ip.is_private or ip.is_link_local
+
+
+def auto_forward(cam: dict | None) -> bool:
+    """A camera added by its public address (a DNS name or public IP) with no outside address set: the private
+    addresses it reports are taken to be its own LAN address behind a port forward."""
+    host = ((cam or {}).get("host") or "").strip()
+    return bool(host) and not (cam or {}).get("public_host") and not _private_ip(host) and host.lower() != "localhost"
+
+
 def rewrite(url: str | None, cam: dict | None) -> str | None:
     """A URL the camera returned, pointed at its outside address (port-forward mode). The host becomes
     public_host; an http(s) URL's port becomes public_onvif_port (the one ONVIF forward: device, media, events,
     PTZ, imaging, device-IO and the subscription manager all share it), an rtsp(s) URL's port public_rtsp_port
-    (whatever it reported, 554 or another). Path, query and any user info are kept. A camera without
-    public_host, or a URL of another scheme, comes back unchanged."""
-    if not url or not cam or not cam.get("public_host"):
+    (whatever it reported, 554 or another). Path, query and any user info are kept.
+    Without public_host, a camera added by its public address (auto_forward) that reports a private host has
+    that host replaced by the one we reach it at, with our ONVIF / RTSP ports (SD replay URLs keep their port
+    or take public_replay_port). Anything else, or a URL of another scheme, comes back unchanged."""
+    if not url or not cam:
         return url
     try:
         parts = urllib.parse.urlsplit(url.strip())
@@ -263,13 +280,30 @@ def rewrite(url: str | None, cam: dict | None) -> str | None:
     except ValueError:
         return url
     scheme = parts.scheme.lower()
-    if scheme in ("http", "https"):
-        port = cam.get("public_onvif_port") or reported
-    elif scheme in ("rtsp", "rtsps"):
-        port = cam.get("public_rtsp_port") or reported
+    if cam.get("public_host"):
+        host = cam["public_host"]
+        if scheme in ("http", "https"):
+            port = cam.get("public_onvif_port") or reported
+        elif scheme in ("rtsp", "rtsps"):
+            port = cam.get("public_rtsp_port") or reported
+        else:
+            return url
+    elif auto_forward(cam) and _private_ip(parts.hostname) and parts.hostname != cam["host"]:
+        # Added by its public address and reporting a private one: the same camera behind a port forward. Point
+        # its URLs at the address and ports we reach it at (event 2026-10-08: 5001.bigview.ai:8082 answered, then
+        # handed back http://192.168.50.37:80/onvif/Events and every ONVIF call timed out).
+        host = cam["host"]
+        if scheme in ("http", "https"):
+            port = cam.get("onvif_port") or reported
+        elif scheme in ("rtsp", "rtsps"):
+            # SD replay has its own port (555 on Milesight): keep it unless an outside replay port is set
+            replay = "replay" in (parts.path or "").lower()
+            port = (cam.get("public_replay_port") or reported) if replay else (cam.get("rtsp_port") or reported)
+        else:
+            return url
     else:
         return url
-    netloc = cam["public_host"] + (f":{int(port)}" if port else "")
+    netloc = host + (f":{int(port)}" if port else "")
     if "@" in parts.netloc:
         netloc = parts.netloc.rsplit("@", 1)[0] + "@" + netloc
     return urllib.parse.urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))

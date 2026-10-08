@@ -15,6 +15,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 os.environ["NVR_DATA_DIR"] = tempfile.mkdtemp(prefix="nvr-rewrite-test-")  # never the real DB
+os.environ["NVR_RUNTIME_DIR"] = tempfile.mkdtemp(prefix="nvr-rewrite-runtime-")      # nor the running server's
+os.environ["NVR_RECORDINGS_DIR"] = tempfile.mkdtemp(prefix="nvr-rewrite-rec-")       # MediaMTX config / recordings
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pydantic  # noqa: E402
@@ -49,6 +51,27 @@ def test_rewrite_rules():
     for cam in (INTERNAL, {**INTERNAL, "public_host": None}, {**INTERNAL, "public_host": ""}, None):
         assert rewrite(sub, cam) == sub
     assert rewrite("urn:uuid:1234", FORWARDED) == "urn:uuid:1234" and rewrite(None, FORWARDED) is None and rewrite("", FORWARDED) == ""
+
+
+def test_added_by_its_public_address():
+    """Dave's camera (2026-10-08): added as 5001.bigview.ai, RTSP 556, ONVIF 8082 with no outside fields; it answered
+    on 8082 and handed back http://192.168.50.37:80/... for every service, so events and PTZ timed out."""
+    dave = {**INTERNAL, "host": "5001.bigview.ai", "onvif_port": 8082, "rtsp_port": 556}
+    assert onvif_soap.auto_forward(dave)
+    assert rewrite("http://192.168.50.37:80/onvif/Events", dave) == "http://5001.bigview.ai:8082/onvif/Events"
+    assert rewrite("http://192.168.50.37/onvif/PTZ", dave) == "http://5001.bigview.ai:8082/onvif/PTZ"
+    assert rewrite("rtsp://192.168.50.37:554/main", dave) == "rtsp://5001.bigview.ai:556/main"
+    assert rewrite("rtsp://192.168.50.37:555/onvifreplay", dave) == "rtsp://5001.bigview.ai:555/onvifreplay"   # replay keeps its port
+    assert rewrite("rtsp://192.168.50.37:555/onvifreplay", {**dave, "public_replay_port": 5555}) == "rtsp://5001.bigview.ai:5555/onvifreplay"
+    # a public IP works the same; a public URL it reports, or its own name, is left alone
+    by_ip = {**dave, "host": "162.190.144.15"}
+    assert rewrite("http://192.168.50.37/onvif/Media", by_ip) == "http://162.190.144.15:8082/onvif/Media"
+    assert rewrite("http://5001.bigview.ai:8082/onvif/Media", dave) == "http://5001.bigview.ai:8082/onvif/Media"
+    assert rewrite("http://8.8.4.4/onvif/Media", dave) == "http://8.8.4.4/onvif/Media"
+    # cameras added by a private address (same LAN, VPN) and explicit outside fields behave as before
+    assert not onvif_soap.auto_forward(INTERNAL) and not onvif_soap.auto_forward(FORWARDED)
+    assert rewrite("http://10.0.0.7/onvif/Events", INTERNAL) == "http://10.0.0.7/onvif/Events"
+    assert onvif_soap.outside(dave) == ("5001.bigview.ai", 8082, 556)
 
 
 def test_outside_and_camera_url():

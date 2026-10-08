@@ -412,7 +412,9 @@ def replay_url(cam: dict, reported: str | None = None) -> str:
     public_replay_port; an empty public_replay_port keeps the port the camera reported)."""
     url = reported or f"rtsp://{cam['host']}:{DEFAULT_REPLAY_PORT}{DEFAULT_REPLAY_PATH}"
     url = re.sub(r"^(rtsps?://)[^@/]*@", r"\1", url.strip())   # never carry user info from the camera
-    return rewrite(url, {**cam, "public_rtsp_port": cam.get("public_replay_port")}) if cam.get("public_host") else url
+    if cam.get("public_host"):
+        return rewrite(url, {**cam, "public_rtsp_port": cam.get("public_replay_port")})
+    return rewrite(url, cam)   # added by its public address: a reported private host is pointed back at it
 
 
 class ReplaySession:
