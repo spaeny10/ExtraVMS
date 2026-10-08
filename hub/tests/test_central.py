@@ -320,7 +320,7 @@ def test_site_scoped_access(world):
     r = sa_.get(f"/api/locations/{a['id']}/central")
     assert r.status_code == 200
     body = r.json()
-    assert body["can_provision"] is False and body["hosts"] == []
+    assert body["can_provision"] is False and body["can_manage"] is False and "hosts" not in body
     assert all("host_id" not in x and "last_error" not in x for x in body["instances"])
     assert sa_.get(f"/api/locations/{b['id']}/central").status_code == 403    # another Site of the same customer
     assert viewer.get(f"/api/locations/{a['id']}/central").status_code == 403  # not a Site admin
@@ -512,7 +512,8 @@ def test_camera_addresses(world, superuser):
         ci = root.post(f"/api/locations/{a['id']}/central", json={"mode": "vpn", "quota_gb": 100, "host_id": host["host"]["id"]}).json()
         made.append(ci)
         n = ci["site_number"]
-        assert ci["camera_network"] == {"subnets": [f"10.20.{n}.0/24"], "public_ips": [], "hosts": [], "resolved": {}}
+        assert ci["camera_network"] == {"subnets": [f"10.20.{n}.0/24"], "public_ips": [], "hosts": [], "auto": {"public_ips": [], "hosts": []},
+                                        "auto_on": True, "resolved": {}, "pending": False, "sync_error": None}
         assert ci["peplink"]["forward_addresses"] == []
         wait(lambda: hosts.get_instance(ci["id"])["ready_at"])
         url = f"/api/locations/{a['id']}/central/{ci['id']}/cameras"
@@ -542,10 +543,11 @@ def test_camera_addresses(world, superuser):
         out = r.json()
         want = {"subnets": ["192.168.105.0/24", f"10.20.{n}.0/24"], "public_ips": ["203.0.113.7"], "hosts": ["cam1.example.net"]}
         assert fh.cmds[-1]["op"] == "set_camera_network" and fh.cmds[-1]["args"] == {"id": ci["id"], **want}
-        assert out["camera_network"] == {**want, "resolved": {"cam1.example.net": ["203.0.113.21"]}}
+        assert out["camera_network"] == {**want, "auto": {"public_ips": [], "hosts": []}, "auto_on": True,
+                                         "resolved": {"cam1.example.net": ["203.0.113.21"]}, "pending": False, "sync_error": None}
         assert out["peplink"]["forward_addresses"] == ["203.0.113.7", "cam1.example.net"]
         assert out["mode"] == "vpn" and out["subnet"] == f"10.20.{n}.0/24"          # the BR1 LAN of the Peplink sheet stays
-        assert hosts.get_instance(ci["id"])["camera_network"] == want
+        assert hosts.get_instance(ci["id"])["camera_network"] == {**want, "auto": {"public_ips": [], "hosts": []}, "applied": want}
         audit = db.rows(sa.select(db.audit_log).where(db.audit_log.c.org_id == org["id"], db.audit_log.c.action.like("central recording camera addresses%")))
         assert len(audit) == 1 and audit[0]["detail"]["to"] == want and audit[0]["detail"]["from"]["subnets"] == [f"10.20.{n}.0/24"]
         assert audit[0]["user_email"] == superuser["email"]
@@ -557,7 +559,7 @@ def test_camera_addresses(world, superuser):
         ci_e = root.post(f"/api/locations/{e['id']}/central", json={"mode": "forward", "public_ip": "93.184.216.40", "quota_gb": 100,
                                                                     "host_id": host["host"]["id"]}).json()
         made.append(ci_e)
-        assert ci_e["camera_network"] == {"subnets": [], "public_ips": ["93.184.216.40"], "hosts": [], "resolved": {}}
+        assert {k: ci_e["camera_network"][k] for k in ("subnets", "public_ips", "hosts")} == {"subnets": [], "public_ips": ["93.184.216.40"], "hosts": []}
         url_e = f"/api/locations/{e['id']}/central/{ci_e['id']}/cameras"
         for clash in ({"subnets": ["192.168.105.128/25"]}, {"public_ips": ["203.0.113.7"]}, {"hosts": ["cam1.example.net"]}):
             assert root.put(url_e, json=clash).status_code == 409, clash
@@ -566,13 +568,13 @@ def test_camera_addresses(world, superuser):
         fh.answer = lambda cmd: {"ok": False, "detail": "subnet 192.168.106.0/24 overlaps the hub address"}
         r = root.put(url, json={"subnets": ["192.168.106.0/24"]})
         assert r.status_code == 502 and "overlaps the hub" in r.text and "nothing was changed" in r.text
-        assert hosts.get_instance(ci["id"])["camera_network"] == want
+        assert hosts.camera_network(hosts.get_instance(ci["id"])) == want
         # the host offline: a clear error, nothing stored
         fh.close()
         wait(lambda: not hosts.registry.online(host["host"]["id"]))
         r = root.put(url, json={"subnets": ["192.168.106.0/24"]})
         assert r.status_code == 502 and "offline" in r.text
-        assert hosts.get_instance(ci["id"])["camera_network"] == want
+        assert hosts.camera_network(hosts.get_instance(ci["id"])) == want
         assert len(db.rows(sa.select(db.audit_log).where(db.audit_log.c.org_id == org["id"],
                                                          db.audit_log.c.action.like("central recording camera addresses%")))) == 1
     finally:

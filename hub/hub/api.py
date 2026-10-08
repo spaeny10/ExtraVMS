@@ -20,7 +20,7 @@ from . import __version__, alerts, auth, backups, cameras, dashboards, db, diges
 from . import fleet as fleet_mod
 from . import find as find_mod
 from . import site_ask
-from . import coverage, geocode, hosts, security, soc, soc_reports
+from . import central_cameras, coverage, geocode, hosts, security, soc, soc_reports
 from fastapi.responses import StreamingResponse
 from .agents import registry
 from .config import settings
@@ -62,6 +62,7 @@ async def _sweeper() -> None:
         try:
             await registry.sweep()
             await hosts.registry.sweep()
+            central_cameras.sweep()   # central instances whose camera addresses wait for their host
             alerts.expire_event_alerts()
             db.run(sa.delete(db.sessions).where(db.sessions.c.expires_at < time.time()))
             db.run(sa.delete(db.claims).where(db.claims.c.expires_at < time.time() - 3600))
@@ -654,6 +655,14 @@ async def update_site(site_id: str, body: SiteIn, u: dict = Depends(user)):
         target = _org_location(site["org_id"], vals["location_id"])
         if not target:
             raise HTTPException(404, "unknown site")
+        # a central recording instance's server: one instance per Site, placed by hub administrators
+        if central_cameras.instance_for_server(site_id):
+            if not u.get("is_super"):
+                raise HTTPException(403, "a central recording server is moved by Axiom Vision (hub administrators) only")
+            busy = db.one(sa.select(db.central_instances.c.id).where(db.central_instances.c.location_id == target["id"],
+                                                                     db.central_instances.c.state.in_(hosts.LIVE_STATES)))
+            if busy:
+                raise HTTPException(409, f"{target['name']} already has central recording: one instance per Site")
     if vals:
         with db.engine().begin() as c:
             c.execute(sa.update(db.sites).where(db.sites.c.id == site_id).values(**vals))
@@ -708,6 +717,8 @@ async def retire_site(site_id: str, body: RetireIn, u: dict = Depends(user)):
     """Hide a site from Fleet, Home, Find, Ask and alerts (or bring it back). Its tunnel and data are untouched."""
     site, _ = auth.site_access(u, site_id)
     auth.require_role(u, site["org_id"], "admin")
+    if central_cameras.instance_for_server(site_id) and not u.get("is_super"):
+        raise HTTPException(403, "This server is the Site's central recording: only Axiom Vision can retire it (Hosts page)")
     fleet_actions.retire(site_id, body.retired)
     _audit(u, site["org_id"], site_id, f"site {'retired' if body.retired else 'restored'}: {site['name']}")
     return _site_card(db.one(sa.select(db.sites).where(db.sites.c.id == site_id)))
@@ -719,6 +730,9 @@ async def revoke_site(site_id: str, u: dict = Depends(user)):
     """Remove a server and everything the hub keeps about it (its Site stays, even if now empty)."""
     site, _ = auth.site_access(u, site_id)
     auth.require_role(u, site["org_id"], "admin")
+    if central_cameras.instance_for_server(site_id):
+        # removing only the server row would orphan the running instance on its host: Hosts page -> Remove does both
+        raise HTTPException(409, "This server is the Site's central recording: remove it from the Hosts page, which also removes it from its host")
     await registry.push(site_id, {"t": "revoked", "reason": "removed at the hub"})
     with db.engine().begin() as c:
         c.execute(sa.delete(db.alerts).where(db.alerts.c.site_id == site_id))
@@ -1426,14 +1440,18 @@ class CentralIn(BaseModel):
     quota_gb: int = Field(ge=10, le=1_000_000)   # the host agent refuses less than 10 GB
     gpu: int | None = Field(None, ge=0, le=64)           # None = the hub picks (an A10 first, the A40 only if alone)
     name: str | None = Field(None, max_length=120)       # the server's name in the Site; default "Central"
+    camera_limit: int | None = Field(None, ge=1, le=hosts.MAX_CAMERA_LIMIT)   # None = no limit (central_cameras.py)
 
 
 class CentralPatch(BaseModel):
-    quota_gb: int = Field(ge=10, le=1_000_000)   # the host agent refuses less than 10 GB
+    """Either or both; camera_limit null = no limit (sent explicitly)."""
+    quota_gb: int | None = Field(None, ge=10, le=1_000_000)   # the host agent refuses less than 10 GB
+    camera_limit: int | None = Field(None, ge=1, le=hosts.MAX_CAMERA_LIMIT)
 
 
 class CentralCameras(BaseModel):
-    """The instance's whole camera allow-list (each list replaces the stored one; hosts.check_camera_network)."""
+    """The instance's Site networks (each list replaces the stored one; hosts.check_camera_network). The firewall is
+    these plus the public addresses its cameras use (central_cameras.py)."""
     subnets: list[str] = Field(default_factory=list, max_length=32)      # LAN / VPN subnets, any protocol
     public_ips: list[str] = Field(default_factory=list, max_length=32)   # routers' public IPs (port forwards, TCP)
     hosts: list[str] = Field(default_factory=list, max_length=32)        # their dynamic DNS names (TCP)
@@ -1448,7 +1466,8 @@ def _central_of(location_id: str, ci_id: str) -> dict:
 
 @app.get("/api/locations/{location_id}/central")
 async def location_central(location_id: str, u: dict = Depends(user)):
-    """The Site's central instance and the Peplink settings sheet: Site admins (and hub administrators)."""
+    """The Site's central instance and the Peplink settings sheet: Site admins (and hub administrators), read-only.
+    Instances are allocated and changed on the Hosts page (hub administrators): can_manage only drives that link."""
     loc, _ = auth.location_access(u, location_id)
     auth.require_role(u, loc["org_id"], "admin")
     rows = hosts.instances(db.central_instances.c.location_id == location_id, hub_admin=bool(u.get("is_super")))
@@ -1458,19 +1477,19 @@ async def location_central(location_id: str, u: dict = Depends(user)):
         for c in db.rows(sa.select(db.cameras.c.server_id, db.cameras.c.camera_id, db.cameras.c.name).where(
                 db.cameras.c.server_id.in_(servers), db.cameras.c.missing_since.is_(None)).order_by(db.cameras.c.first_seen_at)):
             cams.setdefault(c["server_id"], []).append({"id": c["camera_id"], "name": c["name"]})
-    return {"instances": [{**r, "cameras": cams.get(r["server_id"] or "", [])} for r in rows], "can_provision": bool(u.get("is_super")),
-            "hosts": [{"id": h["id"], "name": h["name"], "online": h["online"], "capacity": h["capacity"], "instances": h["instances"]}
-                      for h in hosts.list_hosts()] if u.get("is_super") else []}
+    return {"instances": [{**r, "cameras": cams.get(r["server_id"] or "", [])} for r in rows],
+            "can_provision": False,   # nothing is allocated from a Site page any more (older UIs read this)
+            "can_manage": bool(u.get("is_super"))}
 
 
 @app.post("/api/locations/{location_id}/central")
 async def location_central_create(location_id: str, body: CentralIn, u: dict = Depends(user)):
-    """Provision: answers at once with the instance (phase provisioning); the page polls GET until it is running."""
+    """Allocate (the Hosts page): answers at once with the instance (phase provisioning); the page polls until it runs."""
     auth.require_super(u)
     auth.location_access(u, location_id)
     try:
         ci = await hosts.provision(location_id, body.host_id or None, body.mode, body.subnet, body.public_ip, body.quota_gb, u,
-                                   name=body.name, gpu=body.gpu)
+                                   name=body.name, gpu=body.gpu, camera_limit=body.camera_limit)
     except LookupError as e:
         raise HTTPException(404, str(e))
     except ValueError as e:
@@ -1482,10 +1501,19 @@ async def location_central_create(location_id: str, body: CentralIn, u: dict = D
 
 @app.patch("/api/locations/{location_id}/central/{ci_id}")
 async def location_central_update(location_id: str, ci_id: str, body: CentralPatch, u: dict = Depends(user)):
+    """Storage quota (a set_quota round trip to the host) and / or camera limit (hub only)."""
     auth.require_super(u)
     _central_of(location_id, ci_id)
+    sent = body.model_fields_set
+    if "quota_gb" in sent and body.quota_gb is None:
+        raise HTTPException(400, "the storage quota cannot be empty")
+    if not sent & {"quota_gb", "camera_limit"}:
+        raise HTTPException(400, "nothing to change: send quota_gb and / or camera_limit")
     try:
-        await hosts.set_quota(ci_id, body.quota_gb, u)
+        if "quota_gb" in sent:   # first: the host may refuse it, and then nothing changed
+            await hosts.set_quota(ci_id, body.quota_gb, u)
+        if "camera_limit" in sent:
+            hosts.set_camera_limit(ci_id, body.camera_limit, u)
     except LookupError as e:
         raise HTTPException(404, str(e))
     except ValueError as e:
@@ -1497,8 +1525,9 @@ async def location_central_update(location_id: str, ci_id: str, body: CentralPat
 
 @app.put("/api/locations/{location_id}/central/{ci_id}/cameras")
 async def location_central_cameras(location_id: str, ci_id: str, body: CentralCameras, u: dict = Depends(user)):
-    """Replace the instance's camera allow-list on its host (LAN/VPN subnets, public IPs, dynamic DNS names). Hub
-    administrators only, like the quota. Stored and audited only once the host has applied it."""
+    """Replace the instance's Site networks (LAN/VPN subnets, extra public IPs and dynamic DNS names) and send its host
+    the firewall (those plus its cameras' public addresses). Hub administrators only, like the quota. Stored and
+    audited only once the host has applied it."""
     auth.require_super(u)
     _central_of(location_id, ci_id)
     try:

@@ -7,6 +7,10 @@
    python -m hub geocode [--force]                   locate Sites that have an address but no coordinates (1 request/s)
    python -m hub coverage purge                      delete all stored CoverageMap data and usage (when unsubscribing)
    python -m hub coverage usage                      CoverageMap units used this month against the budget
+   python -m hub central-networks CI_ID [--subnet S]... [--public-ip IP]... [--host NAME]... [--camera-limit N|none]
+                                                     show (no options) or set a central instance's Site networks (replaces
+                                                     all three lists; the running hub sends its host the firewall within
+                                                     a minute) and camera limit
 """
 from __future__ import annotations
 
@@ -37,6 +41,12 @@ def main() -> None:
     gc.add_argument("--force", action="store_true", help="also retry addresses that failed in the last 24 h")
     cv = sub.add_parser("coverage", help="cellular coverage (CoverageMap): purge stored data, show usage")
     cv.add_argument("action", choices=["purge", "usage"])
+    cn = sub.add_parser("central-networks", help="show or set a central instance's Site networks and camera limit")
+    cn.add_argument("instance", help="the instance id (ci_...), as on the Hosts page")
+    cn.add_argument("--subnet", action="append", default=None, help="a LAN / VPN subnet, e.g. 192.168.105.0/24 (repeat for more)")
+    cn.add_argument("--public-ip", action="append", default=None, help="a router's public IP to open before any camera uses it")
+    cn.add_argument("--host", action="append", default=None, help="a router's dynamic DNS name to open before any camera uses it")
+    cn.add_argument("--camera-limit", help="the most cameras the instance may have (1-500), or none")
     co = sub.add_parser("createorg")
     co.add_argument("name")
     co.add_argument("slug")
@@ -109,6 +119,34 @@ def main() -> None:
         r = coverage.usage_report()
         print(f"CoverageMap {'on, plan ' + r['plan'] if r['enabled'] else 'off (HUB_COVERAGEMAP_KEY empty)'}; {r['month']}: {r['units']} unit(s) in "
               f"{r['calls']} call(s), budget {r['budget'] or 'none'}; stored data for {r['stored_sites']} site(s)")
+        return
+    if args.cmd == "central-networks":
+        from . import db, hosts
+        db.engine()
+        ci = hosts.get_instance(args.instance)
+        if not ci or ci["state"] == "deleted":
+            sys.exit("no such central instance (python -m hub central-networks takes the ci_... id from the Hosts page)")
+        who = {"id": None, "email": "(command line)"}
+        try:
+            if args.subnet is not None or args.public_ip is not None or args.host is not None:
+                ci = hosts.store_site_networks(ci["id"], args.subnet or [], args.public_ip or [], args.host or [], who)
+                print("Site networks stored; the running hub sends the host the firewall at its next sweep (host online)")
+            if args.camera_limit is not None:
+                v = args.camera_limit.strip().lower()
+                if v not in ("none", "") and not v.isdigit():
+                    sys.exit("--camera-limit takes a number (1-500) or none")
+                ci = hosts.set_camera_limit(ci["id"], None if v in ("none", "") else int(v), who)
+        except (ValueError, LookupError, hosts.Conflict) as e:
+            sys.exit(str(e))
+        site, auto, (state, applied) = hosts.camera_network(ci), hosts.auto_addresses(ci), hosts.applied_state(ci)
+        show = lambda d: " ".join([*d.get("subnets", []), *d.get("public_ips", []), *d.get("hosts", [])]) or "none"  # noqa: E731
+        print(f"{ci['id']} ({ci['state']}) camera limit: {ci.get('camera_limit') or 'none'}")
+        print(f"  Site networks:      {show(site)}")
+        print(f"  camera addresses:   {show(auto)}")
+        print("  on the host:        " + {"ok": show(applied or {}), "pending": "waiting for the hub to send it",
+                                          "legacy": "as before automatic camera addresses (set the Site networks once to start them)"}[state])
+        if isinstance(ci.get("camera_network"), dict) and ci["camera_network"].get("sync_error"):
+            print(f"  last sync failed:   {ci['camera_network']['sync_error']}")
         return
     if args.cmd == "createorg":
         import time

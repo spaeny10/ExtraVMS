@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
-  cameraEntryError, cameraNetworkError, cameraNetworkOf, cameraNetworkSummary, capacityBars, centralFormError, cleanCameraNetwork, defaultSubnet,
-  fmtGB, fmtMbps, forwardCount, forwardRows, forwardTargets, isHostName, lanGateway, nextSiteNumber, parseIPv4, pct, phaseStep, quotaText,
-  resolvedLines, settling, siteBandwidth, uploadLine,
+  addressParts, allocateFormError, cameraEntryError, cameraNetworkError, cameraNetworkOf, cameraNetworkSummary, camerasText, capacityBars,
+  centralFormError, cleanCameraNetwork, defaultSubnet, fmtGB, fmtMbps, forwardCount, forwardRows, forwardTargets, isHostName, lanGateway,
+  nextSiteNumber, overLimit, parseCameraLimit, parseIPv4, pct, phaseStep, quotaText, resolvedLines, settling, siteBandwidth, sitesWithoutCentral,
+  uploadLine,
 } from "./central";
-import type { ServerSummary } from "./api";
+import type { HubSitesOrg, ServerSummary, Site } from "./api";
 
 const srv = (bandwidth?: ServerSummary["bandwidth"], retired = false) => ({ summary: { bandwidth } as ServerSummary, retired_at: retired ? 1 : null });
 
@@ -65,6 +66,7 @@ describe("VPN sheet and form", () => {
     expect(centralFormError({ mode: "vpn", public_ip: "", subnet: "8.8.8.0/24", quota_gb: "2000" })).toMatch(/private/);
     expect(centralFormError({ mode: "forward", public_ip: "", subnet: "", quota_gb: "2000" })).toMatch(/public IP/);
     expect(centralFormError({ mode: "forward", public_ip: "93.184.216.34", subnet: "", quota_gb: "0" })).toMatch(/quota/);
+    expect(centralFormError({ mode: "vpn", public_ip: "", subnet: "", quota_gb: "9" })).toMatch(/at least 10/);   // the host agent's minimum
   });
 });
 
@@ -142,5 +144,49 @@ describe("host capacity from a real agent", () => {
     const bars = capacityBars({ cpus: 80, load: [0.31, 0.21, 0.4], ram_gb: { total: 791.2, free: 707.5 } });
     expect(bars[0].text).toBe("load 0.3 on 80 cores");
     expect(capacityBars({ cpus: 8, load: 2 })[0].used).toBe(2);
+  });
+});
+
+describe("camera limit", () => {
+  it("cameras against the limit", () => {
+    expect(camerasText(3, 5)).toBe("3 of 5");
+    expect(camerasText(0, null)).toBe("0 (no limit)");
+    expect(camerasText(undefined, 2)).toBe("0 of 2");
+    expect(overLimit(4, 3)).toBe(true);
+    expect(overLimit(3, 3)).toBe(false);
+    expect(overLimit(9, null)).toBe(false);
+  });
+  it("the limit field: blank = none, 1-500", () => {
+    expect(parseCameraLimit("")).toEqual({ value: null, error: null });
+    expect(parseCameraLimit(" 12 ")).toEqual({ value: 12, error: null });
+    for (const bad of ["0", "501", "2.5", "-1", "ten"]) expect(parseCameraLimit(bad).error).toMatch(/1 to 500/);
+  });
+});
+
+describe("allocate form", () => {
+  const site = (id: string, name: string) => ({ id, name } as Site);
+  const orgs = [{ org: { id: "o1", name: "Acme" }, locations: [site("l1", "Yard"), site("l2", "Annex"), site("l3", "Depot")], unassigned: [] }] as HubSitesOrg[];
+  it("offers the customer's Sites without a live instance", () => {
+    const inst = [{ location_id: "l1", state: "running" as const }, { location_id: "l3", state: "deleted" as const }];
+    expect(sitesWithoutCentral(orgs, "o1", inst)).toEqual([{ id: "l2", name: "Annex" }, { id: "l3", name: "Depot" }]);
+    expect(sitesWithoutCentral(orgs, "nope", [])).toEqual([]);
+  });
+  const ok = { org: "o1", site: "l2", mode: "vpn" as const, subnet: "10.20.7.0/24", public_ip: "", quota_gb: "2000", camera_limit: "5" };
+  it("enables Allocate only when the hub would accept it", () => {
+    expect(allocateFormError(ok, 8000)).toBeNull();
+    expect(allocateFormError({ ...ok, camera_limit: "" }, null)).toBeNull();
+    expect(allocateFormError({ ...ok, org: "" }, 8000)).toMatch(/customer/);
+    expect(allocateFormError({ ...ok, site: "" }, 8000)).toMatch(/Site/);
+    expect(allocateFormError({ ...ok, camera_limit: "0" }, 8000)).toMatch(/camera limit/);
+    expect(allocateFormError({ ...ok, quota_gb: "9000" }, 8000)).toBe("The host has room for 8.0 TB");
+    expect(allocateFormError({ ...ok, mode: "forward", public_ip: "" }, 8000)).toMatch(/public IP/);
+    expect(allocateFormError({ ...ok, mode: "forward", public_ip: "not an address" }, 8000)).toMatch(/IP address or a DNS name/);
+    expect(allocateFormError({ ...ok, mode: "forward", public_ip: "yard.dyn.example.net" }, 8000)).toBeNull();
+  });
+  it("splits the firewall into Site networks and the cameras' own addresses", () => {
+    const ci = { mode: "vpn" as const, subnet: "10.20.7.0/24", public_ip: null,
+      camera_network: { subnets: ["10.20.7.0/24"], public_ips: ["203.0.113.7"], hosts: [], auto: { public_ips: ["203.0.113.7", "93.184.216.77"], hosts: ["yard.dyn.example.net"] } } };
+    expect(addressParts(ci)).toEqual({ site: ["10.20.7.0/24", "203.0.113.7"], cameras: ["93.184.216.77", "yard.dyn.example.net"] });
+    expect(addressParts({ mode: "vpn", subnet: "10.20.8.0/24", public_ip: null })).toEqual({ site: ["10.20.8.0/24"], cameras: [] });
   });
 });

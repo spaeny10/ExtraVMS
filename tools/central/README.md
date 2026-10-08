@@ -154,7 +154,7 @@ The agent runs on the host, not in a container, because it drives `docker`, `nft
 
 ## 2. Instances
 
-### Create (hub: Site → Servers → Add central recording; or by hand)
+### Create (hub: Hosts → a host → Allocate instance; or by hand)
 
 The hub sends `create_instance` with a one-time enrollment token bound to the Site. By hand (Phase 1, before the hub's host pages exist), with the token from the hub saved in a file:
 ```bash
@@ -205,7 +205,25 @@ Each instance's firewall lets it reach exactly its **camera addresses**, three l
 | `public_ips` | Public IPs of site routers that port-forward to their cameras (PEPLINK.md, mode 2) | TCP (all ports, or `forward_tcp_ports` in host.json) |
 | `hosts` | Dynamic DNS names of such routers | TCP, to whatever each name resolves to |
 
-`mode` (`vpn` / `forward`) only says how the Site mainly connects (the hub's Peplink sheet); the firewall allows the union of the three lists, so one Site can record cameras on a LAN or VPN subnet and remote cameras behind port forwards at the same time. `create-instance` fills them from `--subnet`, `--public-ip` and `--host`; change them later on the hub (Site → Servers → Central recording → **Camera addresses…**, hub administrators) or here:
+`mode` (`vpn` / `forward`) only says how the Site mainly connects (the hub's Peplink sheet); the firewall allows the union of the three lists, so one Site can record cameras on a LAN or VPN subnet and remote cameras behind port forwards at the same time. `create-instance` fills them from `--subnet`, `--public-ip` and `--host`.
+
+**On the hub, the lists come from two places** (hub `hosts.py` and `central_cameras.py`); the hub sends the host their union with the same `set_camera_network`:
+
+| Part | Who sets it | What |
+|---|---|---|
+| Site networks | hub administrators: Hosts → Central instances → **Site networks…** (or `python -m hub central-networks <ci_id> --subnet …` on the hub) | the Site's LAN / VPN subnets, and router public IPs / DNS names to open before any camera uses them |
+| Automatic | nobody: the hub, from the instance's own camera list | the public IP or DNS name each enabled camera connects to (its `public_host`, else its `host`) |
+
+The Site's admins add cameras on the instance's console like on any server (Customer admin role, as for any camera change); the hub checks each camera create or update before it reaches the instance, for everyone:
+- a **private** address (10/8, 172.16/12, 192.168/16, 100.64/10) must be inside one of the instance's Site networks, else 400 "192.168.7.20 is outside this Site's camera network 10.20.7.0/24" (so one customer never reaches another's VPN subnet or the host's own networks);
+- a **public IP or DNS name** (a port-forward camera's `public_host`) is allowed and opened automatically, unless it is the hub's, the datacenter's or a host's own address, or another live instance's camera address (409); never IPv6, loopback, link-local, multicast or a bare name like `vllm`;
+- the instance's **camera limit** (set when it is allocated, changed with **Change camera limit…**; blank = none): a new camera, or one switched on again, beyond it is refused (409 "This Site's central recording allows 5 cameras; ask Axiom Vision to raise it."). Lowering the limit keeps the cameras it has.
+
+After a camera change goes through (and whenever the instance's heartbeat shows its camera list changed), the hub reads the instance's `GET /api/cameras` over its tunnel (no passwords), recomputes the automatic part and, if the union differs from what the host has, sends it (about 10 s later, one change per burst), audited as "central recording camera addresses: <Site>" by "(automatic: camera addresses)". Disabling or removing the last camera at an address closes it again. A host that is offline or refuses is retried every 30 s; the Hosts page shows "camera addresses not applied yet".
+
+An instance created before automatic addresses keeps its firewall as it is (the hub may not know everything its host allows) until a hub administrator saves its Site networks once; from then on it follows its cameras.
+
+By hand on the host (the hub's next change replaces these lists with its own union):
 
 ```bash
 axiom_host.py set-camera-network --id acme-gate --subnet 192.168.105.0/24 --subnet 10.20.7.0/24 \

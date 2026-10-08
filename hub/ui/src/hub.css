@@ -468,3 +468,8 @@ button.sa-ref-row:hover, .sa-ref-row.hot { background: var(--panel-2); border-co
   .sa-log { padding: 10px; }
   .site-ask .ask-msg { max-width: 100%; }
 }
+/* Hosts page dialogs (Allocate instance, Site networks, Remove): the body under the modal head */
+.modal.central-dialog { padding-bottom: 14px; }
+.modal.central-dialog > :not(.modal-head) { margin-left: 16px; margin-right: 16px; }
+.modal.central-dialog .field > span { display: block; }
+.central-row-actions { display: flex; flex-wrap: wrap; gap: 4px; }

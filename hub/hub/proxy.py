@@ -13,7 +13,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 
-from . import auth, db, security
+from . import auth, central_cameras, db, security
 from .agents import TooManyStreams, registry
 from .config import settings
 from .roles import allows, required_role
@@ -47,7 +47,16 @@ async def proxy_api(site_id: str, path: str, request: Request):
     conn = registry.get(site_id)
     if conn is None:
         raise HTTPException(503, "site offline")
-    headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP and not k.lower().startswith("x-hub-")}
+    # a central recording instance: camera limit and address rules before the change reaches it (central_cameras.py)
+    central = central_cameras.instance_for_server(site_id) if central_cameras.changes_cameras(request.method, api_path) else None
+    reserved: list[str] = []
+    kind = central_cameras.write_kind(request.method, api_path) if central else None
+    if kind:
+        try:
+            reserved = await central_cameras.check(central, kind, api_path, await request.body())
+        except central_cameras.Refused as e:
+            raise HTTPException(e.status, e.detail)
+    headers ={k: v for k, v in request.headers.items() if k.lower() not in HOP and not k.lower().startswith("x-hub-")}
     headers.update({"x-hub-user": u["email"], "x-hub-role": role, "x-hub-site": site_id,
                     "x-forwarded-for": request.client.host if request.client else "", "x-forwarded-host": request.headers.get("host", ""),
                     "x-forwarded-proto": request.url.scheme,
@@ -70,6 +79,11 @@ async def proxy_api(site_id: str, path: str, request: Request):
     if s.aborted or s.status is None:
         conn.finish(s)
         raise HTTPException(503, f"site aborted: {s.aborted or 'no response'}")
+    if central:
+        if 200 <= s.status < 300:
+            central_cameras.after_write(site_id)   # the firewall follows the instance's cameras
+        else:
+            central_cameras.release(site_id, reserved)
     # allow-listed headers only, never an active content type, always nosniff + a sandboxing CSP (security.py)
     status, resp_headers = s.status, security.filter_proxy_headers(s.headers, site_id)
 

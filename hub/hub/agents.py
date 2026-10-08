@@ -18,7 +18,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from tunnelproto import CHUNK, WINDOW, Stream, chunk, decode, encode, split
 
-from . import alerts, cameras, db, hosts, soc, turn
+from . import alerts, cameras, central_cameras, db, hosts, soc, turn
 from .config import settings
 
 log = logging.getLogger("hub.agents")
@@ -138,6 +138,14 @@ def _sync_cameras(site: dict, cams: list, disabled, source: str) -> None:
         cameras.sync(site, cams, full=True, disabled=disabled if isinstance(disabled, list) else None, source=source)
     except Exception:
         log.exception("cameras registry sync for %s", site.get("id"))
+
+
+def _central_cameras(conn: "AgentConn") -> None:
+    """A central instance's camera list changed: its firewall follows (central_cameras.py); never breaks the tunnel."""
+    try:
+        central_cameras.on_heartbeat(conn.site_id, conn.summary or {})
+    except Exception:
+        log.exception("central camera addresses for %s", conn.site_id)
 
 
 def _soc(conn: "AgentConn", fn, arg) -> None:
@@ -261,6 +269,7 @@ class AgentRegistry:
                         version=conn.summary.get("version") or conn.site.get("version")))
                     if isinstance(conn.summary.get("cameras"), list):   # an empty summary says nothing about cameras
                         _sync_cameras(conn.site, conn.summary["cameras"], conn.summary.get("disabled"), "heartbeat")
+                        _central_cameras(conn)
                     alerts.on_heartbeat(conn.site, conn.summary, skew)
                     _soc(conn, soc.on_attention, conn.summary.get("attention"))
                     await self._refresh_turn(conn)

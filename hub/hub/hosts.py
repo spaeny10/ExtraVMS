@@ -20,10 +20,18 @@ rest like a server's device token) and keeps the socket open. Protocol (JSON tex
 
 A central instance is one isolated server container recording one customer Site's cameras, over SpeedFusion (mode
 vpn: the BR1's LAN is 10.20.<site_number>.0/24) or port forwards locked to the datacenter's IP (mode forward: the
-Site's public IP). Its camera allow-list (camera_network: LAN/VPN subnets, public IPs, dynamic DNS names) can be
-changed afterwards, so one Site can mix cameras on a routed LAN with remote ones behind port forwards. provision() places it (host with room, GPU), mints a single-use enrollment token bound to the
-Site, and asks the host to create it; the instance then dials /agent with `Authorization: Enroll <token>` and
-becomes an ordinary server of that Site (agents.py -> enroll_check / enroll_consume). Every change is audited.
+Site's public IP). Hub administrators allocate it from the Hosts page: provision() places it (the chosen host, a GPU)
+with a storage quota and an optional camera limit, mints a single-use enrollment token bound to the Site, and asks the
+host to create it; the instance then dials /agent with `Authorization: Enroll <token>` and becomes an ordinary server
+of that Site (agents.py -> enroll_check / enroll_consume).
+
+Its camera allow-list on the host is the union of two parts (camera_network):
+  Site networks  {subnets, public_ips, hosts} a hub administrator sets ("Site networks…"): the Site's LAN / VPN
+                 subnets, and router addresses to open before any camera uses them
+  auto           {public_ips, hosts}: the public IPs and DNS names the instance's cameras use (port forwards), kept up
+                 to date by central_cameras.py from the instance's own camera list
+so the Site's admins add cameras like on any server and their addresses open by themselves (central_cameras.py also
+holds the camera limit and the address rules). Every change is audited.
 """
 from __future__ import annotations
 
@@ -37,7 +45,7 @@ import time
 import sqlalchemy as sa
 from fastapi import WebSocket, WebSocketDisconnect
 
-from . import alerts, db
+from . import alerts, cameras, db
 from .config import settings
 
 log = logging.getLogger("hub.hosts")
@@ -295,6 +303,8 @@ def host_out(h: dict, instances: list[dict] | None = None, open_alerts: dict | N
             "last_seen_at": h["last_seen_at"], "hostname": h["hostname"], "version": h["version"], "capacity": h["capacity"] or None,
             "notes": h["notes"], "fusionhub": h["fusionhub"], "agent_ip": h["agent_ip"], "instances": len(mine),
             "quota_gb": sum(int(i["quota_gb"] or 0) for i in mine),
+            # what a new instance's storage quota may be: the largest disk's free space minus what its instances may still grow into
+            "room_gb": round(host_room(h)["room_gb"], 1),
             "offline_since": (open_alerts or {}).get(h["id"])}
 
 
@@ -515,14 +525,91 @@ def _split_public(public: str | None) -> dict:
 
 
 def camera_network(ci: dict) -> dict:
-    """{subnets, public_ips, hosts} the instance's firewall allows. Rows from before camera networks have none
-    stored: what the host's create_instance allowed then (vpn: the subnet; forward: the public address)."""
+    """The instance's Site networks {subnets, public_ips, hosts}: what a hub administrator set. Rows from before camera
+    networks have none stored: what the host's create_instance allowed then (vpn: the subnet; forward: the public
+    address)."""
     cn = ci.get("camera_network")
     if isinstance(cn, dict):
         return {k: [x for x in (cn.get(k) or []) if isinstance(x, str)] for k in CAMERA_KEYS}
     if ci.get("mode") == "vpn":
         return {"subnets": [ci["subnet"]] if ci.get("subnet") else [], "public_ips": [], "hosts": []}
     return {"subnets": [], **_split_public(ci.get("public_ip"))}
+
+
+AUTO_KEYS = ("public_ips", "hosts")
+
+
+def auto_addresses(ci: dict) -> dict:
+    """{public_ips, hosts} the instance's cameras use (central_cameras.sync keeps it up to date)."""
+    cn = ci.get("camera_network")
+    auto = cn.get("auto") if isinstance(cn, dict) else None
+    auto = auto if isinstance(auto, dict) else {}
+    return {k: [x for x in (auto.get(k) or []) if isinstance(x, str)] for k in AUTO_KEYS}
+
+
+def merge_network(site: dict, auto: dict) -> dict:
+    """The firewall allow-list: the Site networks plus the cameras' own public addresses, duplicates dropped."""
+    out = {"subnets": list(dict.fromkeys(site.get("subnets") or []))}
+    for k in AUTO_KEYS:
+        out[k] = list(dict.fromkeys([*(site.get(k) or []), *(auto.get(k) or [])]))
+    return out
+
+
+def firewall(ci: dict) -> dict:
+    """{subnets, public_ips, hosts} the instance's firewall allows (or will, once the host has it)."""
+    return merge_network(camera_network(ci), auto_addresses(ci))
+
+
+def same_network(a: dict | None, b: dict | None) -> bool:
+    return a is not None and b is not None and all(sorted(a.get(k) or []) == sorted(b.get(k) or []) for k in CAMERA_KEYS)
+
+
+def applied_state(ci: dict) -> tuple[str, dict | None]:
+    """What the host was last sent: ("ok", lists), ("pending", None) = send at the next sync, or ("legacy", Site
+    networks) for a row from before automatic camera addresses: never pushed automatically until a hub administrator
+    saves its Site networks once (its host may allow something the hub never stored)."""
+    cn = ci.get("camera_network")
+    if not isinstance(cn, dict) or "applied" not in cn:
+        return "legacy", camera_network(ci)
+    a = cn.get("applied")
+    if not isinstance(a, dict):
+        return "pending", None
+    return "ok", {k: [x for x in (a.get(k) or []) if isinstance(x, str)] for k in CAMERA_KEYS}
+
+
+def taken_elsewhere(ci_id: str | None) -> list[tuple[dict, dict]]:
+    """[(instance row, its firewall lists)] for every other live instance: one Site's addresses are never another's."""
+    q = sa.select(db.central_instances).where(db.central_instances.c.state.in_(LIVE_STATES))
+    if ci_id:
+        q = q.where(db.central_instances.c.id != ci_id)
+    return [(o, firewall(o)) for o in db.rows(q)]
+
+
+def network_conflict(ci_id: str | None, new: dict) -> str | None:
+    """Why `new` ({subnets, public_ips, hosts}) clashes with another live instance's addresses, or None."""
+    mine = [ipaddress.ip_network(s) for s in new.get("subnets") or []]
+    for _, theirs in taken_elsewhere(ci_id):
+        for s in mine:
+            if any(s.overlaps(ipaddress.ip_network(t)) for t in theirs["subnets"]):
+                return f"{s} overlaps another Site's camera subnet: every Site needs its own"
+        for p in new.get("public_ips") or []:
+            if p in theirs["public_ips"]:
+                return f"{p} is already a camera address of another Site"
+        for h in new.get("hosts") or []:
+            if h in theirs["hosts"]:
+                return f"{h} is already a camera address of another Site"
+    return None
+
+
+_net_locks: dict[str, asyncio.Lock] = {}
+
+
+def network_lock(ci_id: str) -> asyncio.Lock:
+    """One change to an instance's camera network at a time (an administrator's edit, an automatic sync)."""
+    lk = _net_locks.get(ci_id)
+    if lk is None:
+        lk = _net_locks[ci_id] = asyncio.Lock()
+    return lk
 
 
 # ---------------------------------------------------------------- provisioning
@@ -562,10 +649,11 @@ _tasks: set[asyncio.Task] = set()
 
 
 async def provision(location_id: str, host_id: str | None, mode: str, subnet: str | None, public_ip: str | None, quota_gb: int,
-                    by_user: dict | None, *, name: str | None = None, gpu: int | None = None, wait: bool = False) -> dict:
+                    by_user: dict | None, *, name: str | None = None, gpu: int | None = None, camera_limit: int | None = None,
+                    wait: bool = False) -> dict:
     """Place a central instance for a Site and ask its host to create it. Returns the new row at once (state
     provisioning); the host's answer arrives in the background (wait=True: before returning). ValueError = bad input,
-    LookupError = unknown Site or host, Conflict = cannot be placed now."""
+    LookupError = unknown Site or host, Conflict = cannot be placed now. camera_limit: None = no limit."""
     loc = db.one(sa.select(db.locations).where(db.locations.c.id == location_id))
     if not loc:
         raise LookupError("unknown site")
@@ -573,6 +661,7 @@ async def provision(location_id: str, host_id: str | None, mode: str, subnet: st
         raise ValueError("mode must be vpn or forward")
     if not isinstance(quota_gb, int) or quota_gb < 10:   # axiom_host refuses less than 10 GB
         raise ValueError("the storage quota must be at least 1 GB")
+    _check_limit(camera_limit)
     public = _check_public(public_ip) if public_ip and public_ip.strip() else None
     if mode == "forward" and not public:
         raise ValueError("port-forward mode needs the Site's public IP (the BR1's WAN address)")
@@ -595,8 +684,11 @@ async def provision(location_id: str, host_id: str | None, mode: str, subnet: st
         gpu = pick_gpu(host.get("capacity"), _assigned_gpus(host["id"]))
     elif gpu not in {g["index"] for g in _gpus(host.get("capacity"))}:
         raise ValueError(f"host {host['name']} has no GPU {gpu}")
-    others = db.rows(sa.select(db.central_instances.c.subnet).where(db.central_instances.c.state.in_(LIVE_STATES),
-                                                                    db.central_instances.c.subnet.is_not(None)))
+    # every other Site's subnets (its Site networks, not only the one it was created with) and public addresses
+    others = [{"subnet": s} for _, fw in taken_elsewhere(None) for s in fw["subnets"]]
+    clash = network_conflict(None, _split_public(public)) if public else None
+    if clash:
+        raise Conflict(clash)
     ci = None
     for _ in range(5):   # two provisions at once may pick the same number: the unique index sends one round again
         try:
@@ -608,13 +700,16 @@ async def provision(location_id: str, host_id: str | None, mode: str, subnet: st
                     for o in others:
                         if ipaddress.ip_network(o["subnet"]).overlaps(mine):
                             raise Conflict(f"{sub} overlaps another Site's camera subnet ({o['subnet']})")
+                site_nets = {"subnets": [sub] if sub else [], **_split_public(public)}
                 t = time.time()
                 ci = {"id": db.new_id("ci_"), "host_id": host["id"], "location_id": location_id, "org_id": loc["org_id"], "server_id": None,
                       "name": (name or "").strip()[:120] or "Central", "mode": mode, "subnet": sub, "public_ip": public, "site_number": n,
                       "quota_gb": quota_gb, "gpu": gpu, "state": "provisioning", "last_error": None, "created_at": t,
                       "created_by": (by_user or {}).get("id"), "updated_at": t, "ready_at": None, "info": None, "info_at": None,
-                      # what the host's create_instance allows: the subnet and the public address, whatever the mode
-                      "camera_network": {"subnets": [sub] if sub else [], **_split_public(public)}}
+                      "camera_limit": camera_limit,
+                      # the Site networks = what the host's create_instance allows: the subnet and the public address,
+                      # whatever the mode; the cameras' own public addresses are added (auto) as they are set up
+                      "camera_network": {**site_nets, "auto": {"public_ips": [], "hosts": []}, "applied": site_nets}}
                 c.execute(db.central_instances.insert().values(**ci))
             break
         except sa.exc.IntegrityError:
@@ -627,7 +722,7 @@ async def provision(location_id: str, host_id: str | None, mode: str, subnet: st
             "quota_gb": quota_gb, "gpu": gpu, "enroll_token": token, "hub_url": hub_agent_url(), "vlm_url": settings.central_vlm_url}
     _audit(by_user, loc["org_id"], None, f"central recording provisioning: {loc['name']} on {host['name']}",
            {"location_id": location_id, "instance_id": ci["id"], "host_id": host["id"], "mode": mode, "subnet": ci["subnet"],
-            "public_ip": public, "site_number": ci["site_number"], "quota_gb": quota_gb, "gpu": gpu})
+            "public_ip": public, "site_number": ci["site_number"], "quota_gb": quota_gb, "gpu": gpu, "camera_limit": camera_limit})
     task = asyncio.create_task(_create(ci, args, loc, host), name=f"central-create-{ci['id']}")
     _tasks.add(task)
     task.add_done_callback(_tasks.discard)
@@ -710,38 +805,79 @@ async def set_quota(ci_id: str, quota_gb: int, by_user: dict | None) -> dict:
     return get_instance(ci_id) or ci
 
 
-async def set_camera_network(ci_id: str, subnets, public_ips, names, by_user: dict | None) -> dict:
-    """Replace the instance's camera allow-list on its host (set_camera_network), then store and audit it. ValueError
-    = bad input, Conflict = another Site's instance already has that address, HostError = the host is offline or
-    refused (nothing is stored then)."""
+MAX_CAMERA_LIMIT = 500
+
+
+def _check_limit(limit) -> None:
+    if limit is not None and (not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_CAMERA_LIMIT):
+        raise ValueError(f"the camera limit must be 1-{MAX_CAMERA_LIMIT}, or none")
+
+
+def set_camera_limit(ci_id: str, limit: int | None, by_user: dict | None) -> dict:
+    """The most cameras the instance may have (None = no limit), enforced at the hub (central_cameras.py). Lowering it
+    below the cameras it has keeps them recording; only new ones are refused."""
+    ci = get_instance(ci_id)
+    if not ci or ci["state"] == "deleted":
+        raise LookupError("unknown central instance")
+    _check_limit(limit)
+    if ci.get("camera_limit") == limit:
+        return ci
+    _set(ci_id, camera_limit=limit)
+    loc = db.one(sa.select(db.locations.c.name).where(db.locations.c.id == ci["location_id"])) or {"name": ci["location_id"]}
+    show = lambda v: "no limit" if v is None else str(v)  # noqa: E731
+    _audit(by_user, ci["org_id"], ci["server_id"], f"central recording camera limit: {loc['name']} {show(ci.get('camera_limit'))} -> {show(limit)}",
+           {"location_id": ci["location_id"], "instance_id": ci_id, "from": ci.get("camera_limit"), "to": limit})
+    return get_instance(ci_id) or ci
+
+
+def _site_networks(ci_id: str, subnets, public_ips, names) -> tuple[dict, dict, dict, dict]:
+    """(instance, checked Site networks, its cameras' automatic addresses, their union = the firewall). ValueError =
+    bad input or too many in all, Conflict = another Site's instance already has one of them."""
     ci = get_instance(ci_id)
     if not ci or ci["state"] in ("deleting", "deleted"):
         raise LookupError("unknown central instance")
     new = check_camera_network(subnets, public_ips, names)
-    mine = [ipaddress.ip_network(s) for s in new["subnets"]]
-    for o in db.rows(sa.select(db.central_instances).where(db.central_instances.c.state.in_(LIVE_STATES),
-                                                           db.central_instances.c.id != ci_id)):
-        theirs = camera_network(o)
-        for s in mine:
-            if any(s.overlaps(ipaddress.ip_network(t)) for t in theirs["subnets"]):
-                raise Conflict(f"{s} overlaps another Site's camera subnet: every Site needs its own")
-        for p in new["public_ips"]:
-            if p in theirs["public_ips"]:
-                raise Conflict(f"{p} is already a camera address of another Site")
-        for h in new["hosts"]:
-            if h in theirs["hosts"]:
-                raise Conflict(f"{h} is already a camera address of another Site")
-    res = await registry.command(ci["host_id"], "set_camera_network", {"id": ci_id, **new})
-    if not res.get("ok"):
-        raise HostError(str(res.get("detail") or "the host refused"))
-    old = camera_network(ci)
-    vals: dict = {"camera_network": new}
-    if isinstance(res.get("instance"), dict):   # the names' resolved addresses, until the next heartbeat
-        vals |= {"info": {**(ci.get("info") or {}), "host_ips": res["instance"].get("host_ips")}, "info_at": time.time()}
-    _set(ci_id, **vals)
+    auto = auto_addresses(ci)
+    try:
+        union = check_camera_network(*(merge_network(new, auto)[k] for k in CAMERA_KEYS))
+    except ValueError as e:
+        raise ValueError(f"{e} (with the {sum(len(v) for v in auto.values())} addresses its cameras use)") from None
+    clash = network_conflict(ci_id, new)
+    if clash:
+        raise Conflict(clash)
+    return ci, new, auto, union
+
+
+async def set_camera_network(ci_id: str, subnets, public_ips, names, by_user: dict | None) -> dict:
+    """Replace the instance's Site networks (what "Site networks…" edits) and send its host the firewall: those plus
+    the public addresses its cameras use. Stored and audited only once the host applied it. ValueError = bad input,
+    Conflict = another Site's instance already has that address, HostError = the host is offline or refused (nothing
+    is stored then). A row from before automatic camera addresses gets them from here on."""
+    async with network_lock(ci_id):
+        ci, new, auto, union = _site_networks(ci_id, subnets, public_ips, names)
+        res = await registry.command(ci["host_id"], "set_camera_network", {"id": ci_id, **union})
+        if not res.get("ok"):
+            raise HostError(str(res.get("detail") or "the host refused"))
+        old = camera_network(ci)
+        vals: dict = {"camera_network": {**new, "auto": auto, "applied": union}}
+        if isinstance(res.get("instance"), dict):   # the names' resolved addresses, until the next heartbeat
+            vals |= {"info": {**(ci.get("info") or {}), "host_ips": res["instance"].get("host_ips")}, "info_at": time.time()}
+        _set(ci_id, **vals)
     loc = db.one(sa.select(db.locations.c.name).where(db.locations.c.id == ci["location_id"])) or {"name": ci["location_id"]}
     _audit(by_user, ci["org_id"], ci["server_id"], f"central recording camera addresses: {loc['name']}",
-           {"location_id": ci["location_id"], "instance_id": ci_id, "from": old, "to": new})
+           {"location_id": ci["location_id"], "instance_id": ci_id, "from": old, "to": new, "firewall": union})
+    return get_instance(ci_id) or ci
+
+
+def store_site_networks(ci_id: str, subnets, public_ips, names, by_user: dict | None) -> dict:
+    """`python -m hub central-networks`: store the Site networks without talking to the host (the command line has no
+    host connection). The running hub sends the host the firewall at its next sweep (every 30 s, host online)."""
+    ci, new, auto, union = _site_networks(ci_id, subnets, public_ips, names)
+    old = camera_network(ci)
+    _set(ci_id, camera_network={**new, "auto": auto, "applied": None})
+    loc = db.one(sa.select(db.locations.c.name).where(db.locations.c.id == ci["location_id"])) or {"name": ci["location_id"]}
+    _audit(by_user, ci["org_id"], ci["server_id"], f"central recording camera addresses: {loc['name']}",
+           {"location_id": ci["location_id"], "instance_id": ci_id, "from": old, "to": new, "firewall": union, "pending": True})
     return get_instance(ci_id) or ci
 
 
@@ -856,6 +992,8 @@ def phase(ci: dict) -> str:
 
 def instance_out(ci: dict, names: dict, hub_admin: bool) -> dict:
     info = ci.get("info") or {}
+    state, _ = applied_state(ci)
+    cn = ci["camera_network"] if isinstance(ci.get("camera_network"), dict) else {}
     host = names["host"].get(ci["host_id"]) or {}
     server = names["server"].get(ci["server_id"]) if ci["server_id"] else None
     gpu_name = next((g.get("name") for g in _gpus(host.get("capacity")) if g["index"] == ci["gpu"]), None)
@@ -865,12 +1003,18 @@ def instance_out(ci: dict, names: dict, hub_admin: bool) -> dict:
            "public_ip": ci["public_ip"], "site_number": ci["site_number"], "quota_gb": ci["quota_gb"],
            "used_gb": info.get("used_gb") if isinstance(info.get("used_gb"), (int, float)) else None,
            "state": ci["state"], "phase": phase(ci), "created_at": ci["created_at"], "ready_at": ci.get("ready_at"), "info_at": ci.get("info_at"),
-           # resolved: {DNS name: [IPv4]} as the host last resolved them (the firewall allows exactly those)
-           "camera_network": {**camera_network(ci), "resolved": info["host_ips"] if isinstance(info.get("host_ips"), dict) else {}},
+           "camera_limit": ci.get("camera_limit"), "camera_count": (names.get("cams") or {}).get(ci["server_id"] or "", (0, 0))[0],
+           # subnets / public_ips / hosts: the Site networks; auto: the public addresses its cameras use (the firewall
+           # allows both; auto_on false = a row from before automatic addresses, see applied_state); resolved: {DNS
+           # name: [IPv4]} as the host last resolved them (the firewall allows exactly those)
+           "camera_network": {**camera_network(ci), "auto": auto_addresses(ci), "auto_on": state != "legacy",
+                              "resolved": info["host_ips"] if isinstance(info.get("host_ips"), dict) else {}},
            "peplink": peplink(ci, host)}
     if hub_admin:
         out |= {"host_id": ci["host_id"], "host_name": host.get("name"), "host_online": registry.online(ci["host_id"]),
                 "gpu": ci["gpu"], "gpu_name": gpu_name, "last_error": ci["last_error"], "host_state": info.get("state")}
+        # not on the host yet: waiting for the next sync, or the last one failed (sync_error says why)
+        out["camera_network"] |= {"pending": state == "pending" or bool(cn.get("sync_error")), "sync_error": cn.get("sync_error")}
     return out
 
 
@@ -882,7 +1026,7 @@ def peplink(ci: dict, host: dict) -> dict:
             gw = str(next(ipaddress.ip_network(ci["subnet"]).hosts()))
         except (ValueError, StopIteration):
             gw = None
-    cn = camera_network(ci)
+    cn = firewall(ci)
     return {"mode": ci["mode"], "subnet": ci.get("subnet"), "lan_gateway": gw, "public_ip": ci.get("public_ip"),
             # the routers whose port forwards the instance reaches: the port-forward table applies to each
             "forward_addresses": [*cn["public_ips"], *cn["hosts"]],
@@ -898,6 +1042,7 @@ def instances(where=None, hub_admin: bool = True, include_deleted: bool = False)
         q = q.where(db.central_instances.c.state != "deleted")
     rows = db.rows(q)
     names = _names(rows)
+    names["cams"] = cameras.counts([r["server_id"] for r in rows if r["server_id"]], set())   # enabled, not missing
     return [instance_out(r, names, hub_admin) for r in rows]
 
 

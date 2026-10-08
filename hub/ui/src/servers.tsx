@@ -60,7 +60,8 @@ export function ServerActions({ s, admin, sites, onChanged }: { s: Server; admin
       <a className="small" href={consoleHref(s.id)} title="The server's own interface, through its tunnel">Open server console ↗</a>
       {admin && <button className="ghost small" onClick={async () => { const name = await promptDialog("Rename server", { initial: s.name, label: "Name" }); if (name?.trim()) await act(() => api.updateServer(s.id, { name: name.trim() }))(); }}>Rename</button>}
       {admin && <button className="ghost small" title="A free-text note on where this box is (rack, room…)" onClick={async () => { const loc = await promptDialog("Where is this server?", { initial: s.location, label: "Note (rack, room…)" }); if (loc != null) await act(() => api.updateServer(s.id, { location: loc.trim() }))(); }}>Note</button>}
-      {admin && others.length > 0 && (
+      {/* a central recording server stays in the Site it was allocated to (hub administrators manage it on the Hosts page) */}
+      {admin && !s.central && others.length > 0 && (
         <select className="small" value="" aria-label="Move to site" onChange={async (e) => {
           const to = others.find((l) => l.id === e.target.value);
           if (to && await confirmDialog(`Move ${s.name} to ${to.name}?`, { message: "Its cameras, alerts and events follow it. People who can see only the old site stop seeing it.", confirmLabel: "Move" }))

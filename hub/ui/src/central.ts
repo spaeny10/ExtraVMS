@@ -3,7 +3,7 @@
  * and the bandwidth / storage numbers shown on Site → Servers and Customer → Servers. Kept apart from the components
  * so they are unit-tested (central.test.ts).
  */
-import type { CentralInstance, HostCapacity, Peplink, Server } from "./api";
+import type { CentralInstance, HostCapacity, HubSitesOrg, Peplink, Server } from "./api";
 
 /** provisioning (the host is creating it) → waiting_enroll (created, not dialed in yet) → running. */
 export const PHASE_LABEL: Record<string, string> = {
@@ -115,7 +115,7 @@ export function lanGateway(subnet: string | null | undefined): string | null {
 /** The provisioning form's checks, so the button only enables when the hub would accept it. */
 export function centralFormError(f: { mode: "vpn" | "forward"; public_ip: string; subnet: string; quota_gb: string }): string | null {
   const q = Number(f.quota_gb);
-  if (!f.quota_gb.trim() || !Number.isInteger(q) || q < 1) return "Enter the storage quota in GB";
+  if (!f.quota_gb.trim() || !Number.isInteger(q) || q < 10) return "Enter the storage quota in GB (at least 10)";
   if (f.mode === "forward" && !f.public_ip.trim()) return "Port forwarding needs the site's public IP";
   if (f.mode === "vpn" && f.subnet.trim() && !/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}\/\d{1,2}$|^192\.168\.\d{1,3}\.\d{1,3}\/\d{1,2}$|^172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}\/\d{1,2}$/.test(f.subnet.trim()))
     return "The camera subnet must be a private network like 10.20.7.0/24";
@@ -228,4 +228,56 @@ export function resolvedLines(hosts: string[], resolved: Record<string, string[]
 /** The routers whose port forwards the instance uses (the port-forward table applies to each). */
 export function forwardTargets(p: Pick<Peplink, "forward_addresses" | "public_ip">): string[] {
   return p.forward_addresses ?? (p.public_ip ? [p.public_ip] : []);
+}
+
+// ---- Camera limit and the Hosts page's Allocate form
+
+export const MAX_CAMERA_LIMIT = 500;
+
+/** The limit field: blank = no limit; else a whole number 1-500. */
+export function parseCameraLimit(s: string): { value: number | null; error: null } | { value: null; error: string } {
+  const v = s.trim();
+  if (!v) return { value: null, error: null };
+  const n = Number(v);
+  if (!/^\d+$/.test(v) || !Number.isInteger(n) || n < 1 || n > MAX_CAMERA_LIMIT) return { value: null, error: `The camera limit is a number from 1 to ${MAX_CAMERA_LIMIT}, or blank for none` };
+  return { value: n, error: null };
+}
+
+/** "3 of 5", or "3 (no limit)". */
+export function camerasText(count: number | null | undefined, limit: number | null | undefined): string {
+  const n = count ?? 0;
+  return limit == null ? `${n} (no limit)` : `${n} of ${limit}`;
+}
+
+/** More cameras than the limit allows (it was lowered): they keep recording, new ones are refused. */
+export const overLimit = (count: number | null | undefined, limit: number | null | undefined) => limit != null && (count ?? 0) > limit;
+
+/** The customer's Sites that have no central instance yet (removed ones don't count), by name. */
+export function sitesWithoutCentral(orgs: HubSitesOrg[], orgId: string, instances: Pick<CentralInstance, "location_id" | "state">[]): { id: string; name: string }[] {
+  const taken = new Set(instances.filter((c) => c.state !== "deleted").map((c) => c.location_id));
+  const org = orgs.find((o) => o.org.id === orgId);
+  return (org?.locations ?? []).filter((l) => !taken.has(l.id)).map((l) => ({ id: l.id, name: l.name })).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export type AllocateFields = { org: string; site: string; mode: "vpn" | "forward"; subnet: string; public_ip: string; quota_gb: string; camera_limit: string };
+
+/** The Allocate form's checks (the hub decides; this keeps the button off until it would accept). roomGb: the host's room. */
+export function allocateFormError(f: AllocateFields, roomGb: number | null | undefined): string | null {
+  if (!f.org) return "Choose the customer";
+  if (!f.site) return "Choose the Site";
+  const base = centralFormError(f);
+  if (base) return base;
+  if (f.mode === "forward" && parseIPv4(f.public_ip) == null && !isHostName(f.public_ip)) return "The router's public address is an IP address or a DNS name";
+  const lim = parseCameraLimit(f.camera_limit);
+  if (lim.error) return lim.error;
+  if (roomGb != null && Number(f.quota_gb) > roomGb) return `The host has room for ${fmtGB(Math.max(0, roomGb))}`;
+  return null;
+}
+
+/** What the firewall allows, split for display: the Site networks, and the cameras' own addresses not already among them. */
+export function addressParts(ci: Pick<CentralInstance, "mode" | "subnet" | "public_ip" | "camera_network">): { site: string[]; cameras: string[] } {
+  const site = cameraNetworkOf(ci);
+  const listed = new Set([...site.subnets, ...site.public_ips, ...site.hosts]);
+  const auto = ci.camera_network?.auto;
+  return { site: [...site.subnets, ...site.public_ips, ...site.hosts], cameras: [...(auto?.public_ips ?? []), ...(auto?.hosts ?? [])].filter((a) => !listed.has(a)) };
 }

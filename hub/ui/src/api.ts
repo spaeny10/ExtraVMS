@@ -59,24 +59,37 @@ export type HostCapacity = { cpus?: number; load?: number | number[]; ram_gb?: {
 export type Host = {
   id: string; name: string; created_at: number; online: boolean; last_seen_at: number | null; hostname: string | null; version: string | null;
   capacity: HostCapacity | null; notes: string | null; fusionhub: string | null; agent_ip: string | null; instances: number; quota_gb: number; offline_since: number | null;
+  /** GB a new instance's quota may take: the largest disk's free space minus what its instances may still grow into. */
+  room_gb?: number;
 };
 /** What the Peplink settings sheet shows (central.ts lays out the port-forward table from the bases). */
 /** `forward_addresses`: the routers' public IPs and DNS names the port-forward table applies to (from the camera network). */
 export type Peplink = { mode: CentralMode; subnet: string | null; lan_gateway: string | null; public_ip: string | null; forward_addresses?: string[]; fusionhub: string | null; datacenter_ip: string | null; rtsp_base: number; onvif_base: number };
-/** The instance's camera allow-list on its host: LAN / VPN subnets (any protocol), public IPs and DNS names (TCP). */
+/** The instance's Site networks (set by hub administrators): LAN / VPN subnets (any protocol), public IPs and DNS names (TCP). */
 export type CameraNetwork = { subnets: string[]; public_ips: string[]; hosts: string[] };
-/** `resolved`: each DNS name's IPv4 addresses as the host last resolved them. */
-export type CentralCameraNetwork = CameraNetwork & { resolved?: Record<string, string[] | null> | null };
+/**
+ * The firewall on the host = the Site networks (subnets / public_ips / hosts) plus `auto`: the public IPs and DNS names the
+ * instance's cameras use, opened and closed by the hub as cameras are added (hub central_cameras.py). `auto_on` false: an
+ * instance from before automatic addresses (they start once its Site networks are saved). `resolved`: each DNS name's IPv4
+ * addresses as the host last resolved them. `pending` / `sync_error` (hub administrators): not on the host yet, and why.
+ */
+export type CentralCameraNetwork = CameraNetwork & {
+  auto?: { public_ips: string[]; hosts: string[] }; auto_on?: boolean; resolved?: Record<string, string[] | null> | null;
+  pending?: boolean; sync_error?: string | null;
+};
 /** One Site's central instance. The host_* / gpu / last_error fields are sent to hub administrators only. */
 export type CentralInstance = {
   id: string; location_id: string; location_name: string | null; org_id: string; org_name: string | null; server_id: string | null; server_online: boolean;
   name: string; mode: CentralMode; subnet: string | null; public_ip: string | null; site_number: number | null; quota_gb: number; used_gb: number | null;
   state: "provisioning" | "running" | "failed" | "deleting" | "deleted"; phase: string; created_at: number; ready_at: number | null; info_at: number | null;
   peplink: Peplink; cameras?: { id: string; name: string }[]; camera_network?: CentralCameraNetwork;
+  /** The most cameras it may have (null = no limit) and how many it has (enabled, as last reported). */
+  camera_limit?: number | null; camera_count?: number;
   host_id?: string; host_name?: string | null; host_online?: boolean; gpu?: number | null; gpu_name?: string | null; last_error?: string | null; host_state?: string | null;
 };
-export type LocationCentral = { instances: CentralInstance[]; can_provision: boolean; hosts: Pick<Host, "id" | "name" | "online" | "capacity" | "instances">[] };
-export type CentralBody = { host_id?: string | null; mode: CentralMode; subnet?: string | null; public_ip?: string | null; quota_gb: number; gpu?: number | null; name?: string | null };
+/** Read-only on a Site page; `can_manage` (hub administrators) shows the link to the Hosts page, where instances are managed. */
+export type LocationCentral = { instances: CentralInstance[]; can_provision?: boolean; can_manage?: boolean };
+export type CentralBody = { host_id?: string | null; mode: CentralMode; subnet?: string | null; public_ip?: string | null; quota_gb: number; gpu?: number | null; name?: string | null; camera_limit?: number | null };
 /**
  * `urls`: candidate base URLs of the server itself (`local` = only works from a browser on that machine, e.g.
  * http://localhost:8080); `fingerprint`: its self-signed certificate's SHA-256, for the "accept the certificate" prompt.
@@ -373,8 +386,9 @@ export const api = {
   hubCentral: () => req<CentralInstance[]>("/api/hub/central"),
   locationCentral: (loc: string) => req<LocationCentral>(`/api/locations/${loc}/central`),
   provisionCentral: (loc: string, b: CentralBody) => req<CentralInstance>(`/api/locations/${loc}/central`, json("POST", b)),
-  setCentralQuota: (loc: string, ci: string, quota_gb: number) => req<CentralInstance>(`/api/locations/${loc}/central/${ci}`, json("PATCH", { quota_gb })),
-  /** Replaces the instance's camera allow-list on its host (hub administrators). */
+  /** Storage quota and / or camera limit (null = no limit); hub administrators. */
+  updateCentral: (loc: string, ci: string, b: { quota_gb?: number; camera_limit?: number | null }) => req<CentralInstance>(`/api/locations/${loc}/central/${ci}`, json("PATCH", b)),
+  /** Replaces the instance's Site networks; the host gets them plus its cameras' own addresses (hub administrators). */
   setCentralCameras: (loc: string, ci: string, b: CameraNetwork) => req<CentralInstance>(`/api/locations/${loc}/central/${ci}/cameras`, json("PUT", b)),
   /** purge also deletes the recordings on the host; force forgets the instance at the hub when its host can't. */
   removeCentral: (loc: string, ci: string, o: { purge?: boolean; force?: boolean } = {}) =>

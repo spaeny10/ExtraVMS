@@ -1,6 +1,6 @@
 # Host agent protocol (proto 1)
 
-How a central host's `axiom_host.py run` talks to the hub. The hub side lives in `hub/` (host registry, placement, "Add central recording"). This file is the contract between them; both sides implement exactly these frames and field names.
+How a central host's `axiom_host.py run` talks to the hub. The hub side lives in `hub/` (host registry, placement: "Allocate instance" on the Hosts page). This file is the contract between them; both sides implement exactly these frames and field names.
 
 ## Connection
 

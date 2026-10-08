@@ -47,7 +47,7 @@ from urllib.parse import quote, urlencode
 
 import sqlalchemy as sa
 
-from . import auth, db, vlm_proxy
+from . import auth, central_cameras, db, vlm_proxy
 from .agents import AgentConn, registry
 
 log = logging.getLogger("hub.fleet_actions")
@@ -369,8 +369,21 @@ async def site_cameras(site: dict, u: dict, fresh: bool = False) -> list[dict] |
 
 
 def _forget(*site_ids: str) -> None:
+    """Their cameras changed: drop the cached lists; a central instance's firewall follows its cameras."""
     for s in site_ids:
         _cameras_cache.pop(s, None)
+        central_cameras.after_write(s)
+
+
+async def _central_check(site: dict, kind: str, path: str, body: dict) -> tuple[dict | None, list[str]]:
+    """A central recording instance's camera limit and address rules (central_cameras.py), before the change is sent."""
+    ci = central_cameras.instance_for_server(site["id"])
+    if not ci:
+        return None, []
+    try:
+        return ci, await central_cameras.check(ci, kind, path, body)
+    except central_cameras.Refused as e:
+        raise ActionError(f"{site['name']}: {e.detail}") from None
 
 
 async def _index(u: dict, org_id: str) -> list[dict]:
@@ -1546,11 +1559,16 @@ async def _move(p: dict, u: dict, lines: list[str], detail: dict) -> None:
         if set(ids) - got:
             raise ActionError(f"{src['name']} no longer has {', '.join(names[i] for i in set(ids) - got)}; nothing changed")
         handoff["source"] = src["name"]
+        reserved: list[str] = []
         try:
+            _, reserved = await _central_check(dst, "merge", "/api/config/merge", {"data": handoff})
             st, res = await _call(dst_conn, u, "POST", "/api/config/merge", "admin", body={"data": handoff}, timeout=HANDOFF_TIMEOUT_S)
+        except ActionError as e:
+            raise ActionError(f"{e}; nothing changed") from None
         finally:
             handoff = None   # the only copy of the passwords at the hub: drop it now  # noqa: F841
         if st != 200 or not isinstance(res, dict):
+            central_cameras.release(dst["id"], reserved)
             raise ActionError(f"{dst['name']} could not add the cameras ({_detail(res, st)}); {src['name']} is unchanged")
         moved = {k: v for k, v in (res.get("ids") or {}).items() if k in names}
         detail["merge"] = {k: res.get(k) for k in ("cameras", "camera_links", "identities", "learned")}
@@ -1733,11 +1751,14 @@ async def _run(p: dict, u: dict, lines: list[str], detail: dict, extras: dict) -
             n += 1
         cid = f"cam{n}"
         body = {"id": cid, "name": p["new_name"] or p["host"], "host": p["host"], "enabled": True, "zones": [], "scene_notes": "", "policies": [], **fields}
+        reserved: list[str] = []
         try:
+            _, reserved = await _central_check(p["site"], "camera", f"/api/cameras/{cid}", body)
             st, res = await _call(conn, u, "PUT", f"/api/cameras/{cid}", "admin", body=body)
         finally:
             body = fields = None   # the password: gone from the hub  # noqa: F841
         if st != 200:
+            central_cameras.release(p["site"]["id"], reserved)
             raise ActionError(f"{p['site']['name']} refused the camera ({_detail(res, st)})")
         _forget(p["site"]["id"])
         lines.append(f"\"{p['new_name']}\" ({p['host']}) added to {p['site']['name']} as {cid}")
