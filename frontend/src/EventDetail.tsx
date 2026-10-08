@@ -23,7 +23,7 @@ export function EventDetail({ id: initialId, cameraName, onClose, site = api, va
   const [id, setId] = useState(initialId); // the viewer can step to another camera's sighting of the same person
   useEffect(() => setId(initialId), [initialId]);
   const [e, setE] = useState<NvrEvent | null>(null);
-  const [tab, setTab] = useState<"clip" | "details" | "chat">("details");
+  const [tab, setTab] = useState<"clip" | "details" | "journey" | "chat">("details");
   const isPhone = useIsPhone();
   useEffect(() => { if (isPhone) setTab("clip"); }, [isPhone]);
   const [chat, setChat] = useState<ChatMessage[]>([]);
@@ -49,6 +49,8 @@ export function EventDetail({ id: initialId, cameraName, onClose, site = api, va
   }, [e, id]);
 
   if (!e) return null;
+  // the Journey tab exists only for an event that is part of a journey; a stale selection falls back to Details
+  const view = tab === "journey" && !e.journey_id ? "details" : tab;
   const crops = e.detections?.keyframes?.filter((k) => k.kind === "crop") ?? [];
   const seek = (t: number) => {
     if (video.current) {
@@ -80,13 +82,14 @@ export function EventDetail({ id: initialId, cameraName, onClose, site = api, va
         </header>
         {isPhone && (
           <div className="segmented detail-tabs">
-            <button className={tab === "clip" ? "active" : ""} onClick={() => setTab("clip")}>Clip</button>
-            <button className={tab === "details" ? "active" : ""} onClick={() => setTab("details")}>Details</button>
-            <button className={tab === "chat" ? "active" : ""} onClick={() => setTab("chat")}>Ask{chat.length ? ` (${chat.filter((m) => m.role === "user").length})` : ""}</button>
+            <button className={view === "clip" ? "active" : ""} onClick={() => setTab("clip")}>Clip</button>
+            <button className={view === "details" ? "active" : ""} onClick={() => setTab("details")}>Details</button>
+            {e.journey_id ? <button className={view === "journey" ? "active" : ""} onClick={() => setTab("journey")}>Journey</button> : null}
+            <button className={view === "chat" ? "active" : ""} onClick={() => setTab("chat")}>Ask{chat.length ? ` (${chat.filter((m) => m.role === "user").length})` : ""}</button>
           </div>
         )}
         <div className={`modal-grid ${isPhone ? "phone" : ""}`}>
-          {(!isPhone || tab === "clip") && <div>
+          {(!isPhone || view === "clip") && <div>
             {e.clip ? (
               <video ref={video} className="clip" src={site.media(e, "clip.mp4")} poster={e.snapshot ? site.media(e, "snapshot.jpg", 960) : undefined} controls autoPlay muted />
             ) : e.snapshot ? (
@@ -106,21 +109,22 @@ export function EventDetail({ id: initialId, cameraName, onClose, site = api, va
             )}
             {isPhone && <p className="synopsis">{e.synopsis ?? <span className="muted">{placeholder(e)}</span>}</p>}
           </div>}
-          {(!isPhone || tab !== "clip") && <aside className="detail-side">
+          {(!isPhone || view !== "clip") && <aside className="detail-side">
             {!isPhone && <div className="segmented">
-              <button className={tab === "details" ? "active" : ""} onClick={() => setTab("details")}>Details</button>
-              <button className={tab === "chat" ? "active" : ""} onClick={() => setTab("chat")}>
+              <button className={view === "details" ? "active" : ""} onClick={() => setTab("details")}>Details</button>
+              {e.journey_id ? <button className={view === "journey" ? "active" : ""} onClick={() => setTab("journey")}
+                title="The same person on other cameras">Journey</button> : null}
+              <button className={view === "chat" ? "active" : ""} onClick={() => setTab("chat")}>
                 Ask about this clip{chat.length ? ` (${chat.filter((m) => m.role === "user").length})` : ""}
               </button>
             </div>}
-            {tab !== "chat" ? (
-              <>
-                <JourneySection e={e} site={site} cameraName={cameraName} onShow={(eid) => setId(eid)}
-                  onOpenTimeline={(members) => { openInTimeline({ ...e, members }); onClose(); }} />
-                <Details e={e} site={site} setE={setE} notes={chat.filter((m) => m.saved)} onUnsave={(m) => site.saveNote(e.id, m.id, false).then(setChat)} seek={seek} />
-              </>
-            ) : (
+            {view === "journey" ? (
+              <JourneySection e={e} site={site} cameraName={cameraName} onShow={(eid) => setId(eid)}
+                onOpenTimeline={(members) => { openInTimeline({ ...e, members }); onClose(); }} />
+            ) : view === "chat" ? (
               <ChatPanel e={e} site={site} chat={chat} setChat={setChat} video={video} seek={seek} />
+            ) : (
+              <Details e={e} site={site} setE={setE} notes={chat.filter((m) => m.saved)} onUnsave={(m) => site.saveNote(e.id, m.id, false).then(setChat)} seek={seek} />
             )}
           </aside>}
         </div>
