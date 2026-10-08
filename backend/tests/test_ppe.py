@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np  # noqa: E402
 
-from nvr import advisor, policy, ppe, synopsis, verifier, zones  # noqa: E402
+from nvr import advisor, baseline, policy, ppe, synopsis, verifier, zones  # noqa: E402
 from nvr.config import settings  # noqa: E402
 from nvr.db import db  # noqa: E402
 from nvr.verifier import event_dir  # noqa: E402
@@ -244,7 +244,9 @@ def test_pipeline_violation_sets_priority_tag_and_prompt():
     cam = {**CAM, "zones": []}
     db.upsert_camera(cam)
     p.cameras = {c["id"]: c for c in db.cameras()}
-    assert policy.check(eid, p.cameras["cam1"]) is None and db.event(eid)["priority"] != "medium"
+    assert policy.check(eid, p.cameras["cam1"]) is None
+    e = db.event(eid)   # the rule no longer lifts the priority; what's left is unusualness for the hour the test runs at
+    assert e["policy"] is None and e["priority"] == baseline.priority(e, e.get("anomaly")), e
     assert asyncio.run(p.check_ppe(eid)) is None and "ppe" not in db.event(eid)["detections"]
     db.upsert_camera(CAM)
 
