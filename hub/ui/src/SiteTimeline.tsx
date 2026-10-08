@@ -60,8 +60,11 @@ const iceFor = (server: string): Promise<RTCIceServer[]> => {
  * `syncUrl` (default true): focusing an event or clearing focus rewrites the page URL into a shareable Timeline link.
  * An embedding page whose URL means something else (the SOC's /soc/incidents/:id) passes false and deep-links
  * through `query` instead (same parameters as the link: ?server=&cam=&event=).
+ * `canRecoverSd`: offer "recover from the SD card" on gaps (admins; the proxy requires admin for POST /api/sd/recover).
  */
-export function SiteTimeline({ site, query, syncUrl = true }: { org: Org; site: Site; query: string | URLSearchParams; syncUrl?: boolean }) {
+export function SiteTimeline({ site, query, syncUrl = true, canRecoverSd = false }: {
+  org: Org; site: Site; query: string | URLSearchParams; syncUrl?: boolean; canRecoverSd?: boolean;
+}) {
   const servers = useMemo(() => site.servers.filter((s) => !s.retired_at), [site.servers]);
   const online = useMemo(() => servers.filter((s) => s.online), [servers]);
   const onlineKey = online.map((s) => s.id).sort().join(",");
@@ -234,7 +237,7 @@ export function SiteTimeline({ site, query, syncUrl = true }: { org: Org; site: 
       <TimelineView key={site.id} cameras={cameras} focus={focus} onClearFocus={clearFocus} apiFor={siteApi} mediaFor={mediaApi} remote={viaHub}
         qualityFor={qualityFor} onQualityUnavailable={onSdBusy} layoutStore={layoutStore} storageKey={storageKey} iceFor={iceServersFor}
         qualityToggle={hubSd ? { value: quality, set: setQuality, title: "Playback quality for cameras reached through the hub: SD is a 720p low-bitrate copy that starts faster on a slow uplink" } : undefined}
-        soloHint={hubSolo && anyHub ? HUB_SOLO_HINT : undefined} />
+        soloHint={hubSolo && anyHub ? HUB_SOLO_HINT : undefined} canRecoverSd={canRecoverSd} />
     </NavContext.Provider>
   );
 }

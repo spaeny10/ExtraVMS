@@ -15,6 +15,7 @@ import { regionPass, regions, useRegions } from "./region";
 import { useRef } from "react";
 import { yoloFallbackText, yoloState } from "./yoloStatus";
 import { vlmSub, vlmValue } from "./vlmStatus";
+import { sdStatusText } from "./sdcard";
 
 /* ------------------------------------------------------------------ Live */
 
@@ -231,6 +232,31 @@ const blank: Camera & { password?: string } = {
   sub_path: "/sub", enabled: true, zones: [], retention_days: null, scene_notes: "",
 };
 
+/** Settings → Cameras: what the camera's own SD card holds (checked hourly; "Check" asks the camera now). */
+function SdCell({ camera, onChecked }: { camera: Camera; onChecked: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const sd = camera.status?.sd;
+  const text = sdStatusText(sd).replace(/^SD card: /, "");
+  const check = async () => {
+    setBusy(true);
+    try {
+      const r = await api.cameraSd(camera.id, true);
+      toast.success(`${camera.name}: ${sdStatusText(r)}`);
+      onChecked();
+    } catch (e) {
+      toast.error(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const title = sd?.has_recording ? "Footage the server missed can be recovered from this card (Timeline: click a dashed gap)" : sd?.error ?? undefined;
+  return (
+    <span className={`sd-status small ${sd?.has_recording ? "" : "muted"}`} title={title}>
+      {text} <button className="ghost small" disabled={busy} onClick={check} title="Ask the camera now">{busy ? "…" : "Check"}</button>
+    </span>
+  );
+}
+
 export function CamerasView({ cameras, port, reload }: { cameras: Camera[]; port: number; reload: () => void }) {
   const [edit, setEdit] = useState<(Camera & { password?: string }) | null>(null);
   const [err, setErr] = useState("");
@@ -259,7 +285,7 @@ export function CamerasView({ cameras, port, reload }: { cameras: Camera[]; port
       </div>
       <table className="table">
         <thead>
-          <tr><th>Camera</th><th>Address</th><th>Stream</th><th>Bitrate</th><th>Metadata</th><th>ONVIF events</th><th>PTZ</th><th>Zones</th><th>Retention</th><th /></tr>
+          <tr><th>Camera</th><th>Address</th><th>Stream</th><th>Bitrate</th><th>Metadata</th><th>ONVIF events</th><th>PTZ</th><th>SD card</th><th>Zones</th><th>Retention</th><th /></tr>
         </thead>
         <tbody>
           {cameras.map((c) => (
@@ -280,6 +306,7 @@ export function CamerasView({ cameras, port, reload }: { cameras: Camera[]; port
                 : c.status.ptz.home_name ? <span className="ptz-badge">↗ {c.status.ptz.preset_name ?? "away"}</span>
                 : <span className="muted small">no home set</span>}
                 {c.status?.ptz?.relay?.state ? <span className="ptz-badge"> ⚡</span> : null}</td>
+              <td><SdCell camera={c} onChecked={reload} /></td>
               <td>{zoneSummary(c.zones)}</td>
               <td>{c.retention_days ?? "default"}</td>
               <td className="row">
@@ -319,6 +346,8 @@ export function CamerasView({ cameras, port, reload }: { cameras: Camera[]; port
                       onChange={(e) => setEdit({ ...edit, public_onvif_port: e.target.value ? +e.target.value : null })} /></Field>
                     <Field label="Outside RTSP port"><input type="number" value={edit.public_rtsp_port ?? ""} placeholder={String(edit.rtsp_port)}
                       onChange={(e) => setEdit({ ...edit, public_rtsp_port: e.target.value ? +e.target.value : null })} /></Field>
+                    <Field label="Outside replay port (SD card)"><input type="number" value={edit.public_replay_port ?? ""} placeholder="555"
+                      onChange={(e) => setEdit({ ...edit, public_replay_port: e.target.value ? +e.target.value : null })} /></Field>
                   </div>
                   <span className="small">For a camera reached through the site router's port forwards. This server connects to the outside address and ports, and the addresses the camera reports (events, PTZ, streams) are rewritten to them. Host / IP and the ports above stay the camera's own. Leave empty on the same network or over a VPN.</span>
                 </details>

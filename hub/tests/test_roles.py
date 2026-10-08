@@ -24,11 +24,18 @@ def test_role_table_reads_right():
     assert required_role("POST", "/api/advisor/apply") == "admin"
     assert required_role("PUT", "/api/cameras/cam1/ptz/config") == "admin"
     assert required_role("POST", "/api/cameras/cam1/ptz/presets") == "operator"
+    # SD card recovery writes footage into the recordings: configuration; its status and gaps are watching
+    assert required_role("POST", "/api/sd/recover") == "admin"
+    assert required_role("GET", "/api/sd/gaps") == "viewer" and required_role("GET", "/api/cameras/cam1/sd") == "viewer"
     assert allows("owner", "admin") and allows("operator", "viewer") and not allows("viewer", "operator")
 
 
 def test_every_site_write_route_is_covered():
     from nvr.api import app as site_app
+    from nvr.config import settings
+    for d in (settings.data_dir, settings.recordings_dir, settings.runtime_dir):   # conftest: temp folders, never the live server's
+        v = str(d).replace("\\", "/").lower()
+        assert "hub-test-" in v and "e:/nvr" not in v and "d:/nvr" not in v, d
     unmatched = []
     for r in site_app.routes:
         methods = getattr(r, "methods", None) or set()

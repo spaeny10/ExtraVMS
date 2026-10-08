@@ -8,6 +8,7 @@ import { HOLD_MAX_MS, LIVE_LAG, camKey, fmtClock, nowS, reachesLiveEdge, retryDe
 import { SyncTile, type TileStatus } from "./SyncPlayer";
 import { encodeCells, regionPass, regions, useRegions } from "./region";
 import { timelineHash } from "./nav";
+import { fmtLength, recoverableGaps, restoredLabel, type CardRange, type RestoredSpan } from "./sdcard";
 
 type Marker = TimelineEvent;
 type Filter = {
@@ -46,8 +47,10 @@ function loadFilter(key: string): Filter {
     return DEFAULT_FILTER;
   }
 }
-/** `error`: the last recordings request for this lane failed (the data shown, if any, is from an earlier answer) */
-type Lane = { spans: Span[]; events: Marker[]; kept: KeptSpan[]; locks: Lock[]; error?: boolean };
+/** `error`: the last recordings request for this lane failed (the data shown, if any, is from an earlier answer).
+ *  `restored`: SD card recovery jobs; `card`: what the camera's SD card holds (null: nothing, or an older server). */
+type Lane = { spans: Span[]; events: Marker[]; kept: KeptSpan[]; locks: Lock[]; restored: RestoredSpan[]; card: CardRange | null; error?: boolean };
+const EMPTY_LANE: Lane = { spans: [], events: [], kept: [], locks: [], restored: [], card: null };
 
 /** A Timeline lane. The site UI passes plain cameras (lane key = camera id); the hub's combined Timeline sets
  *  `key` (server/camera, see camKey), the camera's `server` and `serverName`, and its clock skew. */
@@ -72,7 +75,11 @@ const laneKey = (c: TimelineCamera) => c.key ?? c.id;
 function shiftLane(l: Lane, d: number): Lane {
   if (!d) return l;
   const sh = <T extends { start_ts: number; end_ts: number | null }>(x: T): T => ({ ...x, start_ts: x.start_ts + d, end_ts: x.end_ts == null ? x.end_ts : x.end_ts + d });
-  return { spans: l.spans.map((x) => ({ start: x.start + d, end: x.end + d })), events: l.events.map(sh), kept: l.kept.map(sh), locks: l.locks.map(sh) };
+  return {
+    spans: l.spans.map((x) => ({ start: x.start + d, end: x.end + d })), events: l.events.map(sh), kept: l.kept.map(sh), locks: l.locks.map(sh),
+    restored: l.restored.map((r) => ({ ...r, from_ts: r.from_ts + d, to_ts: r.to_ts + d })),
+    card: l.card && { from: l.card.from + d, to: l.card.to + d },
+  };
 }
 type View = { start: number; end: number };
 type Drag =
@@ -164,8 +171,11 @@ function loadConfig(key: string): LayoutConfig {
 export type QualityToggle = { value: PlaybackQuality; set: (q: PlaybackQuality) => void; title?: string };
 
 export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = localApi, layoutStore = apiLayoutStore, storageKey = "", remote,
-  mediaFor, qualityFor, qualityToggle, soloHint, onQualityUnavailable, iceFor }: {
+  mediaFor, qualityFor, qualityToggle, soloHint, onQualityUnavailable, iceFor, canRecoverSd = true }: {
   cameras: TimelineCamera[]; focus?: TimelineFocus | null; onClearFocus?: () => void;
+  /** may this user put footage back from a camera's SD card (admin)? The server UI on its LAN: yes; the hub passes the
+   *  user's role. The server checks it again. */
+  canRecoverSd?: boolean | ((server: string) => boolean);
   /** STUN/TURN servers per server for the live tiles at the live edge (the hub's relay for remote servers); default none */
   iceFor?: (server: string) => RTCIceServer[] | undefined;
   /** API client per server (default: every camera is on this server); must be stable */
@@ -473,7 +483,8 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
         const off = offOf(k);   // ask in the server's clock, then shift the answer back onto the shared one
         try {
           const r = await apiFor(serverOf(k)).recordings(c.id, v.start - margin + off, v.end + margin + off);
-          return [k, shiftLane({ spans: mergeSpans(r.spans), events: r.events, kept: r.kept ?? [], locks: r.locks ?? [] }, -off)] as const;
+          return [k, shiftLane({ spans: mergeSpans(r.spans), events: r.events, kept: r.kept ?? [], locks: r.locks ?? [],
+            restored: r.restored ?? [], card: r.sd_card ?? null }, -off)] as const;
         } catch {
           return [k, null] as const;
         }
@@ -481,7 +492,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
     );
     // A failed lane keeps what it showed before (a dropped tunnel shouldn't blank the Timeline), flagged `error`.
     setLanes((prev) => Object.fromEntries(entries.map(([k, l]) =>
-      [k, l ?? { ...(prev[k] ?? { spans: [], events: [], kept: [], locks: [] }), error: true }])));
+      [k, l ?? { ...(prev[k] ?? EMPTY_LANE), error: true }])));
     loadedFor.current = { start: v.start - margin, end: v.end + margin };
     if (entries.some(([, l]) => l == null)) {
       const delay = retryDelayMs(retry.current.attempt++);
@@ -499,10 +510,14 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
     const t = setTimeout(() => load(view), 200);
     return () => clearTimeout(t);
   }, [view, load]);
-  // Keep the live edge fresh (unless a backed-off retry is already pending: don't hammer a server that isn't answering)
+  // Keep the live edge fresh (unless a backed-off retry is already pending: don't hammer a server that isn't answering),
+  // and past footage while an SD card recovery is filling it in
+  const recovering = useMemo(() => Object.values(lanes).some((l) => l.restored.some((r) => r.state === "waiting" || r.state === "recovering")), [lanes]);
+  const recoveringRef = useRef(recovering);
+  recoveringRef.current = recovering;
   useEffect(() => {
     const t = setInterval(() => {
-      if (viewRef.current.end > nowS() - 60 && retry.current.timer == null) load(viewRef.current);
+      if ((viewRef.current.end > nowS() - 60 || recoveringRef.current) && retry.current.timer == null) load(viewRef.current);
     }, 10000);
     return () => clearInterval(t);
   }, [load]);
@@ -735,6 +750,24 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
     setLockPrompt(null);
     setSelection(null);
     load(viewRef.current);
+  };
+
+  // ---- SD card recovery: a gap the camera's card covers can be put back (admin)
+  const mayRecover = (k: string) => (typeof canRecoverSd === "function" ? canRecoverSd(serverOf(k)) : canRecoverSd);
+  const recoverGap = async (k: string, gap: Span) => {
+    const off = offOf(k);
+    const len = fmtLength(gap.end - gap.start);
+    if (!await confirmDialog(`Recover ${len} of ${camName(k)} from its SD card?`, {
+      message: `${fmtClock(gap.start)} – ${fmtClock(gap.end)}. The camera replays it at real time (about ${len}), next to its live stream; the footage then appears here like any other recording.`,
+      confirmLabel: "Recover",
+    })) return;
+    try {
+      await apiFor(serverOf(k)).recoverSd(idOf(k), gap.start + off, gap.end + off);
+      toast.success(`Recovering ${len} from the SD card · it fills in as it arrives`);
+      load(viewRef.current);
+    } catch (e) {
+      toast.error(e);
+    }
   };
 
   const GRAB_PX = 12;
@@ -1273,6 +1306,23 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
                   const x2 = Math.min(width + 2, toX(k.end_ts));
                   return x2 > x1 ? <div key={`k${i}`} className="tl-kept" style={{ left: x1, width: Math.max(2, x2 - x1) }} title={`AI-kept: ${k.reasons.join(", ")}`} /> : null;
                 })}
+                {lane?.restored.map((r) => {
+                  const x1 = Math.max(-2, toX(r.from_ts));
+                  const x2 = Math.min(width + 2, toX(r.to_ts));
+                  const lbl = restoredLabel(r);
+                  return x2 > x1 ? <div key={`r${r.id}`} className={`tl-restored ${lbl.cls}`} style={{ left: x1, width: Math.max(2, x2 - x1) }} title={lbl.text} /> : null;
+                })}
+                {/* the listing is cut at the loaded window's end: a hole "up to now" only counts when that end is now */}
+                {lane && mayRecover(k) && recoverableGaps(lane.spans, lane.card, lane.restored, Math.min(nowS(), loadedFor.current?.end ?? 0)).map((g) => {
+                  const x1 = Math.max(-2, toX(g.start));
+                  const x2 = Math.min(width + 2, toX(g.end));
+                  return x2 - x1 >= 4 ? (
+                    <div key={`g${g.start}`} className="tl-sdgap" style={{ left: x1, width: x2 - x1 }}
+                      title={`No recording for ${fmtLength(g.end - g.start)} · the camera's SD card has it · click to recover`}
+                      onPointerDown={(ev) => ev.stopPropagation()}
+                      onClick={(ev) => { ev.stopPropagation(); recoverGap(k, g); }} />
+                  ) : null;
+                })}
                 {lane?.locks.map((lk) => {
                   const x1 = Math.max(-2, toX(lk.start_ts));
                   const x2 = Math.min(width + 2, toX(lk.end_ts));
@@ -1348,6 +1398,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
         <span><i className="sw span" /> recorded</span>
         <span><i className="sw kept" /> AI-kept (past continuous window)</span>
         <span><i className="sw locked" /> locked</span>
+        <span><i className="sw restored" /> recovered from SD card</span>
         <span><i className="sw person" /> person</span>
         <span><i className="sw vehicle" /> vehicle</span>
         <button className={`legend-toggle ${filter.ppe ? "on" : ""}`} onClick={() => setFilter({ ppe: !filter.ppe })}

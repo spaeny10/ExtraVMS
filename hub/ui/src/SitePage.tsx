@@ -89,7 +89,7 @@ export function SitePage({ org, me, siteId, tab, section = "general", serverId, 
       </div>
       {serverId ? (server ? <ServerPanel site={site} server={server} admin={admin} onChanged={reload} /> : <p className="muted">That server isn't in this site. <a href={siteHref(site.id, "servers")} onClick={go(siteHref(site.id, "servers"))}>Servers</a></p>)
         : tab === "live" ? <SiteLive org={siteOrg} site={site} />
-        : tab === "timeline" ? <SiteTimeline org={siteOrg} site={site} query={location.search} />
+        : tab === "timeline" ? <SiteTimeline org={siteOrg} site={site} query={location.search} canRecoverSd={admin} />
         : tab === "find" ? <SiteFind org={siteOrg} site={site} />
         : tab === "ask" ? <SiteAsk site={site} threadId={threadId} />
         : tab === "alerts" ? <><SiteIncidents site={site} /><SiteAlerts org={siteOrg} site={site} /></>

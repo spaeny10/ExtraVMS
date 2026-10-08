@@ -3,7 +3,7 @@
 viewer   watch: every GET, the live WebSocket, WHEP signaling, media, playback, frames
 operator act: PTZ / relay / presets, naming people and vehicles, feedback and synopsis edits, locks,
          Ask and clip chat, reprocess, briefings on demand
-admin    configure: cameras, zones, retention, topology, remote AI, backups, site rules
+admin    configure: cameras, zones, retention, topology, remote AI, backups, site rules, SD card recovery
 owner    everything an admin can, plus org members and billing (hub-side only)
 Unknown non-GET routes need admin, so a new site endpoint is never accidentally open to viewers.
 """
@@ -40,6 +40,7 @@ RULES: list[tuple[set[str], re.Pattern, str]] = [
     ({"DELETE"}, re.compile(r"^/api/assistant/threads/"), "operator"),
     ({"POST"}, re.compile(r"^/api/journeys/\d+/regenerate$"), "operator"),
     ({"POST"}, re.compile(r"^/api/(baseline/rebuild|journeys/relink|backup)$"), "admin"),
+    ({"POST"}, re.compile(r"^/api/sd/recover$"), "admin"),   # replays footage from a camera's SD card into its recordings
     ({"PUT", "POST", "DELETE"}, re.compile(r"^/api/cameras(/|$)"), "admin"),
     ({"PUT"}, re.compile(r"^/api/(retention|topology|remote|briefings/settings)(/|$)"), "admin"),
     ({"PUT"}, re.compile(r"^/api/hub$"), "owner"),   # hub-managed; effectively blocked (see proxy)

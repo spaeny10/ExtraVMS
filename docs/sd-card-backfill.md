@@ -1,6 +1,6 @@
 # SD card backfill: recovering footage and events from the cameras after an outage
 
-Status: plan (2026-10-08). Proven by hand on Building 2 East (cam5, Milesight MS-C5366-X12PE): the 10:59:04–11:03:04 gap of 2026-10-08 was replayed from the camera's SD card in full.
+Status: phases 0 and 1 built (2026-10-08, not deployed); phases 2-4 planned. Proven by hand on Building 2 East (cam5, Milesight MS-C5366-X12PE): the 10:59:04–11:03:04 gap of 2026-10-08 was replayed from the camera's SD card in full.
 
 ## What the test showed
 
@@ -59,6 +59,25 @@ Status: plan (2026-10-08). Proven by hand on Building 2 East (cam5, Milesight MS
 2. **Events:** metadata replay into the tracker, restored events marked, no live push.
 3. **Automatic:** triggers, the hourly sweep, the SD alert.
 4. **Central and hub:** port-forward replay port, data budget, hub UI.
+
+## Phase 0 results (2026-10-08, cam5)
+
+| Check | Result |
+|---|---|
+| (a) The video service picks up the server's own segments | Yes. A segment written in MediaMTX's own layout (below) into a scratch MediaMTX 1.21's record folder is listed at the right start and length and served by `/get` (fMP4 and MP4); retention's trimmer and PyAV read it too. MediaMTX joins two segments into one listing entry only when they carry the same stream id with consecutive segment numbers (`mtxi`), so a restored segment is its own entry next to the live ones; the Timeline merges entries under 2 s apart and the player moves on to the next chunk at the boundary. |
+| Timing | The card holds the same encoded stream as the live recording (frame sizes equal to the byte). Camera NTP time plus the metadata reader's clock offset puts each restored frame within 26 ms of where MediaMTX put the same frame live (589 of 590 frames matched). |
+| (b) Metadata | Not available from this camera: the replay SDP has a video track only (no audio, no metadata), and `FindEvents` returns only `RecordingHistory` states. Events can't be rebuilt from the camera's analytics here; phase 2 needs the fallback (motion + YOLO over the restored video). cam5's live metadata produced no object events in the last 7 days either (motion arrives over PullPoint). |
+| (c) Long replay with a reconnect | 02:00–02:32 (32 min) replayed with the connection cut at 15 min: one reconnect, resumed from the GOP in progress (02:15:00.8), 1,924 s wall clock. Four 10-minute segments, 19,192 frames, exactly the 19,192 frames the live recording has over that span: each matched one-to-one (no duplicates, no holes, no frame interval over 100 ms), all decode cleanly, and MediaMTX lists the four as one 1,919 s entry. |
+| (d) Audio | The live recording has the camera's G.711 audio (stored as LPCM); the replay has none, so restored segments are video only. Matching the live layout with a silent track was tested and changes nothing (MediaMTX still lists the two streams apart), so audio is dropped when the replay has none and kept as LPCM when it has G.711 / L16. |
+| Other | The replay starts at the keyframe nearest the requested start (seen both just before and just after it) and the GOP is 2 s, so a restored gap can begin up to 2 s late (never overlapping the live segment before it). The ONVIF C/D flags are not usable on this camera (D is set on every packet): keyframes come from the NAL types and holes from the timestamps. |
+
+## Phase 1 as built
+
+- `backend/nvr/sdreplay.py`: the replay client (Digest, TCP interleaved, `GET_PARAMETER` every 20 s, H.264 / H.265 depacketizing with loss handling, ONVIF timestamps, G.711 to PCM) and `fetch_range`, which reconnects and resumes from the GOP in progress: the new session starts 4 s early and frames before the resume point are skipped, so nothing is written twice and nothing is skipped. Port-forward mode uses `public_replay_port`.
+- `backend/nvr/fmp4mux.py`: writes segments exactly as MediaMTX does (ftyp, moov with mvhd length, hvc1/avc1, `mtxi` with a stream id per run, 1 s fragments, parameter sets in band), named by their start, published by a hard link that fails if the name exists (never overwritten), with the file's modification time set to its end like MediaMTX's.
+- `backend/nvr/sdbackfill.py`: SD status per camera (hourly, read-only ONVIF), the gap finder, the job worker (one session per camera, cameras in parallel, newest first) and the `restored_spans` table.
+- API: `GET /api/cameras/{id}/sd`, `GET /api/sd/gaps`, `POST /api/sd/recover` (admin through the hub), `restored` and `sd_card` in `/api/recordings/{id}`, `status.sd` in `/api/cameras`.
+- UI: Settings → Cameras shows the SD status with a Check button; the Timeline shades recovered and running jobs and offers "recover" on a gap the card covers (admins).
 
 ## Before it is useful at Jetstream HQ
 Four of the five cameras have nothing on their cards. Fit cards (or check they're fitted) and switch on recording to them, continuous at main-stream quality if the card is big enough: a 256 GB card holds about 9 days at 2.6 Mbit/s.

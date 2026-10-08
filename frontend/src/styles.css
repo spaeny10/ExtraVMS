@@ -363,6 +363,16 @@ h3.spaced { margin-top: 18px; }
 .tl-kept { position: absolute; top: 9px; height: 16px; background: #a855f7; opacity: .75; border-radius: 2px; pointer-events: none; }
 .tl-lock { position: absolute; top: 0; height: 6px; background: #eab308; border-radius: 0 0 3px 3px; cursor: pointer; z-index: 2; }
 .tl-lock:hover { height: 9px; }
+/* SD card backfill: footage recovered from a camera's own card (a tint over the recorded bar), jobs still waiting or
+   running (striped), ranges the card did not have (gray); a gap the card covers is a dashed box to click (admin) */
+.tl-restored { position: absolute; top: 9px; height: 16px; border-radius: 2px; border-bottom: 3px solid #0ea5e9; }
+.tl-restored.done { background: color-mix(in srgb, #0ea5e9 30%, transparent); }
+.tl-restored.busy { background: repeating-linear-gradient(135deg, color-mix(in srgb, #0ea5e9 45%, transparent) 0 4px, transparent 4px 8px); }
+.tl-restored.none { border-bottom-color: var(--muted); background: transparent; }
+.tl-sdgap { position: absolute; top: 9px; height: 16px; border: 1px dashed #0ea5e9; border-radius: 2px; cursor: pointer; background: color-mix(in srgb, #0ea5e9 8%, transparent); }
+.tl-sdgap:hover { background: color-mix(in srgb, #0ea5e9 25%, transparent); }
+.sw.restored { background: color-mix(in srgb, #0ea5e9 30%, transparent); border-bottom: 3px solid #0ea5e9; }
+.sd-status { white-space: nowrap; }
 .tl-selection { position: absolute; top: 0; bottom: 0; background: rgb(234 179 8 / .25); border-left: 2px solid #eab308; border-right: 2px solid #eab308; pointer-events: none; z-index: 2; }
 .lock-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; background: color-mix(in srgb, #eab308 12%, var(--panel)); border: 1px solid #eab308; border-radius: 8px; padding: 8px 12px; }
 .lock-bar input { flex: 1; min-width: 180px; }

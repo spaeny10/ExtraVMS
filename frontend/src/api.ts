@@ -1,6 +1,7 @@
 import { connection } from "./ui";
 import type { DashboardConfig } from "./dashboard/types";
 import type { ActionPlanCore, ActionResult } from "./ActionCard";
+import type { CardRange, RestoredSpan, SdStatus } from "./sdcard";
 /** include = detect only here; exclude = mask out; area = just a name for a place (never filters);
  * ppe = people who stay in it must wear the required items (backend/nvr/ppe.py; never filters) */
 export type ZoneType = "include" | "exclude" | "area" | "ppe";
@@ -101,6 +102,8 @@ export type Camera = {
   public_host?: string | null;
   public_rtsp_port?: number | null;
   public_onvif_port?: number | null;
+  /** port-forward mode: the outside port of the camera's ONVIF replay (SD card recovery); empty = as the camera reports it (555) */
+  public_replay_port?: number | null;
   /** which stream is recorded 24/7: "sub" saves cellular data (HD live view then pulls <id>_hd on demand) */
   record_stream?: "main" | "sub";
   status?: {
@@ -112,6 +115,8 @@ export type Camera = {
     onvif_events?: boolean;
     health?: StreamHealth;
     ptz?: PtzStatus | null;
+    /** the camera's own recording (SD card), as last checked (hourly) */
+    sd?: SdStatus | null;
   };
 };
 
@@ -248,6 +253,15 @@ export type RetentionPreview = {
 
 export type Lock = { id: number; camera_id: string; start_ts: number; end_ts: number; event_id: number | null; note: string; created_at: number };
 export type KeptSpan = { start_ts: number; end_ts: number; reasons: string[]; score: number };
+export type { CardRange, RestoredSpan, SdStatus };
+/** GET /api/sd/gaps: per camera, the holes in this server's recordings and the recovery jobs (backend sdbackfill.camera_gaps). */
+export type SdGaps = {
+  cameras: {
+    camera_id: string; sd: SdStatus | null; error: string | null; restored: RestoredSpan[];
+    gaps: { from: number; to: number; seconds: number; on_card: "yes" | "partly" | "no"; card_from: number | null; card_to: number | null }[];
+  }[];
+  worker: { running: string[]; progress: Record<string, number> };
+};
 
 export type CameraLink = { cam_a: string; cam_b: string; min_s: number; max_s: number; one_way: boolean | number };
 export type LinkSuggestion = { cam_a: string; cam_b: string; count: number; median_gap_s: number; min_s: number; max_s: number; configured: boolean };
@@ -576,9 +590,16 @@ export function makeApi(base: string, opts: ApiOptions = {}) {
     req<FootageMatch>("/api/footage/verify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(b) }),
   footageStatus: () => req<FootageStatus>("/api/footage/status"),
   recordings: (camera: string, start: number, end: number) =>
-    req<{ spans: { start: string; duration: number }[]; events: TimelineEvent[]; kept: KeptSpan[]; locks: Lock[] }>(
+    req<{ spans: { start: string; duration: number }[]; events: TimelineEvent[]; kept: KeptSpan[]; locks: Lock[];
+      /** SD card recovery jobs overlapping the window, and the span the camera's card holds (absent on older servers) */
+      restored?: RestoredSpan[]; sd_card?: CardRange | null }>(
       `/api/recordings/${camera}?${qs({ start, end })}`,
     ),
+  /** the camera's own recording (SD card); `refresh` asks the camera again */
+  cameraSd: (camera: string, refresh = false) => req<SdStatus & { camera_id: string }>(`/api/cameras/${camera}/sd${refresh ? "?refresh=true" : ""}`),
+  sdGaps: (camera?: string, hours?: number) => req<SdGaps>(`/api/sd/gaps?${qs({ camera, hours })}`),
+  /** admin: put [from, to) back from the camera's SD card (replays at real time) */
+  recoverSd: (camera_id: string, from: number, to: number) => req<RestoredSpan>("/api/sd/recover", json("POST", { camera_id, from, to })),
   system: () => req<SystemInfo>("/api/system"),
   advisor: (ai = true) => req<AdvisorReport>(`/api/advisor?ai=${ai}`),
   advisorDismiss: (key: string, fingerprint: string) => req("/api/advisor/dismiss", json("POST", { key, fingerprint })),

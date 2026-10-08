@@ -237,6 +237,25 @@ CREATE TABLE IF NOT EXISTS briefings (
     model        TEXT,
     created_at   REAL NOT NULL
 );
+-- Footage put back from a camera's own recording (SD card) after an outage (sdbackfill.py): one row per job,
+-- the range asked for on this server's clock and what came of it. The footage itself is ordinary segments.
+CREATE TABLE IF NOT EXISTS restored_spans (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    camera_id    TEXT NOT NULL,
+    from_ts      REAL NOT NULL,
+    to_ts        REAL NOT NULL,
+    source       TEXT NOT NULL DEFAULT 'sd',
+    state        TEXT NOT NULL,             -- waiting | recovering | recovered | partly recovered | not on the card | failed
+    bytes        INTEGER NOT NULL DEFAULT 0,
+    created_at   REAL NOT NULL,
+    error        TEXT,
+    restored_s   REAL NOT NULL DEFAULT 0,   -- seconds of footage written
+    done_from    REAL,                      -- first and last restored instant
+    done_to      REAL,
+    updated_at   REAL,
+    requested_by TEXT
+);
+CREATE INDEX IF NOT EXISTS restored_spans_cam ON restored_spans(camera_id, from_ts);
 CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(synopsis, labels, content='', contentless_delete=1);
 CREATE VIRTUAL TABLE IF NOT EXISTS events_vec USING vec0(embedding float[{EMBED_DIM}]);
 """
@@ -271,6 +290,7 @@ MIGRATIONS = [
     ("cameras", "public_onvif_port", "INTEGER"),
     ("cameras", "record_stream", "TEXT NOT NULL DEFAULT 'main'"),   # main | sub: which stream is recorded 24/7 (mediamtx.build_config)
     ("events", "migrated_from", "TEXT"),        # JSON {site, site_id, event_id, camera_id}: copied here by a fleet move (siteconfig.import_history)
+    ("cameras", "public_replay_port", "INTEGER"),   # port-forward mode: the outside port of the camera's ONVIF replay (SD card) RTSP
 ]
 JSON_FIELDS = ("path", "rules", "detections", "synopsis_json", "synopsis_original", "feedback", "anomaly_json", "areas", "policy", "migrated_from")
 
@@ -424,7 +444,7 @@ class Database:
     def upsert_camera(self, cam: dict) -> None:
         cols = ["id", "name", "host", "onvif_port", "rtsp_port", "username", "password",
                 "main_path", "sub_path", "enabled", "zones", "retention_days", "scene_notes", "retention_policy",
-                "synopsis_labels", "policies", "public_host", "public_rtsp_port", "public_onvif_port", "record_stream"]
+                "synopsis_labels", "policies", "public_host", "public_rtsp_port", "public_onvif_port", "public_replay_port", "record_stream"]
         data = {**cam, "zones": json.dumps(cam.get("zones", []))}
         if "public_host" in data:
             data["public_host"] = data["public_host"] or None   # "" = not in port-forward mode

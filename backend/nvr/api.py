@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from . import assistant, backup, baseline, footage, frames, health, identities, journeys, keep, mediamtx, policy, ptz, retention, zones
 from . import synopsis as vlm
-from . import advisor, ai_serve, detector, direct, hub_agent, lan_guard, site_actions, siteconfig
+from . import advisor, ai_serve, detector, direct, hub_agent, lan_guard, sdbackfill, site_actions, siteconfig
 from . import vlmroute
 from . import summary as summary_mod
 from .config import ROOT, settings
@@ -49,6 +49,7 @@ class State:
     health: health.StreamHealth
     ptz: ptz.PtzManager
     hub: hub_agent.HubAgent
+    sd: sdbackfill.Backfill
 
 
 state = State()
@@ -91,6 +92,8 @@ async def lifespan(app: FastAPI):
     p.tracker.away_preset = state.ptz.away_preset
     p.tracker.away_between = state.ptz.away_between
     state.hub = hub_agent.HubAgent(app, state)
+    # SD card backfill (manual only in this phase): restored frames are re-timed with the metadata reader's clock offset
+    state.sd = sdbackfill.Backfill(live_offset=_live_clock_offset)
     assistant.ctx.pipeline, assistant.ctx.footage = p, state.footage
     state.tasks = [asyncio.create_task(coro, name=name) for name, coro in [
         ("mediamtx", state.mtx.run()),
@@ -110,6 +113,8 @@ async def lifespan(app: FastAPI):
         ("stream-health", state.health.run()),
         ("ptz", state.ptz.run()),
         ("hub-agent", state.hub.run()),
+        ("sd-backfill", state.sd.run()),
+        ("sd-status", sdbackfill.status_loop()),
     ]]
     https = _https_server() if settings.direct_enabled else None
     https_task = asyncio.create_task(_serve_https(https), name="https") if https is not None else None
@@ -120,6 +125,7 @@ async def lifespan(app: FastAPI):
     yield
     for ing in state.ingests.values():
         ing.stop()
+    state.sd.stop_all()   # a recovery in progress keeps what it published and resumes after the restart
     await state.mtx.stop()
     state.health.flush()   # bytes received today since the last save
     if state.ollama is not None:   # a site without a local model has no Ollama to stop
@@ -130,6 +136,12 @@ async def lifespan(app: FastAPI):
         https_task.cancel()
     for t in state.tasks:
         t.cancel()
+
+
+def _live_clock_offset(camera_id: str) -> float | None:
+    """The metadata reader's camera-clock offset (arrival minus camera time), or None before it has one."""
+    ing = state.ingests.get(camera_id)
+    return ing.meta.clock_offset if ing else None
 
 
 def _https_server():
@@ -506,9 +518,9 @@ async def hub_configure(body: HubIn):
 
 PUBLIC_CAMERA_FIELDS = ("id", "name", "host", "onvif_port", "rtsp_port", "username", "main_path",
                         "sub_path", "enabled", "zones", "retention_days", "scene_notes", "retention_policy",
-                        "synopsis_labels", "policies", "ptz_config", "public_host", "public_rtsp_port", "public_onvif_port",
+                        "synopsis_labels", "policies", "ptz_config", "public_host", "public_rtsp_port", "public_onvif_port", "public_replay_port",
                         "record_stream")
-CAMERA_KEPT_FIELDS = ("public_host", "public_rtsp_port", "public_onvif_port", "record_stream")   # omitted on PUT = unchanged
+CAMERA_KEPT_FIELDS = ("public_host", "public_rtsp_port", "public_onvif_port", "public_replay_port", "record_stream")   # omitted on PUT = unchanged
 
 
 def public_camera(c: dict) -> dict:
@@ -550,6 +562,7 @@ class CameraIn(BaseModel):
     public_host: str | None = Field(None, pattern=r"^[A-Za-z0-9][A-Za-z0-9.\-]{0,252}$", description="outside IP address or hostname")
     public_rtsp_port: int | None = None
     public_onvif_port: int | None = None
+    public_replay_port: int | None = None    # the camera's ONVIF replay (SD card) RTSP port outside; empty = as reported (555)
     # "sub": record the sub stream 24/7 instead of the main one (cellular sites); HD live pulls main on demand
     record_stream: Literal["main", "sub"] = "main"
 
@@ -558,7 +571,7 @@ class CameraIn(BaseModel):
     def _empty_is_none(cls, data):
         if isinstance(data, dict):   # a cleared form field arrives as "" (or 0 for a port)
             data = {**data}
-            for k in ("public_host", "public_rtsp_port", "public_onvif_port"):
+            for k in ("public_host", "public_rtsp_port", "public_onvif_port", "public_replay_port"):
                 if k in data and data[k] in ("", 0):
                     data[k] = None
         return data
@@ -568,7 +581,7 @@ class CameraIn(BaseModel):
         # main_path / sub_path are appended to rtsp://user:pass@host:port: "@evil:554/x" would send the camera
         # password to another host. Same rules as a config import (mediamtx.camera_problem).
         problem = mediamtx.camera_problem(self.model_dump(include={"id", "host", "main_path", "sub_path", "rtsp_port", "onvif_port",
-                                                                   "public_host", "public_rtsp_port", "public_onvif_port", "record_stream"}))
+                                                                   "public_host", "public_rtsp_port", "public_onvif_port", "public_replay_port", "record_stream"}))
         if problem:
             raise ValueError(problem)
         return self
@@ -590,6 +603,7 @@ async def list_cameras():
             **(ing.status() if ing else {}),
             "health": state.health.camera(c["id"]),
             "ptz": state.ptz.status(c["id"]),
+            "sd": _sd_brief(sdbackfill.cached_status(c["id"])),
         }})
     return out
 
@@ -1597,7 +1611,87 @@ async def recordings(camera_id: str, start: float | None = None, end: float | No
     for k in kept:
         k["reasons"] = json.loads(k["reasons"])
     locks = db.all("SELECT * FROM locks WHERE camera_id=? AND end_ts>=? AND start_ts<=? ORDER BY start_ts", [camera_id, lo, hi])
-    return {"spans": spans, "events": events, "kept": kept, "locks": locks}
+    # footage put back from the camera's SD card (and jobs still waiting / recovering): the Timeline shades these
+    restored = sdbackfill.restored_for_timeline(camera_id, lo, hi)
+    st = sdbackfill.cached_status(camera_id)
+    return {"spans": spans, "events": events, "kept": kept, "locks": locks, "restored": restored,
+            "sd_card": {"from": card[0], "to": card[1]} if (card := sdbackfill.card_range(st)) else None}
+
+
+# ---------------------------------------------------------------- SD card backfill (sdbackfill.py)
+
+def _sd_brief(st: dict | None) -> dict | None:
+    """What the UI shows of a camera's SD status (no replay URI)."""
+    if not st:
+        return None
+    out = {k: st.get(k) for k in ("checked_at", "supported", "has_recording", "earliest", "latest", "recording_now", "error")}
+    return {**out, "text": sdbackfill.status_text(st)}
+
+
+def _camera_row(camera_id: str) -> dict:
+    cam = next((c for c in db.cameras() if c["id"] == camera_id), None)
+    if cam is None:
+        raise HTTPException(404, "unknown camera")
+    return cam
+
+
+@app.get("/api/cameras/{camera_id}/sd")
+async def camera_sd(camera_id: str, refresh: bool = False):
+    """The camera's own recording (SD card), read-only over ONVIF Profile G; cached for an hour. `refresh` asks the
+    camera again (at most once a minute)."""
+    st = await sdbackfill.status(_camera_row(camera_id), refresh=refresh)
+    return {"camera_id": camera_id, **_sd_brief(st)}
+
+
+@app.get("/api/sd/gaps")
+async def sd_gaps(camera: str | None = Query(None, pattern=r"^[a-z0-9_]{1,32}$"), hours: float = Query(sdbackfill.LOOKBACK_H, gt=0, le=240)):
+    """Per camera: holes of 20 s or more in this server's recordings over the last `hours` (not yet handled), whether
+    the camera's card covers them, and the recovery jobs (restored spans) with their states."""
+    cams = [c for c in db.cameras(enabled_only=True) if camera is None or c["id"] == camera]
+    if camera and not cams:
+        raise HTTPException(404, "unknown camera")
+    out = await asyncio.gather(*(sdbackfill.camera_gaps(c, hours) for c in cams))
+    for o in out:
+        o["sd"] = _sd_brief(o["sd"])
+    return {"cameras": out, "worker": state.sd.status()}
+
+
+class RecoverIn(BaseModel):
+    camera_id: str = Field(pattern=r"^[a-z0-9_]{1,32}$")
+    start: float = Field(alias="from")
+    end: float = Field(alias="to")
+
+
+@app.post("/api/sd/recover")
+async def sd_recover(body: RecoverIn, request: Request):
+    """Admin: put [from, to) back from the camera's SD card (replay runs at real time, one job per camera at a time).
+    Through the hub this needs admin (hub roles.py); checked here too for a tunneled or direct request."""
+    role = _hub_role(request)
+    if role is not None and role not in ("admin", "owner"):
+        raise HTTPException(403, "recovering footage from a camera's SD card needs the admin role")
+    cam = _camera_row(body.camera_id)
+    now = time.time()
+    if not body.end > body.start:
+        raise HTTPException(422, "the end must be after the start")
+    if body.end > now - 30:
+        raise HTTPException(422, "only past footage can be recovered")
+    if body.end - body.start > sdbackfill.MAX_JOB_S:
+        raise HTTPException(422, f"at most {sdbackfill.MAX_JOB_S // 3600} hours at a time (the camera replays at real time)")
+    if cam.get("record_stream") == "sub":
+        raise HTTPException(409, "this camera records its sub stream here; the card holds the main stream")
+    st = await sdbackfill.status(cam)
+    if not st.get("has_recording"):
+        raise HTTPException(409, "the camera has no recording on its SD card" + (f" ({st['error']})" if st.get("error") else ""))
+    card = sdbackfill.card_range(st, now)
+    if not card or not sdbackfill.clip([(body.start, body.end)], *card):
+        raise HTTPException(409, "the camera's SD card does not cover that time")
+    busy = db.one("SELECT id FROM restored_spans WHERE camera_id=? AND state IN ('waiting','recovering') AND from_ts<? AND to_ts>?",
+                  [cam["id"], body.end, body.start])
+    if busy:
+        raise HTTPException(409, "that time is already being recovered")
+    by = request.headers.get("x-hub-user") if role is not None else "local"
+    log.info("SD recovery requested: %s %s -> %s by %s", cam["id"], body.start, body.end, by)
+    return state.sd.submit(cam["id"], body.start, body.end, by)
 
 
 # ---------------------------------------------------------------- Ask the NVR + briefings
