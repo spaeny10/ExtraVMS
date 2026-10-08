@@ -106,7 +106,7 @@ export function RetentionPanel() {
         <h2>Retention</h2>
         {stats.dry_run && <span className="badge status-open">Dry run: nothing is deleted</span>}
       </div>
-      {stats.alert && <div className="alert-box">{stats.alert.message} ({stats.alert.free_gb} GB free, floor {stats.alert.floor_gb} GB)</div>}
+      {stats.alert && <div className="alert-box">{stats.alert.message}{stats.alert.kind === "continuous" ? ` (${stats.alert.free_gb} GB free, floor ${stats.alert.floor_gb} GB)` : ""}</div>}
 
       <div className="stat">
         <div className="muted small">Recording disk</div>

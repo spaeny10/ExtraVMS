@@ -235,7 +235,7 @@ export type RetentionStats = {
     kept_files: number; continuous_days_on_disk: number; gb_per_day: number;
   }[];
   disk: { total_gb: number; free_gb: number };
-  alert: { message: string; free_gb: number; floor_gb: number } | null;
+  alert: { message: string; free_gb: number; floor_gb: number; kind?: "continuous" | "event_media" } | null;
   last_pass: Record<string, number | boolean>;
   dry_run: boolean;
   locks: number;

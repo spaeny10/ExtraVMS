@@ -233,7 +233,7 @@ def enforce_disk_floor(dry_run: bool, stats: Counter, now: float | None = None) 
     if data_free_gb() < dfloor:
         free_event_media(dtarget, dry_run, stats, locked=True)
     if stats["deleted_continuous"] or free_gb() < floor:
-        _continuous_breach = {"at": time.time(), "free_gb": round(free_gb(), 1), "floor_gb": floor,
+        _continuous_breach = {"at": time.time(), "free_gb": round(free_gb(), 1), "floor_gb": round(floor, 1),
                               "message": "Disk is too small to hold the continuous window for all cameras; "
                                          "oldest continuous footage was deleted. Add storage, lower continuous days or the free-space floor."}
         log.error(_continuous_breach["message"])
@@ -434,7 +434,7 @@ def _update_alert() -> None:
     if not problems:
         alert = None
         return
-    base = _continuous_breach or {"free_gb": round(dfree, 1), "floor_gb": dfloor}
+    base = _continuous_breach or {"free_gb": round(dfree, 1), "floor_gb": round(dfloor, 1)}
     alert = {"at": time.time(), "free_gb": base["free_gb"], "floor_gb": base["floor_gb"],
              "kind": "continuous" if _continuous_breach else "event_media",
              "message": " ".join(problems), "problems": problems}
