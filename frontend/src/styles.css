@@ -422,7 +422,7 @@ h3.spaced { margin-top: 18px; }
 .sync-status.playing { background: rgb(220 38 38 / .75); }
 .sync-gap { position: absolute; inset: 0; display: grid; place-items: center; color: #9aa4b1; font-size: 13px; background: #0b0e12; }
 .sync-bar { position: absolute; left: 0; right: 0; top: 0; display: flex; align-items: center; gap: 6px; padding: 4px 6px; background: linear-gradient(rgb(0 0 0 / .6), transparent); color: #fff; font-size: 12px; }
-.sync-name { font-weight: 600; text-shadow: 0 1px 2px #000; }
+.sync-name { font-weight: 600; text-shadow: 0 1px 2px #000; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sync-status { font-size: 11px; background: rgb(0 0 0 / .5); padding: 1px 6px; border-radius: 4px; }
 .sync-solo { color: #fff !important; border-color: rgb(255 255 255 / .3) !important; padding: 0 6px !important; opacity: .75; }
 .sync-solo.on, .sync-solo:hover { opacity: 1; background: rgb(59 130 246 / .5) !important; }
