@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api, makeApi, type SiteApi } from "./api";
+import { ZoomFrame } from "./VideoZoom";
 
 /**
  * WebRTC (WHEP) player for a MediaMTX path.
@@ -141,16 +142,18 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
 
   return (
     <div className={`player ${className ?? ""}`}>
-      <video
-        ref={setVideo}
-        autoPlay
-        muted
-        playsInline
-        onResize={(e) => {
-          const v = e.currentTarget;
-          if (v.videoWidth) setSize(`${v.videoWidth}×${v.videoHeight}`);
-        }}
-      />
+      <ZoomFrame>
+        <video
+          ref={setVideo}
+          autoPlay
+          muted
+          playsInline
+          onResize={(e) => {
+            const v = e.currentTarget;
+            if (v.videoWidth) setSize(`${v.videoWidth}×${v.videoHeight}`);
+          }}
+        />
+      </ZoomFrame>
       {state !== "playing" && <div className="player-state">{state === "connecting" ? "Connecting…" : "Reconnecting…"}</div>}
       {showSize && size && state === "playing" && <div className="player-size">{size}</div>}
       {children}
