@@ -18,10 +18,10 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import Callable
 
-from . import mediamtx
+from . import mediamtx, ruleevents
 from .config import settings
 from .onvif_soap import ACTION_PULL, Onvif, OnvifError, discover_services, escape, find, find_all, local, simple_items, text
-from .rtsp_client import Rtsp, keepalive, play_track, rtp_payload
+from .rtsp_client import NoTrack, Rtsp, keepalive, play_track, rtp_payload
 
 log = logging.getLogger("nvr.ingest")
 
@@ -52,6 +52,7 @@ class RuleEvent:
     state: bool | None
     data: dict
     initial: bool = False   # the subscription's state dump, not a transition (kept for relay / digital input)
+    received: float = field(default_factory=time.time)   # this PC's clock when it arrived (camera clocks drift)
 
 
 def parse_utc(value: str | None) -> float | None:
@@ -103,6 +104,7 @@ def parse_metadata(camera_id: str, xml: bytes, offset: float = 0.0) -> list[Meta
 CLOCK_WINDOW = 4000        # metadata frames (~3-5 min) for the camera clock estimate
 CLOCK_PERCENTILE = 0.05    # low percentile: the least-delayed arrivals show the true clock offset
 SILENCE_LIMIT_S = 90  # no packets at all (RTP, RTCP or keepalive replies) for this long = dead session
+NO_TRACK_RETRY_S = 1800   # the stream has no metadata track at all (Reolink RP-PCT8MD): look again this rarely
 
 
 class MetadataReader(threading.Thread):
@@ -125,6 +127,9 @@ class MetadataReader(threading.Thread):
         self._deltas: collections.deque[float] = collections.deque(maxlen=CLOCK_WINDOW)
         self._since_update = 0
         self.clock_offset: float | None = None  # seconds to add to camera time to get PC time
+        # the camera's stream has no metadata track (its DESCRIBE lists video/audio only): its detections can only come
+        # from its ONVIF events (ruleevents.py, auto mode), so the reader checks again every NO_TRACK_RETRY_S
+        self.no_track = False
 
     def _retime(self, raw_ts: float) -> float:
         self._deltas.append(time.time() - raw_ts)
@@ -141,6 +146,15 @@ class MetadataReader(threading.Thread):
             started = time.time()
             try:
                 self._session()
+            except NoTrack as e:
+                if not self.no_track:
+                    log.warning("[%s] metadata stream: %s: detections can only come from the camera's ONVIF events; "
+                                "checking again every %d min", self.camera_id, e, NO_TRACK_RETRY_S // 60)
+                self.no_track = True
+                self.connected = False
+                self.stop_event.wait(NO_TRACK_RETRY_S)
+                backoff = 1
+                continue
             except (OSError, ConnectionError, LookupError, ET.ParseError) as e:
                 if time.time() - started > 60:
                     backoff = 1  # the session was healthy for a while; reconnect quickly
@@ -154,6 +168,7 @@ class MetadataReader(threading.Thread):
         cam = Rtsp(f"{settings.mediamtx_rtsp}/{self.camera_id}", user, pw)
         try:
             play_track(cam, "application")
+            self.no_track = False
             cam.sock.settimeout(5)
             self.connected = True
             log.info("[%s] metadata stream connected", self.camera_id)
@@ -284,9 +299,12 @@ class CameraIngest:
         put_event = lambda e: loop.call_soon_threadsafe(events.put_nowait, e)
         self.meta = MetadataReader(cam["id"], put_frame)
         self.events = EventPuller(cam, put_event)
+        # set to take its detections from its ONVIF events: no metadata reader at all (none would be used)
+        self.meta_wanted = ruleevents.setting(cam) != "onvif_events"
 
     def start(self) -> None:
-        self.meta.start()
+        if self.meta_wanted:
+            self.meta.start()
         self.events.start()
 
     def stop(self) -> None:
@@ -296,4 +314,6 @@ class CameraIngest:
     def status(self) -> dict:
         return {"metadata": self.meta.connected, "metadata_last": self.meta.last_frame_at,
                 "clock_offset": None if self.meta.clock_offset is None else round(self.meta.clock_offset, 2),
-                "onvif_events": self.events.connected}
+                "onvif_events": self.events.connected,
+                # no metadata track in the camera's stream / no reader (set to ONVIF events): Settings says why
+                "metadata_missing": self.meta.no_track, "metadata_off": not self.meta_wanted}

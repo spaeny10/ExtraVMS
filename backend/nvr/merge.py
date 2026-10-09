@@ -23,7 +23,7 @@ import shutil
 
 import numpy as np
 
-from . import cells, zones
+from . import cells, ruleevents, zones
 from .config import settings
 from .db import db
 
@@ -62,6 +62,8 @@ def continuous(a_path: list, b_path: list, max_dist: float | None = None) -> boo
     p, q = _last_box(a_path), _first_box(b_path)
     if p is None or q is None:
         return False
+    if ruleevents.whole_frame(p[1:5]) or ruleevents.whole_frame(q[1:5]):
+        return False   # no position (an ONVIF event not verified yet): nothing says it's the same object
     if _overlap(p, q):
         return True
     (x1, y1), (x2, y2) = _box_center(p), _box_center(q)

@@ -22,7 +22,24 @@ export type CameraStreams = {
   sub_not_found?: boolean;
   /** the check route answered before the camera did; the result is stored when it comes */
   pending?: boolean;
+  /** the metadata configuration's Analytics flag (false: no objects in the metadata; detections from ONVIF events) */
+  metadata_analytics?: boolean | null;
+  /** the configured main path is not one the camera lists: the paths it does list (largest = main), for a one-click fix */
+  suggest?: { main_path: string; sub_path: string } | null;
 };
+
+/** "Use /Preview_01_main and /Preview_01_sub" for the one-click path fix, or null when there is nothing to offer. */
+export function suggestText(s: CameraStreams | null | undefined, current: { main_path: string; sub_path: string }): string | null {
+  const g = s?.suggest;
+  if (!g || (g.main_path === current.main_path && g.sub_path === current.sub_path)) return null;
+  return g.sub_path && g.sub_path !== current.sub_path ? `Use ${g.main_path} and ${g.sub_path}` : `Use ${g.main_path}`;
+}
+
+/** Settings → Cameras: where detections come from, in words (null when it's the camera's object metadata). */
+export function detectionsText(d: { source: string; reason: string } | null | undefined): string | null {
+  if (!d || d.source !== "onvif_events") return null;
+  return "Detections: from the camera's ONVIF events (no object positions)";
+}
 
 function size(p: StreamProfile): string {
   const res = p.width && p.height ? `${p.width}×${p.height}` : "";

@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     track_min_seconds: float = 1.0          # camera track must persist this long to become an event
     track_end_gap: float = 2.0              # seconds without the object before the track is closed
     track_max_seconds: float = 60.0         # long tracks are split so synopses stay timely
+    # Cameras without object metadata (ruleevents.py): an event opened by an ONVIF detection (e.g. Reolink PeopleDetect)
+    # whose state=false never comes is closed this long after the last state=true
+    rule_event_on_timeout: float = 120.0
     camera_clock_offset: float = 0.0        # seconds to add to camera UtcTime to match PC clock
     clip_pre_roll: float = 5.0             # cameras report a person a step or two late: keep the doorway on the clip
     clip_post_roll: float = 3.0

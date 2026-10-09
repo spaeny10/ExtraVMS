@@ -107,10 +107,14 @@ async def lifespan(app: FastAPI):
     p = state.pipeline
     state.footage = footage.Indexer(p)
     state.health = health.StreamHealth()
+    # detections from the camera's ONVIF events: a metadata reader that isn't attached is expected, not a problem
+    state.health.event_only = lambda cid: p.tracker.uses_rule_events(cid)[0]
     state.ptz = ptz.PtzManager()
     p.ptz = state.ptz
     p.tracker.away_preset = state.ptz.away_preset
     p.tracker.away_between = state.ptz.away_between
+    # cameras whose RTSP stream has no metadata track at all: auto mode takes their ONVIF events (ruleevents.py)
+    p.tracker.metadata_missing = lambda cid: bool((ing := state.ingests.get(cid)) and ing.meta.no_track)
     state.hub = hub_agent.HubAgent(app, state)
     # SD card backfill (manual only in this phase): restored frames are re-timed with the metadata reader's clock offset
     state.sd = sdbackfill.Backfill(live_offset=_live_clock_offset)
@@ -543,8 +547,9 @@ async def hub_configure(body: HubIn):
 PUBLIC_CAMERA_FIELDS = ("id", "name", "host", "onvif_port", "rtsp_port", "username", "main_path",
                         "sub_path", "enabled", "zones", "retention_days", "scene_notes", "retention_policy",
                         "synopsis_labels", "policies", "ptz_config", "public_host", "public_rtsp_port", "public_onvif_port", "public_replay_port",
-                        "record_stream")
-CAMERA_KEPT_FIELDS = ("public_host", "public_rtsp_port", "public_onvif_port", "public_replay_port", "record_stream")   # omitted on PUT = unchanged
+                        "record_stream", "event_source", "motion_events")
+CAMERA_KEPT_FIELDS = ("public_host", "public_rtsp_port", "public_onvif_port", "public_replay_port", "record_stream",
+                      "event_source", "motion_events")   # omitted on PUT = unchanged
 
 
 def public_camera(c: dict) -> dict:
@@ -590,6 +595,10 @@ class CameraIn(BaseModel):
     public_replay_port: int | None = None    # the camera's ONVIF replay (SD card) RTSP port outside; empty = as reported (555)
     # "sub": record the sub stream 24/7 instead of the main one (cellular sites); HD live pulls main on demand
     record_stream: Literal["main", "sub"] = "main"
+    # what opens events (ruleevents.py): "auto" = the camera's object metadata, or its ONVIF detection events
+    # (Reolink PeopleDetect) when it sends no objects; omitted on update = keep what is stored
+    event_source: Literal["auto", "metadata", "onvif_events"] = "auto"
+    motion_events: bool = False   # ONVIF events mode: motion topics open events too (YOLO must confirm a person/vehicle)
 
     @model_validator(mode="before")
     @classmethod
@@ -612,6 +621,12 @@ class CameraIn(BaseModel):
         return self
 
 
+def _detection_status(camera_id: str) -> dict | None:
+    """Where the camera's detections come from now (its object metadata or its ONVIF events, ruleevents.py)."""
+    tracker = getattr(getattr(state, "pipeline", None), "tracker", None)
+    return tracker.detection_status(camera_id) if tracker is not None else None
+
+
 @app.get("/api/cameras")
 async def list_cameras():
     status = {}
@@ -629,6 +644,7 @@ async def list_cameras():
             "health": state.health.camera(c["id"]),
             "ptz": state.ptz.status(c["id"]),
             "sd": _sd_brief(sdbackfill.cached_status(c["id"])),
+            "detections": _detection_status(c["id"]),
         }})
     return out
 
@@ -677,6 +693,8 @@ async def put_camera(camera_id: str, cam: CameraIn):
         if k not in cam.model_fields_set and existing:
             data[k] = existing.get(k)
     db.upsert_camera(data)
+    if hasattr(state.pipeline, "forget_camera_rows"):
+        state.pipeline.forget_camera_rows()   # the tracker reads event_source / motion_events afresh
     # A new camera, or another address / credentials: what it served before no longer applies, ask it again (after
     # this answers). Edited stream paths: the path MediaMTX was refused (404) may not be pulled any more.
     readdressed = existing is None or any(existing.get(k) != data.get(k) for k in streams.ADDRESS_KEYS)

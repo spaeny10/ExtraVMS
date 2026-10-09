@@ -53,6 +53,10 @@ class Pipeline:
         self.synopsis_failed_at = 0.0    # last synopsis that ended in an error (retry_loop backs off from it)
         self.journey_q: asyncio.Queue[int] = asyncio.Queue()
         self.tracker = Tracker(self.verify_q.put)
+        self.tracker.camera = self.camera_row        # event_source / motion_events / metadata Analytics flag
+        self.tracker.on_opened = self.publish        # events opened by a camera's ONVIF detection events
+        self._camera_rows: dict[str, dict] = {}
+        self._camera_rows_at = 0.0
         self.gpu = ThreadPoolExecutor(max_workers=1, thread_name_prefix="yolo")
         self.verifier: Verifier | None = None
         self.verify_done = 0              # events the verifier finished (verified / rejected / error): the stall check's progress
@@ -81,6 +85,24 @@ class Pipeline:
             self.clip = await asyncio.get_running_loop().run_in_executor(self.gpu, Clip)
             log.info("CLIP model loaded (footage search, vehicle fingerprints)")
         return self.clip
+
+    CAMERA_ROWS_S = 30.0   # the camera rows the tracker reads are re-read this often (a stream check updates them)
+
+    def camera_row(self, camera_id: str) -> dict | None:
+        """The camera's settings row for the tracker: settings and its stream check (streams.py stores the metadata
+        Analytics flag there) change without sync_cameras, so the rows are re-read every CAMERA_ROWS_S."""
+        now = time.time()
+        if now - self._camera_rows_at >= self.CAMERA_ROWS_S:
+            try:
+                self._camera_rows = {c["id"]: c for c in db.cameras()}
+            except Exception:  # noqa: BLE001 - keep the last rows
+                log.exception("reading cameras for the tracker failed")
+            self._camera_rows_at = now
+        return self._camera_rows.get(camera_id) or self.cameras.get(camera_id)
+
+    def forget_camera_rows(self) -> None:
+        """A camera was saved: the tracker reads its new settings on the next event."""
+        self._camera_rows_at = 0.0
 
     # ---- live updates for the UI
     def annotate(self, e: dict) -> dict:
@@ -206,7 +228,8 @@ class Pipeline:
         db.update_event(event_id, clip=str(clip.relative_to(settings.data_dir)), error=None, **result)
         if reid:
             db.set_reid(event_id, reid)
-        if result["status"] == "verified" and e["camera_class"] == "vehicle":
+        label = result.get("camera_class") or e["camera_class"]   # a "motion" event takes the class YOLO found
+        if result["status"] == "verified" and label == "vehicle":
             clip = await self.get_clip()
             await asyncio.get_running_loop().run_in_executor(self.gpu, identities.embed_vehicle, clip, event_id)
         # Verified from the clip (snapshot, re-ID and fingerprint are made); a camera over the hourly event limit

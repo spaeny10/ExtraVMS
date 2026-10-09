@@ -293,6 +293,8 @@ MIGRATIONS = [
     ("cameras", "public_replay_port", "INTEGER"),   # port-forward mode: the outside port of the camera's ONVIF replay (SD card) RTSP
     ("cameras", "streams", "TEXT"),              # JSON {profiles, media, error, sub_not_found}: what the camera serves (streams.py)
     ("cameras", "streams_checked_at", "REAL"),   # last ONVIF stream check; NULL = never (streams.StreamChecker probes it)
+    ("cameras", "event_source", "TEXT NOT NULL DEFAULT 'auto'"),   # auto | metadata | onvif_events: what opens events (ruleevents.py)
+    ("cameras", "motion_events", "INTEGER NOT NULL DEFAULT 0"),    # ONVIF events mode: motion topics open events (YOLO must confirm)
 ]
 JSON_FIELDS = ("path", "rules", "detections", "synopsis_json", "synopsis_original", "feedback", "anomaly_json", "areas", "policy", "migrated_from")
 
@@ -447,8 +449,13 @@ class Database:
     def upsert_camera(self, cam: dict) -> None:
         cols = ["id", "name", "host", "onvif_port", "rtsp_port", "username", "password",
                 "main_path", "sub_path", "enabled", "zones", "retention_days", "scene_notes", "retention_policy",
-                "synopsis_labels", "policies", "public_host", "public_rtsp_port", "public_onvif_port", "public_replay_port", "record_stream"]
+                "synopsis_labels", "policies", "public_host", "public_rtsp_port", "public_onvif_port", "public_replay_port", "record_stream",
+                "event_source", "motion_events"]
         data = {**cam, "zones": json.dumps(cam.get("zones", []))}
+        if "event_source" in data:
+            data["event_source"] = data["event_source"] if data["event_source"] in ("auto", "metadata", "onvif_events") else "auto"
+        if "motion_events" in data:
+            data["motion_events"] = int(bool(data["motion_events"]))
         if "public_host" in data:
             data["public_host"] = data["public_host"] or None   # "" = not in port-forward mode
         if "record_stream" in data:

@@ -21,8 +21,12 @@ The probe runs when a camera is added or its address or credentials change (api.
 an import adds one). StreamChecker also tails MediaMTX's log for "[path <id>_sub] [RTSP source] bad status code:
 404" so a camera that drops its sub stream falls back without waiting for a probe.
 
-Stored on the camera row: `streams` (JSON {profiles, media, error, sub_not_found: {path, at}}) and
-`streams_checked_at`.
+Stored on the camera row: `streams` (JSON {profiles, media, metadata_analytics, error, sub_not_found: {path, at}}) and
+`streams_checked_at`. metadata_analytics is the profiles' metadata configuration Analytics flag (False on cameras
+whose metadata carries no objects, e.g. the Reolink RP-PCT8MD: their detections come from ONVIF events, ruleevents.py).
+
+When the configured main path is not one the camera lists, view() offers the paths it does list (`suggest`: the
+largest profile as main, the plan's sub) for a one-click fix in Settings; nothing is ever changed automatically.
 """
 from __future__ import annotations
 
@@ -126,6 +130,16 @@ def parse_profiles(body) -> list[dict]:
     return out
 
 
+def parse_metadata_analytics(body) -> bool | None:
+    """GetProfiles reply -> the metadata configurations' Analytics flag: True if any says true, False if they all say
+    false, None when no profile has one (Media: MetadataConfiguration/Analytics; Media2: Configurations/Metadata/Analytics)."""
+    values = [(e.text or "").strip().lower() for e in body.iter() if soap.local(e) == "Analytics"]
+    values = [v for v in values if v in ("true", "false", "1", "0")]
+    if not values:
+        return None
+    return any(v in ("true", "1") for v in values)
+
+
 def parse_stream_uri(body) -> str | None:
     return soap.text(body, "Uri")
 
@@ -146,9 +160,12 @@ GET_URI_MEDIA1 = ("<trt:GetStreamUri><trt:StreamSetup><tt:Stream>RTP-Unicast</tt
 GET_URI_MEDIA2 = "<tr2:GetStreamUri><tr2:Protocol>RTSP</tr2:Protocol><tr2:ProfileToken>{token}</tr2:ProfileToken></tr2:GetStreamUri>"
 
 
-def _profiles_from(client: soap.Onvif, url: str, get_profiles: str, get_uri: str) -> list[dict]:
+def _profiles_from(client: soap.Onvif, url: str, get_profiles: str, get_uri: str, flags: dict | None = None) -> list[dict]:
     from xml.sax.saxutils import escape
-    profiles = parse_profiles(client.call(url, get_profiles))
+    body = client.call(url, get_profiles)
+    if flags is not None:
+        flags["metadata_analytics"] = parse_metadata_analytics(body)
+    profiles = parse_profiles(body)
     out = []
     for p in profiles:
         try:
@@ -176,17 +193,18 @@ def probe_streams(cam: dict, timeout: float = CALL_TIMEOUT_S) -> dict:
         raise soap.OnvifError("the camera reports no ONVIF media service")
     profiles: list[dict] = []
     used = None
+    flags: dict = {}
     if media:
         try:
-            profiles = _profiles_from(client, media, "<trt:GetProfiles/>", GET_URI_MEDIA1)
+            profiles = _profiles_from(client, media, "<trt:GetProfiles/>", GET_URI_MEDIA1, flags)
             used = "media"
         except soap.OnvifError:
             if not media2:
                 raise
     if not profiles and media2:
-        profiles = _profiles_from(client, media2, "<tr2:GetProfiles><tr2:Type>All</tr2:Type></tr2:GetProfiles>", GET_URI_MEDIA2)
+        profiles = _profiles_from(client, media2, "<tr2:GetProfiles><tr2:Type>All</tr2:Type></tr2:GetProfiles>", GET_URI_MEDIA2, flags)
         used = "media2"
-    return {"profiles": sort_profiles(profiles), "media": used}
+    return {"profiles": sort_profiles(profiles), "media": used, "metadata_analytics": flags.get("metadata_analytics")}
 
 
 # --------------------------------------------------------------------------- the decision
@@ -229,7 +247,7 @@ def plan(cam: dict) -> dict:
     main_path, sub_path = cam.get("main_path") or "/main", cam.get("sub_path") or "/sub"
     missing = (st.get("sub_not_found") or {}).get("path")
     busy = (st.get("sub_not_found") or {}).get("code") == "453"
-    out: dict = {"sub_path": sub_path, "detected": False, "main": None, "sub": None, "problems": []}
+    out: dict = {"sub_path": sub_path, "detected": False, "main": None, "sub": None, "problems": [], "suggest": None}
     if busy:   # no connection left on the camera: relay the main stream, whatever it offers
         out.update(sub_path=None)
         out["problems"].append(busy_text())
@@ -262,6 +280,10 @@ def plan(cam: dict) -> dict:
     out["sub_path"], out["sub"] = chosen, profile
     if chosen is None:
         out["problems"].append(no_sub_text(ref.get("width"), ref.get("height")))
+    if main is None and _safe_path(ref.get("path")):
+        # the configured main path is not one the camera serves: offer what it lists (the user clicks; never automatic)
+        sub_suggest = chosen if chosen and _safe_path(chosen) else None
+        out["suggest"] = {"main_path": ref["path"], "sub_path": sub_suggest or sub_path}
     return out
 
 
@@ -292,6 +314,9 @@ def view(cam: dict) -> dict:
         "sub": _profile_view(p["sub"]),
         "sd": {"path": p["sub_path"], "relay": p["sub_path"] is None, "detected": p["detected"]},
         "sub_not_found": bool((st.get("sub_not_found") or {}).get("path")),
+        "metadata_analytics": st.get("metadata_analytics"),
+        # the configured main path is not listed: the paths the camera does list, for a one-click fix in Settings
+        "suggest": p.get("suggest"),
     }
 
 
@@ -313,7 +338,8 @@ def record_probe(camera_id: str, result: dict | None, error: str | None = None, 
     st = state_of(cam)
     now = now or time.time()
     if result is not None:
-        st = {**st, "profiles": result.get("profiles") or [], "media": result.get("media"), "error": None}
+        st = {**st, "profiles": result.get("profiles") or [], "media": result.get("media"),
+              "metadata_analytics": result.get("metadata_analytics"), "error": None}
         if clear_404:   # a manual check gives the sub stream another chance (MediaMTX re-marks it on the next 404)
             st.pop("sub_not_found", None)
     else:

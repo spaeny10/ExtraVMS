@@ -128,6 +128,9 @@ class StreamHealth:
         self.sub_recorded: set[str] = set()        # cameras whose <id>_sub relays <id> locally (mediamtx.sub_relays_main)
         self._daily: dict[str, float] | None = None   # BANDWIDTH_KEY, loaded on first use
         self._daily_saved = 0.0
+        # camera id -> its detections come from its ONVIF events (ruleevents.py; set by the API): no metadata reader
+        # is expected there, so "metadata reader not attached" is not a problem (the hub would raise camera_down)
+        self.event_only = lambda camera_id: False
 
     async def sample(self) -> None:
         async with httpx.AsyncClient(timeout=5) as c:
@@ -239,11 +242,17 @@ class StreamHealth:
         out["metadata_reader"] = main.readers.get("rtspSession", 0) >= 1 + relay
         if stalled is not None and stalled >= STALL_S and main.state == "ready":
             out["problems"].append(f"no video for {int(stalled)} s (stream still open)")
-        if out["metadata_reader"] is False and len(main.samples) >= 3:
+        if out["metadata_reader"] is False and len(main.samples) >= 3 and not self._event_only(camera_id):
             out["problems"].append("metadata reader not attached: detections are being missed")
         if out["frames_in_error_1h"]:
             out["problems"].append(f"{out['frames_in_error_1h']} corrupt frames in the last hour (packet loss?)")
         return out
+
+    def _event_only(self, camera_id: str) -> bool:
+        try:
+            return bool(self.event_only(camera_id))
+        except Exception:  # noqa: BLE001 - never let the lookup hide the camera's health
+            return False
 
     def all(self) -> dict[str, dict]:
         return {c["id"]: self.camera(c["id"]) for c in db.cameras(enabled_only=True)}

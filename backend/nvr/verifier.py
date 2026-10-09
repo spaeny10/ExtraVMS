@@ -2,6 +2,10 @@
 
 For a closed event: fetch the clip from MediaMTX recordings, decode frames at sampled track
 timestamps, run YOLO, and check that YOLO sees the same class where the camera said it was.
+
+Events opened from a camera's ONVIF detection events (ruleevents.py) have no camera boxes: frames are sampled evenly
+over the event, any YOLO object of the event's label (inside the zones) counts, and the path is rebuilt from YOLO's
+boxes. A "motion" event takes the class YOLO sees most (person or vehicle), or is rejected.
 """
 from __future__ import annotations
 
@@ -18,7 +22,7 @@ import av
 import cv2
 import numpy as np
 
-from . import parked, zones
+from . import parked, ruleevents, zones
 from .config import ROOT, settings
 
 log = logging.getLogger("nvr.verifier")
@@ -310,10 +314,15 @@ class Verifier:
     def verify(self, event: dict, clip: Path, clip_start: float, zone_list: list[dict] | None = None) -> dict:
         zone_list = zones.normalize(zone_list)
         label = event["camera_class"]
+        no_box = ruleevents.is_rule_event(event)   # opened by the camera's ONVIF event: no camera boxes to match
+        motion = no_box and label not in LABEL_CLASSES   # "motion": YOLO decides person or vehicle
         allowed = LABEL_CLASSES.get(label, set())
-        samples = sample_path(event["path"], settings.verify_frames)
+        if no_box:
+            samples = ruleevents.sample_points(event, settings.verify_frames, settings.clip_pre_roll, settings.clip_post_roll)
+        else:
+            samples = sample_path(event["path"], settings.verify_frames)
         # vehicles also get one pre-roll frame from before the camera saw motion: what was already parked there
-        pre_t = clip_start + 0.5 if (label in parked.VEHICLE_LABELS and settings.parked_suppress) else None
+        pre_t = clip_start + 0.5 if ((label in parked.VEHICLE_LABELS or motion) and settings.parked_suppress) else None
         frames = grab_frames(clip, clip_start, [s[0] for s in samples] + ([pre_t] if pre_t else []))
         if not frames:
             return {"status": "error", "error": "no frames decoded from recording"}
@@ -332,15 +341,21 @@ class Verifier:
             pre_boxes = [b for b in pre_boxes if zones.allowed(zones.foot(b["box"]), zone_list)]
         detections, hits, best = [], 0, None
         sample_by_ts = {s[0]: s for s in samples}
+        frame_boxes = []
         for ts, res in zip(ts_list, results):
-            cam_box = tuple(sample_by_ts[ts][1:5])
             boxes = [
                 {"cls": names[int(c)], "cls_id": int(c), "conf": round(float(p), 3),
                  "box": [round(float(v), 4) for v in b]}
                 for b, c, p in zip(res.boxes.xyxyn.tolist(), res.boxes.cls.tolist(), res.boxes.conf.tolist())
             ]
             # Drop anything standing in a masked area (e.g. a box that straddles the mask edge).
-            boxes = [b for b in boxes if zones.allowed(zones.foot(b["box"]), zone_list)]
+            frame_boxes.append((ts, [b for b in boxes if zones.allowed(zones.foot(b["box"]), zone_list)]))
+        if motion:
+            label = pick_label(frame_boxes)
+            allowed = LABEL_CLASSES[label]
+        for ts, boxes in frame_boxes:
+            cam_box = tuple(sample_by_ts[ts][1:5])
+            # no camera box: the whole frame, so any allowed YOLO object matches (the most confident one)
             match, match_iou = _matches(cam_box, boxes, allowed)
             if match:
                 hits += 1
@@ -351,7 +366,7 @@ class Verifier:
 
         need = min(settings.verify_min_hits, max(1, len(ts_list) // 2))
         shift = 0.0
-        if hits < need:
+        if hits < need and not no_box:
             # The camera's metadata clock may be off by a few seconds (fast vehicles then never overlap):
             # try one consistent time shift of the camera track against the frames YOLO looked at.
             shift, shifted_hits = best_shift(event["path"], [(d["ts"], d["yolo"]) for d in detections], allowed)
@@ -373,7 +388,8 @@ class Verifier:
         # A parked vehicle "confirming" motion next to it (shimmer, shadows): rejected, with the reason recorded.
         parked_info = None
         if verified:
-            parked_info, detections, hits, best = self._parked(event, detections, hits, best, need, allowed, pre_boxes)
+            parked_info, detections, hits, best = self._parked({**event, "camera_class": label}, detections, hits, best,
+                                                               need, allowed, pre_boxes)
             if parked_info:
                 verified = False
         # Where did it come from / go to? Cameras often report a person a step or two late, so the doorway
@@ -381,6 +397,8 @@ class Verifier:
         # post-roll with YOLO and extend the path (stored in camera-clock time, i.e. frame time + shift).
         path_ext = {"before": 0, "after": 0}
         path = list(event["path"])
+        if no_box:   # the camera gave no positions: the object's path is where YOLO saw it
+            path = [[d["ts"], *d["match"]["box"], d["match"]["conf"]] for d in detections if d["match"]] if verified else []
         if verified and path:
             clip_end = clip_start + (event["end_ts"] or event["start_ts"]) + settings.clip_post_roll - event["start_ts"] + settings.clip_pre_roll
             first_ts, last_ts = path[0][0] - shift, path[-1][0] - shift
@@ -420,12 +438,20 @@ class Verifier:
             "yolo_conf": best[1]["conf"] if best else None,
             "yolo_hits": hits,
             "detections": {"samples": detections, "keyframes": keyframes, "needed": need, "time_shift_s": shift,
-                           "path_extended": path_ext,
+                           "path_extended": path_ext, **({"source": ruleevents.SOURCE} if no_box else {}),
                            **({"rejected": parked.REASON, "parked": parked_info} if parked_info else {})},
             "snapshot": str(snapshot.relative_to(settings.data_dir)),
             "clip_start": clip_start,
-            **({"path": path} if path_ext["before"] or path_ext["after"] else {}),
+            **({"path": path} if path_ext["before"] or path_ext["after"] or (no_box and path) else {}),
+            **({"camera_class": label} if motion and verified else {}),
         }
+
+
+def pick_label(frame_boxes: list[tuple[float, list]]) -> str:
+    """A "motion" event's label: the class (person / vehicle) YOLO saw in more of the frames; people win ties."""
+    def frames_with(classes: set) -> int:
+        return sum(any(b["cls_id"] in classes for b in boxes) for _, boxes in frame_boxes)
+    return "vehicle" if frames_with(VEHICLE) > frames_with(PERSON) else "person"
 
 
 def _largest_matches(detections: list, n: int = 4) -> list:
@@ -438,8 +464,9 @@ def annotate(img: np.ndarray, cam_box, match: dict | None) -> np.ndarray:
     out = img.copy()
     h, w = out.shape[:2]
     px = lambda b: (int(b[0] * w), int(b[1] * h), int(b[2] * w), int(b[3] * h))
-    x1, y1, x2, y2 = px(cam_box)
-    cv2.rectangle(out, (x1, y1), (x2, y2), (0, 200, 255), 2)  # camera: amber
+    if cam_box is not None and not ruleevents.whole_frame(cam_box):   # no camera box (ONVIF event): nothing to draw
+        x1, y1, x2, y2 = px(cam_box)
+        cv2.rectangle(out, (x1, y1), (x2, y2), (0, 200, 255), 2)  # camera: amber
     if match:
         x1, y1, x2, y2 = px(match["box"])
         cv2.rectangle(out, (x1, y1), (x2, y2), (80, 220, 80), 3)  # YOLO: green

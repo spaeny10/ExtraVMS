@@ -109,6 +109,10 @@ export type Camera = {
   record_stream?: "main" | "sub";
   /** what the camera serves (ONVIF check) and what SD live view plays (backend streams.view) */
   streams?: CameraStreams;
+  /** what opens events (backend ruleevents.py): auto = object metadata, or the camera's ONVIF detection events when it sends no objects */
+  event_source?: EventSource;
+  /** ONVIF events mode: motion topics open events too (YOLO must confirm a person or vehicle) */
+  motion_events?: number | boolean;
   status?: {
     stream_ready: boolean;
     recording: boolean;
@@ -120,8 +124,15 @@ export type Camera = {
     ptz?: PtzStatus | null;
     /** the camera's own recording (SD card), as last checked (hourly) */
     sd?: SdStatus | null;
+    /** where detections come from now and why (backend Tracker.detection_status) */
+    detections?: { setting: EventSource; source: "metadata" | "onvif_events"; reason: string; motion_events: boolean };
+    /** the camera's stream has no metadata track / the reader is off (set to ONVIF events) */
+    metadata_missing?: boolean;
+    metadata_off?: boolean;
   };
 };
+
+export type EventSource = "auto" | "metadata" | "onvif_events";
 
 /** PTZ camera state and settings (backend/nvr/ptz.py). */
 export type PtzConfig = { home_token: string | null; home_name: string | null; return_home_min: number; relay_label: string; input_label: string };
@@ -218,7 +229,9 @@ export type NvrEvent = {
     /** why the verifier rejected it despite YOLO agreeing (e.g. "parked vehicle, motion elsewhere") */
     rejected?: string;
     /** the still YOLO box the camera's motion sat on (backend/nvr/parked.py); via "memory" = a remembered parking spot */
-    parked?: { box: number[]; cls: string; via: "clip" | "memory" } };
+    parked?: { box: number[]; cls: string; via: "clip" | "memory" };
+    /** "onvif_event": opened by the camera's ONVIF detection event, no camera boxes (backend/nvr/ruleevents.py) */
+    source?: string };
   synopsis_json?: Synopsis | null;
   synopsis_original?: Synopsis | null;
   clip_start?: number | null;

@@ -171,7 +171,9 @@ def event_facts(event: dict, camera: dict) -> str:
     lines += [
         f"Local time: {start:%A %Y-%m-%d %H:%M:%S} ({'night' if start.hour < 6 or start.hour >= 20 else 'day'})",
         f"Duration on scene: {dur:.0f} s; movement across the frame: {describe_motion(event['path'])}",
-        f"Camera analytics: {event['camera_class']} (confidence {event['camera_conf'] or 0:.2f})"
+        (f"Camera analytics: {event['camera_class']} (the camera's own detection event, no position or confidence)"
+         if str(event.get("track_id") or "").startswith("onvif:")   # ruleevents.TRACK_PREFIX
+         else f"Camera analytics: {event['camera_class']} (confidence {event['camera_conf'] or 0:.2f})")
         + (f"; rules triggered: {', '.join(rules)}" if rules else ""),
         f"YOLO verification: {event['yolo_class'] or 'not confirmed'} (confidence {event['yolo_conf'] or 0:.2f}, "
         f"matched in {event['yolo_hits'] or 0} frames)",

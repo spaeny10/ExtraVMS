@@ -402,6 +402,7 @@ function Details({ e, site, setE, notes, onUnsave, seek }: {
           <table className="kv">
             <tbody>
               <tr><td>Camera</td><td>{e.camera_class} · {((e.camera_conf ?? 0) * 100).toFixed(0)}% · track {e.track_id}</td></tr>
+              {e.detections?.source === "onvif_event" && <tr><td>Source</td><td>the camera's ONVIF event (no object positions): YOLO found the {e.camera_class} in the clip</td></tr>}
               <tr><td>YOLO</td><td>{e.yolo_class ?? "—"} {e.yolo_conf != null && `· ${(e.yolo_conf * 100).toFixed(0)}%`}</td></tr>
               <tr><td>Agreement</td><td>{e.yolo_hits ?? 0} of {frames} frames (need {e.detections?.needed ?? "—"}){e.detections?.time_shift_s ? ` · clock shift ${e.detections.time_shift_s} s` : ""}</td></tr>
               {e.detections?.rejected && <tr><td>Rejected</td><td>{rejectedReason(e)}{e.detections.parked ? ` · ${e.detections.parked.cls} sat still ${e.detections.parked.via === "memory" ? "on a remembered parking spot" : "while the camera's boxes were small movements on it"}` : ""}</td></tr>}

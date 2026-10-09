@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { BASE, api, bandwidthText, fmtTime, frameUrl, type Bandwidth, type BaselineCamera, type FootageStatus, type RemoteStatus, type Camera, type FeedbackStats, type HubStatus, type NvrEvent, type RetentionPolicy, type ScannedDevice, type SiteApi, type SystemInfo, type Zone } from "./api";
+import { BASE, api, bandwidthText, fmtTime, frameUrl, type Bandwidth, type BaselineCamera, type FootageStatus, type RemoteStatus, type Camera, type EventSource, type FeedbackStats, type HubStatus, type NvrEvent, type RetentionPolicy, type ScannedDevice, type SiteApi, type SystemInfo, type Zone } from "./api";
 import { EventCard } from "./Events";
 import { EventDetail } from "./EventDetail";
 import { LivePlayer } from "./LivePlayer";
@@ -17,7 +17,7 @@ import { useRef } from "react";
 import { yoloFallbackText, yoloState } from "./yoloStatus";
 import { vlmSub, vlmValue } from "./vlmStatus";
 import { sdStatusText } from "./sdcard";
-import { streamsText, streamsTitle } from "./cameraStreams";
+import { detectionsText, streamsText, streamsTitle, suggestText } from "./cameraStreams";
 
 /* ------------------------------------------------------------------ Live */
 
@@ -264,10 +264,27 @@ function SdCell({ camera, onChecked }: { camera: Camera; onChecked: () => void }
 }
 
 /** Settings → Cameras: the streams the camera serves (its ONVIF profiles, backend streams.py); "Check" asks it now. */
-function StreamsLine({ camera, onChecked }: { camera: Camera; onChecked: () => void }) {
+function StreamsLine({ camera, onChecked, onPaths }: { camera: Camera; onChecked: () => void; onPaths?: (p: { main_path: string; sub_path: string }) => void }) {
   const [busy, setBusy] = useState(false);
   const s = camera.streams;
   const text = streamsText(s);
+  const fix = suggestText(s, camera);
+  // the configured main path is not one the camera lists: one click saves the paths it does list (never automatic)
+  const usePaths = async () => {
+    if (!s?.suggest) return;
+    setBusy(true);
+    try {
+      const { status, streams, ...rest } = camera;
+      await api.saveCamera({ ...rest, main_path: s.suggest.main_path, sub_path: s.suggest.sub_path });
+      toast.success(`${camera.name}: now ${s.suggest.main_path} and ${s.suggest.sub_path}`);
+      onPaths?.(s.suggest);
+      onChecked();
+    } catch (e) {
+      toast.error(e);
+    } finally {
+      setBusy(false);
+    }
+  };
   const check = async () => {
     setBusy(true);
     try {
@@ -286,6 +303,8 @@ function StreamsLine({ camera, onChecked }: { camera: Camera; onChecked: () => v
     <div className={`small ${s?.error && !text ? "muted" : ""}`} title={streamsTitle(s)}>
       Streams: {text || (s?.error ? "check failed" : s?.checked_at ? "none listed" : "not checked")}{" "}
       <button className="ghost small" disabled={busy} onClick={check} title="Ask the camera which streams it serves">{busy ? "…" : "Check"}</button>
+      {fix && <button className="small" disabled={busy} onClick={usePaths}
+        title="The camera does not list the configured main stream path: save the paths it lists (largest stream as main)">{fix}</button>}
     </div>
   );
 }
@@ -328,12 +347,15 @@ export function CamerasView({ cameras, port, reload }: { cameras: Camera[]; port
               <td><Health ok={c.status?.stream_ready} /> {c.status?.tracks?.join(", ")}
                 {c.status?.health?.problems?.length ? <div className="small error">{c.status.health.problems.join("; ")}</div> : null}
                 {c.status?.health?.warnings?.length ? <div className="small warn-text">{c.status.health.warnings.join("; ")}</div> : null}
-                <StreamsLine camera={c} onChecked={reload} /></td>
+                <StreamsLine camera={c} onChecked={reload} />
+                {detectionsText(c.status?.detections) && <div className="small muted" title={c.status?.detections?.reason}>{detectionsText(c.status?.detections)}</div>}</td>
               <td title="Main stream now · estimated recording per day (from the last hour)">
                 {c.status?.health?.bitrate_mbps != null ? `${c.status.health.bitrate_mbps.toFixed(1)} Mbps` : "—"}
                 {c.status?.health?.gb_per_day != null && <div className="muted small">~{c.status.health.gb_per_day} GB/day</div>}
               </td>
-              <td><Health ok={c.status?.metadata} /></td>
+              <td>{c.status?.metadata_off || c.status?.metadata_missing
+                ? <span className="muted small" title={c.status.metadata_off ? "Set to take detections from the camera's ONVIF events: no metadata reader" : "The camera's stream has no metadata track: detections come from its ONVIF events"}>none</span>
+                : <Health ok={c.status?.metadata} />}</td>
               <td><Health ok={c.status?.onvif_events} /></td>
               <td>{!c.status?.ptz?.available ? <span className="muted">—</span>
                 : c.status.ptz.last_error ? <span className="error small">unreachable</span>
@@ -402,11 +424,31 @@ export function CamerasView({ cameras, port, reload }: { cameras: Camera[]; port
                   <Field label="Sub stream path"><input value={edit.sub_path} onChange={(e) => setEdit({ ...edit, sub_path: e.target.value })} /></Field>
                 </div>
                 {cameras.some((c) => c.id === edit.id)
-                  ? <StreamsLine camera={cameras.find((c) => c.id === edit.id)!} onChecked={reload} />
+                  ? <StreamsLine camera={cameras.find((c) => c.id === edit.id)!} onChecked={reload}
+                      onPaths={(p) => setEdit({ ...edit, ...p })} />
                   : <span className="small">The camera is asked which streams it serves when it is saved. Without a low-resolution stream, SD live view plays the main stream.</span>}
                 <div className="row">
                   <Field label="Enabled"><input type="checkbox" checked={Boolean(edit.enabled)} onChange={(e) => setEdit({ ...edit, enabled: e.target.checked })} /></Field>
                 </div>
+                <Field label="Events from">
+                  <select value={edit.event_source ?? "auto"} onChange={(e) => setEdit({ ...edit, event_source: e.target.value as EventSource })}>
+                    <option value="auto">Automatic</option>
+                    <option value="metadata">The camera's object metadata</option>
+                    <option value="onvif_events">The camera's ONVIF events (people / vehicle detection)</option>
+                  </select>
+                </Field>
+                {(edit.event_source ?? "auto") !== "metadata" && (
+                  <label className="row small">
+                    <input type="checkbox" checked={Boolean(edit.motion_events)} onChange={(e) => setEdit({ ...edit, motion_events: e.target.checked })} />
+                    Open events on the camera's motion alarms too (YOLO must confirm a person or vehicle)
+                  </label>
+                )}
+                {(() => {
+                  const d = cameras.find((c) => c.id === edit.id)?.status?.detections;
+                  const note = detectionsText(d);
+                  return <span className="small">{note ? `${note}: ${d?.reason}.` : d ? `Detections: from the camera's object metadata (${d.reason}).` : ""}{" "}
+                    Automatic uses the camera's ONVIF detection events (e.g. Reolink people detection) only when it sends no objects in its metadata; those events have no positions, so YOLO finds the person or vehicle and the zones apply to what it finds.</span>;
+                })()}
                 <div className="field">
                   <span>Qwen describes</span>
                   <div className="row">

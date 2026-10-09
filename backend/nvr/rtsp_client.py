@@ -113,6 +113,10 @@ class Rtsp:
         return None
 
 
+class NoTrack(LookupError):
+    """The stream has no track of the media type asked for (e.g. a camera without ONVIF metadata in its RTSP)."""
+
+
 def play_track(cam: Rtsp, media: str = "application") -> str:
     """DESCRIBE, SETUP the first track of `media` type on interleaved channel 0, PLAY. Returns the SDP section."""
     status, h, sdp = cam.request("DESCRIBE", cam.url, {"Accept": "application/sdp"})
@@ -121,7 +125,7 @@ def play_track(cam: Rtsp, media: str = "application") -> str:
     base = h.get("content-base", cam.url)
     section = next((s for s in re.split(r"\r?\nm=", sdp.decode(errors="replace"))[1:] if s.startswith(media)), None)
     if not section:
-        raise LookupError(f"no {media} track in SDP")
+        raise NoTrack(f"no {media} track in SDP")
     control = re.search(r"a=control:(\S+)", section).group(1)
     track_url = control if control.startswith("rtsp://") else base.rstrip("/") + "/" + control
     status, h, _ = cam.request("SETUP", track_url, {"Transport": "RTP/AVP/TCP;unicast;interleaved=0-1"})

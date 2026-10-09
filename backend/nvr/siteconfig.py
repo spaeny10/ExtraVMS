@@ -40,7 +40,8 @@ def _check_cameras(cams, remap_ids: bool = False) -> None:
             raise InvalidCamera(problem.replace("camera x:", f"camera {str(c.get('id'))[:40]!r}:") if remap_ids else problem)
 CAMERA_COLS = ("name", "host", "onvif_port", "rtsp_port", "username", "main_path", "sub_path", "enabled", "zones",
                "retention_days", "scene_notes", "retention_policy", "synopsis_labels", "policies",
-               "public_host", "public_rtsp_port", "public_onvif_port", "public_replay_port", "record_stream")
+               "public_host", "public_rtsp_port", "public_onvif_port", "public_replay_port", "record_stream",
+               "event_source", "motion_events")
 
 
 def _export_identities() -> list[dict]:

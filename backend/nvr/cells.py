@@ -44,6 +44,8 @@ def path_cells(path: list) -> set[int]:
         if len(p) < 5:
             continue
         ts, l, t, r, b = p[0], p[1], p[2], p[3], p[4]
+        if l <= 0.001 and t <= 0.001 and r >= 0.999 and b >= 0.999:
+            continue   # no box (an event from the camera's ONVIF event, ruleevents.py): it crossed nothing we know
         foot = cell((l + r) / 2, b)
         out.add(foot)
         w = r - l
