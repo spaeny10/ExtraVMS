@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import secrets
+import threading
 import urllib.parse
 
 import httpx
@@ -73,11 +74,20 @@ def reader_credentials() -> tuple[str, str] | None:
     proxy). Generated on first use and kept in the settings table, not .env. None when rtsp_auth is off."""
     if not settings.rtsp_auth:
         return None
-    c = db.get_setting("mediamtx_reader")
-    if not (isinstance(c, dict) and c.get("user") and c.get("pass")):
-        c = {"user": "nvr", "pass": secrets.token_urlsafe(24)}
-        db.set_setting("mediamtx_reader", c)
-    return c["user"], c["pass"]
+    # One caller at a time: at startup the config writer, every camera's metadata reader and the WHEP proxy ask at
+    # once, and a check-then-create race left Qwenbot's mediamtx.yml with one password and the database with another
+    # (2026-10-08: every metadata session got 401 for 4.5 h, no detections).
+    with _reader_lock:
+        c = db.get_setting("mediamtx_reader")
+        if not (isinstance(c, dict) and c.get("user") and c.get("pass")):
+            c = {"user": "nvr", "pass": secrets.token_urlsafe(24)}
+            db.set_setting("mediamtx_reader", c)
+            log.warning("generated a new MediaMTX reader password (none was stored)")
+            c = db.get_setting("mediamtx_reader") or c
+        return c["user"], c["pass"]
+
+
+_reader_lock = threading.Lock()
 
 
 def reader_auth_header() -> dict[str, str]:
@@ -234,7 +244,8 @@ class MediaMTX:
         self.proc: asyncio.subprocess.Process | None = None
         self._stop = asyncio.Event()
 
-    def write_config(self, cameras: list[dict]) -> None:
+    def write_config(self, cameras: list[dict]) -> bool:
+        """Write mediamtx.yml if it differs from what the cameras and settings call for. True when it was written."""
         settings.runtime_dir.mkdir(parents=True, exist_ok=True)
         settings.recordings_dir.mkdir(parents=True, exist_ok=True)
         text = yaml.safe_dump(build_config(cameras), sort_keys=False)
@@ -244,6 +255,8 @@ class MediaMTX:
             # paths) until the next restart (Qwenbot, 2026-10-06, ~6 min of recording lost).
             atomic_write(self.config_path, text)
             log.info("wrote %s (%d cameras)", self.config_path, len(cameras))
+            return True
+        return False
 
     async def run(self) -> None:
         """Keep MediaMTX running; restart with backoff if it exits."""

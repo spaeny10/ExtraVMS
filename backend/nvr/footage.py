@@ -12,6 +12,7 @@ hits grouped into "moments" (same camera, within MOMENT_GAP_S).
 from __future__ import annotations
 
 import asyncio
+import gc
 import logging
 import sqlite3
 import struct
@@ -192,28 +193,39 @@ def decode_keyframes(path: Path, seg_start: float, t0: float, t1: float) -> tupl
     """Keyframes in [t0, t1), at most one per SAMPLE_S.
     Returns (frames, last packet time seen, ended) where ended = the file ran out before t1."""
     out: list[tuple[float, np.ndarray]] = []
+    try:
+        with av.open(str(path)) as c:
+            s = c.streams.video[0]
+            # One decoder thread: a keyframe every few seconds needs no more. FFmpeg's frame threads outlived each
+            # file on Python 3.14 (Qwenbot, 2026-10-08: 2,289 leaked "footage_0" threads and 12.7 GB in 4.4 h).
+            s.thread_type = "NONE"
+            s.codec_context.thread_count = 1
+            return _decode_keyframes(c, s, seg_start, t0, t1, out)
+    finally:
+        gc.collect()   # PyAV leaves the decoder in reference cycles; the verifier does the same (db8de08)
+
+
+def _decode_keyframes(c, s, seg_start: float, t0: float, t1: float, out: list) -> tuple[list[tuple[float, np.ndarray]], float | None, bool]:
     last_seen, ended = None, True
-    with av.open(str(path)) as c:
-        s = c.streams.video[0]
-        tb = float(s.time_base)
-        base = s.start_time or 0
-        c.seek(max(base, base + int((t0 - seg_start) / tb)), stream=s, backward=True, any_frame=False)
-        next_t = t0
-        for pkt in c.demux(s):
-            if pkt.pts is None:
-                continue
-            ts = seg_start + (pkt.pts - base) * tb
-            last_seen = ts
-            if ts >= t1:
-                ended = False
-                break
-            if not pkt.is_keyframe or ts < next_t:
-                continue
-            for fr in pkt.decode():
-                h = int(round(fr.height * DECODE_WIDTH / fr.width / 2)) * 2
-                out.append((ts, fr.reformat(width=DECODE_WIDTH, height=h, format="bgr24").to_ndarray()))
-                next_t = ts + SAMPLE_S
-                break
+    tb = float(s.time_base)
+    base = s.start_time or 0
+    c.seek(max(base, base + int((t0 - seg_start) / tb)), stream=s, backward=True, any_frame=False)
+    next_t = t0
+    for pkt in c.demux(s):
+        if pkt.pts is None:
+            continue
+        ts = seg_start + (pkt.pts - base) * tb
+        last_seen = ts
+        if ts >= t1:
+            ended = False
+            break
+        if not pkt.is_keyframe or ts < next_t:
+            continue
+        for fr in pkt.decode():
+            h = int(round(fr.height * DECODE_WIDTH / fr.width / 2)) * 2
+            out.append((ts, fr.reformat(width=DECODE_WIDTH, height=h, format="bgr24").to_ndarray()))
+            next_t = ts + SAMPLE_S
+            break
     return out, last_seen, ended
 
 

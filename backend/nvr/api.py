@@ -74,6 +74,19 @@ def sync_cameras() -> None:
     state.ptz.sync(cams)
 
 
+async def _mediamtx_config_check() -> None:
+    """Every 5 minutes: mediamtx.yml must match the cameras and the stored reader password. Anything that left them
+    apart (Qwenbot 2026-10-08: the file and the database held different reader passwords, every metadata session got
+    401 for 4.5 h) is repaired by rewriting it; MediaMTX hot-reloads."""
+    while True:
+        await asyncio.sleep(300)
+        try:
+            if state.mtx.write_config(db.cameras(enabled_only=True)):
+                log.warning("mediamtx.yml had drifted from the cameras / reader password: rewritten")
+        except Exception:  # noqa: BLE001 - a bad cycle must not end the check
+            log.exception("mediamtx config check failed")
+
+
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     for d in (settings.data_dir, settings.runtime_dir, settings.recordings_dir):
@@ -115,6 +128,7 @@ async def lifespan(app: FastAPI):
         ("hub-agent", state.hub.run()),
         ("sd-backfill", state.sd.run()),
         ("sd-status", sdbackfill.status_loop()),
+        ("mediamtx-config-check", _mediamtx_config_check()),
     ]]
     https = _https_server() if settings.direct_enabled else None
     https_task = asyncio.create_task(_serve_https(https), name="https") if https is not None else None

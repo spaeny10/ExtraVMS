@@ -50,6 +50,44 @@ def test_write_config_uses_atomic_write():
     assert calls and calls[0] == m.config_path and m.config_path.read_text().strip()
 
 
+def test_reader_password_is_created_once_under_concurrency():
+    """Qwenbot 2026-10-08: the config writer, the metadata readers and the WHEP proxy asked at once, each made its own
+    password, and mediamtx.yml and the database disagreed (every metadata session 401 for 4.5 h)."""
+    import threading
+    from nvr.db import db
+    db.execute("DELETE FROM settings WHERE key='mediamtx_reader'")
+    real_get, gate = db.get_setting, threading.Barrier(8)
+
+    def slow_get(key, default=None):   # every thread reads "missing" before any of them writes, if unprotected
+        v = real_get(key, default)
+        if key == "mediamtx_reader" and v is None:
+            try:
+                gate.wait(timeout=0.5)
+            except threading.BrokenBarrierError:
+                pass
+        return v
+    db.get_setting = slow_get
+    got = []
+    try:
+        threads = [threading.Thread(target=lambda: got.append(mediamtx.reader_credentials())) for _ in range(8)]
+        [t.start() for t in threads]
+        [t.join() for t in threads]
+    finally:
+        db.get_setting = real_get
+    assert len(got) == 8 and len(set(got)) == 1, got
+    assert real_get("mediamtx_reader")["pass"] == got[0][1]
+
+
+def test_write_config_reports_drift_and_repairs_it():
+    m = mediamtx.MediaMTX()
+    assert Path(tempfile.gettempdir()) in m.config_path.parents, m.config_path
+    m.write_config([])
+    assert m.write_config([]) is False                          # nothing changed: nothing written
+    user, pw = mediamtx.reader_credentials()
+    m.config_path.write_text(m.config_path.read_text().replace(pw, "stale-password"))   # what Qwenbot ended up with
+    assert m.write_config([]) is True and pw in m.config_path.read_text()
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):
