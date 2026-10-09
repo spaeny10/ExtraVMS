@@ -780,6 +780,7 @@ body:has(.drag-ghost) { cursor: grabbing; user-select: none; }
 .region-badge .linkish { color: inherit; }
 .region-chip { display: inline-flex; gap: 6px; align-items: center; background: color-mix(in srgb, var(--accent) 18%, transparent); border-color: var(--accent); }
 .region-chip .linkish { color: var(--accent); }
+.region-note { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 4px 0 8px; }
 
 /* PTZ (PtzControl.tsx): drag surface over the picture, tools pill, badges, settings */
 .ptz-surface { position: absolute; z-index: 2; touch-action: none; cursor: move; outline: none; }

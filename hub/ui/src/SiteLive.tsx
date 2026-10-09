@@ -16,12 +16,12 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { Camera as ServerCam, NvrEvent } from "@site/api";
 import { EventCard } from "@site/Events";
-import { LiveTile } from "@site/Views";
+import { LiveTile, RegionChips } from "@site/Views";
 import { LiveBudgetProvider, useBudget } from "@site/dashboard/Dashboard";
 import { useIceServers } from "@site/dashboard/ice";
 import { camKey, splitKey, type DashboardSource } from "@site/dashboard/source";
 import type { FleetEvent } from "@site/dashboard/types";
-import { regions, useRegions } from "@site/region";
+import { useRegions } from "@site/region";
 import { Icon, swipeHandlers, useIsPhone } from "@site/ui";
 import { type Camera as RegistryCam, type Fleet, type Org, type Server, type Site, api } from "./api";
 import { type EventRef, applyLiveEvent, cameraNameFor, mergePool, regionFeed, removeLiveEvent, siteRegionKeys, tagServer } from "./eventOpen";
@@ -233,12 +233,7 @@ function SiteActivity({ site, servers, tiles, multi, activity: a }: { site: Site
     <>
       <aside className="live-feed">
         <h3>Latest activity</h3>
-        {a.regionKeys.length > 0 && (
-          <p className="muted small">
-            Showing only {a.regionKeys.map(label).join(" and ")} events that passed through the painted region ·{" "}
-            <button className="linkish" onClick={() => a.regionKeys.forEach((k) => regions.set(k, null))}>Clear</button>
-          </p>
-        )}
+        <RegionChips items={a.regionKeys.map((k) => ({ key: k, label: label(k) }))} />
         {offline.length > 0 && <p className="muted small">Offline: {offline.join(", ")}</p>}
         {a.recent === null && <p className="muted">Loading…</p>}
         {a.recent !== null && a.pool.length === 0 && <p className="muted">Nothing yet.</p>}

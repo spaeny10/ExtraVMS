@@ -83,16 +83,34 @@ export function LiveTile({ c, hd, port, active, onUnsupported, bar, phone, onSwi
   );
 }
 
+/**
+ * Which cameras' painted regions filter the feed, each removable on its own. Regions are kept per camera across
+ * visits, so one painted days ago on another camera still counts: every one is listed, not only the camera on screen.
+ */
+export function RegionChips({ items }: { items: { key: string; label: string }[] }) {
+  if (!items.length) return null;
+  return (
+    <div className="region-note muted small">
+      <span>Only events through the painted {items.length > 1 ? "regions" : "region"} on</span>
+      {items.map((it) => (
+        <span key={it.key} className="chip region-chip">
+          {it.label}
+          <button type="button" className="linkish" title={`Stop filtering by ${it.label}'s region`}
+            aria-label={`Clear the region on ${it.label}`} onClick={() => regions.set(it.key, null)}>✕</button>
+        </span>
+      ))}
+      {items.length > 1 && <button type="button" className="linkish" onClick={() => items.forEach((it) => regions.set(it.key, null))}>Clear all</button>}
+    </div>
+  );
+}
+
 /** The activity feed filtered by painted regions, with a note and a way to clear them. */
 function RegionNote({ cameras }: { cameras: Camera[] }) {
   const regionMap = useRegions();
   const ids = Object.keys(regionMap);
   if (!ids.length) return null;
   return (
-    <p className="muted small">
-      Showing only {ids.map((id) => cameras.find((c) => c.id === id)?.name ?? id).join(" and ")} events that passed through the painted region ·{" "}
-      <button className="linkish" onClick={() => ids.forEach((id) => regions.set(id, null))}>Clear</button>
-    </p>
+    <RegionChips items={ids.map((id) => ({ key: id, label: cameras.find((c) => c.id === id)?.name ?? id }))} />
   );
 }
 

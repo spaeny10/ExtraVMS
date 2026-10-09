@@ -317,7 +317,9 @@ export function ZoomFrame({ children, doubleClickReset: dblProp = true, keyboard
       onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp}
       onPointerLeave={(e) => { if (!frame.current?.hasPointerCapture(e.pointerId)) onPointerUp(e); }}
       onTouchStart={onTouch} onTouchMove={onTouch} onTouchEnd={onTouch} onTouchCancel={onTouch}
-      onClickCapture={(e) => { if (g.current.acted) e.stopPropagation(); }}   // the end of a pan or pinch is not a click
+      // the end of a pan or pinch is not a click; the pill's Reset is never a gesture's end (after a pinch `acted`
+      // stays set until the next press on the picture, and the press on the pill doesn't clear it)
+      onClickCapture={(e) => { if (g.current.acted && !(e.target as Element).closest(".vzoom-pill")) e.stopPropagation(); }}
       onDoubleClick={(e) => { if (dblReset && !disabled && isZoomed(ctl.xf)) { e.stopPropagation(); ctl.reset(); } }}
       onKeyDown={onKeyDown}>
       <div ref={inner} className="vzoom-inner">{children}</div>
