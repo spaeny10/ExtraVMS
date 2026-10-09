@@ -291,6 +291,8 @@ MIGRATIONS = [
     ("cameras", "record_stream", "TEXT NOT NULL DEFAULT 'main'"),   # main | sub: which stream is recorded 24/7 (mediamtx.build_config)
     ("events", "migrated_from", "TEXT"),        # JSON {site, site_id, event_id, camera_id}: copied here by a fleet move (siteconfig.import_history)
     ("cameras", "public_replay_port", "INTEGER"),   # port-forward mode: the outside port of the camera's ONVIF replay (SD card) RTSP
+    ("cameras", "streams", "TEXT"),              # JSON {profiles, media, error, sub_not_found}: what the camera serves (streams.py)
+    ("cameras", "streams_checked_at", "REAL"),   # last ONVIF stream check; NULL = never (streams.StreamChecker probes it)
 ]
 JSON_FIELDS = ("path", "rules", "detections", "synopsis_json", "synopsis_original", "feedback", "anomaly_json", "areas", "policy", "migrated_from")
 
@@ -435,6 +437,7 @@ class Database:
             c["synopsis_labels"] = json.loads(c["synopsis_labels"]) if c.get("synopsis_labels") else None
             c["policies"] = json.loads(c["policies"]) if c.get("policies") else []
             c["ptz_config"] = json.loads(c["ptz_config"]) if c.get("ptz_config") else None
+            c["streams"] = json.loads(c["streams"]) if c.get("streams") else None
         return cams
 
     def set_ptz_config(self, camera_id: str, cfg: dict) -> None:

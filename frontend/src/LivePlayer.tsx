@@ -26,7 +26,8 @@ export function LivePlayer({ path, camera, port, className, onUnsupported, showS
   const [fallback, setFallback] = useState(false);
   useEffect(() => { setFallback(false); }, [path]);
   if (!fallback) {
-    return <WhepPlayer path={path} port={port} className={className} onUnsupported={onUnsupported} showSize={showSize} base={base} site={site}
+    // camera: the still shown while connecting comes from this camera's recording
+    return <WhepPlayer path={path} camera={camera} port={port} className={className} onUnsupported={onUnsupported} showSize={showSize} base={base} site={site}
       iceServers={iceServers} videoRef={videoRef} muted={muted} onAudio={onAudio} onState={onState} onFallback={() => { onState?.("playing"); setFallback(true); }}>{children}</WhepPlayer>;
   }
   return <RecordingFollow camera={camera ?? path.replace(/_(sub|hd)$/, "")} className={className} videoRef={videoRef} base={base} site={site} onGiveUp={() => { onState?.("connecting"); setFallback(false); }}>{children}</RecordingFollow>;

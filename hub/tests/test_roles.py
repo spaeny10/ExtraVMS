@@ -24,6 +24,8 @@ def test_role_table_reads_right():
     assert required_role("POST", "/api/advisor/apply") == "admin"
     assert required_role("PUT", "/api/cameras/cam1/ptz/config") == "admin"
     assert required_role("POST", "/api/cameras/cam1/ptz/presets") == "operator"
+    # asking a camera which streams it serves re-plans its SD live source (mediamtx.yml): configuration
+    assert required_role("POST", "/api/cameras/cam1/streams/check") == "admin"
     # SD card recovery writes footage into the recordings: configuration; its status and gaps are watching
     assert required_role("POST", "/api/sd/recover") == "admin"
     assert required_role("GET", "/api/sd/gaps") == "viewer" and required_role("GET", "/api/cameras/cam1/sd") == "viewer"

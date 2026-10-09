@@ -1,15 +1,40 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api, makeApi, type SiteApi } from "./api";
+import { cameraOfPath, stillWidth } from "./cameraStreams";
 
 /**
  * WebRTC (WHEP) player for a MediaMTX path.
  * onUnsupported fires when the browser can't decode the stream's codec (e.g. H.265 main streams),
  * so the caller can fall back to the H.264 sub stream.
+ *
+ * While it connects (until the first video frame plays) it shows the camera's latest recorded still (/api/frame,
+ * sized to the player) with a small "Connecting…" badge, then cross-fades to the video. A still that can't load
+ * leaves the plain black "Connecting…" box as before.
  */
 export type WhepState = "connecting" | "playing" | "error";
 
-export function WhepPlayer({ path, port, className, onUnsupported, showSize = false, videoRef, children, iceServers, onFallback, base, site: given, muted = true, onAudio, onState }: {
+/** The camera's most recent still (from its recording) while the live picture connects. */
+function usePoster(site: SiteApi, camera: string | null, box: React.RefObject<HTMLDivElement | null>) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const [failed, setFailed] = useState(false);
+  useLayoutEffect(() => {
+    setLoaded(false);
+    setFailed(false);
+    if (!camera) { setUrl(null); return; }
+    const w = box.current?.clientWidth ?? 0;
+    // the newest keyframe on disk: the recording trails live by about a second (1 s fMP4 parts)
+    setUrl(site.frameUrl(camera, Date.now() / 1000 - 1, stillWidth(w, window.devicePixelRatio || 1)));
+  }, [site, camera, box]);
+  return { url: failed ? null : url, loaded: loaded && !failed, onLoad: () => setLoaded(true), onError: () => setFailed(true) };
+}
+
+export function WhepPlayer({ path, port, className, onUnsupported, showSize = false, videoRef, children, iceServers, onFallback, base, site: given, muted = true, onAudio, onState, camera, poster = true }: {
   path: string; port: number; className?: string; onUnsupported?: () => void; showSize?: boolean;
+  /** the camera whose recording the still comes from; default: the path without _sub / _hd */
+  camera?: string;
+  /** show the camera's latest still while connecting (default on) */
+  poster?: boolean;
   /** told whenever the connection state changes (the Timeline's live tiles report it as their status) */
   onState?: (s: WhepState) => void;
   /** sound off (default); unmuting must follow a click, browsers block autoplaying audio */
@@ -45,6 +70,15 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
   const audioCb = useRef(onAudio);
   audioCb.current = onAudio;
   useEffect(() => { if (video.current) video.current.muted = muted; }, [muted]);  // React doesn't sync the muted attribute
+  const box = useRef<HTMLDivElement | null>(null);
+  const still = usePoster(site, poster ? camera ?? cameraOfPath(path) : null, box);
+  // the first video frame of this path has played (a decoded frame with a size, not just the stream starting: its
+  // audio track can arrive first): the still fades out, then is dropped
+  const [frame, setFrame] = useState(false);
+  const [stillGone, setStillGone] = useState(false);
+  useEffect(() => { setFrame(false); setStillGone(false); }, [path]);
+  const showStill = Boolean(still.url) && !stillGone && !(frame && !still.loaded);
+  const stillVisible = showStill && still.loaded && !frame;
 
   useEffect(() => {
     let pc: RTCPeerConnection | null = null;
@@ -140,18 +174,26 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
   }, [path, port, site, JSON.stringify(iceServers ?? [])]);
 
   return (
-    <div className={`player ${className ?? ""}`}>
+    <div ref={box} className={`player ${className ?? ""}`}>
       <video
         ref={setVideo}
         autoPlay
         muted
         playsInline
+        onPlaying={(e) => { if (e.currentTarget.videoWidth) setFrame(true); }}
         onResize={(e) => {
           const v = e.currentTarget;
           if (v.videoWidth) setSize(`${v.videoWidth}×${v.videoHeight}`);
+          if (v.videoWidth && !v.paused) setFrame(true);
         }}
       />
-      {state !== "playing" && <div className="player-state">{state === "connecting" ? "Connecting…" : "Reconnecting…"}</div>}
+      {showStill && (
+        <img className={`player-poster ${stillVisible ? "shown" : ""}`} src={still.url!} alt="" draggable={false}
+          onLoad={still.onLoad} onError={still.onError} onTransitionEnd={() => { if (frame) setStillGone(true); }} />
+      )}
+      {stillVisible
+        ? <div className="player-badge" role="status">{state === "error" ? "Reconnecting…" : "Connecting…"}</div>
+        : state !== "playing" && <div className="player-state">{state === "connecting" ? "Connecting…" : "Reconnecting…"}</div>}
       {showSize && size && state === "playing" && <div className="player-size">{size}</div>}
       {children}
     </div>

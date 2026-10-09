@@ -62,6 +62,14 @@ def parse_metrics(text: str) -> dict[str, dict]:
     return out
 
 
+def stream_problems(camera_id: str) -> list[str]:
+    """What the camera's ONVIF stream check found (streams.plan): no low-resolution stream, a main path it doesn't
+    list. Shown with the other problems in Settings → Cameras and sent to the hub."""
+    from . import streams
+    cam = db.one("SELECT id, main_path, sub_path, streams FROM cameras WHERE id=?", [camera_id])
+    return streams.problems(cam) if cam else []
+
+
 class PathStats:
     def __init__(self) -> None:
         self.samples: deque[tuple[float, float]] = deque(maxlen=WINDOW)  # (t, bytes since first sample, monotonic)
@@ -117,7 +125,7 @@ class StreamHealth:
         self.last_sample = 0.0
         self.first_sample = 0.0
         self.error: str | None = None
-        self.sub_recorded: set[str] = set()        # cameras recording their sub stream (record_stream "sub")
+        self.sub_recorded: set[str] = set()        # cameras whose <id>_sub relays <id> locally (mediamtx.sub_relays_main)
         self._daily: dict[str, float] | None = None   # BANDWIDTH_KEY, loaded on first use
         self._daily_saved = 0.0
 
@@ -131,7 +139,7 @@ class StreamHealth:
         """One metrics scrape: per-path stats, and the bytes the cameras sent into today's total."""
         now = now or time.time()
         cams = db.cameras(enabled_only=True)
-        self.sub_recorded = {c["id"] for c in cams if mediamtx.records_sub(c)}
+        self.sub_recorded = {c["id"] for c in cams if mediamtx.sub_relays_main(c)}
         from_cameras = {p for c in cams for p in mediamtx.camera_paths(c)}
         received = 0.0
         for path, m in parse_metrics(metrics_text).items():
@@ -209,11 +217,15 @@ class StreamHealth:
             await asyncio.sleep(SAMPLE_S)
 
     def camera(self, camera_id: str) -> dict:
-        """Health of one camera's streams, plus plain-English problems."""
+        """Health of one camera's streams, plus plain-English problems (something is wrong: the hub alerts on these)
+        and warnings (it works, but could be set up better: shown in Settings, never an alert)."""
         now = time.time()
         main, sub = self.paths.get(camera_id), self.paths.get(f"{camera_id}_sub")
         out: dict = {"sampled": bool(self.last_sample), "bitrate_mbps": None, "sub_bitrate_mbps": None, "gb_per_day": None,
-                     "stalled_s": None, "frames_in_error_1h": 0, "metadata_reader": None, "problems": []}
+                     "stalled_s": None, "frames_in_error_1h": 0, "metadata_reader": None, "problems": [],
+                     # stream-setup notes ("no low-resolution stream: SD plays the main stream") are warnings: the camera
+                     # works, and a problem would open a camera_down alert on the hub
+                     "warnings": stream_problems(camera_id)}
         if not main:
             return out
         out["bitrate_mbps"] = main.bitrate_mbps()
@@ -222,7 +234,7 @@ class StreamHealth:
         stalled = now - main.last_increase if main.last_increase else None
         out["stalled_s"] = round(stalled) if stalled is not None else None
         out["frames_in_error_1h"] = main.errors_last_hour(now)
-        # record_stream "sub": while someone watches SD live, <id>_sub relays this path as one more RTSP reader
+        # record_stream "sub" or no sub stream: while someone watches SD live, <id>_sub relays this path as one more RTSP reader
         relay = int(camera_id in self.sub_recorded and sub is not None and sub.state == "ready")
         out["metadata_reader"] = main.readers.get("rtspSession", 0) >= 1 + relay
         if stalled is not None and stalled >= STALL_S and main.state == "ready":

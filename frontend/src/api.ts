@@ -2,6 +2,7 @@ import { connection } from "./ui";
 import type { DashboardConfig } from "./dashboard/types";
 import type { ActionPlanCore, ActionResult } from "./ActionCard";
 import type { CardRange, RestoredSpan, SdStatus } from "./sdcard";
+import type { CameraStreams } from "./cameraStreams";
 /** include = detect only here; exclude = mask out; area = just a name for a place (never filters);
  * ppe = people who stay in it must wear the required items (backend/nvr/ppe.py; never filters) */
 export type ZoneType = "include" | "exclude" | "area" | "ppe";
@@ -106,6 +107,8 @@ export type Camera = {
   public_replay_port?: number | null;
   /** which stream is recorded 24/7: "sub" saves cellular data (HD live view then pulls <id>_hd on demand) */
   record_stream?: "main" | "sub";
+  /** what the camera serves (ONVIF check) and what SD live view plays (backend streams.view) */
+  streams?: CameraStreams;
   status?: {
     stream_ready: boolean;
     recording: boolean;
@@ -153,6 +156,8 @@ export function bandwidthText(b: Bandwidth): string {
 export type StreamHealth = {
   sampled: boolean; bitrate_mbps: number | null; sub_bitrate_mbps: number | null; gb_per_day: number | null;
   stalled_s: number | null; frames_in_error_1h: number; metadata_reader: boolean | null; problems: string[];
+  /** works, but could be set up better (e.g. no low-resolution stream): shown here, never a hub alert */
+  warnings?: string[];
 };
 
 export type EventStatus = "open" | "pending" | "verified" | "rejected" | "error" | "masked";
@@ -596,6 +601,8 @@ export function makeApi(base: string, opts: ApiOptions = {}) {
       `/api/recordings/${camera}?${qs({ start, end })}`,
     ),
   /** the camera's own recording (SD card); `refresh` asks the camera again */
+  /** ask the camera now which streams it serves (admin); re-plans SD live view */
+  checkStreams: (camera: string) => req<CameraStreams>(`/api/cameras/${camera}/streams/check`, { method: "POST" }),
   cameraSd: (camera: string, refresh = false) => req<SdStatus & { camera_id: string }>(`/api/cameras/${camera}/sd${refresh ? "?refresh=true" : ""}`),
   sdGaps: (camera?: string, hours?: number) => req<SdGaps>(`/api/sd/gaps?${qs({ camera, hours })}`),
   /** admin: put [from, to) back from the camera's SD card (replays at real time) */

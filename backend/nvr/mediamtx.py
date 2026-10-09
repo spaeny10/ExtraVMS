@@ -165,13 +165,25 @@ def local_url(path: str) -> str:
     return f"{base}/{path}"
 
 
+def sub_relays_main(cam: dict) -> bool:
+    """<id>_sub relays <id> from this MediaMTX instead of pulling from the camera: record_stream "sub" (<id> is the
+    sub stream), or a camera without a usable low-resolution stream (streams.plan)."""
+    from . import streams
+    return records_sub(cam) or streams.sub_source(cam) is None
+
+
 def camera_paths(cam: dict) -> list[str]:
     """MediaMTX paths whose bytes come from the camera itself (bandwidth from the site): the recorded path
-    and the on-demand one pulling the other stream. In sub mode <id>_sub relays <id> locally (not counted)."""
-    return [cam["id"], f"{cam['id']}_hd"] if records_sub(cam) else [cam["id"], f"{cam['id']}_sub"]
+    and the on-demand one pulling the other stream. A local relay (<id>_sub in sub mode or on a camera without a
+    sub stream, <id>_hd on a sub-mode camera without one) is not counted."""
+    from . import streams
+    if records_sub(cam):
+        return [cam["id"], f"{cam['id']}_hd"] if streams.sub_source(cam) else [cam["id"]]
+    return [cam["id"]] if streams.sub_source(cam) is None else [cam["id"], f"{cam['id']}_sub"]
 
 
 def build_config(cameras: list[dict]) -> dict:
+    from . import streams
     rec_root = settings.recordings_dir.as_posix()
     paths: dict = {}
     for cam in cameras:
@@ -183,6 +195,19 @@ def build_config(cameras: list[dict]) -> dict:
             log.error("[%s] %s: camera left out of MediaMTX", cam.get("id"), problem)
             continue
         on_demand = {"rtspTransport": "tcp", "sourceOnDemand": True, "sourceOnDemandCloseAfter": "30s"}
+        # The camera path SD live view pulls: sub_path, a lower-resolution profile the camera lists instead of it, or
+        # None when it has none (secondary stream switched off, or RTSP 404 seen): then <id>_sub relays <id>, so SD
+        # always plays (streams.plan; Qwenbot's South PTZ Dome 2026-10-08).
+        sub = streams.sub_source(cam)
+        if sub is not None and not PATH_RE.fullmatch(sub):
+            sub = None   # never put a path the camera reported into an RTSP URL unchecked
+        if records_sub(cam) and sub is None:
+            # record_stream "sub" on a camera with no sub stream: record the only stream there is (recording nothing
+            # would be worse than the extra data); SD and HD both relay it locally
+            paths[cam["id"]] = {"source": camera_url(cam, cam["main_path"]), "rtspTransport": "tcp", "record": True}
+            paths[f"{cam['id']}_sub"] = {**on_demand, "source": local_url(cam["id"])}
+            paths[f"{cam['id']}_hd"] = {**on_demand, "source": local_url(cam["id"])}
+            continue
         if records_sub(cam):
             # record_stream "sub" (cellular sites): the path named after the camera pulls and records the SUB stream
             # 24/7, so everything keyed by the camera id keeps working unchanged on the smaller picture: playback,
@@ -190,7 +215,7 @@ def build_config(cameras: list[dict]) -> dict:
             # (the camera must send metadata on its sub-stream profile). <id>_sub (SD live view) relays that same
             # stream from this MediaMTX, so watching costs no extra upload; <id>_hd pulls the main stream from the
             # camera only while someone watches in HD.
-            paths[cam["id"]] = {"source": camera_url(cam, cam["sub_path"]), "rtspTransport": "tcp", "record": True}
+            paths[cam["id"]] = {"source": camera_url(cam, sub), "rtspTransport": "tcp", "record": True}
             paths[f"{cam['id']}_sub"] = {**on_demand, "source": local_url(cam["id"])}
             paths[f"{cam['id']}_hd"] = {**on_demand, "source": camera_url(cam, cam["main_path"])}
             continue
@@ -201,8 +226,9 @@ def build_config(cameras: list[dict]) -> dict:
             "rtspTransport": "tcp",
             "record": True,
         }
-        # Sub stream: H.264, used for browser live view; pulled only while watched.
-        paths[f"{cam['id']}_sub"] = {**on_demand, "source": camera_url(cam, cam["sub_path"])}
+        # Sub stream: H.264, used for browser live view; pulled only while watched. Without one, a relay of the
+        # main stream from this MediaMTX (already pulled 24/7: no second session on the camera).
+        paths[f"{cam['id']}_sub"] = {**on_demand, "source": camera_url(cam, sub) if sub is not None else local_url(cam["id"])}
     return {
         "logLevel": "info",
         "logDestinations": ["stdout", "file"],

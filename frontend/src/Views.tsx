@@ -16,6 +16,7 @@ import { useRef } from "react";
 import { yoloFallbackText, yoloState } from "./yoloStatus";
 import { vlmSub, vlmValue } from "./vlmStatus";
 import { sdStatusText } from "./sdcard";
+import { streamsText, streamsTitle } from "./cameraStreams";
 
 /* ------------------------------------------------------------------ Live */
 
@@ -257,6 +258,33 @@ function SdCell({ camera, onChecked }: { camera: Camera; onChecked: () => void }
   );
 }
 
+/** Settings → Cameras: the streams the camera serves (its ONVIF profiles, backend streams.py); "Check" asks it now. */
+function StreamsLine({ camera, onChecked }: { camera: Camera; onChecked: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const s = camera.streams;
+  const text = streamsText(s);
+  const check = async () => {
+    setBusy(true);
+    try {
+      const r = await api.checkStreams(camera.id);
+      if (r.pending) toast.success(`${camera.name}: the camera is slow to answer; its streams will show when it does`);
+      else if (r.error) toast.error(`${camera.name}: ${r.error}`);
+      else toast.success(`${camera.name}: ${streamsText(r) || "no video streams listed"}`);
+      onChecked();
+    } catch (e) {
+      toast.error(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className={`small ${s?.error && !text ? "muted" : ""}`} title={streamsTitle(s)}>
+      Streams: {text || (s?.error ? "check failed" : s?.checked_at ? "none listed" : "not checked")}{" "}
+      <button className="ghost small" disabled={busy} onClick={check} title="Ask the camera which streams it serves">{busy ? "…" : "Check"}</button>
+    </div>
+  );
+}
+
 export function CamerasView({ cameras, port, reload }: { cameras: Camera[]; port: number; reload: () => void }) {
   const [edit, setEdit] = useState<(Camera & { password?: string }) | null>(null);
   const [err, setErr] = useState("");
@@ -293,7 +321,9 @@ export function CamerasView({ cameras, port, reload }: { cameras: Camera[]; port
               <td><strong>{c.name}</strong> <span className="muted small">{c.id}</span></td>
               <td>{c.host}</td>
               <td><Health ok={c.status?.stream_ready} /> {c.status?.tracks?.join(", ")}
-                {c.status?.health?.problems?.length ? <div className="small error">{c.status.health.problems.join("; ")}</div> : null}</td>
+                {c.status?.health?.problems?.length ? <div className="small error">{c.status.health.problems.join("; ")}</div> : null}
+                {c.status?.health?.warnings?.length ? <div className="small warn-text">{c.status.health.warnings.join("; ")}</div> : null}
+                <StreamsLine camera={c} onChecked={reload} /></td>
               <td title="Main stream now · estimated recording per day (from the last hour)">
                 {c.status?.health?.bitrate_mbps != null ? `${c.status.health.bitrate_mbps.toFixed(1)} Mbps` : "—"}
                 {c.status?.health?.gb_per_day != null && <div className="muted small">~{c.status.health.gb_per_day} GB/day</div>}
@@ -366,6 +396,9 @@ export function CamerasView({ cameras, port, reload }: { cameras: Camera[]; port
                   <Field label="Main stream path"><input value={edit.main_path} onChange={(e) => setEdit({ ...edit, main_path: e.target.value })} /></Field>
                   <Field label="Sub stream path"><input value={edit.sub_path} onChange={(e) => setEdit({ ...edit, sub_path: e.target.value })} /></Field>
                 </div>
+                {cameras.some((c) => c.id === edit.id)
+                  ? <StreamsLine camera={cameras.find((c) => c.id === edit.id)!} onChecked={reload} />
+                  : <span className="small">The camera is asked which streams it serves when it is saved. Without a low-resolution stream, SD live view plays the main stream.</span>}
                 <div className="row">
                   <Field label="Enabled"><input type="checkbox" checked={Boolean(edit.enabled)} onChange={(e) => setEdit({ ...edit, enabled: e.target.checked })} /></Field>
                 </div>

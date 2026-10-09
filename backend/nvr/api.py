@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
-from . import assistant, backup, baseline, footage, frames, health, identities, journeys, keep, mediamtx, policy, ptz, retention, zones
+from . import assistant, backup, baseline, footage, frames, health, identities, journeys, keep, mediamtx, policy, ptz, retention, streams, zones
 from . import synopsis as vlm
 from . import advisor, ai_serve, detector, direct, hub_agent, lan_guard, sdbackfill, site_actions, siteconfig
 from . import vlmroute
@@ -50,9 +50,16 @@ class State:
     ptz: ptz.PtzManager
     hub: hub_agent.HubAgent
     sd: sdbackfill.Backfill
+    streams: streams.StreamChecker
 
 
 state = State()
+
+
+def _write_mediamtx_config() -> None:
+    """A camera's SD live source changed (streams.StreamChecker): rewrite mediamtx.yml; MediaMTX hot-reloads only
+    the paths that changed (<id>_sub), recording is not interrupted."""
+    state.mtx.write_config(db.cameras(enabled_only=True))
 
 
 def sync_cameras() -> None:
@@ -107,6 +114,8 @@ async def lifespan(app: FastAPI):
     state.hub = hub_agent.HubAgent(app, state)
     # SD card backfill (manual only in this phase): restored frames are re-timed with the metadata reader's clock offset
     state.sd = sdbackfill.Backfill(live_offset=_live_clock_offset)
+    # which streams each camera serves (ONVIF), and RTSP 404s on <id>_sub from MediaMTX's log
+    state.streams = streams.StreamChecker(_write_mediamtx_config, settings.runtime_dir / "mediamtx.log")
     assistant.ctx.pipeline, assistant.ctx.footage = p, state.footage
     state.tasks = [asyncio.create_task(coro, name=name) for name, coro in [
         ("mediamtx", state.mtx.run()),
@@ -129,6 +138,7 @@ async def lifespan(app: FastAPI):
         ("sd-backfill", state.sd.run()),
         ("sd-status", sdbackfill.status_loop()),
         ("mediamtx-config-check", _mediamtx_config_check()),
+        ("streams", state.streams.run()),
     ]]
     https = _https_server() if settings.direct_enabled else None
     https_task = asyncio.create_task(_serve_https(https), name="https") if https is not None else None
@@ -538,7 +548,8 @@ CAMERA_KEPT_FIELDS = ("public_host", "public_rtsp_port", "public_onvif_port", "p
 
 
 def public_camera(c: dict) -> dict:
-    return {k: c.get(k) for k in PUBLIC_CAMERA_FIELDS}
+    # streams: what the camera serves (ONVIF check) and what SD live view plays (streams.view; paths only, never a URL)
+    return {**{k: c.get(k) for k in PUBLIC_CAMERA_FIELDS}, "streams": streams.view(c)}
 
 
 # ---------------------------------------------------------------- cameras
@@ -666,14 +677,37 @@ async def put_camera(camera_id: str, cam: CameraIn):
         if k not in cam.model_fields_set and existing:
             data[k] = existing.get(k)
     db.upsert_camera(data)
+    # A new camera, or another address / credentials: what it served before no longer applies, ask it again (after
+    # this answers). Edited stream paths: the path MediaMTX was refused (404) may not be pulled any more.
+    readdressed = existing is None or any(existing.get(k) != data.get(k) for k in streams.ADDRESS_KEYS)
+    if readdressed:
+        streams.forget(camera_id)
+    elif any(existing.get(k) != data.get(k) for k in ("main_path", "sub_path")):
+        streams.clear_404(camera_id)
     if camera_id in state.ingests:  # restart readers with new settings
         state.ingests.pop(camera_id).stop()
     sync_cameras()
+    if readdressed and data["enabled"] and getattr(state, "streams", None) is not None:
+        state.streams.check_soon(camera_id)
     state.ptz.reset(camera_id)  # re-probe with the new host/credentials (ptz_config is kept)
     state.pipeline.queue_missing_synopses(camera_id)  # e.g. vehicles just switched on for Qwen
     if policy.recheck(camera_id):  # rules changed: re-judge this week's described vehicles
         pass
     return public_camera(next(c for c in db.cameras() if c["id"] == camera_id))
+
+
+@app.post("/api/cameras/{camera_id}/streams/check")
+async def check_camera_streams(camera_id: str):
+    """Ask the camera (read-only ONVIF) which streams it serves, store them and re-plan SD live view (streams.py).
+    Admin through the hub (POST /api/cameras/*). Waits at most PROBE_TIMEOUT_S; a slower camera's answer is
+    stored when it comes (the result then says pending)."""
+    if not any(c["id"] == camera_id for c in db.cameras()):
+        raise HTTPException(404, "unknown camera")
+    try:
+        return await asyncio.wait_for(state.streams.check(camera_id, manual=True), streams.PROBE_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        cam = next(c for c in db.cameras() if c["id"] == camera_id)
+        return {**streams.view(cam), "pending": True}
 
 
 @app.delete("/api/cameras/{camera_id}")
