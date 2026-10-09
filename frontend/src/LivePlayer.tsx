@@ -7,6 +7,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api, makeApi, type SiteApi } from "./api";
 import { CHUNK, LIVE_LAG, nowS } from "./playback";
 import { WhepPlayer, type WhepState } from "./WhepPlayer";
+import { ZoomFrame } from "./VideoZoom";
 
 const FALLBACK_LAG = LIVE_LAG + 6;   // a chunk must exist on disk before it can be fetched
 
@@ -45,9 +46,11 @@ function RecordingFollow({ camera, className, videoRef, onGiveUp, children, base
   useEffect(() => { if (errors >= 3) onGiveUp(); }, [errors, onGiveUp]);
   return (
     <div className={`player ${className ?? ""}`}>
-      <video ref={set} key={start} src={site.playbackUrl(camera, start, CHUNK)} autoPlay muted playsInline
-        onEnded={() => setStart((s) => Math.min(s + CHUNK, nowS() - FALLBACK_LAG))}
-        onError={() => { setErrors((n) => n + 1); setTimeout(() => setStart(nowS() - FALLBACK_LAG), 3000); }} />
+      <ZoomFrame>
+        <video ref={set} key={start} src={site.playbackUrl(camera, start, CHUNK)} autoPlay muted playsInline
+          onEnded={() => setStart((s) => Math.min(s + CHUNK, nowS() - FALLBACK_LAG))}
+          onError={() => { setErrors((n) => n + 1); setTimeout(() => setStart(nowS() - FALLBACK_LAG), 3000); }} />
+      </ZoomFrame>
       <div className="player-size" title="WebRTC unavailable: playing the recording a few seconds behind live">recording · {FALLBACK_LAG}s behind</div>
       {children}
     </div>

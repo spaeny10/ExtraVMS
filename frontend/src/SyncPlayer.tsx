@@ -4,6 +4,7 @@ import { api, type Camera, type PlaybackQuality, type SiteApi } from "./api";
 import { PREFETCH_LEAD_S, chunkLen, driftReloadAllowed, dropPrefetch, firstChunkLen, isBuffered, prefetchChunk, shouldReload, spanAt, useLatestFrame, type Prefetched, type Span } from "./playback";
 import { LivePlayer } from "./LivePlayer";
 import type { WhepState } from "./WhepPlayer";
+import { ZoomFrame, ZoomLayer, ZoomScope } from "./VideoZoom";
 
 export type TileStatus = "idle" | "paused" | "playing" | "buffering" | "gap";
 const DRIFT_S = 0.5;      // paused: re-seek a tile further than this from the shared clock
@@ -18,8 +19,19 @@ const bufEnd = (v: HTMLVideoElement) => (v.buffered.length ? v.buffered.end(v.bu
  * One camera in the synced Timeline grid. It follows a shared clock (clockRef.current = epoch seconds):
  * loads the recording chunk around the clock time, corrects drift, pauses in gaps, and shows
  * frame previews while the playhead is being scrubbed.
+ *
+ * Digital zoom (VideoZoom.tsx) is per tile and survives seeks, chunk changes and going live on this camera.
+ * Double-click stays "isolate" and + / − / 0 stay the Timeline's keys, so the zoom pill's Reset goes back to 1×.
  */
-export function SyncTile({
+export function SyncTile(props: Parameters<typeof SyncTileView>[0]) {
+  return (
+    <ZoomScope resetKey={props.cam} doubleClickReset={false} keyboard={false}>
+      <SyncTileView {...props} />
+    </ZoomScope>
+  );
+}
+
+function SyncTileView({
   cam, name, spans, clockRef, playing, speed, scrubbing, scrubT, previewWidth, active, soloed,
   onSolo, onSelect, statusRef, dragging, dropTarget, onDragPointerDown, camera, hasAudio, audioOn, onToggleAudio,
   site = api, camId, timeOffsetS = 0, remote = false, quality, onSdUnavailable, live = false, iceServers,
@@ -253,38 +265,42 @@ export function SyncTile({
       )}
       {live && liveOff && <div className="sync-gap">Camera disabled: no live stream</div>}
       {!live && chunk && (
-        <video
-          key={chunk.key}
-          ref={video}
-          src={chunk.src}
-          muted={!audioOn}
-          playsInline
-          onLoadedMetadata={(e) => {
-            loaded.current = true;
-            e.currentTarget.currentTime = Math.max(0, (clockRef.current ?? chunk.start) - chunk.start);
-          }}
-          onProgress={(e) => { if (loaded.current) noteProgress(e.currentTarget); }}
-          onSeeked={onCaughtUp}
-          onPlaying={onCaughtUp}
-          onError={quality === "sd" && onSdUnavailable ? () => {
-            // a <video> error carries no HTTP status: ask again and read just the status line (the body is
-            // aborted), so only "too many transcodes" (503) flips to HD, not a gap or a dropped link
-            const src = chunk.src;
-            if (src.startsWith("blob:")) return;
-            const ctrl = new AbortController();
-            fetch(src, { signal: ctrl.signal }).then((r) => { ctrl.abort(); if (r.status === 503) onSdUnavailable(); }).catch(() => {});
-          } : undefined}
-          onEnded={(e) => {
-            const d = e.currentTarget.duration;
-            const next = chunk.start + (Number.isFinite(d) && d > 0 ? d : chunk.len) + 0.1;
-            if (spanAt(props.current.spans, next)) load(next, true);
-          }}
-        />
+        <ZoomFrame>
+          <video
+            key={chunk.key}
+            ref={video}
+            src={chunk.src}
+            muted={!audioOn}
+            playsInline
+            onLoadedMetadata={(e) => {
+              loaded.current = true;
+              e.currentTarget.currentTime = Math.max(0, (clockRef.current ?? chunk.start) - chunk.start);
+            }}
+            onProgress={(e) => { if (loaded.current) noteProgress(e.currentTarget); }}
+            onSeeked={onCaughtUp}
+            onPlaying={onCaughtUp}
+            onError={quality === "sd" && onSdUnavailable ? () => {
+              // a <video> error carries no HTTP status: ask again and read just the status line (the body is
+              // aborted), so only "too many transcodes" (503) flips to HD, not a gap or a dropped link
+              const src = chunk.src;
+              if (src.startsWith("blob:")) return;
+              const ctrl = new AbortController();
+              fetch(src, { signal: ctrl.signal }).then((r) => { ctrl.abort(); if (r.status === 503) onSdUnavailable(); }).catch(() => {});
+            } : undefined}
+            onEnded={(e) => {
+              const d = e.currentTarget.duration;
+              const next = chunk.start + (Number.isFinite(d) && d > 0 ? d : chunk.len) + 0.1;
+              if (spanAt(props.current.spans, next)) load(next, true);
+            }}
+          />
+        </ZoomFrame>
       )}
       {frames.shot && (
-        <div className="sync-preview">
-          {frames.shot.url ? <img src={frames.shot.url} alt="" /> : <div className="sync-gap">No recording here</div>}
-        </div>
+        <ZoomLayer>
+          <div className="sync-preview">
+            {frames.shot.url ? <img src={frames.shot.url} alt="" /> : <div className="sync-gap">No recording here</div>}
+          </div>
+        </ZoomLayer>
       )}
       {status === "gap" && !frames.shot && !live && <div className="sync-gap">No recording at this time</div>}
       <RegionOverlay cam={cam} videoRef={video} editing={painting} onDone={() => setPainting(false)} camera={camera} site={site} />

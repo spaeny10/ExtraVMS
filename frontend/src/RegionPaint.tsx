@@ -4,6 +4,7 @@
  */
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, type Camera, type SiteApi } from "./api";
+import { ZoomLayer } from "./VideoZoom";
 import { GRID_H, GRID_W, cellIndex, countCells, hasCell, isEmpty, regions, saveAsPlace, setCell, useRegion } from "./region";
 
 const COARSE = typeof matchMedia !== "undefined" && matchMedia("(pointer: coarse)").matches;
@@ -108,21 +109,24 @@ export function RegionOverlay({ cam, videoRef, editing, onDone, camera, fallback
 
   return (
     <>
-      <canvas ref={canvas} className={`region-canvas ${editing ? "editing" : ""}`}
-        style={rect ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : undefined}
-        onClick={stop} onDoubleClick={stop} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
-        onPointerDown={(e) => {
-          if (!editing) return;
-          e.stopPropagation(); e.preventDefault();
-          e.currentTarget.setPointerCapture(e.pointerId);
-          const erase = mode === "erase" || e.button === 2 || e.altKey;
-          stroke.current = { erase };
-          paintAt(e, erase);
-        }}
-        onPointerMove={(e) => { if (stroke.current) { e.preventDefault(); paintAt(e, stroke.current.erase); } }}
-        onPointerUp={(e) => { if (stroke.current) { const erase = stroke.current.erase; stroke.current = null; commit(paintAt(e, erase) ?? bitsRef.current); } }}
-        onPointerCancel={() => { if (stroke.current) { stroke.current = null; commit(bitsRef.current); } }}
-      />
+      {/* on the zoomed picture when the tile is digitally zoomed; painting maps through the transform (getBoundingClientRect) */}
+      <ZoomLayer>
+        <canvas ref={canvas} className={`region-canvas ${editing ? "editing" : ""}`}
+          style={rect ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : undefined}
+          onClick={stop} onDoubleClick={stop} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
+          onPointerDown={(e) => {
+            if (!editing) return;
+            e.stopPropagation(); e.preventDefault();
+            e.currentTarget.setPointerCapture(e.pointerId);
+            const erase = mode === "erase" || e.button === 2 || e.altKey;
+            stroke.current = { erase };
+            paintAt(e, erase);
+          }}
+          onPointerMove={(e) => { if (stroke.current) { e.preventDefault(); paintAt(e, stroke.current.erase); } }}
+          onPointerUp={(e) => { if (stroke.current) { const erase = stroke.current.erase; stroke.current = null; commit(paintAt(e, erase) ?? bitsRef.current); } }}
+          onPointerCancel={() => { if (stroke.current) { stroke.current = null; commit(bitsRef.current); } }}
+        />
+      </ZoomLayer>
       {editing && (
         <div className="region-tools" onPointerDown={stop} onClick={stop} onDoubleClick={stop}>
           <div className="segmented small-seg">

@@ -11,6 +11,7 @@ import { NeighborsEditor } from "./Neighbors";
 import { Skeleton, confirmDialog, errorText, swipeHandlers, toast, useIsPhone } from "./ui";
 import { RegionBadge, RegionOverlay } from "./RegionPaint";
 import { PtzBadge, PtzOverlay, PtzSettings } from "./PtzControl";
+import { ZoomScope } from "./VideoZoom";
 import { regionPass, regions, useRegions } from "./region";
 import { useRef } from "react";
 import { yoloFallbackText, yoloState } from "./yoloStatus";
@@ -56,12 +57,16 @@ export function LiveTile({ c, hd, port, active, onUnsupported, bar, phone, onSwi
   return (
     <div className={`tile ${active ? "alerting" : ""} ${painting ? "painting" : ""} ${ptzOn ? "ptz" : ""}`}
       {...(phone && onSwipe && !painting && !ptzOn ? swipeHandlers(onSwipe) : {})}>
-      <LivePlayer key={`${c.id}-${hd ? "hd" : "sd"}`} path={livePath(c, hd)} camera={c.id} port={port} showSize className={hd ? "hd" : ""}
-        site={site === api ? undefined : site}
-        onUnsupported={onUnsupported} videoRef={videoRef} iceServers={iceServers} muted={!sound} onAudio={setHasAudio}>
-        {!ptzOn && <RegionOverlay cam={regionKey ?? c.id} videoRef={videoRef} editing={painting} onDone={() => setPainting(false)} camera={c} fallbackAspect={aspect} site={site} />}
-        {ptz?.available && <PtzOverlay cam={c.id} videoRef={videoRef} active={ptzOn} onDone={() => setPtzOn(false)} fallbackAspect={aspect} site={site} />}
-      </LivePlayer>
+      {/* digital zoom: kept across SD/HD and a fallback to recordings, back to 1× on another camera; off in PTZ mode,
+          whose drag / click-to-center / wheel steer the camera and map to the unzoomed picture */}
+      <ZoomScope resetKey={c.id} disabled={ptzOn}>
+        <LivePlayer key={`${c.id}-${hd ? "hd" : "sd"}`} path={livePath(c, hd)} camera={c.id} port={port} showSize className={hd ? "hd" : ""}
+          site={site === api ? undefined : site}
+          onUnsupported={onUnsupported} videoRef={videoRef} iceServers={iceServers} muted={!sound} onAudio={setHasAudio}>
+          {!ptzOn && <RegionOverlay cam={regionKey ?? c.id} videoRef={videoRef} editing={painting} onDone={() => setPainting(false)} camera={c} fallbackAspect={aspect} site={site} />}
+          {ptz?.available && <PtzOverlay cam={c.id} videoRef={videoRef} active={ptzOn} onDone={() => setPtzOn(false)} fallbackAspect={aspect} site={site} />}
+        </LivePlayer>
+      </ZoomScope>
       <div className="tile-bar">
         {bar}
         <PtzBadge cam={c.id} ptz={ptz} site={site} />

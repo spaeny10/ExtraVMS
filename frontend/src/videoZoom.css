@@ -1,0 +1,19 @@
+/* Digital zoom (VideoZoom.tsx). The frame fills the player box; the inner layer carries the transform. */
+.vzoom { position: absolute; inset: 0; overflow: hidden; touch-action: pan-y; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; outline: none; }
+.vzoom:focus-visible { box-shadow: inset 0 0 0 2px var(--accent); }
+.vzoom.zoomed { touch-action: none; cursor: grab; }
+.vzoom.zoomed.panning { cursor: grabbing; }
+.vzoom-inner { position: absolute; inset: 0; transform-origin: 0 0; }
+
+/* overlays that follow the zoomed picture (painted region, scrub preview); the region canvas sat at z-index 2 */
+.vzoom-layer { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: 2; }
+.vzoom-layer-inner { position: absolute; inset: 0; transform-origin: 0 0; }
+
+/* "2.5× · Reset" indicator, only while zoomed */
+.vzoom-pill { position: absolute; right: 8px; bottom: 8px; z-index: 3; display: flex; align-items: center; gap: 6px; padding: 2px 3px 2px 8px;
+  background: rgb(0 0 0 / .6); color: #fff; border-radius: 999px; font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; cursor: default; }
+.vzoom-pill button { background: rgb(255 255 255 / .16); color: #fff; border: 0; border-radius: 999px; padding: 2px 8px; font: inherit; font-weight: 500; cursor: pointer; }
+.vzoom-pill button:hover { background: rgb(255 255 255 / .28); }
+/* a Timeline tile's fallback "recording · N s behind" label sits bottom-right: stack above it */
+.sync-tile .player:has(.player-size) .vzoom-pill { bottom: 34px; }
+@media (pointer: coarse) { .vzoom-pill button { padding: 5px 12px; } }

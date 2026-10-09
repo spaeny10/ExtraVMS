@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api, makeApi, type SiteApi } from "./api";
 import { cameraOfPath, stillWidth } from "./cameraStreams";
+import { ZoomFrame } from "./VideoZoom";
 
 /**
  * WebRTC (WHEP) player for a MediaMTX path.
@@ -175,18 +176,21 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
 
   return (
     <div ref={box} className={`player ${className ?? ""}`}>
-      <video
-        ref={setVideo}
-        autoPlay
-        muted
-        playsInline
-        onPlaying={(e) => { if (e.currentTarget.videoWidth) setFrame(true); }}
-        onResize={(e) => {
-          const v = e.currentTarget;
-          if (v.videoWidth) setSize(`${v.videoWidth}×${v.videoHeight}`);
-          if (v.videoWidth && !v.paused) setFrame(true);
-        }}
-      />
+      <ZoomFrame>
+        <video
+          ref={setVideo}
+          autoPlay
+          muted
+          playsInline
+          onPlaying={(e) => { if (e.currentTarget.videoWidth) setFrame(true); }}
+          onResize={(e) => {
+            const v = e.currentTarget;
+            if (v.videoWidth) setSize(`${v.videoWidth}×${v.videoHeight}`);
+            if (v.videoWidth && !v.paused) setFrame(true);
+          }}
+        />
+      </ZoomFrame>
+      {/* the still shows only until the first frame, while the picture is still at 1x: it needs no zoom layer */}
       {showStill && (
         <img className={`player-poster ${stillVisible ? "shown" : ""}`} src={still.url!} alt="" draggable={false}
           onLoad={still.onLoad} onError={still.onError} onTransitionEnd={() => { if (frame) setStillGone(true); }} />
