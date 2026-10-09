@@ -1449,6 +1449,12 @@ class CentralPatch(BaseModel):
     camera_limit: int | None = Field(None, ge=1, le=hosts.MAX_CAMERA_LIMIT)
 
 
+class CentralResources(BaseModel):
+    """Either or both: the instance's CPU limit (docker --cpus) and memory limit in GB; applied live by the host."""
+    cpus: float | None = Field(None, ge=hosts.CPUS_RANGE[0], le=hosts.CPUS_RANGE[1])
+    mem_gb: float | None = Field(None, ge=hosts.MEM_GB_RANGE[0], le=hosts.MEM_GB_RANGE[1])
+
+
 class CentralCameras(BaseModel):
     """The instance's Site networks (each list replaces the stored one; hosts.check_camera_network). The firewall is
     these plus the public addresses its cameras use (central_cameras.py)."""
@@ -1521,6 +1527,23 @@ async def location_central_update(location_id: str, ci_id: str, body: CentralPat
     except hosts.HostError as e:
         raise HTTPException(502, str(e))
     return hosts.instances(db.central_instances.c.id == ci_id, include_deleted=True)[0]
+
+
+@app.put("/api/locations/{location_id}/central/{ci_id}/resources")
+async def location_central_resources(location_id: str, ci_id: str, body: CentralResources, u: dict = Depends(user)):
+    """CPU and / or memory limits (a set_resources round trip: applied live by the host, recreated only if that fails).
+    Hub administrators only, like the storage quota; audited once the host has done it."""
+    auth.require_super(u)
+    _central_of(location_id, ci_id)
+    try:
+        await hosts.set_resources(ci_id, body.cpus, body.mem_gb, u)
+    except LookupError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except hosts.HostError as e:
+        raise HTTPException(502, f"{e}: nothing was changed")
+    return hosts.instances(db.central_instances.c.id == ci_id)[0]
 
 
 @app.put("/api/locations/{location_id}/central/{ci_id}/cameras")
@@ -1855,7 +1878,7 @@ async def site_backup_restore(site_id: str, backup_id: int, body: RestoreIn, u: 
 @app.get("/api/push/vapid")
 async def push_vapid(u: dict = Depends(user)):
     return {"public_key": push.vapid()["public"], "subscriptions": [{"endpoint": s["endpoint"], "kinds": s["kinds"], "ua": s["ua"]} for s in push.subscriptions_for(u["id"])],
-            # soc_incident is opt-in (push.INCIDENT_KIND); host_offline is offered to hub administrators only
+            # soc_incident is opt-in (push.INCIDENT_KIND); host_offline etc. (HUB_KINDS) are offered to hub administrators only
             "kinds": [*push.CUSTOMER_KINDS, *(alerts.HUB_KINDS if u.get("is_super") else ())]}
 
 

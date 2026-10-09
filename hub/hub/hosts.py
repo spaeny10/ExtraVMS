@@ -6,17 +6,23 @@ rest like a server's device token) and keeps the socket open. Protocol (JSON tex
 
   host -> hub  {"t": "hello", "proto": 1, "hostname", "version", "capacity": {cpus, load, ram_gb: {total, free},
                  gpus: [{index, name, mem_total_mb, mem_used_mb, util}], disks: [{path, total_gb, free_gb}], instances: int}}
-               {"t": "heartbeat", "capacity": {...}, "instances": [{id, location_id, name, state, quota_gb, used_gb, gpu, mode}]}
+               {"t": "heartbeat", "capacity": {..., work?: {at, vllm, instances}}, "instances": [{id, location_id, name, state,
+                 quota_gb, used_gb, gpu, mode, cpus, mem_gb}]}
                {"t": "result", "id": int, "ok": bool, "detail": str, "instance"?: {...}}
                {"t": "ping"}                                   -> hub answers {"t": "pong"}
   hub -> host  {"t": "cmd", "id": int, "op": create_instance | delete_instance | set_quota | set_camera_network |
-                 restart_instance | list, "args": {...}}
+                 restart_instance | set_resources | list, "args": {...}}
     create_instance  {id, location, name, mode, subnet, public_ip, quota_gb, gpu, enroll_token, hub_url, vlm_url}
     delete_instance  {id, purge}        purge false = the recordings and database stay on the host
     set_quota        {id, quota_gb}
     set_camera_network {id, subnets, public_ips, hosts}   the instance's camera allow-list (the hub sends all three)
     restart_instance {id}
+    set_resources    {id, cpus, mem_gb}  CPU / memory limits; applied live (docker update), recreated only if that fails
     list             {}
+
+capacity.work (agent 0.2.0+, tools/central/PROTOCOL.md): the shared vLLM's running / waiting requests and the instances'
+YOLO verify queues. The latest stays in hosts.capacity; a short in-memory history per host (work_history) gives the
+Hosts page its sparklines and drives the hub-level host_queue_growing alert (check_work_alerts).
 
 A central instance is one isolated server container recording one customer Site's cameras, over SpeedFusion (mode
 vpn: the BR1's LAN is 10.20.<site_number>.0/24) or port forwards locked to the datacenter's IP (mode forward: the
@@ -36,6 +42,7 @@ holds the camera limit and the address rules). Every change is audited.
 from __future__ import annotations
 
 import asyncio
+import collections
 import ipaddress
 import json
 import logging
@@ -51,7 +58,7 @@ from .config import settings
 log = logging.getLogger("hub.hosts")
 
 PROTO = 1
-OPS = ("create_instance", "delete_instance", "set_quota", "set_camera_network", "restart_instance", "list")
+OPS = ("create_instance", "delete_instance", "set_quota", "set_camera_network", "restart_instance", "set_resources", "list")
 STATES = ("provisioning", "running", "failed", "deleting", "deleted")
 LIVE_STATES = ("provisioning", "running", "failed", "deleting")   # everything but deleted: holds its site number
 MODES = ("vpn", "forward")
@@ -191,10 +198,18 @@ class HostRegistry:
             vals["capacity"] = frame["capacity"]
         db.run(sa.update(db.hosts).where(db.hosts.c.id == conn.host_id).values(**vals))
         now = time.time()
+        work = (vals.get("capacity") or {}).get("work")
+        if isinstance(work, dict):
+            try:
+                record_work(conn.host_id, work, now)
+                check_work_alerts(conn.host, now)
+            except Exception:   # a malformed work object must never cost the heartbeat
+                log.exception("host %s: work queues", conn.host_id)
         for inst in (frame.get("instances") or [])[:1000] if isinstance(frame.get("instances"), list) else []:
             if not isinstance(inst, dict) or not inst.get("id"):
                 continue
-            info = {k: inst.get(k) for k in ("state", "used_gb", "quota_gb", "gpu", "mode", "location_id", "name", "host_ips")}
+            info = {k: inst.get(k) for k in ("state", "used_gb", "quota_gb", "gpu", "mode", "location_id", "name", "host_ips",
+                                             "cpus", "mem_gb")}
             # only this host's own instances: a host can never report on (or overwrite) another host's rows
             db.run(sa.update(db.central_instances).where(db.central_instances.c.id == str(inst["id"])[:24],
                                                          db.central_instances.c.host_id == conn.host_id).values(info=info, info_at=now))
@@ -272,6 +287,7 @@ async def delete_host(host_id: str) -> None:
     with db.engine().begin() as c:
         c.execute(sa.delete(db.hosts).where(db.hosts.c.id == host_id))
         c.execute(sa.delete(db.alerts).where(db.alerts.c.org_id == HUB_ORG, db.alerts.c.site_id == host_id))
+    _work.pop(host_id, None)
     await registry.disconnect(host_id, "host removed at the hub")
 
 
@@ -297,7 +313,7 @@ def hub_agent_url() -> str:
     return _ws_base() + "/agent"
 
 
-def host_out(h: dict, instances: list[dict] | None = None, open_alerts: dict | None = None) -> dict:
+def host_out(h: dict, instances: list[dict] | None = None, open_alerts: dict | None = None, queue_alerts: dict | None = None) -> dict:
     mine = [i for i in (instances or []) if i["host_id"] == h["id"] and i["state"] in LIVE_STATES]
     return {"id": h["id"], "name": h["name"], "created_at": h["created_at"], "online": bool(h["online"]) and registry.online(h["id"]),
             "last_seen_at": h["last_seen_at"], "hostname": h["hostname"], "version": h["version"], "capacity": h["capacity"] or None,
@@ -305,15 +321,147 @@ def host_out(h: dict, instances: list[dict] | None = None, open_alerts: dict | N
             "quota_gb": sum(int(i["quota_gb"] or 0) for i in mine),
             # what a new instance's storage quota may be: the largest disk's free space minus what its instances may still grow into
             "room_gb": round(host_room(h)["room_gb"], 1),
-            "offline_since": (open_alerts or {}).get(h["id"])}
+            "offline_since": (open_alerts or {}).get(h["id"]),
+            # capacity.work over time (the sparklines) and what is growing; queue_alerts: open host_queue_growing rows
+            "work_history": work_history(h["id"]), "work_trend": work_trend(h["id"]),
+            "queue_alerts": (queue_alerts or {}).get(h["id"], [])}
 
 
 def list_hosts() -> list[dict]:
     hosts = db.rows(sa.select(db.hosts).order_by(db.hosts.c.name))
     inst = db.rows(sa.select(db.central_instances).where(db.central_instances.c.state.in_(LIVE_STATES)))
-    open_alerts = {r["site_id"]: r["opened_at"] for r in db.rows(sa.select(db.alerts.c.site_id, db.alerts.c.opened_at).where(
-        db.alerts.c.org_id == HUB_ORG, db.alerts.c.kind == "host_offline", db.alerts.c.closed_at.is_(None)))}
-    return [host_out(h, inst, open_alerts) for h in hosts]
+    open_alerts: dict = {}
+    queue_alerts: dict = {}
+    for r in db.rows(sa.select(db.alerts).where(db.alerts.c.org_id == HUB_ORG, db.alerts.c.kind.in_(("host_offline", QUEUE_KIND)),
+                                                db.alerts.c.closed_at.is_(None)).order_by(db.alerts.c.opened_at)):
+        if r["kind"] == "host_offline":
+            open_alerts[r["site_id"]] = r["opened_at"]
+        else:
+            queue_alerts.setdefault(r["site_id"], []).append({**(r["detail"] or {}), "key": r["key"], "opened_at": r["opened_at"]})
+    return [host_out(h, inst, open_alerts, queue_alerts) for h in hosts]
+
+
+# ---------------------------------------------------------------- work queues (capacity.work): trends and alerts
+
+QUEUE_KIND = "host_queue_growing"
+WORK_HISTORY = 60            # samples kept per host: ~30 min at one heartbeat per 30 s
+GROW_WINDOW_S = 15 * 60      # an instance's verify queue compared with this long ago...
+GROW_MIN = 20                # ...and above this many events
+GROW_SLACK_S = 120           # the "15 minutes ago" sample may be this much older than that (heartbeats drift, gaps)
+SHRINK_CLOSE = 0.9           # closes at or below GROW_MIN, or once 10 % below where it was 15 minutes earlier
+VLLM_WAIT_S = 10 * 60        # vLLM with requests waiting this long, without a break
+MAX_GAP_S = 90               # samples further apart than this break a "continuously waiting" run (agent gone)
+STALE_S = 120                # an instance value read this much before the work's `at` (the agent's cache) is unknown
+_work: dict[str, collections.deque] = {}
+
+
+def _num(v) -> float | None:
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def record_work(host_id: str, work: dict, now: float | None = None) -> dict:
+    """Append one capacity.work to the host's history: {t, vllm_waiting, vllm_running, verify_q (total), q: {id: verify_q}}.
+    t is the hub's clock. An instance value the agent could not refresh lately is None (unknown), not its old number."""
+    now = time.time() if now is None else now
+    at = _num(work.get("at")) or 0.0
+    q: dict[str, float | None] = {}
+    insts = work.get("instances") if isinstance(work.get("instances"), dict) else {}
+    for iid, w in list(insts.items())[:1000]:
+        if not isinstance(w, dict):
+            continue
+        fresh = w.get("ok") is not False or (at > 0 and (_num(w.get("at")) or 0) >= at - STALE_S)
+        q[str(iid)[:24]] = _num(w.get("verify_q")) if fresh else None
+    v = work.get("vllm") if isinstance(work.get("vllm"), dict) else {}
+    vok = v.get("ok") is True
+    known = [x for x in q.values() if x is not None]
+    sample = {"t": now, "vllm_waiting": _num(v.get("waiting")) if vok else None, "vllm_running": _num(v.get("running")) if vok else None,
+              "verify_q": sum(known) if known else None, "q": q}
+    _work.setdefault(host_id, collections.deque(maxlen=WORK_HISTORY)).append(sample)
+    return sample
+
+
+def work_history(host_id: str) -> list[dict]:
+    """[{t, vllm_waiting, vllm_running, verify_q}] oldest first (the Hosts page's sparklines)."""
+    return [{k: s[k] for k in ("t", "vllm_waiting", "vllm_running", "verify_q")} for s in _work.get(host_id, ())]
+
+
+def _ago(samples: list[dict], now: float, secs: float) -> dict | None:
+    """The newest sample at least `secs` old, if it is not much older than that (else there is no data that far back)."""
+    best = None
+    for s in samples:
+        if s["t"] <= now - secs:
+            best = s
+    return best if best is not None and best["t"] >= now - secs - GROW_SLACK_S else None
+
+
+def work_trend(host_id: str) -> dict:
+    """{instances: {id: {verify_q, verify_q_before, growing, recovered}}, vllm_waiting, vllm_waiting_for_s}: what
+    host_queue_growing opens and closes on. growing: above GROW_MIN and higher than GROW_WINDOW_S ago; recovered: at or
+    below GROW_MIN, or 10 % below that earlier value (between the two an open alert stays open). vllm_waiting_for_s: how
+    long vLLM has had requests waiting without a break (None = none waiting now, or unknown)."""
+    samples = list(_work.get(host_id, ()))
+    if not samples:
+        return {"instances": {}, "vllm_waiting": None, "vllm_waiting_for_s": None}
+    last = samples[-1]
+    now = last["t"]
+    before = _ago(samples, now, GROW_WINDOW_S)
+    out: dict[str, dict] = {}
+    for iid, cur in last["q"].items():
+        old = before["q"].get(iid) if before else None
+        growing = cur is not None and old is not None and cur > GROW_MIN and cur > old
+        recovered = cur is not None and (cur <= GROW_MIN or (old is not None and cur <= old * SHRINK_CLOSE))
+        out[iid] = {"verify_q": cur, "verify_q_before": old, "growing": growing, "recovered": recovered}
+    waiting_for = None
+    if (last["vllm_waiting"] or 0) > 0:
+        start = last
+        for s in reversed(samples[:-1]):
+            if not (s["vllm_waiting"] or 0) > 0 or start["t"] - s["t"] > MAX_GAP_S:
+                break
+            start = s
+        waiting_for = now - start["t"]
+    return {"instances": out, "vllm_waiting": last["vllm_waiting"], "vllm_waiting_for_s": waiting_for}
+
+
+def _site_label(iid: str) -> tuple[str, dict]:
+    """("Yard A", {location_id, org_id}) for a central instance id (the id itself when the hub does not know it)."""
+    ci = db.one(sa.select(db.central_instances.c.location_id, db.central_instances.c.org_id).where(db.central_instances.c.id == iid))
+    if not ci:
+        return iid, {}
+    loc = db.one(sa.select(db.locations.c.name).where(db.locations.c.id == ci["location_id"]))
+    return (loc or {}).get("name") or ci["location_id"], {"location_id": ci["location_id"], "org_id": ci["org_id"]}
+
+
+def check_work_alerts(host: dict, now: float | None = None) -> None:
+    """host_queue_growing (hub administrators only: alerts.HUB_KINDS), one row per (host, key):
+      verify:<instance id>  the instance's YOLO verify queue is above GROW_MIN and higher than 15 minutes earlier;
+                            closes once it is back at or below GROW_MIN or 10 % below that earlier value, or the
+                            instance is no longer reported
+      vllm                  the shared vLLM has had requests waiting for 10 minutes without a break; closes when none wait
+    Unknown values (an instance that did not answer, vLLM unreadable) neither open nor close."""
+    tr = work_trend(host["id"])
+    subject = _alert_subject(host)
+    hname = host.get("name") or host["id"]
+    open_keys = {r["key"] for r in db.rows(sa.select(db.alerts.c.key).where(
+        db.alerts.c.org_id == HUB_ORG, db.alerts.c.site_id == host["id"], db.alerts.c.kind == QUEUE_KIND, db.alerts.c.closed_at.is_(None)))}
+    for iid, t in tr["instances"].items():
+        key = f"verify:{iid}"
+        if t["growing"] and key not in open_keys:
+            site, ref = _site_label(iid)
+            text = (f"{site} on {hname}: YOLO verify queue at {t['verify_q']:.0f} events, up from {t['verify_q_before']:.0f} "
+                    "15 minutes ago")
+            alerts.open(subject, QUEUE_KIND, key, {"text": text, "host": hname, "instance_id": iid, "site": site, "queue": "verify",
+                                                  "value": t["verify_q"], "before": t["verify_q_before"], **ref})
+        elif t["recovered"] and key in open_keys:
+            alerts.close(subject, QUEUE_KIND, key)
+    for key in open_keys:
+        if key.startswith("verify:") and key[len("verify:"):] not in tr["instances"]:   # the instance is gone
+            alerts.close(subject, QUEUE_KIND, key)
+    waited = tr["vllm_waiting_for_s"]
+    if waited is not None and waited >= VLLM_WAIT_S and "vllm" not in open_keys:
+        text = f"{hname}: Qwen (vLLM) has had requests waiting for {int(waited // 60)} minutes ({tr['vllm_waiting']:.0f} waiting now)"
+        alerts.open(subject, QUEUE_KIND, "vllm", {"text": text, "host": hname, "queue": "vllm", "value": tr["vllm_waiting"]})
+    elif "vllm" in open_keys and tr["vllm_waiting"] == 0:
+        alerts.close(subject, QUEUE_KIND, "vllm")
 
 
 # ---------------------------------------------------------------- placement
@@ -806,6 +954,44 @@ async def set_quota(ci_id: str, quota_gb: int, by_user: dict | None) -> dict:
 
 
 MAX_CAMERA_LIMIT = 500
+CPUS_RANGE = (1, 64)         # axiom_host.py set_resources also refuses more CPUs than the host has
+MEM_GB_RANGE = (2, 512)
+
+
+async def set_resources(ci_id: str, cpus: float | None, mem_gb: float | None, by_user: dict | None) -> dict:
+    """The instance's CPU and / or memory limits: a set_resources round trip (applied live with docker update; the
+    container is recreated only if that fails), then kept in its info and audited. ValueError = bad input, HostError = offline or refused
+    (nothing changed then)."""
+    ci = get_instance(ci_id)
+    if not ci or ci["state"] in ("deleting", "deleted"):
+        raise LookupError("unknown central instance")
+    if cpus is None and mem_gb is None:
+        raise ValueError("send cpus and / or mem_gb")
+    if cpus is not None and not CPUS_RANGE[0] <= cpus <= CPUS_RANGE[1]:
+        raise ValueError(f"CPUs must be {CPUS_RANGE[0]}-{CPUS_RANGE[1]}")
+    if mem_gb is not None and not MEM_GB_RANGE[0] <= mem_gb <= MEM_GB_RANGE[1]:
+        raise ValueError(f"memory must be {MEM_GB_RANGE[0]}-{MEM_GB_RANGE[1]} GB")
+    args: dict = {"id": ci_id}
+    if cpus is not None:
+        args["cpus"] = cpus
+    if mem_gb is not None:
+        args["mem_gb"] = mem_gb
+    info = ci.get("info") or {}
+    before = {"cpus": _num(info.get("cpus")), "mem_gb": _num(info.get("mem_gb"))}
+    res = await registry.command(ci["host_id"], "set_resources", args)
+    if not res.get("ok"):
+        raise HostError(str(res.get("detail") or "the host refused"))
+    got = res.get("instance") if isinstance(res.get("instance"), dict) else {}
+    after = {"cpus": _num(got.get("cpus")) if _num(got.get("cpus")) is not None else (cpus if cpus is not None else before["cpus"]),
+             "mem_gb": _num(got.get("mem_gb")) if _num(got.get("mem_gb")) is not None else (mem_gb if mem_gb is not None else before["mem_gb"])}
+    _set(ci_id, info={**info, **after}, info_at=time.time())
+    loc = db.one(sa.select(db.locations.c.name).where(db.locations.c.id == ci["location_id"])) or {"name": ci["location_id"]}
+    show = lambda v, unit: "?" if v is None else f"{v:g} {unit}"  # noqa: E731
+    _audit(by_user, ci["org_id"], ci["server_id"],
+           f"central recording CPU/memory: {loc['name']} {show(before['cpus'], 'CPUs')}, {show(before['mem_gb'], 'GB')} -> "
+           f"{show(after['cpus'], 'CPUs')}, {show(after['mem_gb'], 'GB')}",
+           {"location_id": ci["location_id"], "instance_id": ci_id, "from": before, "to": after, "detail": str(res.get("detail") or "")[:300]})
+    return get_instance(ci_id) or ci
 
 
 def _check_limit(limit) -> None:
@@ -1012,7 +1198,9 @@ def instance_out(ci: dict, names: dict, hub_admin: bool) -> dict:
            "peplink": peplink(ci, host)}
     if hub_admin:
         out |= {"host_id": ci["host_id"], "host_name": host.get("name"), "host_online": registry.online(ci["host_id"]),
-                "gpu": ci["gpu"], "gpu_name": gpu_name, "last_error": ci["last_error"], "host_state": info.get("state")}
+                "gpu": ci["gpu"], "gpu_name": gpu_name, "last_error": ci["last_error"], "host_state": info.get("state"),
+                # its CPU / memory limits on the host, as last reported (set_resources changes them)
+                "cpus": _num(info.get("cpus")), "mem_gb": _num(info.get("mem_gb"))}
         # not on the host yet: waiting for the next sync, or the last one failed (sync_error says why)
         out["camera_network"] |= {"pending": state == "pending" or bool(cn.get("sync_error")), "sync_error": cn.get("sync_error")}
     return out

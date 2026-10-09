@@ -581,3 +581,206 @@ def test_camera_addresses(world, superuser):
         fh.close()
         for c in made:
             root.delete(f"/api/locations/{c['location_id']}/central/{c['id']}?force=true")
+
+
+# ---------------------------------------------------------------- work queues (capacity.work) and CPU / memory
+
+def _work(q: dict, waiting=0, running=1, at=1000.0, vok=True, iok=True):
+    """A capacity.work as the agent sends it: q = {instance id: verify_q}."""
+    return {"at": at, "vllm": {"ok": vok, "running": running, "waiting": waiting, "kv_cache_pct": 34.1, "gen_tps": 180.0, "gpu": 0, "at": at},
+            "instances": {iid: {"verify_q": v, "synopsis_q": 0, "verify_rate_per_min": 0.5, "gpu": 1, "ok": iok,
+                                "at": at if iok else at - 600} for iid, v in q.items()}}
+
+
+def test_work_served_with_history(world):
+    base, root = world["base"], world["root"]
+    host = root.post("/api/hub/hosts", json={"name": "Worker"}).json()
+    hid = host["host"]["id"]
+    fh = FakeHost(base, host["token"], capacity(), None, "worker")
+    try:
+        wait(lambda: hosts.registry.online(hid))
+        listed = next(h for h in root.get("/api/hub/hosts").json()["hosts"] if h["id"] == hid)
+        assert "work" not in listed["capacity"] and listed["work_history"] == [] and listed["queue_alerts"] == []   # an older agent
+        for n, w in enumerate((5, 9)):
+            fh.send({"t": "heartbeat", "capacity": {**capacity(), "work": _work({"ci_x": w, "ci_y": 3}, waiting=n)}, "instances": []})
+        listed = wait(lambda: next((h for h in root.get("/api/hub/hosts").json()["hosts"] if h["id"] == hid and len(h["work_history"]) == 2), None))
+        assert listed["capacity"]["work"]["instances"]["ci_x"]["verify_q"] == 9 and listed["capacity"]["work"]["vllm"]["gen_tps"] == 180.0
+        assert [(s["verify_q"], s["vllm_waiting"]) for s in listed["work_history"]] == [(8, 0), (12, 1)]
+        assert listed["work_trend"]["instances"]["ci_x"] == {"verify_q": 9, "verify_q_before": None, "growing": False, "recovered": True}
+        # a malformed work object costs nothing but itself
+        fh.send({"t": "heartbeat", "capacity": {**capacity(free_gb=6000.0), "work": {"instances": "nope", "vllm": 3}}, "instances": []})
+        wait(lambda: (db.one(sa.select(db.hosts).where(db.hosts.c.id == hid))["capacity"] or {}).get("disks", [{}])[0].get("free_gb") == 6000.0)
+    finally:
+        fh.close()
+    wait(lambda: not hosts.registry.online(hid))
+    asyncio.run(hosts.delete_host(hid))
+    assert hosts.work_history(hid) == []
+
+
+def test_queue_growing_alert(world, superuser, monkeypatch):
+    monkeypatch.setattr(alerts, "on_open", None)
+    org = world["org"]
+    loc = world["root"].post(f"/api/orgs/{org['id']}/locations", json={"name": "Yard Q"}).json()
+    row, _ = hosts.create_host("Fred", None, None)
+    hid = row["id"]
+    ci_id = db.new_id("ci_")
+    t0 = time.time()
+    db.insert(db.central_instances, {"id": ci_id, "host_id": hid, "location_id": loc["id"], "org_id": org["id"], "server_id": None, "name": "Central",
+                                     "mode": "vpn", "subnet": None, "public_ip": None, "site_number": None, "quota_gb": 100, "gpu": 1,
+                                     "state": "running", "last_error": None, "created_at": t0, "created_by": None, "updated_at": t0, "ready_at": t0,
+                                     "info": None, "info_at": None, "camera_limit": None, "camera_network": None})
+    opened = lambda: {r["key"]: r for r in _open(hid, hosts.QUEUE_KIND)}  # noqa: E731
+    t = 1_000_000.0
+
+    def beat(q, waiting=0, **kw):
+        nonlocal t
+        t += 30
+        hosts.record_work(hid, _work(q, waiting=waiting, at=t, **kw), t)
+        hosts.check_work_alerts(row, t)
+
+    try:
+        # growing from the start, but not 15 minutes of history yet: nothing
+        for i in range(25):                       # 12.5 minutes, 10 -> 58
+            beat({ci_id: 10 + 2 * i})
+        assert opened() == {}
+        for i in range(25, 32):                   # past 15 minutes: open, once
+            beat({ci_id: 10 + 2 * i})
+        rows = opened()
+        assert list(rows) == [f"verify:{ci_id}"]
+        d = rows[f"verify:{ci_id}"]["detail"]
+        assert d["site"] == "Yard Q" and d["host"] == "Fred" and d["instance_id"] == ci_id and d["queue"] == "verify"
+        assert d["text"].startswith("Yard Q on Fred: YOLO verify queue at ") and "up from" in d["text"] and d["location_id"] == loc["id"]
+        assert rows[f"verify:{ci_id}"]["org_id"] == hosts.HUB_ORG
+        # it shows on the host card
+        listed = next(h for h in hosts.list_hosts() if h["id"] == hid)
+        assert listed["queue_alerts"][0]["key"] == f"verify:{ci_id}" and "Yard Q" in listed["queue_alerts"][0]["text"]
+        assert listed["work_trend"]["instances"][ci_id]["growing"] is True
+        # steady (not growing, not recovered): stays open; unknown values (the instance stopped answering): stays open
+        for _ in range(4):
+            beat({ci_id: 72})
+        beat({ci_id: 72}, iok=False)
+        assert hosts.work_trend(hid)["instances"][ci_id]["verify_q"] is None
+        assert list(opened()) == [f"verify:{ci_id}"]
+        # recovers (at or below 20): closed
+        beat({ci_id: 15})
+        assert opened() == {}
+        # a high queue that is shrinking never opens
+        hosts._work.pop(hid)
+        for i in range(40):
+            beat({ci_id: 500 - i})
+        assert opened() == {}
+
+        # vLLM: waiting for 10 minutes without a break opens; one heartbeat at 0 starts over
+        for _ in range(15):                       # 7.5 minutes
+            beat({ci_id: 0}, waiting=3)
+        beat({ci_id: 0}, waiting=0)
+        for _ in range(20):                       # a new run: 20 heartbeats = 9.5 minutes from its first
+            beat({ci_id: 0}, waiting=2)
+        assert opened() == {}
+        beat({ci_id: 0}, waiting=2)               # 10 minutes
+        rows = opened()
+        assert list(rows) == ["vllm"] and rows["vllm"]["detail"]["text"].startswith("Fred: Qwen (vLLM) has had requests waiting for 10 minutes")
+        beat({ci_id: 0}, waiting=1, vok=False)    # unreadable: unchanged
+        assert list(opened()) == ["vllm"]
+        beat({ci_id: 0}, waiting=0)
+        assert opened() == {}
+        # a gap in the heartbeats (agent away) breaks the run
+        for _ in range(10):
+            beat({ci_id: 0}, waiting=4)
+        t += 600
+        for _ in range(12):
+            beat({ci_id: 0}, waiting=4)
+        assert opened() == {}
+
+        # an instance that is no longer reported: its alert closes
+        hosts._work.pop(hid)
+        for i in range(32):
+            beat({ci_id: 10 + 2 * i})
+        assert list(opened()) == [f"verify:{ci_id}"]
+        beat({})
+        assert opened() == {}
+
+        # pushed to hub administrators only, with its own title; offered in the push picker to them only
+        assert hosts.QUEUE_KIND in alerts.KINDS and hosts.QUEUE_KIND in alerts.HUB_KINDS and hosts.QUEUE_KIND in push.DEFAULT_KINDS
+        viewer = auth.user_by_email("viewer@central.example")
+        push.subscribe(superuser["id"], {"endpoint": "https://fcm.googleapis.com/fcm/send/root-queue"}, None, "t")
+        push.subscribe(viewer["id"], {"endpoint": "https://fcm.googleapis.com/fcm/send/viewer-queue"}, [*push.DEFAULT_KINDS], "t")
+        sent: list[tuple] = []
+        push.set_sender(lambda sub, payload: sent.append((sub["user_id"], payload)) or True)
+        try:
+            n = asyncio.run(push.notify_alert(hosts.HUB_ORG, hosts._alert_subject(row), hosts.QUEUE_KIND, d))
+        finally:
+            push.set_sender(None)
+            push.unsubscribe(superuser["id"], "https://fcm.googleapis.com/fcm/send/root-queue")
+            push.unsubscribe(viewer["id"], "https://fcm.googleapis.com/fcm/send/viewer-queue")
+        assert n >= 1 and {uid for uid, _ in sent} == {superuser["id"]}
+        assert sent[0][1]["title"] == "Host Fred: work queue growing" and sent[0][1]["body"].startswith("Yard Q on Fred")
+        assert sent[0][1]["url"] == "/hub/hosts"
+        assert hosts.QUEUE_KIND not in _login(world["base"], "viewer@central.example", PW).get("/api/push/vapid").json()["kinds"]
+        assert hosts.QUEUE_KIND in world["root"].get("/api/push/vapid").json()["kinds"]
+    finally:
+        db.run(sa.update(db.central_instances).where(db.central_instances.c.id == ci_id).values(state="deleted"))
+        asyncio.run(hosts.delete_host(hid))
+    assert _open(hid) == []
+
+
+def test_set_resources(world):
+    base, root, org = world["base"], world["root"], world["org"]
+    loc = root.post(f"/api/orgs/{org['id']}/locations", json={"name": "Yard R"}).json()
+    host = root.post("/api/hub/hosts", json={"name": "Resizer"}).json()
+
+    def answer(cmd):
+        if cmd["op"] == "create_instance":
+            return {"ok": True, "detail": "created", "instance": {"id": cmd["args"]["id"], "state": "running", "cpus": 4, "mem_gb": 8}}
+        if cmd["op"] == "set_resources":
+            a = cmd["args"]
+            return {"ok": True, "detail": "recreated", "instance": {"id": a["id"], "state": "running", "cpus": a.get("cpus", 8), "mem_gb": a.get("mem_gb", 8)}}
+        return {"ok": True, "detail": "done"}
+    fh = FakeHost(base, host["token"], capacity(), answer, "resizer")
+    ci = None
+    try:
+        wait(lambda: hosts.registry.online(host["host"]["id"]))
+        ci = root.post(f"/api/locations/{loc['id']}/central", json={"mode": "vpn", "quota_gb": 100, "host_id": host["host"]["id"]}).json()
+        wait(lambda: hosts.get_instance(ci["id"])["ready_at"])
+        # the heartbeat reports its limits
+        fh.send({"t": "heartbeat", "capacity": capacity(), "instances": [{"id": ci["id"], "state": "running", "cpus": 4, "mem_gb": 8}]})
+        wait(lambda: (hosts.get_instance(ci["id"])["info"] or {}).get("cpus") == 4)
+        assert next(c for c in root.get("/api/hub/central").json() if c["id"] == ci["id"])["cpus"] == 4
+        url = f"/api/locations/{loc['id']}/central/{ci['id']}/resources"
+
+        # hub administrators only
+        sa_ = _login(base, "siteadmin@central.example", PW)
+        viewer = _login(base, "viewer@central.example", PW)
+        sent_before = len(fh.cmds)
+        assert sa_.put(url, json={"cpus": 8}).status_code == 403
+        assert viewer.put(url, json={"cpus": 8}).status_code == 403
+        assert httpx.put(base + url, json={"cpus": 8}).status_code == 401
+        # bad input: refused before the host hears of it
+        assert root.put(url, json={}).status_code == 400
+        assert root.put(url, json={"cpus": 100}).status_code == 422
+        assert root.put(url, json={"mem_gb": 1}).status_code == 422
+        assert root.put(f"/api/locations/{world['b']['id']}/central/{ci['id']}/resources", json={"cpus": 8}).status_code == 404
+        assert len(fh.cmds) == sent_before
+
+        r = root.put(url, json={"cpus": 8})
+        assert r.status_code == 200, r.text
+        assert r.json()["cpus"] == 8 and r.json()["mem_gb"] == 8
+        assert fh.cmds[-1]["op"] == "set_resources" and fh.cmds[-1]["args"] == {"id": ci["id"], "cpus": 8.0}
+        r = root.put(url, json={"mem_gb": 16})
+        assert r.json()["mem_gb"] == 16 and fh.cmds[-1]["args"] == {"id": ci["id"], "mem_gb": 16.0}
+        audit = db.rows(sa.select(db.audit_log).where(db.audit_log.c.org_id == org["id"],
+                                                      db.audit_log.c.action.like("central recording CPU/memory%")).order_by(db.audit_log.c.ts))
+        assert [x["action"] for x in audit] == ["central recording CPU/memory: Yard R 4 CPUs, 8 GB -> 8 CPUs, 8 GB",
+                                                "central recording CPU/memory: Yard R 8 CPUs, 8 GB -> 8 CPUs, 16 GB"]
+        assert audit[0]["user_email"] == "root@example.com" and audit[0]["detail"]["instance_id"] == ci["id"]
+
+        # the host refuses: 502, nothing stored or audited
+        fh.answer = lambda cmd: {"ok": False, "detail": "cpus 64 is more than this host has (48)"}
+        r = root.put(url, json={"cpus": 64})
+        assert r.status_code == 502 and "more than this host has" in r.text and "nothing was changed" in r.text
+        assert hosts.get_instance(ci["id"])["info"]["cpus"] == 8
+        assert len(db.rows(sa.select(db.audit_log).where(db.audit_log.c.action.like("central recording CPU/memory%")))) == 2
+    finally:
+        fh.close()
+        if ci:
+            root.delete(f"/api/locations/{loc['id']}/central/{ci['id']}?force=true")

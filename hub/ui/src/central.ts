@@ -3,7 +3,7 @@
  * the bandwidth / storage numbers shown on Site → Servers and Customer → Servers, and the instance's lines on its own
  * server card (Site → Servers). Kept apart from the components so they are unit-tested (central.test.ts).
  */
-import type { CentralInstance, HostCapacity, HubSitesOrg, Peplink, Server } from "./api";
+import type { CentralInstance, Host, HostCapacity, HubSitesOrg, InstanceWork, Peplink, Server, VllmWork, WorkTrend } from "./api";
 
 /** provisioning (the host is creating it) → waiting_enroll (created, not dialed in yet) → running. */
 export const PHASE_LABEL: Record<string, string> = {
@@ -328,4 +328,166 @@ export function addressParts(ci: Pick<CentralInstance, "mode" | "subnet" | "publ
   const listed = new Set([...site.subnets, ...site.public_ips, ...site.hosts]);
   const auto = ci.camera_network?.auto;
   return { site: [...site.subnets, ...site.public_ips, ...site.hosts], cameras: [...(auto?.public_ips ?? []), ...(auto?.hosts ?? [])].filter((a) => !listed.has(a)) };
+}
+
+// ---- Work queues (a host's capacity.work, agent 0.2.0+): the Hosts page's Work section and the instances' Queues column
+
+/** 180.4 → "180", 12.34 → "12.3", 0.5 → "0.5". */
+export function fmtNum(n: number): string {
+  return Math.abs(n) >= 100 ? String(Math.round(n)) : String(Math.round(n * 10) / 10);
+}
+
+/** Verified events per minute: "0.5/min" ("—/min" while unknown: the agent needs two reads). */
+export const fmtRate = (r: number | null | undefined) => (r == null || !isFinite(r) ? "—/min" : `${fmtNum(r)}/min`);
+
+const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
+const clip = (s: string, n = 80) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+
+/** "Qwen (vLLM): 2 running · 0 waiting · KV 34% · 180 tok/s" (generated tokens); pieces this vLLM doesn't export are left out. */
+export function vllmLine(v: VllmWork | null | undefined): string {
+  if (!v) return "Qwen (vLLM): no data";
+  const parts: string[] = [];
+  if (v.running != null) parts.push(`${v.running} running`);
+  if (v.waiting != null) parts.push(`${v.waiting} waiting`);
+  if (v.kv_cache_pct != null) parts.push(`KV ${Math.round(v.kv_cache_pct)}%`);
+  if (v.gen_tps != null) parts.push(`${fmtNum(v.gen_tps)} tok/s`);
+  const body = parts.join(" · ");
+  if (!v.ok) return `Qwen (vLLM): not answering${v.error ? ` (${clip(v.error, 60)})` : ""}${body ? ` · last ${body}` : ""}`;
+  return `Qwen (vLLM): ${body || "no numbers"}`;
+}
+
+/** The vLLM line's tooltip: the rest of what /metrics says. */
+export function vllmTitle(v: VllmWork | null | undefined): string | undefined {
+  if (!v) return undefined;
+  const parts: string[] = [];
+  if (v.model) parts.push(v.model);
+  if (v.prompt_tps != null) parts.push(`prompt ${fmtNum(v.prompt_tps)} tok/s`);
+  if (v.waiting_capacity) parts.push(`${v.waiting_capacity} waiting for KV cache room`);
+  if (v.queue_p50_s != null) parts.push(`median wait ${fmtNum(v.queue_p50_s)} s`);
+  if (v.e2e_p50_s != null) parts.push(`median request ${fmtNum(v.e2e_p50_s)} s`);
+  return parts.length ? parts.join(" · ") : undefined;
+}
+
+/** "YOLO: 29 waiting across 2 instances" (null queue: none of them has reported). */
+export function yoloLine(verifyQ: number | null | undefined, instances: number, where = "YOLO"): string {
+  return verifyQ == null ? `${where}: no queue reported by its ${plural(instances, "instance")}` : `${where}: ${verifyQ} waiting across ${plural(instances, "instance")}`;
+}
+
+export type WorkRow = { key: string; label: string; text: string; title?: string; state: "ok" | "warn" | "bad" };
+
+const growingOn = (trend: WorkTrend | null | undefined, ids: string[]) => ids.some((id) => trend?.instances?.[id]?.growing);
+
+/**
+ * The host card's Work lines: the vLLM on its GPU (the A40), then YOLO per GPU that has instances (the A10G), then
+ * instances on the CPU. null = the host's agent sends no work (older than 0.2.0, or it just started).
+ */
+export function workRows(c: HostCapacity | null | undefined, trend?: WorkTrend | null): WorkRow[] | null {
+  const w = c?.work;
+  if (!w) return null;
+  const rows: WorkRow[] = [];
+  const v = w.vllm;
+  const insts = Object.entries(w.instances ?? {});
+  const gpus = c?.gpus ?? [];
+  const vState = (x: VllmWork) => (!x.ok ? "bad" : (x.waiting ?? 0) > 0 ? "warn" : "ok") as WorkRow["state"];
+  let vllmShown = !v;
+  for (const g of gpus) {
+    const label = `GPU ${g.index} · ${shortGpu(g.name)}`;
+    if (v && v.gpu === g.index) {
+      rows.push({ key: `vllm`, label, text: vllmLine(v), title: vllmTitle(v), state: vState(v) });
+      vllmShown = true;
+    }
+    const mine = insts.filter(([, iw]) => iw.gpu === g.index);
+    const n = g.instances ?? mine.length;
+    if (n > 0) {
+      const known = mine.filter(([, iw]) => iw.verify_q != null);
+      const q = g.verify_q !== undefined ? g.verify_q : known.length ? known.reduce((a, [, iw]) => a + (iw.verify_q ?? 0), 0) : null;
+      rows.push({ key: `yolo-${g.index}`, label, text: yoloLine(q, n), state: growingOn(trend, mine.map(([id]) => id)) ? "warn" : "ok" });
+    }
+  }
+  if (!vllmShown && v) rows.unshift({ key: "vllm", label: "Shared Qwen", text: vllmLine(v), title: vllmTitle(v), state: vState(v) });
+  const cpu = insts.filter(([, iw]) => iw.gpu == null);
+  if (cpu.length) {
+    const known = cpu.filter(([, iw]) => iw.verify_q != null);
+    rows.push({ key: "yolo-cpu", label: "CPU", text: yoloLine(known.length ? known.reduce((a, [, iw]) => a + (iw.verify_q ?? 0), 0) : null, cpu.length, "YOLO on the CPU"),
+      state: growingOn(trend, cpu.map(([id]) => id)) ? "warn" : "ok" });
+  }
+  return rows;
+}
+
+/**
+ * An SVG path through `values` scaled into width × height (0 at the bottom, the largest value, at least 1, at the top).
+ * A null (unknown) breaks the line; "" when there is nothing to draw.
+ */
+export function sparkPath(values: (number | null | undefined)[], width: number, height: number): string {
+  const n = values.length;
+  const nums = values.filter((x): x is number => x != null && isFinite(x));
+  if (!nums.length) return "";
+  const max = Math.max(1, ...nums);
+  const r = (x: number) => Math.round(x * 10) / 10;
+  let d = "";
+  let pen = false;
+  values.forEach((val, i) => {
+    if (val == null || !isFinite(val)) { pen = false; return; }
+    const x = n === 1 ? width : (i * width) / (n - 1);
+    const y = height - (Math.max(0, val) / max) * height;
+    d += `${pen ? "L" : "M"}${r(x)} ${r(y)} `;
+    pen = true;
+  });
+  return d.trim();
+}
+
+/** The largest known value of a series (the sparkline's scale label), null when none. */
+export const seriesMax = (values: (number | null | undefined)[]) => {
+  const nums = values.filter((x): x is number => x != null && isFinite(x));
+  return nums.length ? Math.max(...nums) : null;
+};
+
+/** The instance's queues on its host: "YOLO 29 · 0.5/min · Qwen 0" (verify queue, verified per minute, synopsis queue). */
+export function queueText(w: InstanceWork | null | undefined): string {
+  if (!w) return "no data";
+  const n = (x: number | null | undefined) => (x == null ? "—" : String(x));
+  return `YOLO ${n(w.verify_q)} · ${fmtRate(w.verify_rate_per_min)} · Qwen ${n(w.synopsis_q)}${w.ok ? "" : " · not answering"}`;
+}
+
+/** The Queues cell's tooltip: readiness and why it did not answer. */
+export function queueTitle(w: InstanceWork | null | undefined, growing: boolean): string | undefined {
+  if (!w) return "Its host sends no queue numbers (agent older than 0.2.0, or the instance is new)";
+  const parts: string[] = [];
+  if (growing) parts.push("YOLO verify queue growing over the last 15 minutes");
+  if (!w.ok) parts.push(`not answering${w.error ? `: ${clip(w.error)}` : ""}`);
+  if (w.yolo_ready === false) parts.push("YOLO not ready");
+  if (w.vlm_ready === false) parts.push(`Qwen not ready${w.vlm_state ? ` (${w.vlm_state})` : ""}`);
+  if (w.yolo_frame_ms != null) parts.push(`YOLO ${fmtNum(w.yolo_frame_ms)} ms per frame`);
+  return parts.length ? parts.join(" · ") : undefined;
+}
+
+/** The instance's work and trend from its host's heartbeat (hosts matched by id). */
+export function instanceWork(hosts: Pick<Host, "id" | "capacity" | "work_trend">[] | null | undefined, ci: Pick<CentralInstance, "id" | "host_id">): { work: InstanceWork | null; growing: boolean } {
+  const h = (hosts ?? []).find((x) => x.id === ci.host_id);
+  return { work: h?.capacity?.work?.instances?.[ci.id] ?? null, growing: !!h?.work_trend?.instances?.[ci.id]?.growing };
+}
+
+// ---- CPU / memory of an instance ("Change CPU/memory…"; axiom_host.py set_resources checks the same)
+export const CPUS_RANGE = [1, 64] as const;
+export const MEM_GB_RANGE = [2, 512] as const;
+
+/** The CPU / memory form's checks (blank = keep); hostCpus: the host's CPU count when known. */
+export function resourcesFormError(cpus: string, memGb: string, hostCpus?: number | null): string | null {
+  const c = cpus.trim(), m = memGb.trim();
+  if (!c && !m) return "Enter the CPUs and / or the memory";
+  if (c) {
+    const n = Number(c);
+    if (!/^\d+(\.\d+)?$/.test(c) || n < CPUS_RANGE[0] || n > CPUS_RANGE[1]) return `CPUs: a number from ${CPUS_RANGE[0]} to ${CPUS_RANGE[1]}`;
+    if (hostCpus && n > hostCpus) return `The host has ${hostCpus} CPUs`;
+  }
+  if (m) {
+    const n = Number(m);
+    if (!/^\d+(\.\d+)?$/.test(m) || n < MEM_GB_RANGE[0] || n > MEM_GB_RANGE[1]) return `Memory: ${MEM_GB_RANGE[0]} to ${MEM_GB_RANGE[1]} GB`;
+  }
+  return null;
+}
+
+/** "4 CPUs · 8 GB" ("—" for what is not reported yet). */
+export function resourcesText(cpus: number | null | undefined, memGb: number | null | undefined): string {
+  return `${cpus == null ? "—" : fmtNum(cpus)} CPU${cpus === 1 ? "" : "s"} · ${memGb == null ? "—" : fmtNum(memGb)} GB`;
 }

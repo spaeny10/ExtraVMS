@@ -1,17 +1,19 @@
 /**
  * /hub/hosts (hub administrators): the datacenter machines that run central recording instances, each with its
- * axiom-host agent dialing the hub (online, CPU/RAM/GPU/disk, instances), and every Site's central instance across
- * customers. Adding a host shows its token once, with the command that starts the agent. Instances are allocated here
- * only ("Allocate instance…" on a host: customer, Site, connection, storage, camera limit) and changed here (storage,
- * camera limit, Site networks, removal); a Site's page shows its instance read-only. Once allocated, the Site's admins
- * add cameras on the instance's console and their addresses open on its firewall by themselves.
+ * axiom-host agent dialing the hub (online, CPU/RAM/GPU/disk, instances, and what its GPUs are working through: the
+ * shared Qwen's requests and the instances' YOLO verify queues, with ~30 min sparklines), and every Site's central
+ * instance across customers with its queues. Adding a host shows its token once, with the command that starts the agent.
+ * Instances are allocated here only ("Allocate instance…" on a host: customer, Site, connection, storage, camera limit)
+ * and changed here (storage, CPU/memory, camera limit, Site networks, removal); a Site's page shows its instance
+ * read-only. Once allocated, the Site's admins add cameras on the instance's console and their addresses open on its
+ * firewall by themselves.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { confirmDialog, promptDialog, toast } from "@site/ui";
 import { type CentralInstance, type CentralMode, type Host, type HubSitesOrg, ago, api, fmtTime } from "../api";
 import {
-  PHASE_LABEL, allocateFormError, camerasText, capacityBars, defaultSubnet, fmtGB, nextSiteNumber, overLimit, parseCameraLimit, quotaText,
-  settling, shortGpu, sitesWithoutCentral,
+  PHASE_LABEL, allocateFormError, camerasText, capacityBars, defaultSubnet, fmtGB, instanceWork, nextSiteNumber, overLimit, parseCameraLimit,
+  queueText, queueTitle, quotaText, resourcesFormError, resourcesText, seriesMax, settling, shortGpu, sitesWithoutCentral, sparkPath, workRows,
 } from "../central";
 import { go, siteHref } from "../nav";
 import { SiteNetworks } from "./SiteNetworks";
@@ -24,6 +26,7 @@ export function HostsPage() {
   const [allocating, setAllocating] = useState<Host | null>(null);
   const [networks, setNetworks] = useState<CentralInstance | null>(null);
   const [removing, setRemoving] = useState<CentralInstance | null>(null);
+  const [resizing, setResizing] = useState<CentralInstance | null>(null);
   const load = useCallback(() => {
     api.hosts().then((r) => { setHosts(r.hosts); setInstall(r.install); }).catch((e) => toast.error(e));
     api.hubCentral().then(setCentral).catch(() => setCentral([]));
@@ -45,8 +48,8 @@ export function HostsPage() {
         <h3 style={{ marginTop: 0 }}>Central instances <span className="muted small">{central.length} across every customer</span></h3>
         {central.length === 0 ? <p className="muted small">None yet: use "Allocate instance…" on a host.</p> : (
           <table className="hub-table stack">
-            <thead><tr><th>Site</th><th>Customer</th><th>Host</th><th>Network</th><th>GPU</th><th>Storage</th><th>Cameras</th><th>State</th><th /></tr></thead>
-            <tbody>{central.map((c) => (
+            <thead><tr><th>Site</th><th>Customer</th><th>Host</th><th>Network</th><th>GPU</th><th>Storage</th><th>Cameras</th><th>Queues</th><th>State</th><th /></tr></thead>
+            <tbody>{central.map((c) => { const q = instanceWork(hosts, c); return (
               <tr key={c.id}>
                 <td className="lead"><a href={siteHref(c.location_id, "servers")} onClick={go(siteHref(c.location_id, "servers"))}>{c.location_name ?? c.location_id}</a>
                   {c.site_number != null && <span className="muted small"> · site #{c.site_number}</span>}</td>
@@ -55,12 +58,15 @@ export function HostsPage() {
                 <td className="small" data-label="Network" title={c.camera_network?.sync_error ? `Camera addresses not on the host: ${c.camera_network.sync_error}` : undefined}>
                   {c.mode === "vpn" ? `VPN · ${c.subnet ?? "—"}` : `Port forward · ${c.public_ip ?? "—"}`}
                   {c.camera_network?.pending ? <span className="bad"> · camera addresses not applied yet</span> : null}</td>
-                <td className="small" data-label="GPU">{c.gpu != null ? `${c.gpu}${c.gpu_name ? ` · ${shortGpu(c.gpu_name)}` : ""}` : "CPU"}</td>
+                <td className="small" data-label="GPU">{c.gpu != null ? `${c.gpu}${c.gpu_name ? ` · ${shortGpu(c.gpu_name)}` : ""}` : "CPU"}
+                  {(c.cpus != null || c.mem_gb != null) && <span className="muted"> · {resourcesText(c.cpus, c.mem_gb)}</span>}</td>
                 <td className="small" data-label="Storage">{quotaText(c.used_gb, c.quota_gb)}</td>
                 <td className={`small ${overLimit(c.camera_count, c.camera_limit) ? "bad" : ""}`} data-label="Cameras">{camerasText(c.camera_count, c.camera_limit)}</td>
+                <td className={`small queue-cell ${q.growing ? "warn" : !q.work ? "muted" : q.work.ok ? "" : "bad"}`} data-label="Queues" title={queueTitle(q.work, q.growing)}>
+                  {queueText(q.work)}{q.growing ? " ↑" : ""}</td>
                 <td className="small" title={c.last_error ?? undefined}>{PHASE_LABEL[c.phase] ?? c.phase}{c.state === "failed" && c.last_error ? `: ${c.last_error.slice(0, 80)}` : ""}</td>
-                <td><InstanceActions ci={c} onChanged={load} onNetworks={() => setNetworks(c)} onRemove={() => setRemoving(c)} /></td>
-              </tr>))}
+                <td><InstanceActions ci={c} onChanged={load} onNetworks={() => setNetworks(c)} onResources={() => setResizing(c)} onRemove={() => setRemoving(c)} /></td>
+              </tr>); })}
             </tbody>
           </table>
         )}
@@ -68,12 +74,14 @@ export function HostsPage() {
       {allocating && <AllocateDialog host={allocating} central={central} onClose={() => setAllocating(null)} onDone={() => { setAllocating(null); load(); }} />}
       {networks && <SiteNetworks ci={networks} onClose={() => setNetworks(null)} onSaved={() => { setNetworks(null); load(); }} />}
       {removing && <RemoveDialog ci={removing} onClose={() => setRemoving(null)} onDone={() => { setRemoving(null); load(); }} />}
+      {resizing && <ResourcesDialog ci={resizing} hostCpus={hosts?.find((h) => h.id === resizing.host_id)?.capacity?.cpus ?? null}
+        onClose={() => setResizing(null)} onDone={() => { setResizing(null); load(); }} />}
     </>
   );
 }
 
-/** Storage, camera limit, Site networks and removal of one instance (the table's last column). */
-function InstanceActions({ ci, onChanged, onNetworks, onRemove }: { ci: CentralInstance; onChanged: () => void; onNetworks: () => void; onRemove: () => void }) {
+/** Storage, CPU/memory, camera limit, Site networks and removal of one instance (the table's last column). */
+function InstanceActions({ ci, onChanged, onNetworks, onResources, onRemove }: { ci: CentralInstance; onChanged: () => void; onNetworks: () => void; onResources: () => void; onRemove: () => void }) {
   const site = ci.location_name ?? ci.location_id;
   const live = ci.state !== "deleting" && ci.state !== "deleted";
   const offline = ci.host_online === false;
@@ -103,9 +111,50 @@ function InstanceActions({ ci, onChanged, onNetworks, onRemove }: { ci: CentralI
   return (
     <div className="central-row-actions">
       <button className="ghost small" disabled={!live || offline} title={offline ? "The host is offline" : undefined} onClick={storage}>Change storage…</button>
+      <button className="ghost small" disabled={!live || offline} title={offline ? "The host is offline" : "CPU and memory limits (the instance restarts)"} onClick={onResources}>Change CPU/memory…</button>
       <button className="ghost small" disabled={!live} onClick={limit}>Change camera limit…</button>
       <button className="ghost small" disabled={!live || offline} title={offline ? "The host is offline" : undefined} onClick={onNetworks}>Site networks…</button>
       <button className="ghost small" disabled={ci.state === "deleted"} onClick={onRemove}>Remove…</button>
+    </div>
+  );
+}
+
+/** CPU and memory limits of an instance: applied live by its host (docker update), recreated only if that fails. */
+function ResourcesDialog({ ci, hostCpus, onClose, onDone }: { ci: CentralInstance; hostCpus: number | null; onClose: () => void; onDone: () => void }) {
+  const [cpus, setCpus] = useState(ci.cpus != null ? String(ci.cpus) : "");
+  const [mem, setMem] = useState(ci.mem_gb != null ? String(ci.mem_gb) : "");
+  const [busy, setBusy] = useState(false);
+  const site = ci.location_name ?? ci.location_id;
+  const err = resourcesFormError(cpus, mem, hostCpus);
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const body: { cpus?: number; mem_gb?: number } = {};
+    if (cpus.trim() && Number(cpus) !== ci.cpus) body.cpus = Number(cpus);
+    if (mem.trim() && Number(mem) !== ci.mem_gb) body.mem_gb = Number(mem);
+    if (!Object.keys(body).length) { toast.success("Nothing changed"); onClose(); return; }
+    setBusy(true);
+    try {
+      const r = await api.setCentralResources(ci.location_id, ci.id, body);
+      toast.success(`${site}: ${resourcesText(r.cpus ?? body.cpus, r.mem_gb ?? body.mem_gb)}`);
+      onDone();
+    } catch (er) { toast.error(er); } finally { setBusy(false); }
+  };
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <form className="modal central-dialog central-form" onClick={(e) => e.stopPropagation()} onSubmit={submit} style={{ maxWidth: 460 }}>
+        <header className="modal-head"><h2>CPU and memory for {site}</h2><button type="button" className="ghost" onClick={onClose} aria-label="Close">✕</button></header>
+        <p className="small muted">Now: {resourcesText(ci.cpus, ci.mem_gb)}{hostCpus ? ` · the host has ${hostCpus} CPUs` : ""}. Blank keeps the current value.</p>
+        <label className="field"><span>CPUs <span className="muted small">1-64</span></span>
+          <input inputMode="decimal" value={cpus} placeholder="e.g. 8" onChange={(e) => setCpus(e.target.value.replace(/[^0-9.]/g, ""))} /></label>
+        <label className="field"><span>Memory (GB) <span className="muted small">2-512</span></span>
+          <input inputMode="decimal" value={mem} placeholder="e.g. 16" onChange={(e) => setMem(e.target.value.replace(/[^0-9.]/g, ""))} /></label>
+        <p className="small">Applied to the running instance, with no break in recording. Only if the host can't apply them live (for example less memory than the instance uses now) does it restart the instance: about 30 seconds without recording.</p>
+        <div className="row">
+          <button type="submit" disabled={busy || !!err}>{busy ? "Restarting…" : "Apply and restart"}</button>
+          <button type="button" className="ghost" onClick={onClose}>Cancel</button>
+          {err && <span className="muted small">{err}</span>}
+        </div>
+      </form>
     </div>
   );
 }
@@ -269,6 +318,44 @@ function Bars({ h }: { h: Host }) {
   );
 }
 
+/** A tiny line chart (inline SVG, theme colors) of one series over the hub's ~30 minute history. */
+function Spark({ values, label }: { values: (number | null)[]; label: string }) {
+  const W = 120, H = 24;
+  const d = sparkPath(values, W, H);
+  const top = seriesMax(values);
+  return (
+    <span className="spark small" title={`${label}: the last ${values.length} heartbeats (about ${Math.round(values.length / 2)} min), up to ${top ?? 0}`}>
+      <span className="muted">{label}</span>
+      <svg viewBox={`-1 -1 ${W + 2} ${H + 2}`} width={W} height={H} role="img" aria-label={`${label} sparkline`} preserveAspectRatio="none">
+        <line x1={0} y1={H} x2={W} y2={H} className="spark-base" />
+        {d && <path d={d} />}
+      </svg>
+      <span className="muted">{top ?? "—"}</span>
+    </span>
+  );
+}
+
+/** The host's Work section: Qwen (vLLM) on the A40, YOLO per GPU, sparklines; open queue alerts. */
+function Work({ h }: { h: Host }) {
+  const rows = workRows(h.capacity, h.work_trend);
+  if (!rows) return <p className="muted small work-none">Work: no data{h.online ? " (its agent is older than 0.2.0, or just started)" : ""}</p>;
+  const hist = h.work_history ?? [];
+  return (
+    <div className="work">
+      <div className="work-head small"><strong>Work</strong></div>
+      {rows.map((r) => (
+        <div key={r.key} className={`work-row small ${r.state}`} title={r.title}>
+          <span className="cap-label muted">{r.label}</span><span>{r.text}</span>
+        </div>))}
+      {hist.length > 1 && (
+        <div className="sparks">
+          <Spark label="Qwen waiting" values={hist.map((s) => s.vllm_waiting)} />
+          <Spark label="YOLO queue" values={hist.map((s) => s.verify_q)} />
+        </div>)}
+    </div>
+  );
+}
+
 function HostCard({ h, onChanged, onToken, onAllocate }: { h: Host; onChanged: () => void; onToken: (t: { token: string; install: string }) => void; onAllocate: () => void }) {
   const act = (f: () => Promise<unknown>, done?: string) => async () => { try { await f(); if (done) toast.success(done); onChanged(); } catch (e) { toast.error(e); } };
   const edit = async (field: "name" | "fusionhub" | "notes", title: string) => {
@@ -285,6 +372,7 @@ function HostCard({ h, onChanged, onToken, onAllocate }: { h: Host; onChanged: (
         <span className="muted small">{h.online ? "online" : h.last_seen_at ? `offline · ${ago(h.last_seen_at)}` : "never connected"}</span>
       </div>
       {h.offline_since && <div className="alerts">⚠ offline since {fmtTime(h.offline_since)}</div>}
+      {(h.queue_alerts ?? []).map((a) => <div key={a.key} className="alerts">⚠ {a.text ?? "A work queue is growing"} · since {fmtTime(a.opened_at)}</div>)}
       <div className="stats small">
         <div><span>Machine</span> {h.hostname ?? "—"}{h.agent_ip ? ` · ${h.agent_ip}` : ""}</div>
         <div><span>Agent</span> {h.version ?? "—"}</div>
@@ -292,6 +380,7 @@ function HostCard({ h, onChanged, onToken, onAllocate }: { h: Host; onChanged: (
         <div><span>FusionHub</span> {h.fusionhub ?? "—"}</div>
       </div>
       <Bars h={h} />
+      <Work h={h} />
       {h.notes && <p className="muted small" style={{ whiteSpace: "pre-wrap" }}>{h.notes}</p>}
       <div className="row server-actions">
         <button className="small" disabled={!h.online} title={h.online ? "Place a central instance for a customer's Site on this host" : "The host is offline"} onClick={onAllocate}>Allocate instance…</button>

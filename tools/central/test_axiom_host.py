@@ -120,6 +120,7 @@ class ZfsExec(FakeExec):
 
 
 def make_host(tmp: Path, exe: ah.Exec) -> ah.Host:
+    tmp.mkdir(parents=True, exist_ok=True)
     ai_env = tmp / "ai.env"
     ai_env.write_text(f"VLLM_API_KEY={VLLM_KEY}\nAXIOM_VLM_MODEL=Qwen/Qwen2.5-VL-32B-Instruct-AWQ\n")
     return ah.Host({"root": str(tmp / "srv"), "hub_ips": [HUB], "ai_env": str(ai_env)}, exe)
@@ -880,6 +881,361 @@ class Parsing(unittest.TestCase):
         p = tmp / "ai.env"
         p.write_text("VLLM_API_KEY=<generate: openssl rand -hex 24>\nAXIOM_VLM_MODEL=Qwen/X\n# c\n")
         self.assertEqual(ah.read_env_file(p), {"AXIOM_VLM_MODEL": "Qwen/X"})
+
+
+VLLM_METRICS = """# HELP vllm:num_requests_running Number of requests in model execution batches.
+# TYPE vllm:num_requests_running gauge
+vllm:num_requests_running{engine="0",model_name="Qwen/Qwen3.8-27B-FP8"} 2.0
+# TYPE vllm:num_requests_waiting gauge
+vllm:num_requests_waiting{engine="0",model_name="Qwen/Qwen3.8-27B-FP8"} 3.0
+vllm:num_requests_waiting_by_reason{engine="0",model_name="Qwen/Qwen3.8-27B-FP8",reason="capacity"} 1.0
+vllm:num_requests_waiting_by_reason{engine="0",model_name="Qwen/Qwen3.8-27B-FP8",reason="deferred"} 2.0
+vllm:kv_cache_usage_perc{engine="0",model_name="Qwen/Qwen3.8-27B-FP8"} 0.3412
+vllm:prompt_tokens_total{engine="0",model_name="Qwen/Qwen3.8-27B-FP8"} %(prompt)s
+vllm:generation_tokens_total{engine="0",model_name="Qwen/Qwen3.8-27B-FP8"} %(gen)s
+vllm:e2e_request_latency_seconds_bucket{engine="0",le="1.0",model_name="Qwen/Qwen3.8-27B-FP8"} %(e1)s
+vllm:e2e_request_latency_seconds_bucket{engine="0",le="5.0",model_name="Qwen/Qwen3.8-27B-FP8"} %(e5)s
+vllm:e2e_request_latency_seconds_bucket{engine="0",le="+Inf",model_name="Qwen/Qwen3.8-27B-FP8"} %(einf)s
+vllm:e2e_request_latency_seconds_count{engine="0",model_name="Qwen/Qwen3.8-27B-FP8"} %(einf)s
+vllm:request_queue_time_seconds_bucket{engine="0",le="0.5",model_name="Qwen/Qwen3.8-27B-FP8"} 10.0
+vllm:request_queue_time_seconds_bucket{engine="0",le="+Inf",model_name="Qwen/Qwen3.8-27B-FP8"} 10.0
+vllm:cache_config_info{block_size="16",note="a \\"quoted\\" value"} 1.0
+vllm:spec_decode_draft_acceptance_rate NaN
+python_gc_objects_collected_total{generation="0"} 1234.0
+"""
+OLD_VLLM_METRICS = """vllm:num_requests_running{model_name="Qwen/Qwen2.5-VL-32B-Instruct-AWQ"} 1
+vllm:num_requests_waiting{model_name="Qwen/Qwen2.5-VL-32B-Instruct-AWQ"} 0
+vllm:num_requests_swapped{model_name="Qwen/Qwen2.5-VL-32B-Instruct-AWQ"} 0
+vllm:gpu_cache_usage_perc{model_name="Qwen/Qwen2.5-VL-32B-Instruct-AWQ"} 0.05
+vllm:prompt_tokens_total{model_name="Qwen/Qwen2.5-VL-32B-Instruct-AWQ"} 100
+"""
+
+
+def metrics(prompt=1000.0, gen=500.0, e1=4.0, e5=8.0, einf=10.0) -> str:
+    return VLLM_METRICS % {"prompt": prompt, "gen": gen, "e1": e1, "e5": e5, "einf": einf}
+
+
+INSPECT_VLLM = json.dumps({"axiom-acme-gate": {"IPAddress": "10.200.0.3"}, "axiom-ai": {"IPAddress": "10.201.0.10"}})
+
+
+def system_line(verify=29, synopsis=0, verified=100, pending=29, yolo=True) -> str:
+    return "some warning on stderr-ish stdout\n" + json.dumps({
+        "verify_q": verify, "synopsis_q": synopsis, "yolo_ready": yolo, "vlm_ready": True, "vlm_state": "ready",
+        "yolo_frame_ms": 11.5, "events": {"verified": verified, "rejected": 20, "pending": pending, "open": 2}}) + "\n"
+
+
+class WorkExec(FakeExec):
+    """FakeExec whose `docker exec` answers come from a table per container, optionally after a delay (a hung
+    instance) or failing."""
+
+    def __init__(self) -> None:
+        super().__init__({"docker ps -a": "acme-gate\trunning\nbeta-yard\trunning\n",
+                          "docker inspect -f": INSPECT_VLLM})
+        self.system: dict[str, str] = {}
+        self.delay: dict[str, float] = {}
+        self.fail: dict[str, str] = {}
+
+    def _run(self, argv, input, timeout):
+        if argv[:2] == ["docker", "exec"]:
+            self.calls.append(list(argv))
+            name = argv[2]
+            if name in self.delay:   # a docker exec that hangs (even past its own timeout)
+                __import__("time").sleep(self.delay[name])
+            if name in self.fail:
+                return ah.Result(1, "", self.fail[name])
+            return ah.Result(0, self.system.get(name, ""), "")
+        return super()._run(argv, input, timeout)
+
+
+class Work(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.exe = WorkExec()
+        self.host = make_host(self.tmp, self.exe)
+        self.host.create_instance(dict(VPN_ARGS))   # gpu 1
+        self.host.create_instance(dict(FWD_ARGS))   # CPU
+        self.fetched: list[str] = []
+        self.page = metrics()
+
+        def get(url, timeout):
+            self.fetched.append(url)
+            if isinstance(self.page, Exception):
+                raise self.page
+            return self.page
+        self.host.work.http_get = get
+        self.exe.system = {"axiom-acme-gate": system_line(), "axiom-beta-yard": system_line(verify=3, verified=10)}
+
+    # -- pure parts
+    def test_parse_prometheus(self):
+        p = ah.parse_prometheus(metrics())
+        self.assertEqual(p["vllm:num_requests_running"], [({"engine": "0", "model_name": "Qwen/Qwen3.8-27B-FP8"}, 2.0)])
+        self.assertEqual(p["vllm:cache_config_info"][0][0]["note"], 'a "quoted" value')
+        self.assertNotIn("vllm:spec_decode_draft_acceptance_rate", p)   # NaN dropped
+        self.assertEqual(p["vllm:e2e_request_latency_seconds_bucket"][2][0]["le"], "+Inf")
+        self.assertEqual(ah.parse_prometheus("garbage line here\n# c\n\nx{a=\"1\"} notanumber\nok 1 1700000000000\n"),
+                         {"ok": [({}, 1.0)]})   # a trailing timestamp is allowed
+
+    def test_vllm_sample_current_and_older_names(self):
+        s = ah.vllm_sample(ah.parse_prometheus(metrics()))
+        self.assertEqual((s["running"], s["waiting"], s["waiting_capacity"], s["kv_cache_pct"], s["model"]),
+                         (2, 3, 1, 34.1, "Qwen/Qwen3.8-27B-FP8"))
+        self.assertEqual(s["counters"], {"prompt": 1000.0, "gen": 500.0})
+        self.assertEqual(set(s["hists"]), {"queue", "e2e"})
+        old = ah.vllm_sample(ah.parse_prometheus(OLD_VLLM_METRICS))   # gpu_cache_usage_perc, no by_reason, no histograms
+        self.assertEqual((old["running"], old["waiting"], old["waiting_capacity"], old["kv_cache_pct"]), (1, 0, None, 5.0))
+        self.assertEqual(old["counters"], {"prompt": 100.0, "gen": None})
+        self.assertEqual(old["hists"], {})
+        none = ah.vllm_sample({})
+        self.assertEqual((none["running"], none["waiting"], none["kv_cache_pct"], none["model"]), (None, None, None, None))
+
+    def test_quantiles_and_rates(self):
+        inf = float("inf")
+        self.assertAlmostEqual(ah.histogram_quantile(0.5, {1.0: 4, 5.0: 8, inf: 10}), 2.0)   # 5th of 10: 1 + 4*(1/4)
+        self.assertEqual(ah.histogram_quantile(0.5, {1.0: 0, inf: 10}), 1.0)                 # all in +Inf: the top bound
+        self.assertIsNone(ah.histogram_quantile(0.5, {1.0: 0, inf: 0}))
+        self.assertIsNone(ah.histogram_quantile(0.5, {}))
+        a = ah.vllm_sample(ah.parse_prometheus(metrics()))
+        b = ah.vllm_sample(ah.parse_prometheus(metrics(prompt=7000, gen=5900, e1=5, e5=12, einf=14)))
+        r = ah.vllm_rates(b, 130.0, a, 100.0)
+        self.assertEqual((r["prompt_tps"], r["gen_tps"]), (200.0, 180.0))
+        self.assertEqual(r["e2e_p50_s"], 2.33)         # 4 new requests: 1 under 1 s, 3 in 1-5 s: the 2nd at 1 + 4 * 1/3
+        self.assertIsNone(r["queue_p50_s"])            # no new queued requests in between
+        self.assertEqual(ah.vllm_rates(b, 130.0, None, None)["gen_tps"], None)   # first read: no rate yet
+        restarted = ah.vllm_rates(a, 130.0, b, 100.0)                            # counters went backwards
+        self.assertEqual((restarted["prompt_tps"], restarted["gen_tps"], restarted["e2e_p50_s"]), (None, None, None))
+
+    def test_rate_per_min(self):
+        d = __import__("collections").deque()
+        self.assertIsNone(ah.rate_per_min(d, 0, 100, 300))
+        self.assertEqual(ah.rate_per_min(d, 30, 101, 300), 2.0)
+        self.assertEqual(ah.rate_per_min(d, 60, 101, 300), 1.0)
+        for t in range(90, 600, 30):
+            r = ah.rate_per_min(d, t, 101, 300)
+        self.assertEqual(r, 0.0)                                   # the window slid past the one event
+        self.assertIsNone(ah.rate_per_min(d, 630, 50, 300))       # retention deleted events: start over
+        self.assertEqual(ah.rate_per_min(d, 690, 51, 300), 1.0)
+        self.assertIsNone(ah.rate_per_min(d, 720, None, 300))
+        self.assertEqual(ah.events_done({"verified": 5, "rejected": 2, "error": 1, "masked": 1, "pending": 9, "open": 3}), 9)
+        self.assertIsNone(ah.events_done(None))
+
+    def test_parse_instance_work(self):
+        w = ah.parse_instance_work(system_line())
+        self.assertEqual((w["verify_q"], w["synopsis_q"], w["yolo_ready"], w["done"]), (29, 0, True, 120))
+        with self.assertRaises(ValueError):
+            ah.parse_instance_work("")
+        with self.assertRaises(ValueError):
+            ah.parse_instance_work("Traceback ...\nConnectionRefusedError")
+        self.assertIsNone(ah.parse_instance_work('{"verify_q": "x", "yolo_ready": 1}')["verify_q"])
+
+    # -- the monitor
+    def test_metrics_url(self):
+        self.assertEqual(self.host.work.metrics_url(), "http://10.201.0.10:8000/metrics")   # the AI network, not .3
+        h2 = make_host(self.tmp / "b", FakeExec({"docker inspect -f": "{}"}))
+        self.assertIsNone(h2.work.metrics_url())
+        h3 = make_host(self.tmp / "c", FakeExec())
+        h3.cfg["vllm_metrics_url"] = "http://192.0.2.5:9000/metrics"
+        self.assertEqual(h3.work.metrics_url(), "http://192.0.2.5:9000/metrics")
+
+    def test_collect_and_capacity(self):
+        work = self.host.work.collect()
+        v = work["vllm"]
+        self.assertTrue(v["ok"])
+        self.assertEqual((v["running"], v["waiting"], v["waiting_capacity"], v["kv_cache_pct"], v["gpu"]), (2, 3, 1, 34.1, 0))
+        self.assertIsNone(v["gen_tps"])                              # one read so far
+        self.assertEqual(self.fetched, ["http://10.201.0.10:8000/metrics"])
+        a, b = work["instances"]["acme-gate"], work["instances"]["beta-yard"]
+        self.assertEqual((a["verify_q"], a["synopsis_q"], a["gpu"], a["ok"], a["yolo_ready"], a["vlm_ready"]), (29, 0, 1, True, True, True))
+        self.assertEqual((b["verify_q"], b["gpu"]), (3, None))
+        self.assertIsNone(a["verify_rate_per_min"])
+        execs = self.exe.cmds("docker exec")
+        self.assertEqual({c[2] for c in execs}, {"axiom-acme-gate", "axiom-beta-yard"})
+        self.assertIn("/api/system", execs[0][-1])
+        # a second read 30 s later: rates from the deltas
+        w = self.host.work
+        w._vllm_reads[-1] = (w._vllm_reads[-1][0] - 30, w._vllm_reads[-1][1])
+        w._done["acme-gate"][-1] = (w._done["acme-gate"][-1][0] - 60, 110)   # 10 fewer done a minute ago
+        self.page = metrics(prompt=7000, gen=5900, e1=5, e5=12, einf=14)
+        work = w.collect()
+        self.assertAlmostEqual(work["vllm"]["gen_tps"], 180.0, delta=1)
+        self.assertAlmostEqual(work["vllm"]["prompt_tps"], 200.0, delta=1)
+        self.assertAlmostEqual(work["instances"]["acme-gate"]["verify_rate_per_min"], 10.0, delta=0.2)
+        cap = self.host.capacity()
+        self.assertEqual(cap["work"]["instances"].keys(), {"acme-gate", "beta-yard"})
+        self.assertEqual([g.get("verify_q") for g in cap["gpus"]], [0, 29])   # A40: no instances; A10: acme-gate's
+        json.dumps(cap)   # goes out as JSON
+
+    def test_capacity_without_collection(self):
+        cap = make_host(self.tmp / "x", FakeExec()).capacity()
+        self.assertNotIn("work", cap)
+        self.assertNotIn("verify_q", cap["gpus"][0])
+
+    def test_hung_and_failing_instances(self):
+        self.host.cfg.update(work_budget_s=0.6, work_exec_timeout_s=0.6)
+        self.host.work.collect()                                   # good values first
+        self.exe.delay["axiom-beta-yard"] = 1.5                    # hangs well past the budget
+        self.exe.fail["axiom-acme-gate"] = "Error response from daemon: container is restarting"
+        self.exe.system["axiom-beta-yard"] = system_line(verify=99)
+        t0 = __import__("time").monotonic()
+        work = self.host.work.collect()
+        self.assertLess(__import__("time").monotonic() - t0, 2.0)  # the pass never waits for the hung one
+        a, b = work["instances"]["acme-gate"], work["instances"]["beta-yard"]
+        self.assertFalse(a["ok"])
+        self.assertIn("restarting", a["error"])
+        self.assertEqual(a["verify_q"], 29)                        # last good value kept, with its time
+        self.assertIsNotNone(a["at"])
+        self.assertFalse(b["ok"])
+        self.assertEqual(b["verify_q"], 3)
+        self.assertEqual(b["error"], "no answer within 0.6 s")
+        # the vLLM goes away: its last numbers stay, marked not ok; the hung exec is not started a second time
+        self.page = OSError("connection refused")
+        n = len(self.exe.cmds("docker exec axiom-beta-yard"))
+        work = self.host.work.collect()
+        self.assertEqual(len(self.exe.cmds("docker exec axiom-beta-yard")), n)
+        self.assertEqual(work["instances"]["beta-yard"]["error"], "the last read has not ended yet")
+        self.assertEqual(work["instances"]["beta-yard"]["verify_q"], 3)
+        self.assertFalse(work["vllm"]["ok"])
+        self.assertIn("connection refused", work["vllm"]["error"])
+        self.assertEqual(work["vllm"]["running"], 2)
+        # an instance whose container is not running is not exec'd
+        self.exe.answers["docker ps -a"] = "acme-gate\texited\nbeta-yard\trunning\n"
+        n = len(self.exe.cmds("docker exec axiom-acme-gate"))
+        self.exe.delay.clear()
+        work = self.host.work.collect()
+        self.assertEqual(len(self.exe.cmds("docker exec axiom-acme-gate")), n)
+        self.assertEqual(work["instances"]["acme-gate"]["error"], "container exited")
+
+    def test_no_vllm_metrics(self):
+        self.page = "# nothing here\nprocess_cpu_seconds_total 1\n"
+        v = self.host.work.collect()["vllm"]
+        self.assertFalse(v["ok"])
+        self.assertIn("no vllm", v["error"])
+        h2 = make_host(self.tmp / "nov", FakeExec({"docker ps -a": ""}))
+        h2.exe.answers["docker inspect -f"] = ""
+        v = h2.work.collect()["vllm"]
+        self.assertEqual((v["ok"], v["error"]), (False, "no axiom-vllm container"))
+
+    def test_heartbeat_carries_work(self):
+        agent = ah.Agent(self.host, "wss://hub.example.test/host-agent", "t")
+        self.assertNotIn("work", agent.heartbeat()["capacity"])
+        self.host.work.collect()
+        hb = agent.heartbeat()
+        self.assertEqual(hb["capacity"]["work"]["instances"]["acme-gate"]["verify_q"], 29)
+        self.assertLess(len(json.dumps(hb)), 64 * 1024)
+
+
+class SetResources(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.exe = FakeExec()
+        self.host = make_host(self.tmp, self.exe)
+        self.host.host_cpus = lambda: 80
+        self.host.create_instance(dict(VPN_ARGS))
+
+    def rec(self):
+        return self.host.load()["instances"]["acme-gate"]
+
+    def test_validation(self):
+        for args, msg in (({}, "cpus and / or mem_gb"), ({"cpus": 0.5}, "cpus must be 1-64"), ({"cpus": 65}, "1-64"),
+                          ({"mem_gb": 1}, "mem_gb must be 2-512"), ({"mem_gb": 600}, "2-512"), ({"cpus": "lots"}, "a number"),
+                          ({"cpus": float("nan")}, "1-64")):
+            with self.assertRaises(ah.OpError) as e:
+                self.host.set_resources({"id": "acme-gate", **args})
+            self.assertIn(msg, str(e.exception))
+        self.host.host_cpus = lambda: 6
+        with self.assertRaises(ah.OpError) as e:
+            self.host.set_resources({"id": "acme-gate", "cpus": 8})
+        self.assertIn("more than this host has (6)", str(e.exception))
+        with self.assertRaises(ah.OpError):
+            self.host.set_resources({"id": "nope", "cpus": 2})
+        self.assertEqual((self.rec()["cpus"], self.rec()["mem_gb"]), (4, 8))
+
+    def test_change_applies_live(self):
+        n = len(self.exe.calls)
+        out = self.host.set_resources({"id": "acme-gate", "cpus": 8})
+        self.assertIn("4 -> 8 CPUs", out["detail"])
+        self.assertIn("applied live", out["detail"])
+        self.assertEqual((self.rec()["cpus"], self.rec()["mem_gb"]), (8, 8))
+        self.assertEqual(self.exe.calls[n:], [["docker", "update", "--cpus", "8", "--memory", "8g", "--memory-swap", "8g",
+                                                "axiom-acme-gate"]])   # no rm, no run: recording never stops
+        self.assertEqual(self.exe.cmds("docker rm"), [])
+        n = len(self.exe.calls)
+        out = self.host.set_resources({"id": "acme-gate", "cpus": 8, "mem_gb": 8})
+        self.assertIn("unchanged", out["detail"])
+        self.assertEqual(len(self.exe.calls), n)
+
+    def test_change_recreates_when_live_update_fails(self):
+        class NoUpdate(FakeExec):
+            def _run(self, argv, input, timeout):
+                if argv[:2] == ["docker", "update"]:
+                    self.calls.append(list(argv))
+                    return ah.Result(1, "", "Error response from daemon: Cannot update container: memory below usage")
+                return super()._run(argv, input, timeout)
+        self.host.exe = NoUpdate()
+        n = len(self.host.exe.calls)
+        out = self.host.set_resources({"id": "acme-gate", "cpus": 8})
+        self.assertIn("4 -> 8 CPUs", out["detail"])
+        self.assertEqual((out["instance"]["cpus"], out["instance"]["mem_gb"]), (8, 8))
+        self.assertEqual((self.rec()["cpus"], self.rec()["mem_gb"]), (8, 8))
+        self.exe = self.host.exe
+        new = self.exe.calls[n:]
+        self.assertEqual(new[0][:2], ["docker", "update"])
+        new = new[1:]
+        self.assertEqual(new[0], ["docker", "rm", "-f", "axiom-acme-gate"])
+        run = new[1]
+        self.assertEqual(run[:3], ["docker", "run", "-d"])
+        self.assertEqual(run[run.index("--cpus") + 1], "8")
+        self.assertEqual(run[run.index("--memory") + 1], "8g")
+        self.host.set_resources({"id": "acme-gate", "mem_gb": 16})
+        run = self.exe.cmds("docker run")[-1]
+        self.assertEqual((run[run.index("--cpus") + 1], run[run.index("--memory") + 1], run[run.index("--memory-swap") + 1]),
+                         ("8", "16g", "16g"))
+        n = len(self.exe.calls)
+        out = self.host.set_resources({"id": "acme-gate", "cpus": 8, "mem_gb": 16})
+        self.assertIn("unchanged", out["detail"])
+        self.assertEqual(len(self.exe.calls), n)   # nothing recreated
+
+    def test_dry_run(self):
+        reg = self.host.registry_path.read_text()
+        n = len(self.exe.calls)
+        out = self.host.dispatch("set_resources", {"id": "acme-gate", "cpus": 8, "mem_gb": 12, "dry_run": True})
+        self.assertEqual(self.host.registry_path.read_text(), reg)
+        self.assertEqual(len(self.exe.calls), n)   # nothing ran
+        cmds = [s["cmd"] for s in out["dry_run"]["steps"] if "cmd" in s]
+        self.assertEqual(cmds[0], ["docker", "update", "--cpus", "8", "--memory", "12g", "--memory-swap", "12g", "axiom-acme-gate"])
+        # the CLI
+        cfg = self.tmp / "host.json"
+        cfg.write_text(json.dumps({"root": str(self.tmp / "srv"), "hub_ips": [HUB], "ai_env": str(self.tmp / "ai.env")}))
+        buf = __import__("io").StringIO()
+        with __import__("contextlib").redirect_stdout(buf):
+            rc = ah.main(["--config", str(cfg), "set-resources", "--id", "acme-gate", "--cpus", "2", "--dry-run"])
+        self.assertEqual(rc, 0)
+        printed = json.loads(buf.getvalue())
+        self.assertIn("4 -> 2 CPUs", printed["detail"])
+        self.assertTrue(printed["dry_run"]["steps"])
+        self.assertEqual(self.host.registry_path.read_text(), reg)
+
+    def test_failed_start_restores_old_limits(self):
+        class Refuse(FakeExec):
+            def _run(self, argv, input, timeout):
+                if argv[:2] == ["docker", "update"]:
+                    self.calls.append(list(argv))
+                    return ah.Result(1, "", "Error response from daemon: range of CPUs is from 0.01 to 12.00")
+                if argv[:2] == ["docker", "run"] and "16" in argv[argv.index("--cpus") + 1]:
+                    self.calls.append(list(argv))
+                    return ah.Result(125, "", "docker: Error response from daemon: range of CPUs is from 0.01 to 12.00")
+                return super()._run(argv, input, timeout)
+        self.host.exe = exe = Refuse()
+        with self.assertRaises(ah.CmdError):
+            self.host.set_resources({"id": "acme-gate", "cpus": 16})
+        self.assertEqual(self.rec()["cpus"], 4)
+        run = exe.cmds("docker run")[-1]
+        self.assertEqual(run[run.index("--cpus") + 1], "4")   # re-run with the old limits
+
+    def test_restart_recreate_uses_same_path(self):
+        self.host.set_resources({"id": "acme-gate", "cpus": 6})
+        self.host.restart_instance({"id": "acme-gate", "recreate": True})
+        run = self.exe.cmds("docker run")[-1]
+        self.assertEqual(run[run.index("--cpus") + 1], "6")
 
 
 class FakeWS:

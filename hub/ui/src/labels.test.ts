@@ -29,5 +29,6 @@ describe("KIND_LABEL", () => {
   it("names the central recording alerts", () => {
     expect(KIND_LABEL.site_link_down).toBe("Site link down");
     expect(KIND_LABEL.host_offline).toBe("Central host offline");
+    expect(KIND_LABEL.host_queue_growing).toBe("Central host queue growing");
   });
 });

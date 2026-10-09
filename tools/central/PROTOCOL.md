@@ -29,7 +29,7 @@ How a central host's `axiom_host.py run` talks to the hub. The hub side lives in
 ```
 - `id`: the command's id, echoed back unchanged.
 - `ok`: false when the command was refused or failed; `detail` then says why in plain words (safe to show an admin; never contains secrets).
-- `instance`: present for `create_instance`, `set_quota`, `set_camera_network` and `restart_instance` when they succeed.
+- `instance`: present for `create_instance`, `set_quota`, `set_camera_network`, `restart_instance` and `set_resources` when they succeed.
 - `instances`: present (a list of `{instance}`) for `list`.
 - `dry_run`: present when the command was sent with `"dry_run": true` (the planned commands, env file with secrets masked, firewall).
 - A result that could not be sent because the connection dropped is queued (up to 200) and sent right after the next `hello`. The hub should accept results for ids it no longer tracks (log and drop) and rely on the heartbeat's `instances` as the source of truth.
@@ -47,13 +47,27 @@ How a central host's `axiom_host.py run` talks to the hub. The hub side lives in
   "disks": [{"path": "/srv/axiom", "total_gb": 61440.0, "free_gb": 58210.5, "fs": "zfs", "dataset": "axiom/recordings",
              "project_quota": false, "quota_mode": "zfs"}],
   "instances": 4,
-  "allocated": {"quota_gb": 16000, "mem_gb": 32, "cpus": 16}
+  "allocated": {"quota_gb": 16000, "mem_gb": 32, "cpus": 16},
+  "work": {
+    "at": 1791530000.0,
+    "vllm": {"ok": true, "model": "Qwen/Qwen3.8-27B-FP8", "running": 2, "waiting": 0, "waiting_capacity": 0,
+             "kv_cache_pct": 34.1, "prompt_tps": 1450.2, "gen_tps": 180.4, "queue_p50_s": 0.05, "e2e_p50_s": 6.2,
+             "gpu": 0, "at": 1791530000.0},
+    "instances": {
+      "acme-gate": {"verify_q": 29, "synopsis_q": 0, "yolo_ready": true, "vlm_ready": true, "vlm_state": "ready",
+                    "yolo_frame_ms": 11.5, "verify_rate_per_min": 0.5, "gpu": 1, "ok": true, "at": 1791529999.2}
+    }
+  }
 }
 ```
 - `instances` here is a count; the heartbeat's top-level `instances` is the list of instance objects.
 - `gpus` comes from `nvidia-smi --query-gpu=index,name,memory.total,memory.used,utilization.gpu --format=csv,noheader,nounits`; unreadable values are `null`; `util` is percent. `gpus[].instances` = instances assigned to that GPU for YOLO.
 - `allocated`: the sum of every instance's storage quota, memory limit and CPU limit (for placement: storage is promised, not used).
 - `load` is `null` and `ram_gb` values `null` where the OS doesn't provide them.
+- `work` (agent 0.2.0+; absent from older agents and until the first collection after the agent starts): what the GPUs are working through, collected beside the heartbeat (never inside it) in at most `work_budget_s` (host.json, default 5 s):
+  - `vllm`: one GET of the shared vLLM's Prometheus `/metrics` (no key needed). The address is `vllm_metrics_url` from host.json, else the `vllm_container`'s address on `ai_network` from `docker inspect` (10.201.0.10 with ai/compose.yml; the host is that bridge's gateway) and the port of `vlm_url`. `running` / `waiting` = `vllm:num_requests_running` / `_waiting`; `waiting_capacity` = `vllm:num_requests_waiting_by_reason{reason="capacity"}`; `kv_cache_pct` = `vllm:kv_cache_usage_perc` (older builds: `vllm:gpu_cache_usage_perc`) × 100. `prompt_tps` / `gen_tps` = the increase of `vllm:prompt_tokens_total` / `vllm:generation_tokens_total` per second against the oldest read of the last 2 minutes; `queue_p50_s` / `e2e_p50_s` = the median of the requests that finished in that time, interpolated from the bucket deltas of `vllm:request_queue_time_seconds` (older: `vllm:time_in_queue_requests`) and `vllm:e2e_request_latency_seconds`. Any metric this vLLM does not export, a first read, a counter that went backwards (restart) or no finished request is `null`. `gpu` = `AXIOM_VLM_GPU` from ai.env. `ok` false + `error` when it could not be read; the last good numbers stay, with their `at`.
+  - `instances`: per running instance, one `docker exec axiom-<id> python -c ...` that reads its own `GET http://127.0.0.1:8080/api/system` (concurrent across instances, each at most `work_exec_timeout_s`, default 4 s). `verify_q` / `synopsis_q` = its `queues`; `verify_rate_per_min` = events that left verification (every status but `open` / `pending` in its `events` counts) per minute over up to the last 5 minutes (`null` on the first read or after the count went down: retention deleted events); `gpu` = its assigned GPU. An instance that fails, is not running or does not answer in time keeps its last good values with `ok` false, `error` and the `at` of those values; a hung read is not started again until it ends.
+  - `gpus[].verify_q`: the sum of `verify_q` over the instances assigned to that GPU (`0` for a GPU with none, `null` when none of its instances has reported).
 - `disks[].quota_mode`: what a new instance would get with `quota_mode: auto` (`zfs`, `xfs` or `none`); `project_quota` is true only for `xfs`. On ZFS, `total_gb` is the pool's usable size (`used` + `available` of its root dataset) and `free_gb` the `available` of `dataset` (the one mounted at `<root>/recordings`); elsewhere both come from `statvfs` on the root.
 
 ### instance object
@@ -90,6 +104,7 @@ How a central host's `axiom_host.py run` talks to the hub. The hub side lives in
 | `set_quota` | `id`, `quota_gb`, `force`, `dry_run` | Refused below current usage unless `force`. |
 | `set_camera_network` | `id`, `subnets`, `public_ips`, `hosts` (each a list or comma-separated string; `[]` empties it; absent or `null` keeps it), `dry_run` | Replaces the instance's camera allow-list, saves the registry and regenerates and loads the whole firewall (one `nft -f`, as on create/delete). Idempotent. `subnets`: IPv4 networks inside 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 or 100.64.0.0/10, /16 or smaller, no host bits set; any protocol. `public_ips`: IPv4 addresses, not loopback, link-local, multicast, unspecified or reserved; TCP only (ports: `forward_tcp_ports` in host.json, default any). `hosts`: DNS names (letters, digits, `-`, two or more labels, lowercased), resolved to IPv4 and re-resolved every 10 minutes; TCP only like `public_ips`; a resolved address that would be refused as a public IP (or is in the pool, the AI network or a hub address) is left out. Nothing may overlap the instance pool, the AI network (`ai_network`, 10.201.0.0/24) or the hub's addresses; another instance's subnet, public IP or host name is refused; at most 32 entries in all. On an `nft` failure the old rules and registry stay. `dry_run` returns `dry_run.firewall` (the ruleset) and changes nothing. The hub sends all three lists. |
 | `restart_instance` | `id`, `recreate` (default false), `image`, `dry_run` | `recreate` or a new `image` removes and re-runs the container (picks up a new image or a scrubbed env file); otherwise `docker restart`. |
+| `set_resources` | `id`, `cpus` (1-64, at most the host's CPU count), `mem_gb` (2-512), `dry_run`; either may be left out (kept) | Saves the new CPU / memory limits in the registry and applies them live with `docker update --cpus --memory --memory-swap` (no recording gap); if that fails, recreates the container with them (`docker rm -f` + `docker run`, the same path as `restart_instance` `recreate`: ~30 s without recording). The same values again change nothing. If the new container does not start, the old limits are restored and the container re-run with them, and the result is not ok. `dry_run` returns the planned commands. |
 | `list` | none | Result carries `instances`. |
 
 Ids: 1-32 lowercase letters, digits, `-` and `_`, starting and ending with a letter or digit (the hub uses `ci_` + 12 hex). The container and its network are both named `axiom-<id>`; the container hostname uses `-` for `_`. Two ids that differ only by `-` versus `_` cannot coexist on one host (they would share a firewall chain name).

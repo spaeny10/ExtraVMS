@@ -9,6 +9,8 @@ export const KIND_LABEL: Record<string, string> = {
   host_offline: "Central host offline",
   // hub administrators only: the CoverageMap monthly unit budget is used up (automatic coverage refreshes stopped)
   coverage_budget: "Coverage budget reached",
+  // hub administrators only: a central host's YOLO verify queue or shared Qwen (vLLM) keeps growing
+  host_queue_growing: "Central host queue growing",
 };
 
 /**

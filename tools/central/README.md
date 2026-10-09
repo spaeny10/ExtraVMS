@@ -187,11 +187,15 @@ axiom_host.py set-quota --id acme-gate --quota-gb 6000
 axiom_host.py set-camera-network --id acme-gate --subnet 192.168.105.0/24 --dry-run   # camera addresses (below)
 axiom_host.py restart-instance --id acme-gate        # docker restart
 axiom_host.py restart-instance --id acme-gate --image axiom/instance:<tag>    # upgrade one instance
+axiom_host.py set-resources --id acme-gate --cpus 8 --mem-gb 16 --dry-run     # CPU / memory limits (below)
+axiom_host.py work --interval 30                     # vLLM and per-instance queues, with rates (what the hub's Hosts page shows)
 axiom_host.py delete-instance --id acme-gate --keep-data    # or --purge to delete the footage too (one is required)
 axiom_host.py delete-instance --id acme-gate --purge --dry-run   # ZFS: prints the two `zfs destroy` commands, runs nothing
 axiom_host.py render-firewall                        # print the ruleset; nft list table inet axiom shows counters
 axiom_host.py reconcile                              # re-apply firewall/quotas/networks/vLLM links (also at agent start)
 ```
+
+CPU and memory: `set-resources` (hub: Hosts → Central instances → "Change CPU/memory…") saves the new `--cpus` / `--memory` in the registry and applies them to the running container with `docker update`, with no recording gap; only if Docker refuses (for example memory below what the instance uses now) is the container recreated with them, about 30 s without recording. Don't edit `registry.json` by hand for this: the change would only apply at the next recreate, and nothing checks it (CPUs 1-64 and at most the host's, memory 2-512 GB). If the container does not start with the new limits, the old ones are restored.
 
 Upgrading every instance: build and tag the new image, then `restart-instance --image` one instance at a time, checking each comes back on the hub before the next. Each restart is a ~30 s recording gap for that Site (cameras keep recording to their SD cards).
 
@@ -284,6 +288,7 @@ Host capacity on ZFS: `disks[0].total_gb` is the pool's usable size (`used` + `a
 - CPU is the first limit: an instance with 5 cameras at 4 CPUs/8 GB (defaults; `--cpus`, `--mem-gb` per instance) means ~16-18 instances on 80 threads with room for vLLM, FusionHub and the host. RAM (768 GB) is not the limit.
 - A10 (24 GB): YOLO11s at 1280 + CLIP + OSNet + PPE take roughly 1.5-2.5 GB per instance, so ~8-10 instances per A10 by memory; spread across A10s as more are added (`--gpu`).
 - A40: one vLLM for every instance on the host; synopsis throughput is the number to measure.
+- Watching the queues: every heartbeat carries `capacity.work` (PROTOCOL.md): the vLLM's running / waiting requests, KV cache use and tokens per second from its `/metrics`, and each instance's YOLO verify and Qwen synopsis queues from its own `/api/system`. The hub's Hosts page shows them with 30-minute sparklines, and raises `host_queue_growing` (hub administrators) when an instance's verify queue is above 20 and higher than 15 minutes earlier, or when vLLM has had requests waiting for 10 minutes. `axiom_host.py work --interval 30` prints the same numbers on the host.
 - Storage: plan quotas against usable space; `capacity.allocated.quota_gb` vs `disks[].total_gb` is what the hub uses for placement. On ZFS add `instance_dir_quota_gb` (50 GB) per instance, and keep the pool below about 80 % full: ZFS slows down as a pool fills.
 
 ## 6. Adding a second host

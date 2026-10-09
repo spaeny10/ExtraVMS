@@ -279,6 +279,18 @@
 .cap-bar > span { display: block; height: 100%; background: var(--accent); }
 .cap-bar.warm > span { background: var(--vehicle); }   /* the theme's amber */
 .cap-bar.hot > span { background: var(--bad); }
+/* the host card's Work section and the instances' Queues column (capacity.work) */
+.work { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border); display: grid; gap: 3px; }
+.work-row { display: grid; grid-template-columns: minmax(90px, 140px) 1fr; gap: 8px; align-items: baseline; overflow-wrap: anywhere; }
+.work-row.warn > span:last-child, .queue-cell.warn { color: var(--vehicle); }   /* the theme's amber */
+.work-row.bad > span:last-child, .queue-cell.bad { color: var(--bad); }
+.work-none { margin: 8px 0 0; }
+.sparks { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 4px; }
+.spark { display: inline-flex; align-items: center; gap: 6px; }
+.spark svg { display: block; overflow: visible; }
+.spark path { fill: none; stroke: var(--accent); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.spark .spark-base { stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.queue-cell { white-space: nowrap; }
 .token-box { border-color: var(--accent); }
 .token-box code.token { word-break: break-all; user-select: all; }
 .central-form { display: grid; gap: 8px; margin-top: 10px; max-width: 560px; }
@@ -307,6 +319,8 @@
 @media (max-width: 640px) {
   .host-grid { grid-template-columns: 1fr; }
   .cap-row { grid-template-columns: 1fr; gap: 2px; }
+  .work-row { grid-template-columns: 1fr; gap: 0; }
+  .queue-cell { white-space: normal; }
   .peplink table th { width: auto; }
 }
 

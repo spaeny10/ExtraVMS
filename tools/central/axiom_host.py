@@ -13,7 +13,8 @@ work from the command line.
     axiom_host.py set-camera-network --id acme-gate --subnet 192.168.105.0/24 --public-ip 203.0.113.7 \
         --host cam1.example.net [--clear subnets|public-ips|hosts|all] [--dry-run]
     axiom_host.py restart-instance --id acme-gate [--recreate] [--image axiom/instance:2026.10.06]
-    axiom_host.py list | capacity | render-firewall | apply-firewall | reconcile | finish-enroll --id ...
+    axiom_host.py set-resources --id acme-gate --cpus 8 [--mem-gb 16] [--dry-run]
+    axiom_host.py list | capacity | work | render-firewall | apply-firewall | reconcile | finish-enroll --id ...
     axiom_host.py run --hub wss://hub.axiomvision.ai/host-agent --token-file /etc/axiom/host-token
 
 Python 3.12, standard library plus `websockets` (agent mode only) and `certifi` (optional, for the CA bundle).
@@ -41,10 +42,11 @@ import sys
 import threading
 import time
 import urllib.parse
+from concurrent.futures import Future, ThreadPoolExecutor, wait as futures_wait
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 PROTO = 1
 log = logging.getLogger("axiom-host")
 
@@ -86,6 +88,10 @@ DEFAULTS: dict[str, Any] = {
     "log_max_size": "50m",
     "log_max_file": 5,
     "read_only": True,
+    # capacity.work: the shared vLLM's /metrics (no key needed) and each instance's /api/system, every heartbeat
+    "vllm_metrics_url": "",                     # "" = http://<vllm_container's address on ai_network>:<vlm_url port>/metrics
+    "work_budget_s": 5,                         # one collection pass at most (it runs beside the heartbeat, never in it)
+    "work_exec_timeout_s": 4,                   # one instance's docker exec
 }
 
 PROBE = ("import json,urllib.request as u\n"
@@ -484,6 +490,212 @@ def camera_summary(rec: dict) -> str:
     return ", ".join(items) if items else "none"
 
 
+# ---------------------------------------------------------------- work queues (capacity.work): pure parts
+
+_PROM_LINE = re.compile(r"^([A-Za-z_:][A-Za-z0-9_:]*)(?:\{(.*)\})?\s+(\S+)(?:\s+\S+)?$")
+_PROM_LABEL = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"((?:[^"\\]|\\.)*)"')
+
+Samples = dict[str, list[tuple[dict[str, str], float]]]
+
+
+def parse_prometheus(text: str) -> Samples:
+    """Prometheus text exposition -> {metric name: [(labels, value), ...]}. Comments, blank and malformed lines are
+    skipped; NaN values are dropped; +Inf/-Inf are kept as float infinities."""
+    out: Samples = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = _PROM_LINE.match(line)
+        if not m:
+            continue
+        try:
+            v = float(m.group(3))
+        except ValueError:
+            continue
+        if v != v:   # NaN
+            continue
+        labels = {k: re.sub(r"\\(.)", lambda e: "\n" if e.group(1) == "n" else e.group(1), val)
+                  for k, val in _PROM_LABEL.findall(m.group(2) or "")}
+        out.setdefault(m.group(1), []).append((labels, v))
+    return out
+
+
+def _first(samples: Samples, *names: str) -> list[tuple[dict[str, str], float]] | None:
+    """The samples of the first metric name present (vLLM renamed several metrics between versions)."""
+    for n in names:
+        if n in samples:
+            return samples[n]
+    return None
+
+
+def _sum(rows: list[tuple[dict[str, str], float]] | None, **match: str) -> float | None:
+    if rows is None:
+        return None
+    return sum(v for lb, v in rows if all(lb.get(k) == want for k, want in match.items()))
+
+
+def _buckets(samples: Samples, base: str) -> dict[float, float] | None:
+    """A histogram's cumulative buckets {le: count}, summed over every label set (engines, models)."""
+    rows = samples.get(base + "_bucket")
+    if not rows:
+        return None
+    out: dict[float, float] = {}
+    for lb, v in rows:
+        try:
+            le = float(lb.get("le", ""))
+        except ValueError:
+            continue
+        out[le] = out.get(le, 0.0) + v
+    return out or None
+
+
+# metric names, newest first (vLLM v1 renamed some; versions differ on what they export at all)
+VLLM_KV = ("vllm:kv_cache_usage_perc", "vllm:gpu_cache_usage_perc")
+VLLM_PROMPT = ("vllm:prompt_tokens_total", "vllm:prompt_tokens")
+VLLM_GEN = ("vllm:generation_tokens_total", "vllm:generation_tokens")
+VLLM_QUEUE_HIST = ("vllm:request_queue_time_seconds", "vllm:time_in_queue_requests")
+VLLM_E2E_HIST = ("vllm:e2e_request_latency_seconds",)
+
+
+def vllm_sample(samples: Samples) -> dict:
+    """What one /metrics read says: gauges (running, waiting, waiting_capacity, kv_cache_pct, model) and the raw
+    counters / histogram buckets that rates and medians are computed from (vllm_rates). A metric this vLLM does not
+    export is None."""
+    def num(x: float | None) -> int | None:
+        return None if x is None else int(round(x))
+    kv = _first(samples, *VLLM_KV)
+    model = next((lb["model_name"] for rows in samples.values() for lb, _ in rows if lb.get("model_name")), None)
+    hists = {}
+    for key, names in (("queue", VLLM_QUEUE_HIST), ("e2e", VLLM_E2E_HIST)):
+        for n in names:
+            b = _buckets(samples, n)
+            if b:
+                hists[key] = b
+                break
+    kv_vals = [v for _, v in kv] if kv else []
+    return {"running": num(_sum(_first(samples, "vllm:num_requests_running"))),
+            "waiting": num(_sum(_first(samples, "vllm:num_requests_waiting"))),
+            "waiting_capacity": num(_sum(_first(samples, "vllm:num_requests_waiting_by_reason"), reason="capacity")),
+            # a 0..1 fraction in every version so far; one engine per GPU, so the busiest
+            "kv_cache_pct": round(max(kv_vals) * 100, 1) if kv_vals else None,
+            "model": model,
+            "counters": {"prompt": _sum(_first(samples, *VLLM_PROMPT)), "gen": _sum(_first(samples, *VLLM_GEN))},
+            "hists": hists}
+
+
+def histogram_quantile(q: float, buckets: dict[float, float]) -> float | None:
+    """Prometheus-style quantile from cumulative buckets {le: count} (linear inside a bucket). None when empty; a
+    quantile in the +Inf bucket is the highest finite bound."""
+    les = sorted(buckets)
+    if not les:
+        return None
+    total = buckets[les[-1]] if les[-1] == float("inf") else max(buckets.values())
+    if total <= 0:
+        return None
+    rank = q * total
+    prev_le, prev_c = 0.0, 0.0
+    for le in les:
+        c = buckets[le]
+        if c >= rank:
+            if le == float("inf"):
+                return prev_le
+            if c == prev_c:
+                return le
+            return prev_le + (le - prev_le) * (rank - prev_c) / (c - prev_c)
+        prev_le, prev_c = le, c
+    return prev_le
+
+
+def bucket_delta(cur: dict[float, float], old: dict[float, float]) -> dict[float, float] | None:
+    """Buckets observed between two reads; None when a bucket went down (vLLM restarted)."""
+    out = {}
+    for le, c in cur.items():
+        d = c - old.get(le, 0.0)
+        if d < 0:
+            return None
+        out[le] = d
+    return out
+
+
+def vllm_rates(cur: dict, cur_t: float, old: dict | None, old_t: float | None) -> dict:
+    """Token rates (tok/s) and median queue / end-to-end times (s) between two vllm_sample reads; None where a counter
+    is missing, went backwards (restart) or nothing finished in between."""
+    out: dict[str, float | None] = {"prompt_tps": None, "gen_tps": None, "queue_p50_s": None, "e2e_p50_s": None}
+    if old is None or old_t is None or cur_t - old_t <= 0:
+        return out
+    dt = cur_t - old_t
+    for key, name in (("prompt", "prompt_tps"), ("gen", "gen_tps")):
+        a, b = cur["counters"].get(key), old["counters"].get(key)
+        if a is not None and b is not None and a >= b:
+            out[name] = round((a - b) / dt, 1)
+    for key, name in (("queue", "queue_p50_s"), ("e2e", "e2e_p50_s")):
+        a, b = cur["hists"].get(key), old["hists"].get(key)
+        if a and b:
+            d = bucket_delta(a, b)
+            p = histogram_quantile(0.5, d) if d else None
+            out[name] = None if p is None else round(p, 2)
+    return out
+
+
+# Run inside an instance with `docker exec`: its own API on loopback, the few numbers the hub shows (one line of JSON)
+INSTANCE_WORK = ("import json,urllib.request as u\n"
+                 "s=json.load(u.urlopen('http://127.0.0.1:8080/api/system',timeout=%(t)s))\n"
+                 "q=s.get('queues') or {}\n"
+                 "print(json.dumps({'verify_q':q.get('verify'),'synopsis_q':q.get('synopsis'),'yolo_ready':s.get('yolo_ready'),"
+                 "'vlm_ready':s.get('vlm_ready'),'vlm_state':s.get('vlm_state'),'yolo_frame_ms':s.get('yolo_frame_ms'),"
+                 "'events':s.get('events') if isinstance(s.get('events'),dict) else None}))\n")
+UNFINISHED = ("open", "pending")   # event statuses still waiting for (or in) verification
+
+
+def events_done(events: Any) -> int | None:
+    """Events past verification (verified, rejected, error, masked...) from /api/system `events` {status: count}."""
+    if not isinstance(events, dict):
+        return None
+    try:
+        return int(sum(int(n) for s, n in events.items() if s not in UNFINISHED))
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_instance_work(out: str) -> dict:
+    """The INSTANCE_WORK line -> its fields (ValueError when the output is not that JSON)."""
+    lines = [ln for ln in out.strip().splitlines() if ln.strip()]
+    if not lines:
+        raise ValueError("no output")
+    d = json.loads(lines[-1])
+    if not isinstance(d, dict):
+        raise ValueError("not an object")
+    num = lambda v: v if isinstance(v, (int, float)) and not isinstance(v, bool) else None  # noqa: E731
+    return {"verify_q": num(d.get("verify_q")), "synopsis_q": num(d.get("synopsis_q")),
+            "yolo_ready": d.get("yolo_ready") if isinstance(d.get("yolo_ready"), bool) else None,
+            "vlm_ready": d.get("vlm_ready") if isinstance(d.get("vlm_ready"), bool) else None,
+            "vlm_state": str(d["vlm_state"])[:40] if d.get("vlm_state") is not None else None,
+            "yolo_frame_ms": num(d.get("yolo_frame_ms")), "done": events_done(d.get("events"))}
+
+
+def rate_per_min(series: collections.deque, t: float, v: int | None, window_s: float) -> float | None:
+    """Append (t, v) to `series` and return the increase per minute over up to `window_s`. A count that went down
+    (retention deleted old events, merges) restarts the series: no rate until the next reading."""
+    if v is None:
+        return None
+    if series and v < series[-1][1]:
+        series.clear()
+    series.append((t, v))
+    while len(series) > 2 and t - series[1][0] >= window_s:
+        series.popleft()
+    t0, v0 = series[0]
+    if t - t0 < 1:
+        return None
+    return round((v - v0) / ((t - t0) / 60), 2)
+
+
+def _http_get(url: str, timeout: float) -> str:
+    import urllib.request
+    with urllib.request.urlopen(url, timeout=timeout) as r:   # noqa: S310 (a fixed http:// URL on the AI network)
+        return r.read(4 * 2 ** 20).decode("utf-8", "replace")
+
+
 # ---------------------------------------------------------------- the host
 
 class Host:
@@ -499,6 +711,7 @@ class Host:
         self._inst_locks: dict[str, threading.Lock] = collections.defaultdict(threading.Lock)
         self.probe_cache: dict[str, dict] = {}       # id -> {"at", "cameras", "enrolled"}
         self.du_cache: dict[str, float] = {}         # id -> used GB (hosts without XFS or ZFS quotas)
+        self.work = WorkMonitor(self)                # capacity.work: vLLM and per-instance queues
 
     # -- registry
     @property
@@ -1088,13 +1301,78 @@ class Host:
                 self.save(reg)
         with self._inst_locks[rec["id"]]:
             if a.get("recreate") or a.get("image"):
-                self.exe.run(["docker", "rm", "-f", self.cname(rec["id"])], check=False)
-                self.exe.run(self.docker_run_argv(rec))
+                self.recreate(rec)
                 what = "recreated"
             else:
                 self.exe.run(["docker", "restart", "-t", "30", self.cname(rec["id"])])
                 what = "restarted"
         return {"detail": f"{what} {rec['id']}", "instance": self.view(rec)}
+
+    def recreate(self, rec: dict) -> None:
+        """Remove and re-run the container from the registry record (new image, env file, CPU/memory limits)."""
+        self.exe.run(["docker", "rm", "-f", self.cname(rec["id"])], check=False)
+        self.exe.run(self.docker_run_argv(rec))
+
+    def host_cpus(self) -> int:
+        return os.cpu_count() or 1
+
+    def set_resources(self, a: dict) -> dict:
+        """Change an instance's CPU and / or memory limit (docker --cpus, --memory) in the registry and apply them live
+        with `docker update` (no recording gap). Only when that fails is the container recreated with them (~30 s
+        without recording). Either may be left out (kept). If the recreated container does not start, the old limits
+        are restored and the container re-run with them."""
+        def val(key: str, lo: float, hi: float, what: str) -> float | None:
+            v = a.get(key)
+            if v is None or v == "":
+                return None
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                raise OpError(f"{key} must be a number ({what})") from None
+            if not lo <= f <= hi or f != f:
+                raise OpError(f"{key} must be {lo:g}-{hi:g} ({what})")
+            return f
+        cpus = val("cpus", 1, 64, "CPUs")
+        mem = val("mem_gb", 2, 512, "GB of memory")
+        if cpus is None and mem is None:
+            raise OpError("give cpus and / or mem_gb")
+        if cpus is not None and cpus > self.host_cpus():
+            raise OpError(f"cpus {cpus:g} is more than this host has ({self.host_cpus()})")
+        with self.locked():
+            reg = self.load()
+            rec = self._get(reg, a)
+            old = {"cpus": rec["cpus"], "mem_gb": rec["mem_gb"]}
+            new = {"cpus": old["cpus"] if cpus is None else cpus, "mem_gb": old["mem_gb"] if mem is None else mem}
+            if new == old:
+                return {"detail": f"{rec['id']}: {old['cpus']:g} CPUs, {old['mem_gb']:g} GB memory (unchanged)",
+                        "instance": self.view(rec)} | _plan(self)
+            rec.update(new)
+            self.save(reg)
+        with self._inst_locks[rec["id"]]:   # like restart-instance: the registry lock is not held for the recreate
+            # Live first: docker update changes the limits of the running container (no recording gap). A container
+            # that refuses (e.g. memory below what it uses now) or a Docker without it falls back to a recreate.
+            mem = f"{new['mem_gb']:g}g"
+            live = self.exe.run(["docker", "update", "--cpus", f"{new['cpus']:g}", "--memory", mem, "--memory-swap", mem,
+                                 self.cname(rec["id"])], check=False)
+            if live.rc == 0:
+                detail = (f"{rec['id']}: {old['cpus']:g} -> {new['cpus']:g} CPUs, {old['mem_gb']:g} -> {new['mem_gb']:g} GB "
+                          "memory; applied live (no restart)")
+                return {"detail": detail, "instance": self.view(rec)} | _plan(self)
+            try:
+                self.recreate(rec)
+            except CmdError:
+                if not self.exe.dry_run:
+                    with self.locked():
+                        reg = self.load()
+                        if rec["id"] in reg["instances"]:
+                            reg["instances"][rec["id"]].update(old)
+                            self.save(reg)
+                    rec.update(old)
+                    self.exe.run(self.docker_run_argv(rec), check=False)
+                raise
+        detail = (f"{rec['id']}: {old['cpus']:g} -> {new['cpus']:g} CPUs, {old['mem_gb']:g} -> {new['mem_gb']:g} GB memory; "
+                  "container recreated")
+        return {"detail": detail, "instance": self.view(rec)} | _plan(self)
 
     def list_instances(self, a: dict | None = None) -> dict:
         reg = self.load()
@@ -1105,7 +1383,8 @@ class Host:
     def dispatch(self, op: str, args: dict) -> dict:
         ops = {"create_instance": self.create_instance, "delete_instance": self.delete_instance,
                "set_quota": self.set_quota, "set_camera_network": self.set_camera_network,
-               "restart_instance": self.restart_instance, "list": self.list_instances}
+               "restart_instance": self.restart_instance, "set_resources": self.set_resources,
+               "list": self.list_instances}
         if op not in ops:
             raise OpError(f"unknown op {op!r}")
         if not isinstance(args, dict):
@@ -1189,10 +1468,20 @@ class Host:
                 disk = {"path": str(self.root), "total_gb": round(du.total / 1e9, 1), "free_gb": round(du.free / 1e9, 1),
                         "fs": fstype or None}
             disks.append({**disk, "project_quota": mode == "xfs", "quota_mode": mode})
-        return {"cpus": os.cpu_count(), "load": load, "ram_gb": ram, "gpus": gpus, "disks": disks,
-                "instances": len(insts),
-                "allocated": {"quota_gb": sum(r["quota_gb"] for r in insts), "mem_gb": sum(r["mem_gb"] for r in insts),
-                              "cpus": sum(r["cpus"] for r in insts)}}
+        out = {"cpus": os.cpu_count(), "load": load, "ram_gb": ram, "gpus": gpus, "disks": disks,
+               "instances": len(insts),
+               "allocated": {"quota_gb": sum(r["quota_gb"] for r in insts), "mem_gb": sum(r["mem_gb"] for r in insts),
+                             "cpus": sum(r["cpus"] for r in insts)}}
+        work = self.work.snapshot()   # the last collection (WorkMonitor.collect runs beside the heartbeat)
+        if work is not None:
+            ids = set(reg["instances"])
+            work["instances"] = {k: v for k, v in work["instances"].items() if k in ids}
+            for g in gpus:   # YOLO verify queue waiting on each GPU: the sum over the instances assigned to it
+                qs = [w["verify_q"] for w in work["instances"].values()
+                      if w.get("gpu") == g["index"] and isinstance(w.get("verify_q"), (int, float))]
+                g["verify_q"] = sum(qs) if qs or not g["instances"] else None
+            out["work"] = work
+        return out
 
     def zfs_disk(self) -> dict | None:
         """Disk entry for a ZFS host. statvfs (shutil.disk_usage) is wrong here: on a dataset it reports only that
@@ -1289,6 +1578,183 @@ class Host:
             vllm = self.ensure_vllm(reg)
         return {"detail": "reconciled", "hub_ips": reg["hub_ips"], "hub_ips_changed": old != reg["hub_ips"],
                 "containers_started": created, "vllm_attached": vllm}
+
+
+# ---------------------------------------------------------------- work queues (capacity.work)
+
+class WorkMonitor:
+    """What the GPUs are working through, for the hub's Hosts page and its host_queue_growing alert:
+
+      vllm       the shared Qwen's /metrics (one GET): running / waiting requests, KV cache use, token rates and
+                 median queue / end-to-end times between reads
+      instances  each running instance's own /api/system (one `docker exec` each, concurrently): verify and synopsis
+                 queues, YOLO / Qwen readiness, and verified events per minute from its event counts
+
+    collect() does one pass within `work_budget_s` (the agent runs it in a thread beside the heartbeat, which only
+    reads snapshot()). An instance that does not answer in time keeps its last good values (`at` says when they were
+    read) with ok false; its hung exec is not started again until it has ended."""
+
+    VLLM_RATE_WINDOW_S = 120    # token rates and medians: against the oldest read in the last 2 minutes
+    VERIFY_RATE_WINDOW_S = 300  # verified events per minute: over up to the last 5 minutes
+    ADDR_TTL_S = 300            # how long the vLLM container's discovered address is reused
+
+    def __init__(self, host: "Host", http_get: Callable[[str, float], str] | None = None) -> None:
+        self.host = host
+        self.http_get = http_get or _http_get
+        self._lock = threading.Lock()
+        self._pass_lock = threading.Lock()          # one collection at a time (the CLI's and the agent's never mix)
+        self._pool: ThreadPoolExecutor | None = None
+        self._inflight: dict[str, Future] = {}
+        self._addr: tuple[str | None, float] = (None, 0.0)
+        self.vllm: dict | None = None
+        self._vllm_reads: collections.deque = collections.deque(maxlen=16)   # (t, vllm_sample)
+        self.instances: dict[str, dict] = {}
+        self._done: dict[str, collections.deque] = {}
+        self.at: float | None = None
+
+    # -- the shared vLLM
+    def metrics_url(self) -> str | None:
+        """cfg vllm_metrics_url, else the vLLM container's address on the AI network (docker inspect, cached) and the
+        port of vlm_url (the instances' http://vllm:8000/v1). None when the container is not there."""
+        cfg = self.host.cfg
+        if cfg.get("vllm_metrics_url"):
+            return str(cfg["vllm_metrics_url"])
+        ip, t = self._addr
+        if ip is None or time.time() - t > self.ADDR_TTL_S:
+            ip = self._discover_ip()
+            self._addr = (ip, time.time())
+        if not ip:
+            return None
+        port = urllib.parse.urlsplit(cfg.get("vlm_url") or "").port or 8000
+        return f"http://{ip}:{port}/metrics"
+
+    def _discover_ip(self) -> str | None:
+        r = self.host.exe.query(["docker", "inspect", "-f", "{{json .NetworkSettings.Networks}}", self.host.cfg["vllm_container"]],
+                                timeout=5)
+        if r.rc != 0:
+            return None
+        try:
+            nets = json.loads(r.out or "{}")
+        except ValueError:
+            return None
+        ai = ipaddress.ip_network(self.host.cfg["ai_network"])
+        addrs = [str(n.get("IPAddress") or "") for n in nets.values() if isinstance(n, dict)] if isinstance(nets, dict) else []
+        for a in addrs:   # the axiom-ai network (10.201.0.10 in ai/compose.yml): the host is its bridge gateway
+            with contextlib.suppress(ValueError):
+                if ipaddress.ip_address(a) in ai:
+                    return a
+        return next((a for a in addrs if a), None)   # any network the host can route to (an instance network's .3)
+
+    def read_vllm(self, timeout: float) -> dict:
+        now = time.time()
+        gpu: int | None
+        try:
+            gpu = int(self.host.ai_env().get("AXIOM_VLM_GPU", "0"))
+        except ValueError:
+            gpu = None
+        url = self.metrics_url()
+        if not url:
+            return {"ok": False, "error": f"no {self.host.cfg['vllm_container']} container", "gpu": gpu, "at": None}
+        try:
+            text = self.http_get(url, timeout)
+        except Exception as e:
+            self._addr = (None, 0.0)   # rediscover next time (the container may have been recreated)
+            return {"ok": False, "error": f"metrics: {type(e).__name__}: {str(e)[:120]}", "gpu": gpu, "at": None}
+        cur = vllm_sample(parse_prometheus(text))
+        if cur["running"] is None and cur["waiting"] is None:
+            return {"ok": False, "error": "no vllm: metrics in the answer", "gpu": gpu, "at": None}
+        old = None
+        for t, s in self._vllm_reads:   # the oldest read inside the window
+            if now - t <= self.VLLM_RATE_WINDOW_S:
+                old = (t, s)
+                break
+        rates = vllm_rates(cur, now, old[1] if old else None, old[0] if old else None)
+        self._vllm_reads.append((now, cur))
+        return {"ok": True, "model": cur["model"], "running": cur["running"], "waiting": cur["waiting"],
+                "waiting_capacity": cur["waiting_capacity"], "kv_cache_pct": cur["kv_cache_pct"], **rates,
+                "gpu": gpu, "at": round(now, 1)}
+
+    # -- the instances
+    def _exec_argv(self, iid: str, timeout: float) -> list[str]:
+        return ["docker", "exec", self.host.cname(iid), "python", "-c", INSTANCE_WORK % {"t": max(1, int(timeout) - 1)}]
+
+    def read_instance(self, iid: str, timeout: float) -> dict:
+        r = self.host.exe.query(self._exec_argv(iid, timeout), timeout=timeout)
+        if r.rc != 0:
+            raise RuntimeError((r.err.strip().splitlines() or [f"exit {r.rc}"])[-1][:160])
+        return parse_instance_work(r.out)
+
+    def _instance_entry(self, rec: dict, got: dict | None, error: str | None, now: float) -> dict:
+        iid = rec["id"]
+        prev = self.instances.get(iid) or {}
+        if got is None:   # keep the last good values, say they are old
+            return {**{k: v for k, v in prev.items() if k not in ("ok", "error")}, "gpu": rec.get("gpu"),
+                    "ok": False, "error": error, "at": prev.get("at")}
+        series = self._done.setdefault(iid, collections.deque())
+        rate = rate_per_min(series, now, got.pop("done"), self.VERIFY_RATE_WINDOW_S)
+        return {**got, "verify_rate_per_min": rate, "gpu": rec.get("gpu"), "ok": True, "at": round(now, 1)}
+
+    def collect(self) -> dict:
+        """One pass: vLLM and every running instance, concurrently, within work_budget_s. Returns snapshot()."""
+        if not self._pass_lock.acquire(blocking=False):
+            return self.snapshot() or {}
+        try:
+            budget = float(self.host.cfg.get("work_budget_s") or 5)
+            per_exec = min(float(self.host.cfg.get("work_exec_timeout_s") or 4), budget)
+            start = time.monotonic()
+            if self._pool is None:
+                self._pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="axiom-work")
+            reg = self.host.load()
+            states = self.host.docker_states()
+            jobs: dict[str, Future] = {"\0vllm": self._pool.submit(self.read_vllm, max(1.0, budget - 1))}
+            busy: dict[str, str] = {}
+            for iid, rec in reg["instances"].items():
+                if states.get(iid) != "running":
+                    busy[iid] = f"container {states.get(iid, 'missing')}"
+                    continue
+                f = self._inflight.get(iid)
+                if f is not None and not f.done():
+                    busy[iid] = "the last read has not ended yet"
+                    continue
+                jobs[iid] = self._inflight[iid] = self._pool.submit(self.read_instance, iid, per_exec)
+            futures_wait(list(jobs.values()), timeout=max(0.0, budget - (time.monotonic() - start)))
+            now = time.time()
+            with self._lock:
+                vf = jobs.pop("\0vllm")
+                if vf.done() and vf.exception() is None:
+                    v = vf.result()
+                else:
+                    v = {"ok": False, "error": "no answer within the time budget", "at": None}
+                if not v["ok"] and self.vllm:   # last good numbers, marked old
+                    v = {**{k: x for k, x in self.vllm.items() if k not in ("ok", "error")}, **{k: x for k, x in v.items() if k != "at"},
+                         "at": self.vllm.get("at")}
+                self.vllm = v
+                fresh: dict[str, dict] = {}
+                for iid, rec in reg["instances"].items():
+                    f = jobs.get(iid)
+                    if f is None:
+                        fresh[iid] = self._instance_entry(rec, None, busy.get(iid), now)
+                    elif not f.done():
+                        fresh[iid] = self._instance_entry(rec, None, f"no answer within {budget:g} s", now)
+                    elif f.exception() is not None:
+                        fresh[iid] = self._instance_entry(rec, None, str(f.exception())[:200] or type(f.exception()).__name__, now)
+                    else:
+                        fresh[iid] = self._instance_entry(rec, f.result(), None, now)
+                self.instances = fresh
+                for gone in set(self._done) - set(fresh):
+                    self._done.pop(gone, None)
+                    self._inflight.pop(gone, None)
+                self.at = round(now, 1)
+        finally:
+            self._pass_lock.release()
+        return self.snapshot() or {}
+
+    def snapshot(self) -> dict | None:
+        """capacity.work: {at, vllm, instances: {id: ...}}, or None before the first collection."""
+        with self._lock:
+            if self.at is None:
+                return None
+            return {"at": self.at, "vllm": dict(self.vllm or {}), "instances": {k: dict(v) for k, v in self.instances.items()}}
 
 
 # ---------------------------------------------------------------- agent mode
@@ -1409,6 +1875,16 @@ class Agent:
             except Exception:
                 log.exception("heartbeat failed")
 
+    async def work_loop(self) -> None:
+        """capacity.work: one collection per heartbeat interval, in a thread (at most work_budget_s), so a slow or
+        hung instance never delays a heartbeat; the heartbeat sends the latest snapshot."""
+        while True:
+            try:
+                await asyncio.to_thread(self.host.work.collect)
+            except Exception:
+                log.exception("work collection failed")
+            await asyncio.sleep(self.HEARTBEAT_S)
+
     async def maintenance(self) -> None:
         last_hub = last_du = 0.0
         while True:
@@ -1443,6 +1919,7 @@ class Agent:
             raise SystemExit("agent mode needs websockets>=13 (pip install websockets certifi)")
         ctx = ssl_context(self.hub_url, self.insecure)
         maint = asyncio.create_task(self.maintenance())
+        work = asyncio.create_task(self.work_loop())
         backoff = 1.0
         try:
             while True:
@@ -1472,6 +1949,7 @@ class Agent:
                 await asyncio.sleep(max(delay, 0.5))
         finally:
             maint.cancel()
+            work.cancel()
 
 
 # ---------------------------------------------------------------- CLI
@@ -1549,8 +2027,16 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--image")
     r.add_argument("--dry-run", action="store_true")
 
+    sr = sub.add_parser("set-resources", help="change an instance's CPU and / or memory limit and recreate its container")
+    sr.add_argument("--id", required=True)
+    sr.add_argument("--cpus", type=float, help="CPU limit (docker --cpus), 1-64 and at most the host's CPUs")
+    sr.add_argument("--mem-gb", type=float, help="memory limit in GB (docker --memory, no swap), 2-512")
+    sr.add_argument("--dry-run", action="store_true", help="print the new docker run; change nothing")
+
     sub.add_parser("list")
     sub.add_parser("capacity")
+    w = sub.add_parser("work", help="what the GPUs are working through (capacity.work): vLLM and each instance's queues")
+    w.add_argument("--interval", type=float, default=0, help="read twice this many seconds apart, for rates (e.g. 30)")
     f = sub.add_parser("render-firewall", help="print the nftables ruleset for the current registry")
     f.add_argument("--hub-ip", action="append", help="use these hub addresses instead of resolving")
     f.add_argument("--offline", action="store_true", help="use the last resolved hub addresses")
@@ -1596,10 +2082,19 @@ def main(argv: list[str] | None = None) -> int:
                 _print("\n# dry run: nothing changed. The ruleset this would load:\n" + fw)
         elif ns.cmd == "restart-instance":
             _print(host.restart_instance({"id": ns.id, "recreate": ns.recreate, "image": ns.image}) | _plan(host))
+        elif ns.cmd == "set-resources":
+            _print(host.set_resources({"id": ns.id, "cpus": ns.cpus, "mem_gb": ns.mem_gb}))
         elif ns.cmd == "list":
             _print(host.list_instances()["instances"])
         elif ns.cmd == "capacity":
+            host.work.collect()
             _print(host.capacity())
+        elif ns.cmd == "work":
+            host.work.collect()
+            if ns.interval > 0:
+                time.sleep(ns.interval)
+                host.work.collect()
+            _print(host.capacity().get("work"))
         elif ns.cmd == "render-firewall":
             reg = host.load()
             ips = ns.hub_ip if ns.hub_ip else (reg["hub_ips"] if ns.offline else host.resolve_hub(reg))

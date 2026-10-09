@@ -16,7 +16,7 @@ from .config import settings
 
 log = logging.getLogger("hub.push")
 DEFAULT_KINDS = ["offline", "event_policy", "event_watched", "event_high", "site_link_down",
-                 "host_offline", "coverage_budget"]   # the last two only ever reach hub administrators (alerts.HUB_KINDS)
+                 "host_offline", "coverage_budget", "host_queue_growing"]   # the last three only ever reach hub administrators (alerts.HUB_KINDS)
 _sender: Callable | None = None   # tests inject a fake
 
 
@@ -130,10 +130,15 @@ async def notify_alert(org_id: str, site: dict, kind: str, detail: dict) -> int:
     """Push an opened alert to every member of the org who may see this server and chose this kind. Returns pushes sent."""
     supers = {u["id"] for u in db.rows(sa.select(db.users.c.id).where(db.users.c.is_super == True))}  # noqa: E712
     if kind in alerts.HUB_KINDS:   # a central recording host, the coverage budget: hub administrators only, never a customer
-        payload = ({"title": "CoverageMap monthly budget reached", "body": detail.get("text") or "Automatic cellular coverage refreshes stopped until next month",
-                    "url": "/account", "kind": kind} if kind == "coverage_budget" else
-                   {"title": f"Host {site.get('name') or site['id']} is offline", "body": "Central recording host: its instances may be down too",
-                    "url": "/hub/hosts", "kind": kind, "host_id": site["id"]})
+        if kind == "coverage_budget":
+            payload = {"title": "CoverageMap monthly budget reached", "body": detail.get("text") or "Automatic cellular coverage refreshes stopped until next month",
+                       "url": "/account", "kind": kind}
+        elif kind == "host_queue_growing":
+            payload = {"title": f"Host {site.get('name') or site['id']}: work queue growing", "body": str(detail.get("text") or "")[:180],
+                       "url": "/hub/hosts", "kind": kind, "host_id": site["id"]}
+        else:
+            payload = {"title": f"Host {site.get('name') or site['id']} is offline", "body": "Central recording host: its instances may be down too",
+                       "url": "/hub/hosts", "kind": kind, "host_id": site["id"]}
         return await _send([s for s in db.rows(sa.select(db.push_subscriptions).where(db.push_subscriptions.c.user_id.in_(list(supers))))
                             if kind in (s["kinds"] or DEFAULT_KINDS)] if supers else [], payload)
     members = db.rows(sa.select(db.memberships.c.user_id).where(db.memberships.c.org_id == org_id))

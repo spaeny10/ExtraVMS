@@ -53,14 +53,40 @@ export type CentralUsage = { id: string; mode: CentralMode; quota_gb: number; us
 
 // ---- Central recording (hub/hub/hosts.py): datacenter hosts and the per-Site server instances on them
 export type CentralMode = "vpn" | "forward";
-export type HostGpu = { index: number; name: string; mem_total_mb?: number; mem_used_mb?: number; util?: number };
-export type HostCapacity = { cpus?: number; load?: number | number[]; ram_gb?: { total: number; free: number }; gpus?: HostGpu[]; disks?: { path: string; total_gb?: number; free_gb?: number }[]; instances?: number };
+/** `instances`: central instances assigned to the GPU for YOLO; `verify_q`: their verify queues summed (agent 0.2.0+). */
+export type HostGpu = { index: number; name: string; mem_total_mb?: number; mem_used_mb?: number; util?: number; instances?: number; verify_q?: number | null };
+/**
+ * capacity.work (tools/central/PROTOCOL.md): the shared vLLM's /metrics and each instance's /api/system, read beside every
+ * heartbeat. `ok` false: this read failed; the numbers are the last good ones, read at `at`. Rates are null until two reads.
+ */
+export type VllmWork = {
+  ok: boolean; error?: string | null; at?: number | null; gpu?: number | null; model?: string | null;
+  running?: number | null; waiting?: number | null; waiting_capacity?: number | null; kv_cache_pct?: number | null;
+  prompt_tps?: number | null; gen_tps?: number | null; queue_p50_s?: number | null; e2e_p50_s?: number | null;
+};
+export type InstanceWork = {
+  ok: boolean; error?: string | null; at?: number | null; gpu?: number | null;
+  verify_q?: number | null; synopsis_q?: number | null; yolo_ready?: boolean | null; vlm_ready?: boolean | null; vlm_state?: string | null;
+  yolo_frame_ms?: number | null; verify_rate_per_min?: number | null;
+};
+export type HostWork = { at: number; vllm?: VllmWork; instances?: Record<string, InstanceWork> };
+export type HostCapacity = { cpus?: number; load?: number | number[]; ram_gb?: { total: number; free: number }; gpus?: HostGpu[]; disks?: { path: string; total_gb?: number; free_gb?: number }[]; instances?: number; work?: HostWork };
+/** One heartbeat's totals in the hub's short history (~30 min): vLLM requests, the verify queues of every instance. */
+export type WorkSample = { t: number; vllm_waiting: number | null; vllm_running: number | null; verify_q: number | null };
+/** growing: verify queue above 20 and higher than 15 minutes ago (the host_queue_growing alert's rule). */
+export type WorkTrend = {
+  instances: Record<string, { verify_q: number | null; verify_q_before: number | null; growing: boolean; recovered: boolean }>;
+  vllm_waiting?: number | null; vllm_waiting_for_s: number | null;
+};
+/** An open host_queue_growing alert (key verify:<instance id> or vllm); `text` says which queue, where. */
+export type QueueAlert = { key: string; opened_at: number; text?: string; queue?: string; instance_id?: string; site?: string };
 /** `offline_since`: when its open host_offline alert opened (null = none open). */
 export type Host = {
   id: string; name: string; created_at: number; online: boolean; last_seen_at: number | null; hostname: string | null; version: string | null;
   capacity: HostCapacity | null; notes: string | null; fusionhub: string | null; agent_ip: string | null; instances: number; quota_gb: number; offline_since: number | null;
   /** GB a new instance's quota may take: the largest disk's free space minus what its instances may still grow into. */
   room_gb?: number;
+  work_history?: WorkSample[]; work_trend?: WorkTrend; queue_alerts?: QueueAlert[];
 };
 /** What the Peplink settings sheet shows (central.ts lays out the port-forward table from the bases). */
 /** `forward_addresses`: the routers' public IPs and DNS names the port-forward table applies to (from the camera network). */
@@ -86,6 +112,8 @@ export type CentralInstance = {
   /** The most cameras it may have (null = no limit) and how many it has (enabled, as last reported). */
   camera_limit?: number | null; camera_count?: number;
   host_id?: string; host_name?: string | null; host_online?: boolean; gpu?: number | null; gpu_name?: string | null; last_error?: string | null; host_state?: string | null;
+  /** Its CPU and memory limits on the host, as last reported (null until a 0.2.0+ agent reports them). */
+  cpus?: number | null; mem_gb?: number | null;
 };
 /** Read-only on a Site page; `can_manage` (hub administrators) shows the link to the Hosts page, where instances are managed. */
 export type LocationCentral = { instances: CentralInstance[]; can_provision?: boolean; can_manage?: boolean };
@@ -388,6 +416,8 @@ export const api = {
   provisionCentral: (loc: string, b: CentralBody) => req<CentralInstance>(`/api/locations/${loc}/central`, json("POST", b)),
   /** Storage quota and / or camera limit (null = no limit); hub administrators. */
   updateCentral: (loc: string, ci: string, b: { quota_gb?: number; camera_limit?: number | null }) => req<CentralInstance>(`/api/locations/${loc}/central/${ci}`, json("PATCH", b)),
+  /** CPU and / or memory limits: the host recreates the instance's container (~30 s without recording); hub administrators. */
+  setCentralResources: (loc: string, ci: string, b: { cpus?: number; mem_gb?: number }) => req<CentralInstance>(`/api/locations/${loc}/central/${ci}/resources`, json("PUT", b)),
   /** Replaces the instance's Site networks; the host gets them plus its cameras' own addresses (hub administrators). */
   setCentralCameras: (loc: string, ci: string, b: CameraNetwork) => req<CentralInstance>(`/api/locations/${loc}/central/${ci}/cameras`, json("PUT", b)),
   /** purge also deletes the recordings on the host; force forgets the instance at the hub when its host can't. */
