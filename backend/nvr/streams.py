@@ -51,7 +51,15 @@ ENCODINGS = {"H264": "H.264", "H265": "H.265", "HEVC": "H.265", "JPEG": "MJPEG",
 # query parameters some cameras put credentials in (never stored, never shown)
 SECRET_PARAM = re.compile(r"^(user(name)?|pass(word|wd)?|pwd|auth|token|key)$", re.I)
 # MediaMTX: "2026/10/08 19:58:14 ERR [path cam4_sub] [RTSP source] bad status code: 404 (Not Found)"
-SUB_404 = re.compile(r"\[path ([a-z0-9_]+)_sub\] \[RTSPS? source\][^\n]*\b404\b")
+SUB_404 = re.compile(r"\[path ([a-z0-9_]+)_sub\] \[RTSPS? source\][^\n]*\b(404|453)\b")
+# 453 "Not Enough Bandwidth": the camera has no stream connection left for us (Qwenbot's SW Corner PTZ 2026-10-08:
+# something else held its slots). Any extra sub-stream session would be refused too: SD relays the main stream we
+# already pull, whatever the profiles say.
+
+
+def busy_text() -> str:
+    return ("The camera refused its low-resolution stream (453 Not Enough Bandwidth: no connection left on the "
+            "camera): SD plays the main stream. Check what else is connected to the camera, then press Check.")
 
 
 def no_sub_text(width: int | None = None, height: int | None = None) -> str:
@@ -220,7 +228,12 @@ def plan(cam: dict) -> dict:
     profiles = [p for p in st.get("profiles") or [] if isinstance(p, dict)]
     main_path, sub_path = cam.get("main_path") or "/main", cam.get("sub_path") or "/sub"
     missing = (st.get("sub_not_found") or {}).get("path")
+    busy = (st.get("sub_not_found") or {}).get("code") == "453"
     out: dict = {"sub_path": sub_path, "detected": False, "main": None, "sub": None, "problems": []}
+    if busy:   # no connection left on the camera: relay the main stream, whatever it offers
+        out.update(sub_path=None)
+        out["problems"].append(busy_text())
+        return out
     if not profiles:   # never probed, or the camera wouldn't say: as configured, unless MediaMTX saw a 404 there
         if missing and missing == sub_path:
             out.update(sub_path=None)
@@ -322,8 +335,9 @@ def clear_404(camera_id: str) -> None:
         save(camera_id, st, (cam or {}).get("streams_checked_at"))
 
 
-def mark_sub_not_found(camera_id: str, now: float | None = None) -> bool:
-    """MediaMTX got RTSP 404 for <id>_sub: remember the camera path it pulled. True when this changes the plan."""
+def mark_sub_not_found(camera_id: str, now: float | None = None, code: str = "404") -> bool:
+    """MediaMTX got RTSP 404 (or 453, no connection left) for <id>_sub: remember the camera path it pulled and why.
+    True when this changes the plan."""
     cam = _camera(camera_id)
     if not cam:
         return False
@@ -332,9 +346,9 @@ def mark_sub_not_found(camera_id: str, now: float | None = None) -> bool:
     if path is None:
         return False   # already relaying the main stream
     st = state_of(cam)
-    st["sub_not_found"] = {"path": path, "at": now or time.time()}
+    st["sub_not_found"] = {"path": path, "at": now or time.time(), "code": code}
     save(camera_id, st, cam.get("streams_checked_at"))
-    log.warning("[%s] the camera answered 404 for its sub stream %s: SD live view relays the main stream", camera_id, path)
+    log.warning("[%s] the camera answered %s for its sub stream %s: SD live view relays the main stream", camera_id, code, path)
     return True
 
 
@@ -349,9 +363,9 @@ def needs_probe(cam: dict, now: float | None = None) -> bool:
     return bool(st.get("error")) and not st.get("profiles") and (now or time.time()) - checked >= RETRY_FAILED_S
 
 
-def scan_log(text: str) -> set[str]:
-    """Camera ids whose <id>_sub source got RTSP 404 in this MediaMTX log text."""
-    return set(SUB_404.findall(text))
+def scan_log(text: str) -> dict[str, str]:
+    """{camera id: RTSP code} for <id>_sub sources refused with 404 or 453 in this MediaMTX log text (the last wins)."""
+    return {cid: code for cid, code in SUB_404.findall(text)}
 
 
 # --------------------------------------------------------------------------- the background checker
@@ -435,8 +449,8 @@ class StreamChecker:
     def watch_once(self) -> bool:
         """Apply any sub-stream 404 MediaMTX logged since the last look. True when mediamtx.yml must be rewritten."""
         changed = False
-        for cid in scan_log(self._read_new_log()):
-            if mark_sub_not_found(cid):
+        for cid, code in scan_log(self._read_new_log()).items():
+            if mark_sub_not_found(cid, code=code):
                 changed = True
                 if not self._busy.get(cid):
                     self.check_soon(cid)   # the camera may serve another, lower-resolution profile

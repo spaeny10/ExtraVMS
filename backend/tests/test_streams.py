@@ -320,7 +320,7 @@ def test_record_probe_and_404():
     assert cam["streams_checked_at"] == 1000.0 and streams.sub_source(cam) == "/sub" and not streams.needs_probe(cam)
     assert streams.scan_log("2026/10/08 19:58:14 ERR [path ptz_sub] [RTSP source] bad status code: 404 (Not Found)\n"
                             "2026/10/08 19:58:15 INF [path ptz] [RTSP source] ready: 1 track (H264)\n"
-                            "2026/10/08 19:58:16 ERR [path other_cam_sub] [RTSP source] bad status code: 404 (Not Found)\n") == {"ptz", "other_cam"}
+                            "2026/10/08 19:58:16 ERR [path other_cam_sub] [RTSP source] bad status code: 453 (Not Enough Bandwidth)\n") == {"ptz": "404", "other_cam": "453"}
     assert streams.mark_sub_not_found("ptz") is True
     assert streams.sub_source(_get("ptz")) is None
     assert streams.mark_sub_not_found("ptz") is False       # already relaying
@@ -338,6 +338,19 @@ def test_record_probe_and_404():
     assert streams.sub_source(_get("ptz")) == "/sub"
     streams.forget("ptz")
     assert _get("ptz")["streams_checked_at"] is None and streams.needs_probe(_get("ptz"))
+
+
+def test_453_relays_the_main_stream_whatever_the_profiles():
+    """Qwenbot's SW Corner PTZ (2026-10-08): its sub stream exists, but the camera answered 453 Not Enough Bandwidth
+    because something else held its connections. Any other sub profile would be refused too: relay the main."""
+    _store(CAM)
+    streams.record_probe("ptz", {"profiles": TWO, "media": "media"}, now=1000.0)
+    assert streams.sub_source(_get("ptz")) == "/sub"
+    assert streams.mark_sub_not_found("ptz", code="453") is True
+    p = streams.plan(_get("ptz"))
+    assert p["sub_path"] is None and p["problems"] == [streams.busy_text()]
+    streams.record_probe("ptz", {"profiles": TWO, "media": "media"}, clear_404=True)   # Check: try the sub again
+    assert streams.sub_source(_get("ptz")) == "/sub"
 
 
 def test_failed_probe_retried_later():
