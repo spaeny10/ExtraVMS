@@ -12,7 +12,7 @@ import { Skeleton, confirmDialog, errorText, swipeHandlers, toast, useIsPhone } 
 import { RegionBadge, RegionOverlay } from "./RegionPaint";
 import { PtzBadge, PtzOverlay, PtzSettings } from "./PtzControl";
 import { ZoomScope } from "./VideoZoom";
-import { regionPass, regions, useRegions } from "./region";
+import { encodeCells, regionPass, regions, useRegions } from "./region";
 import { useRef } from "react";
 import { yoloFallbackText, yoloState } from "./yoloStatus";
 import { vlmSub, vlmValue } from "./vlmStatus";
@@ -104,6 +104,18 @@ export function RegionChips({ items }: { items: { key: string; label: string }[]
   );
 }
 
+const FEED_STEP = 12;
+/** How many feed cards to show: 12, then 12 more per "Show more"; back to 12 when `reset` changes (another region). */
+export function useFeedCount(reset: unknown): [number, () => void] {
+  const [n, setN] = useState(FEED_STEP);
+  useEffect(() => { setN(FEED_STEP); }, [reset]);
+  return [n, () => setN((x) => x + FEED_STEP)];
+}
+export function FeedMore({ shown, total, onMore }: { shown: number; total: number; onMore: () => void }) {
+  if (total <= shown) return null;
+  return <button type="button" className="ghost small feed-more" onClick={onMore}>Show more ({total - shown} older)</button>;
+}
+
 /** The activity feed filtered by painted regions, with a note and a way to clear them. */
 function RegionNote({ cameras }: { cameras: Camera[] }) {
   const regionMap = useRegions();
@@ -122,20 +134,27 @@ export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: n
   const regionMap = useRegions();
   // a painted region scopes the feed to that camera (or cameras): only their events, only through the region.
   // `recent` is just the last few events site-wide, so fetch a deeper history for the scoped cameras.
-  const regionKey = Object.keys(regionMap).sort().join(",");
+  // The server matches the region itself (`region`), so a burst of other events can't crowd the matches out of the
+  // 100; a server without that filter ignores it and the regionPass below still applies.
+  const regionKey = Object.keys(regionMap).sort().map((cam) => `${cam}=${encodeCells(regionMap[cam])}`).join(",");
   const scoped = regionKey.length > 0;
   const [scopedEvents, setScopedEvents] = useState<NvrEvent[]>([]);
   useEffect(() => {
     if (!scoped) { setScopedEvents([]); return; }
     let canceled = false;
-    Promise.all(regionKey.split(",").map((camera) => api.events({ camera, status: "open,pending,verified", limit: 100 }).catch(() => [] as NvrEvent[])))
-      .then((lists) => { if (!canceled) setScopedEvents(lists.flat()); });
-    return () => { canceled = true; };
+    const t = setTimeout(() => {   // painting changes the region cell by cell: fetch once the stroke settles
+      Promise.all(regionKey.split(",").map((kv) => {
+        const [camera, region] = kv.split("=");
+        return api.events({ camera, region, status: "open,pending,verified", limit: 100 }).catch(() => [] as NvrEvent[]);
+      })).then((lists) => { if (!canceled) setScopedEvents(lists.flat()); });
+    }, 400);
+    return () => { canceled = true; clearTimeout(t); };
   }, [regionKey, scoped]);
   const pool = scoped
     ? [...new Map([...scopedEvents, ...recent].map((e) => [e.id, e])).values()].sort((a, b) => b.start_ts - a.start_ts)
     : recent;
   const feed = pool.filter((e) => !scoped || (regionMap[e.camera_id] && regionPass(e, regionMap[e.camera_id])));
+  const [feedShown, showMore] = useFeedCount(regionKey);
   const [open, setOpen] = useState<number | null>(null);
   // SD = H.264 sub stream (light, plays everywhere); HD = the recorded H.265 main stream.
   const [quality, setQualityState] = useState<Record<string, Quality>>(loadQuality);
@@ -197,7 +216,8 @@ export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: n
           <RegionNote cameras={cameras} />
           {recent.length === 0 && <p className="muted">Nothing yet.</p>}
           {recent.length > 0 && feed.length === 0 && <p className="muted">Nothing recent on that camera passed through the painted region.</p>}
-          {feed.slice(0, 12).map((e) => <EventCard key={e.id} e={e} cameraName={name(e.camera_id)} onOpen={() => setOpen(e.id)} />)}
+          {feed.slice(0, feedShown).map((e) => <EventCard key={e.id} e={e} cameraName={name(e.camera_id)} onOpen={() => setOpen(e.id)} />)}
+          <FeedMore shown={feedShown} total={feed.length} onMore={showMore} />
         </aside>
         {open !== null && <EventDetail id={open} cameraName={name} onClose={() => setOpen(null)} />}
       </div>
@@ -240,9 +260,10 @@ export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: n
         <RegionNote cameras={cameras} />
         {recent.length === 0 && <p className="muted">Nothing yet.</p>}
         {recent.length > 0 && feed.length === 0 && <p className="muted">Nothing recent on that camera passed through the painted region.</p>}
-        {feed.slice(0, 12).map((e) => (
+        {feed.slice(0, feedShown).map((e) => (
           <EventCard key={e.id} e={e} cameraName={name(e.camera_id)} onOpen={() => setOpen(e.id)} />
         ))}
+        <FeedMore shown={feedShown} total={feed.length} onMore={showMore} />
       </aside>
       {open !== null && <EventDetail id={open} cameraName={name} onClose={() => setOpen(null)} />}
     </div>

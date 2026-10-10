@@ -15,7 +15,7 @@ import subprocess
 import urllib.parse
 import time
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
-from . import assistant, backup, baseline, footage, frames, health, identities, journeys, keep, mediamtx, policy, ptz, retention, streams, zones
+from . import assistant, backup, baseline, cells, footage, frames, health, identities, journeys, keep, mediamtx, policy, ptz, retention, streams, zones
 from . import synopsis as vlm
 from . import advisor, ai_serve, detector, direct, hub_agent, lan_guard, sdbackfill, site_actions, siteconfig
 from . import vlmroute
@@ -1007,22 +1007,54 @@ def _event_filters(**kw) -> tuple[list[str], list]:
         raise HTTPException(400, str(ex))
 
 
+REGION_SCAN_MAX = 20000   # rows a region filter looks through before giving up on more matches
+
+
+def _region_ids(where: list[str], params: list, order: str, region: str, limit: int, offset: int) -> list[int]:
+    """Ids of the newest events (in `order`) passing `where` whose cells cross `region`, skipping `offset` matches."""
+    sql = "SELECT id, status, cells FROM events" + (f" WHERE {' AND '.join(where)}" if where else "") + f" ORDER BY {order} LIMIT ? OFFSET ?"
+    out: list[int] = []
+    skip, scanned, page = offset, 0, 1000
+    while scanned < REGION_SCAN_MAX:
+        rows = db.all(sql, [*params, page, scanned])
+        for r in rows:
+            if r["status"] == "open" or cells.overlaps(r["cells"], region):
+                if skip:
+                    skip -= 1
+                elif len(out) < limit:
+                    out.append(r["id"])
+        scanned += len(rows)
+        if len(out) >= limit or len(rows) < page:
+            break
+    return out
+
+
 @app.get("/api/events")
 async def list_events(camera: str | None = None, status: str | None = None, label: str | None = None,
                       threat: str | None = None, since: float | None = None, until: float | None = None,
                       before_id: int | None = None, min_yolo: float = Query(0, ge=0, le=1),
                       limit: int = Query(50, le=500), priority: str | None = None, flags: str | None = None,
                       place: str | None = None, ppe_zone: str | None = None, attention: bool = False,
-                      sort: Literal["newest", "priority"] = "newest", offset: int = 0):
+                      sort: Literal["newest", "priority"] = "newest", offset: int = 0,
+                      region: Annotated[str | None, Query(max_length=200)] = None):
     """Browse events. priority: at least this level; flags: comma list (rule, ppe, unusual, watched, multicam,
     locked, corrected, false_alarm), all must hold; place: walked into this named area; attention: anything that
-    needs a look. sort=priority pages by offset (before_id only makes sense for newest-first)."""
+    needs a look. sort=priority pages by offset (before_id only makes sense for newest-first).
+    region: a painted 32x18 cell bitmap (cells.py encoding, the UI's region.ts): only events whose path crossed it
+    while a PTZ camera was at its home view, plus open events (their path isn't complete yet), as regionPass does
+    in the UI. Matched here so a burst of non-matching events can't crowd the matches out of `limit`."""
     where, params = _event_filters(camera=camera, label=label, threat=threat, status=status, since=since,
                                    until=until, min_yolo=min_yolo, priority=priority, flags=flags, place=place,
                                    ppe_zone=ppe_zone, attention=attention)
     if before_id:
         where.append("id<?"); params.append(before_id)
     order = f"{PRIORITY_RANK_SQL} DESC, id DESC" if sort == "priority" else "id DESC"
+    if region:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,96}", region):
+            raise HTTPException(400, "region: not a cell bitmap")
+        where.append("(status='open' OR (cells IS NOT NULL AND ptz_preset IS NULL))")
+        ids = await asyncio.to_thread(_region_ids, where, params, order, region, limit, max(0, int(offset or 0)))
+        where, params, offset = [f"id IN ({','.join('?' * len(ids))})"] if ids else ["0"], list(ids), 0
     sql = ("SELECT id, camera_id, track_id, camera_class, camera_conf, start_ts, end_ts, status, yolo_class, "
            "yolo_conf, yolo_hits, snapshot, clip, synopsis, threat, priority, anomaly, anomaly_json, watched, areas, policy, cells, ptz_preset, error, corrected_at, feedback, "
            f"{LOCKED_SQL} AS locked, journey_id, {JOURNEY_CAMS_SQL} AS journey_cameras FROM events"

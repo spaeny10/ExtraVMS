@@ -16,12 +16,12 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { Camera as ServerCam, NvrEvent } from "@site/api";
 import { EventCard } from "@site/Events";
-import { LiveTile, RegionChips } from "@site/Views";
+import { FeedMore, LiveTile, RegionChips, useFeedCount } from "@site/Views";
 import { LiveBudgetProvider, useBudget } from "@site/dashboard/Dashboard";
 import { useIceServers } from "@site/dashboard/ice";
 import { camKey, splitKey, type DashboardSource } from "@site/dashboard/source";
 import type { FleetEvent } from "@site/dashboard/types";
-import { useRegions } from "@site/region";
+import { encodeCells, useRegions } from "@site/region";
 import { Icon, swipeHandlers, useIsPhone } from "@site/ui";
 import { type Camera as RegistryCam, type Fleet, type Org, type Server, type Site, api } from "./api";
 import { type EventRef, applyLiveEvent, cameraNameFor, mergePool, regionFeed, removeLiveEvent, siteRegionKeys, tagServer } from "./eventOpen";
@@ -200,18 +200,24 @@ function useSiteActivity(site: Site, servers: Server[], source: DashboardSource,
   const regionMap = useRegions();
   const regionKeys = useMemo(() => siteRegionKeys(regionMap, serverKey.split(",")), [regionMap, serverKey]);
   const scopeKey = regionKeys.join(",");
+  // the regions' contents too: repainting refetches (the server matches the region, so a burst of other events
+  // can't crowd the matches out of SCOPED_LIMIT; a server without that filter ignores it)
+  const fetchKey = regionKeys.map((k) => `${k}=${encodeCells(regionMap[k])}`).join(",");
   const [scoped, setScoped] = useState<FleetEvent[]>([]);
   useEffect(() => {
-    if (!enabled || !scopeKey) { setScoped([]); return; }
+    if (!enabled || !fetchKey) { setScoped([]); return; }
     let alive = true;
     const nameOf = (id: string) => serversRef.current.find((s) => s.id === id)?.name ?? id;
-    Promise.all(scopeKey.split(",").map((k) => {
-      const { server, id } = splitKey(k);
-      return siteApi(server).events({ camera: id, status: "open,pending,verified", limit: SCOPED_LIMIT })
-        .then((evs) => tagServer(evs, server, nameOf(server))).catch(() => [] as FleetEvent[]);
-    })).then((lists) => { if (alive) setScoped(lists.flat()); });
-    return () => { alive = false; };
-  }, [enabled, scopeKey]);
+    const t = setTimeout(() => {   // painting changes the region cell by cell: fetch once the stroke settles
+      Promise.all(fetchKey.split(",").map((kv) => {
+        const [k, region] = kv.split("=");
+        const { server, id } = splitKey(k);
+        return siteApi(server).events({ camera: id, region, status: "open,pending,verified", limit: SCOPED_LIMIT })
+          .then((evs) => tagServer(evs, server, nameOf(server))).catch(() => [] as FleetEvent[]);
+      })).then((lists) => { if (alive) setScoped(lists.flat()); });
+    }, 400);
+    return () => { alive = false; clearTimeout(t); };
+  }, [enabled, fetchKey]);
 
   const pool = useMemo(() => (scopeKey ? mergePool(scoped, recent ?? []) : recent ?? []), [scopeKey, scoped, recent]);
   return { recent, pool, regionKeys, regionMap, offline };
@@ -228,6 +234,7 @@ function SiteActivity({ site, servers, tiles, multi, activity: a }: { site: Site
     return t ? tileLabel(t.server.name, t.name, multi) : tileLabel(servers.find((s) => s.id === server)?.name ?? server, id, multi);
   };
   const feed = regionFeed(a.pool, a.regionMap, a.regionKeys);
+  const [shown, showMore] = useFeedCount(a.regionKeys.join(","));
   const offline = a.offline.map((id) => servers.find((s) => s.id === id)?.name ?? id);
   return (
     <>
@@ -238,11 +245,12 @@ function SiteActivity({ site, servers, tiles, multi, activity: a }: { site: Site
         {a.recent === null && <p className="muted">Loading…</p>}
         {a.recent !== null && a.pool.length === 0 && <p className="muted">Nothing yet.</p>}
         {a.pool.length > 0 && feed.length === 0 && <p className="muted">Nothing recent on that camera passed through the painted region.</p>}
-        {feed.slice(0, 12).map((e) => (
+        {feed.slice(0, shown).map((e) => (
           <EventCard key={`${e.site_id}-${e.id}`} e={e} cameraName={names.get(camKey(e.site_id, e.camera_id)) ?? e.camera_id}
             site={mediaApi(e.site_id)} siteName={multi ? e.site_name : undefined}
             onOpen={() => setOpen({ server: e.site_id, id: e.id, location: site.id })} />
         ))}
+        <FeedMore shown={shown} total={feed.length} onMore={showMore} />
       </aside>
       {/* a sibling of the column, as in LiveView, so the column's scroll and card styles don't reach the viewer */}
       {open && <HubEventDetail ev={open} cameraName={cameraNameFor(names, open.server)} onClose={() => setOpen(null)} />}

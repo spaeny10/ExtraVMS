@@ -576,7 +576,7 @@ export function makeApi(base: string, opts: ApiOptions = {}) {
   /** Unicast ONVIF scan of a private subnet (at most a /22); credentials only read model names, never stored. */
   scanCameras: (body: { subnet: string; ports?: number[]; username?: string; password?: string }) =>
     req<{ subnet: string; devices: ScannedDevice[] }>("/api/cameras/scan", json("POST", body)),
-  events: (p: EventQuery & { threat?: string; before_id?: number; sort?: "newest" | "priority" }) =>
+  events: (p: EventQuery & { threat?: string; before_id?: number; sort?: "newest" | "priority"; region?: string }) =>
     req<NvrEvent[]>(`/api/events?${qs(eventQs(p))}`),
   /** Find's compliance strip: counts for the same filters (backend db.summary). */
   eventsSummary: (p: EventQuery) => req<EventSummary>(`/api/events/summary?${qs(eventQs(p))}`),

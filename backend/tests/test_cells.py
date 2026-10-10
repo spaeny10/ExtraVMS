@@ -87,6 +87,35 @@ def test_backfill_and_api_rows():
     assert listed[0]["cells"] == cells.for_event(path)
 
 
+def test_list_events_region_filter():
+    """region= is matched on the server, past a burst of non-matching events that would fill `limit` on its own."""
+    from nvr import api
+    from nvr.pipeline import Pipeline
+    api.state.pipeline = Pipeline()
+    now = time.time() + 1000
+    here = [[now, *box(0.2, 0.3)]]                 # crosses the painted cell
+    there = [[now, *box(0.8, 0.9)]]                # elsewhere in the picture
+    mk = lambda tid, t, p, **kw: db.create_event(camera_id="cam1", track_id=tid, camera_class="person", camera_conf=0.9,
+                                                  start_ts=t, end_ts=t + 1, path=p, cells=cells.for_event(p), **kw)
+    old = mk("old", now, here, status="verified")
+    away = mk("away", now + 1, here, status="verified", ptz_preset="away")   # crossed it, but the PTZ was turned away
+    for i in range(30):                                                    # the burst
+        mk(f"burst{i}", now + 2 + i, there, status="verified")
+    live = mk("live", now + 40, there, status="open")                       # open: path not complete, kept
+    region = cells.encode({cells.cell(0.2, 0.3)})
+    got = [r["id"] for r in asyncio.run(api.list_events(camera="cam1", status="verified,open", min_yolo=0, limit=5, region=region))]
+    assert got[:2] == [live, old], got      # (an open event from the test above may follow: open always passes)
+    assert away not in got and not any(r in got for r in range(away + 1, live))
+    # paging by offset counts matches, not scanned rows
+    assert [r["id"] for r in asyncio.run(api.list_events(camera="cam1", status="verified,open", min_yolo=0, limit=5,
+                                                         offset=1, region=region))][0] == old
+    try:
+        asyncio.run(api.list_events(camera="cam1", min_yolo=0, limit=5, region="!!not-base64!!"))
+        raise AssertionError("a malformed region must be refused")
+    except api.HTTPException as e:
+        assert e.status_code == 400
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

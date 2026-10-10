@@ -106,6 +106,7 @@ main { flex: 1; padding: 16px; }
 .tile-bar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; }
 .live-feed { display: flex; flex-direction: column; gap: 8px; max-height: calc(100vh - 90px); overflow-y: auto; }
 .live-feed .event-card { grid-template-columns: 110px 1fr; }
+.live-feed .feed-more { align-self: center; margin: 4px 0 12px; }
 
 /* events */
 .event-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 10px; }
