@@ -11,7 +11,9 @@ A replay session is an ordinary RTSP session with two ONVIF additions (ONVIF Str
 
 ffmpeg and MediaMTX can't send either, hence this client. What the cameras tested do (docs/sd-card-backfill.md):
 replay runs at real time only (Rate-Control / Scale are ignored), a session goes silent and is closed after ~65 s
-without a keep-alive (GET_PARAMETER every 20 s), and footage is the main stream.
+without a keep-alive (GET_PARAMETER every 20 s), and footage is the main stream. A camera with nothing more to send
+keeps answering keep-alives without sending video (RFC 2326 pauses at the end of the range): that is the end of
+its footage, not a broken session.
 
 Blocking sockets, like ingest.py: run `fetch_range` in a thread. Credentials are never logged.
 """
@@ -36,9 +38,12 @@ log = logging.getLogger("nvr.sdreplay")
 DEFAULT_REPLAY_PORT = 555          # Milesight; GetReplayUri gives the camera's own when it has the replay service
 DEFAULT_REPLAY_PATH = "/onvifreplay"
 KEEPALIVE_S = 20.0                 # GET_PARAMETER this often (the camera ends a silent session after ~65 s)
-STALL_S = 30.0                     # no packet at all for this long = the session is dead
+STALL_S = 30.0                     # no video for this long: the session is dead, or (camera still answering) idle
 NTP_EPOCH = 2208988800             # seconds from 1900-01-01 to 1970-01-01
 USER_AGENT = "AxiomVision-sdreplay"
+WALL_FACTOR, WALL_MARGIN_S = 1.25, 300.0   # a fetch gets at most range * factor + margin of wall-clock time
+BFRAMES = "camera stream uses B-frames; SD recovery not supported for this camera yet"
+BACKWARDS_MAX = 3                  # frame times going backwards this often in one session = B-frames (not a clock step)
 
 
 class ReplayError(Exception):
@@ -51,6 +56,15 @@ class NotOnCard(ReplayError):
 
 class AuthFailed(ReplayError):
     """The camera refused the credentials: no point retrying."""
+
+
+class Ended(ReplayError):
+    """The camera has nothing more to send: the session stays open (keep-alives answered) but no video comes, as
+    RFC 2326 has a server pause at the end of the range, or the camera said RTCP BYE. Not worth a reconnect."""
+
+
+class Unsupported(ReplayError):
+    """The stream can't be written as it is (B-frames: fmp4mux writes no composition offsets): no point retrying."""
 
 
 # --------------------------------------------------------------------------- RTP
@@ -124,6 +138,18 @@ def parse_rtp(pkt: bytes) -> RtpPacket | None:
     if end < off:
         return None
     return RtpPacket(seq, ts, bool(b1 & 0x80), b1 & 0x7F, ssrc, pkt[off:end], onvif)
+
+
+def rtcp_bye(pkt: bytes) -> bool:
+    """An RTCP compound packet (RFC 3550) that holds a BYE (packet type 203)."""
+    i = 0
+    while i + 4 <= len(pkt):
+        if pkt[i] >> 6 != 2:
+            return False
+        if pkt[i + 1] == 203:
+            return True
+        i += 4 * (struct.unpack(">H", pkt[i + 2:i + 4])[0] + 1)
+    return False
 
 
 # --------------------------------------------------------------------------- depacketizing
@@ -431,6 +457,7 @@ class ReplaySession:
         self.channels: dict[int, int] = {}     # interleaved RTP channel -> index into self.tracks
         self.play_cseq = 0
         self._last_ka = 0.0
+        self._ka_retried = False
 
     def _req(self, method: str, uri: str, extra: dict | None = None) -> tuple[int, dict, bytes]:
         h = {"User-Agent": USER_AGENT, "Require": "onvif-replay", **(extra or {})}
@@ -477,57 +504,99 @@ class ReplaySession:
         self._last_ka = time.time()
         return wanted
 
-    def keepalive(self) -> None:
+    def _send(self, method: str) -> None:
+        """A request whose reply is not waited for (keep-alive, TEARDOWN), with the session's credentials."""
         r = self.rtsp
+        uri = getattr(self, "base", self.url)
         r.cseq += 1
         h = {"CSeq": str(r.cseq), "User-Agent": USER_AGENT, "Require": "onvif-replay", "Session": r.session or ""}
-        auth = r._auth_header("GET_PARAMETER", self.base)
+        auth = r._auth_header(method, uri)
         if auth:
             h["Authorization"] = auth
-        msg = f"GET_PARAMETER {self.base} RTSP/1.0\r\n" + "".join(f"{k}: {v}\r\n" for k, v in h.items()) + "\r\n"
-        r.sock.sendall(msg.encode())
+        r.sock.sendall((f"{method} {uri} RTSP/1.0\r\n" + "".join(f"{k}: {v}\r\n" for k, v in h.items()) + "\r\n").encode())
+
+    def keepalive(self) -> None:
+        self._send("GET_PARAMETER")
         self._last_ka = time.time()
 
-    def packets(self, stop: threading.Event | None = None) -> Iterator[tuple[int, RtpPacket]]:
+    def _read(self) -> tuple:
+        """("rtp", channel, data) for an interleaved packet, ("reply", status, headers) for an RTSP reply."""
         r = self.rtsp
-        r.sock.settimeout(5)
-        last_data = time.time()
+        first = r._read_exact(1)
+        if first == b"$":
+            hdr = r._read_exact(3)
+            return "rtp", hdr[0], r._read_exact(int.from_bytes(hdr[1:3], "big"))
+        r.buf = first + r.buf
+        status, hdrs, _ = r._read_response()
+        return "reply", status, hdrs
+
+    def _reply(self, status: int, hdrs: dict) -> None:
+        """A keep-alive's reply. 401: the camera rotated its nonce (Digest stale=true); answer the new challenge once."""
+        if status == 401:
+            www = hdrs.get("www-authenticate", "")
+            if self._ka_retried or not www.lower().startswith("digest"):
+                raise ReplayError("keep-alive refused (401)")      # a new session authenticates from scratch
+            self.rtsp.auth = ("digest", dict(re.findall(r'(\w+)="?([^",]*)"?', www[6:])))
+            self._ka_retried = True
+            self.keepalive()
+        elif status == 454:
+            raise ReplayError("the camera dropped the session (454 Session Not Found)")
+        elif status < 300:
+            self._ka_retried = False
+
+    def packets(self, stop: threading.Event | None = None) -> Iterator[tuple[int, RtpPacket]]:
+        """(track index, packet) until `stop`. Only video RTP of this PLAY keeps the session counted as delivering: no
+        video for STALL_S raises Ended when the camera still answers (a keep-alive reply or RTCP since the last video
+        packet: it has nothing more) and ReplayError when it has gone quiet altogether (worth a reconnect)."""
+        r = self.rtsp
+        r.sock.settimeout(min(5.0, KEEPALIVE_S / 4))   # wake up in time to send keep-alives while nothing comes
+        last_video = time.time()
+        last_alive = 0.0
+        self._ka_retried = False
         while not (stop and stop.is_set()):
+            if time.time() - last_video > STALL_S:
+                if last_alive > last_video:
+                    raise Ended(f"no video for {STALL_S:.0f} s while the camera keeps the session open")
+                raise ReplayError(f"no data for {STALL_S:.0f} s")
             if time.time() - self._last_ka > KEEPALIVE_S:
                 try:
                     self.keepalive()
                 except OSError as e:
                     raise ReplayError(f"keep-alive: {e}") from None
             try:
-                item = r.read_interleaved()
+                item = self._read()
+                if item[0] == "reply":
+                    last_alive = time.time()
+                    self._reply(item[1], item[2])
+                    continue
             except socket.timeout:
-                if time.time() - last_data > STALL_S:
-                    raise ReplayError(f"no data for {STALL_S:.0f} s")
                 continue
             except (OSError, ConnectionError) as e:
                 raise ReplayError(f"connection lost: {e}") from None
             except (ValueError, IndexError):
                 raise ReplayError("unexpected data from the camera") from None
-            last_data = time.time()
-            if not item:
-                continue          # an RTSP reply (keep-alive)
-            ch, data = item
+            _, ch, data = item
             idx = self.channels.get(ch)
             if idx is None:
-                continue          # RTCP (odd channel) or unknown
+                last_alive = time.time()   # RTCP (odd channel) or unknown: the camera is there
+                if ch & 1 and rtcp_bye(data):
+                    raise Ended("the camera ended the stream (RTCP BYE)")
+                continue
             p = parse_rtp(data)
             if p is None:
                 continue
             if p.onvif and p.onvif.cseq not in (0, self.play_cseq):
                 continue          # data from an earlier PLAY on this session
+            if self.tracks[idx].kind == "video":
+                last_video = time.time()
+            else:
+                last_alive = time.time()
             yield idx, p
 
     def close(self) -> None:
         try:
             if self.rtsp.session:
-                self.rtsp.cseq += 1
-                self.rtsp.sock.sendall((f"TEARDOWN {getattr(self, 'base', self.url)} RTSP/1.0\r\nCSeq: {self.rtsp.cseq}\r\n"
-                                        f"Session: {self.rtsp.session}\r\nUser-Agent: {USER_AGENT}\r\n\r\n").encode())
+                self._send("TEARDOWN")
         except OSError:
             pass
         try:
@@ -559,28 +628,52 @@ class FetchResult:
     last: float | None = None       # last frame delivered
     reconnects: int = 0
     reason: str = ""                # why it stopped: "end", "not on card", "stopped", error text
-    complete: bool = False
+    complete: bool = False          # everything up to the end of the range arrived
+    unsupported: bool = False       # the stream can't be written (B-frames): the sink's output should be dropped
+
+
+class _TimeUp(Exception):
+    """The fetch used up its wall-clock allowance."""
 
 
 def fetch_range(url: str, user: str, password: str, start: float, end: float, sink: Sink, *,
                 stop: threading.Event | None = None, kinds: tuple[str, ...] = ("video", "audio"),
                 max_reconnects: int = 5, resume_lead_s: float = 4.0, session_factory: Callable[..., ReplaySession] | None = None,
-                on_progress: Callable[[float], None] | None = None) -> FetchResult:
+                on_progress: Callable[[float], None] | None = None, max_wall_s: float | None = None) -> FetchResult:
     """Replay [start, end) (camera clock) into `sink`, reconnecting up to `max_reconnects` times in a row after a
     broken session and resuming where the sink says, without duplicates: the new session starts `resume_lead_s`
     early (so the camera begins at a keyframe at or before the resume point) and frames before the resume point
-    are skipped. A frame is never delivered twice (strictly increasing times)."""
+    are skipped. A frame is never delivered twice (strictly increasing times).
+
+    It stops without a reconnect, keeping what was delivered (the sink is not rolled back, so its last GOP is
+    written), when the camera has nothing more: the session stays open but no video comes (Ended), or a resumed
+    session ends at the same frame as the one before it. It also stops after `max_wall_s` of wall-clock time
+    (default: the range at real time * WALL_FACTOR + WALL_MARGIN_S), and at once, flagged `unsupported`, when frame
+    times go backwards (B-frames)."""
     factory = session_factory or ReplaySession
     res = FetchResult()
     pos = start
     failures = 0
     started = False
+    high: float | None = None       # newest frame any session delivered (a rollback doesn't lower it)
+    limit = max_wall_s if max_wall_s is not None else (end - start) * WALL_FACTOR + WALL_MARGIN_S
+    deadline = time.monotonic() + limit
+    took_too_long = (f"took longer than {limit / 60:.0f} min" if limit >= 60 else f"took longer than {limit:.0f} s") \
+        + " (the range at real time plus a margin)"
+
+    def ends_at() -> str:
+        return f"the camera's recording ends at {epoch_to_clock(high)}" if high is not None else \
+            "the camera sent no footage for this range"
     while pos < end - 0.05:
         if stop and stop.is_set():
             res.reason = "stopped"
             return res
+        if time.monotonic() > deadline:
+            res.reason = took_too_long
+            return res
         session = None
         skip_before = pos if pos > start else None
+        resumed, high_before, sess_last = skip_before is not None, high, None
         try:
             session = factory(url, user, password)
             tracks = session.open(max(start, pos - resume_lead_s) if skip_before else pos, end, kinds)
@@ -594,12 +687,22 @@ def fetch_range(url: str, user: str, password: str, start: float, end: float, si
                 elif t.kind == "audio" and t.codec in ("PCMU", "PCMA", "L16"):
                     deps[i] = AudioDepacketizer(t.codec, t.clock_rate, t.channels)
             last_progress = 0.0
+            prev_ntp, backwards = None, 0
             for idx, p in session.packets(stop):
+                if time.monotonic() > deadline:
+                    raise _TimeUp
                 d = deps.get(idx)
                 if d is None:
                     continue
                 if isinstance(d, VideoDepacketizer):
                     for au in d.push(p):
+                        # decode order with presentation times going backwards: B-frames. Dropping them ("never
+                        # twice" below) would write half-rate video; one step back alone is a camera clock step
+                        if prev_ntp is not None and au.ntp < prev_ntp - 1e-6:
+                            backwards += 1
+                            if backwards >= BACKWARDS_MAX:
+                                raise Unsupported(BFRAMES)
+                        prev_ntp = au.ntp
                         if au.ntp >= end:
                             res.reason, res.complete = "end", True
                             raise _Done
@@ -610,7 +713,8 @@ def fetch_range(url: str, user: str, password: str, start: float, end: float, si
                         skip_before = None
                         sink.video(au)
                         res.first = au.ntp if res.first is None else res.first
-                        res.last = au.ntp
+                        res.last = sess_last = au.ntp
+                        high = au.ntp if high is None else max(high, au.ntp)
                         if on_progress and au.ntp - last_progress >= 5:
                             last_progress = au.ntp
                             on_progress(au.ntp)
@@ -621,23 +725,35 @@ def fetch_range(url: str, user: str, password: str, start: float, end: float, si
             res.reason = "stopped" if stop and stop.is_set() else "camera ended the replay"
             if res.reason == "stopped":
                 return res
-            # the camera closed the stream before the end of the range: the card has nothing more, or it gave up
-            if res.last is not None and res.last >= end - 2:
-                res.complete = True
-                return res
             raise ReplayError("the camera ended the replay early")
         except _Done:
             return res
-        except NotOnCard as e:
+        except _TimeUp:
+            res.reason = took_too_long
+            return res
+        except (NotOnCard, AuthFailed) as e:
             res.reason = str(e)
             return res
-        except AuthFailed as e:
-            res.reason = str(e)
+        except Unsupported as e:
+            res.reason, res.unsupported = str(e), True
+            return res
+        except Ended as e:
+            # the camera has nothing more after what it sent: keep it all (no rollback: the sink writes its last GOP)
+            if res.last is not None and res.last >= end - 2.0:
+                res.reason, res.complete = "end", True
+            else:
+                res.reason = ends_at()
+                log.info("replay %s: %s; %s", _safe(url), e, res.reason)
             return res
         except ReplayError as e:
             if res.last is not None and res.last >= end - 1.0:
                 # it ended (or broke) at the very end of the range: everything asked for has arrived
                 res.reason, res.complete = "end", True
+                return res
+            if resumed and sess_last is not None and high == high_before and sess_last >= high_before - 0.001:
+                # a resumed session ended at the very frame the one before did: that is where the card's footage ends
+                res.reason = ends_at()
+                log.info("replay %s: %s again at the same frame; %s", _safe(url), e, res.reason)
                 return res
             res.reconnects += 1
             resume = sink.rollback()

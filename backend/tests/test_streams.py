@@ -9,6 +9,7 @@ import asyncio
 import os
 import sys
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from types import SimpleNamespace
@@ -143,6 +144,10 @@ def test_uri_path_strips_host_and_credentials():
     out = streams.uri_path("rtsp://10.0.0.5/cam/realmonitor?channel=1&subtype=1&user=admin&password=secret")
     assert out == "/cam/realmonitor?channel=1&subtype=1" and "secret" not in out
     assert streams.uri_path("") is None and streams.uri_path(None) is None and streams.uri_path("rtsp://host") is None
+    # query parameters are kept as the camera wrote them: a bare one stays bare, encodings are not redone
+    assert streams.uri_path("rtsp://10.0.0.5/live?ch1") == "/live?ch1"
+    assert streams.uri_path("rtsp://10.0.0.5/live?ch1&pwd=x&stream=0") == "/live?ch1&stream=0"
+    assert streams.uri_path("rtsp://10.0.0.5/a?name=a%20b&Password=s") == "/a?name=a%20b"
 
 
 def test_probe_one_profile_camera():
@@ -212,7 +217,26 @@ def test_plan_main_only_relays_and_warns():
     assert p["problems"] == ["No low-resolution stream: SD plays the main stream (3840×2160). "
                              "Enable the camera's secondary stream for faster live view."]
     v = streams.view(cam_with(ONE))
-    assert v["sd"] == {"path": None, "relay": True, "detected": False} and v["sub"] is None
+    assert v["sd"] == {"path": None, "relay": True, "detected": False, "encoding": "H.264", "h265": False} and v["sub"] is None
+
+
+def test_sd_relaying_an_h265_main_is_marked():
+    """Browsers can't play H.265 over WebRTC: when SD relays an H.265 main stream the UI is told (sd.h265)."""
+    one265 = [prof("Profile_1", "H.265", 2592, 1520, "/main")]
+    p = streams.plan(cam_with(one265))
+    assert p["sub_path"] is None and p["encoding"] == "H.265"
+    assert p["problems"] == [streams.no_sub_text(2592, 1520, h265=True)] and "H.265" in p["problems"][0]
+    v = streams.view(cam_with(one265))
+    assert v["sd"]["relay"] and v["sd"]["h265"] and v["sd"]["encoding"] == "H.265"
+    # an H.265 main with an H.264 sub: SD plays the sub, fine in a browser
+    v = streams.view(cam_with(TWO))
+    assert v["sd"]["encoding"] == "H.264" and not v["sd"]["h265"]
+    # the sub refused with 453: SD relays the H.265 main, marked, and the problem says so
+    busy = {**cam_with(TWO), "streams": {"profiles": TWO, "sub_not_found": {"path": "/sub", "at": 1.0, "code": "453"}}}
+    v = streams.view(busy)
+    assert v["sd"]["relay"] and v["sd"]["h265"] and streams.plan(busy)["problems"] == [streams.busy_text(h265=True)]
+    # never probed: unknown
+    assert streams.view(cam_with())["sd"]["encoding"] is None
 
 
 def test_plan_configured_sub_listed():
@@ -320,7 +344,7 @@ def test_record_probe_and_404():
     assert cam["streams_checked_at"] == 1000.0 and streams.sub_source(cam) == "/sub" and not streams.needs_probe(cam)
     assert streams.scan_log("2026/10/08 19:58:14 ERR [path ptz_sub] [RTSP source] bad status code: 404 (Not Found)\n"
                             "2026/10/08 19:58:15 INF [path ptz] [RTSP source] ready: 1 track (H264)\n"
-                            "2026/10/08 19:58:16 ERR [path other_cam_sub] [RTSP source] bad status code: 453 (Not Enough Bandwidth)\n") == {"ptz": "404", "other_cam": "453"}
+                            "2026/10/08 19:58:16 ERR [path other_cam_sub] [RTSP source] bad status code: 453 (Not Enough Bandwidth)\n") == {"ptz_sub": "404", "other_cam_sub": "453"}
     assert streams.mark_sub_not_found("ptz") is True
     assert streams.sub_source(_get("ptz")) is None
     assert streams.mark_sub_not_found("ptz") is False       # already relaying
@@ -348,7 +372,7 @@ def test_453_relays_the_main_stream_whatever_the_profiles():
     assert streams.sub_source(_get("ptz")) == "/sub"
     assert streams.mark_sub_not_found("ptz", code="453") is True
     p = streams.plan(_get("ptz"))
-    assert p["sub_path"] is None and p["problems"] == [streams.busy_text()]
+    assert p["sub_path"] is None and p["problems"] == [streams.busy_text(h265=True)]   # (TWO's main is H.265)
     streams.record_probe("ptz", {"profiles": TWO, "media": "media"}, clear_404=True)   # Check: try the sub again
     assert streams.sub_source(_get("ptz")) == "/sub"
 
@@ -389,6 +413,112 @@ def test_watcher_tails_the_log():
     assert w.watch_once() is False
 
 
+def test_sub_record_mode_ignores_its_own_relay():
+    """A camera recording its sub stream (cellular): <id>_sub is a relay of our own <id>, so MediaMTX's 404 there (the
+    camera rebooting, the server just restarted, <id> not ready) is not the camera's answer and must not switch the
+    24/7 recording to the main stream. A 404 on <id>, which pulls the camera's sub stream, is the camera's answer."""
+    _store({**CAM, "id": "cell4", "record_stream": "sub"})
+    streams.record_probe("cell4", {"profiles": TWO, "media": "media"})
+    _store({**CAM, "id": "main5"})                       # records its main stream: <id>_sub pulls the camera's sub
+    streams.record_probe("main5", {"profiles": TWO, "media": "media"})
+    log = settings.runtime_dir / "mediamtx-cell.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("")
+    checks: list[str] = []
+    w = streams.StreamChecker(lambda: None, log)
+    w.check_soon = checks.append
+    w.watch_once()
+
+    def logged(line: str) -> bool:
+        with open(log, "a") as f:
+            f.write(line + "\n")
+        return w.watch_once()
+    assert logged("2026/10/08 19:58:14 ERR [path cell4_sub] [RTSP source] bad status code: 404 (Not Found)") is False
+    assert logged("2026/10/08 19:58:15 ERR [path main5] [RTSP source] bad status code: 404 (Not Found)") is False   # its main
+    assert checks == [] and streams.sub_source(_get("cell4")) == "/sub" and streams.sub_source(_get("main5")) == "/sub"
+    assert mediamtx.build_config([_get("cell4")])["paths"]["cell4"]["source"].endswith(":554/sub")   # still the sub
+    assert logged("2026/10/08 19:58:16 ERR [path cell4] [RTSP source] bad status code: 404 (Not Found)") is True
+    assert checks == ["cell4"] and streams.sub_source(_get("cell4")) is None
+    # now <id> pulls the main stream: a 404 there is not about the sub
+    assert logged("2026/10/08 19:58:30 ERR [path cell4] [RTSP source] bad status code: 404 (Not Found)") is False
+    assert logged("2026/10/08 19:58:31 ERR [path main5_sub] [RTSP source] bad status code: 453 (Not Enough Bandwidth)") is True
+    assert streams.plan(_get("main5"))["problems"] == [streams.busy_text(h265=True)]
+
+
+def test_fallback_is_retried():
+    """The relay is not for ever: a 453 expires after RETRY_SUB_S (doubling while it keeps coming back), a 404 is
+    cleared when the camera answers DESCRIBE on that path again."""
+    _store({**CAM, "id": "busy1"})
+    streams.record_probe("busy1", {"profiles": TWO, "media": "media"})
+    _store({**CAM, "id": "gone1"})
+    streams.record_probe("gone1", {"profiles": TWO, "media": "media"})
+    t = 10_000.0          # long ago: cameras of other tests, marked at the real time, are not due
+    asked: list[tuple[str, str]] = []
+    answer = {"code": 200}
+    real = streams.sub_answers
+    streams.sub_answers = lambda cam, path, timeout=streams.CALL_TIMEOUT_S: asked.append((cam["id"], path)) or answer["code"]
+    w = streams.StreamChecker(lambda: None, None)
+    try:
+        assert streams.mark_sub_not_found("busy1", now=t, code="453")
+        assert streams.view(_get("busy1"))["sub_retry_at"] == t + streams.RETRY_SUB_S
+        assert not streams.retry_due(_get("busy1"), now=t + streams.RETRY_SUB_S - 1)
+        assert asyncio.run(w.retry_subs(now=t + streams.RETRY_SUB_S - 1)) is False
+        assert asyncio.run(w.retry_subs(now=t + 3600)) is True and asked == []      # a 453 just expires
+        assert streams.sub_source(_get("busy1")) == "/sub"
+        # refused again soon after: relays again and waits twice as long
+        assert streams.mark_sub_not_found("busy1", now=t + 3700, code="453")
+        nf = streams.state_of(_get("busy1"))["sub_not_found"]
+        assert nf["tries"] == 2 and nf["retry_at"] == t + 3700 + 7200
+        # a 404: kept while the camera still refuses the path, the wait doubling
+        assert streams.mark_sub_not_found("gone1", now=t, code="404")
+        answer["code"] = 404
+        assert asyncio.run(w.retry_subs(now=t + 3600)) is False
+        assert asked == [("gone1", "/sub")] and streams.sub_source(_get("gone1")) is None
+        assert streams.state_of(_get("gone1"))["sub_not_found"]["retry_at"] == t + 3600 + 7200
+        answer["code"] = None                                                        # unreachable: kept too
+        assert asyncio.run(w.retry_subs(now=t + 10900)) is True                      # (busy1's 453 expired)
+        assert streams.sub_source(_get("gone1")) is None and streams.sub_source(_get("busy1")) == "/sub"
+        answer["code"] = 200                                                         # the camera serves it again
+        due = streams.state_of(_get("gone1"))["sub_not_found"]["retry_at"]
+        assert asyncio.run(w.retry_subs(now=due)) is True and streams.sub_source(_get("gone1")) == "/sub"
+        assert streams._retry_wait(1) == 3600 and streams._retry_wait(20) == streams.RETRY_SUB_MAX_S
+        # a manual Check forgets the history
+        streams.record_probe("busy1", {"profiles": TWO, "media": "media"}, clear_404=True)
+        assert "sub_retried" not in streams.state_of(_get("busy1"))
+    finally:
+        streams.sub_answers = real
+
+
+def test_probe_of_the_old_address_is_discarded():
+    """put_camera re-addresses a camera while a probe of its old address is running: that probe's answer is dropped
+    and the new address is asked (a check requested meanwhile waits for it)."""
+    _store({**CAM, "id": "race", "host": "10.0.0.99"})
+    calls: list[str] = []
+
+    def slow_probe(cam, timeout=streams.CALL_TIMEOUT_S):
+        calls.append(cam["host"])
+        time.sleep(0.3)
+        base = "/old" if cam["host"] == "10.0.0.99" else "/main"
+        return {"profiles": [prof("1", "H.264", 1920, 1080, base), prof("2", "H.264", 640, 360, base + "_low")], "media": "media"}
+
+    async def go():
+        w = streams.StreamChecker(lambda: None, None)
+        first = asyncio.ensure_future(w.check("race"))
+        await asyncio.sleep(0.05)
+        db.upsert_camera({**CAM, "id": "race", "host": "10.0.0.5"})     # what put_camera does
+        streams.forget("race")
+        await w.check("race")
+        await first
+    real = streams.probe_streams
+    streams.probe_streams = slow_probe
+    try:
+        asyncio.run(go())
+    finally:
+        streams.probe_streams = real
+    assert calls == ["10.0.0.99", "10.0.0.5"], calls
+    assert [p["path"] for p in streams.state_of(_get("race"))["profiles"]] == ["/main", "/main_low"]
+
+
 def test_checker_applies_a_probe():
     _store({**CAM, "id": "dome2"})
     changes: list[int] = []
@@ -419,7 +549,8 @@ def test_check_route():
         r = client.post("/api/cameras/dome3/streams/check", headers=h)
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body["sd"] == {"path": "/sub", "relay": False, "detected": False} and body["sub"]["width"] == 1280 and seen == ["dome3"]
+        assert body["sd"] == {"path": "/sub", "relay": False, "detected": False, "encoding": "H.264", "h265": False}
+        assert body["sub"]["width"] == 1280 and seen == ["dome3"]
         assert client.post("/api/cameras/nope/streams/check", headers=h).status_code == 404
         pub = api.public_camera(_get("dome3"))
         assert pub["streams"]["main"]["width"] == 2592 and "password" not in pub and "u:p@" not in str(pub)

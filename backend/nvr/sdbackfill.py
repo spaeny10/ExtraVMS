@@ -7,22 +7,25 @@ Phase 1 (this module): footage only, started by hand (POST /api/sd/recover).
   has_recording, earliest, latest, recording_now, the replay URI.
 - Gaps: holes of GAP_MIN_S or more between the server's own recordings in the last LOOKBACK_H hours (the MediaMTX
   listing the Timeline draws), clipped to what the camera's card holds.
-- The worker: one replay session per camera at a time (cameras limit sessions), cameras in parallel, newest job
-  first. Footage is written as MediaMTX segments (fmp4mux) into that camera's own recording folder, never
+- The worker: one replay session per camera at a time (cameras limit sessions), up to MAX_PARALLEL cameras in
+  parallel on the worker's own threads, newest job first. Footage is written as MediaMTX segments (fmp4mux) into that camera's own recording folder, never
   replacing a file, so playback, the Timeline, export and retention treat it as ordinary footage. Each job is a
   row of `restored_spans`; the Timeline shades its range "Recovered from the camera's SD card".
 
 Times: replay runs on the camera's clock. Restored frames are moved onto this server's clock with the same offset
 the metadata reader measures for live detections (ingest.MetadataReader.clock_offset, arrival minus camera time),
-so they land where MediaMTX would have put them (measured on cam5: within 26 ms of the live recording's frames).
+so they land where MediaMTX would have put them (measured on cam5: within 26 ms of the live recording's frames),
+when that offset agrees with the camera's ONVIF clock within CLOCK_AGREE_S; otherwise the ONVIF difference.
 """
 from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import functools
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
 
@@ -42,6 +45,9 @@ TAIL_MARGIN_S = 60            # a hole reaching "now" is only a gap once it is t
 MAX_JOB_S = 12 * 3600         # one request covers at most this much (replay runs at real time)
 COVERED_SLACK_S = 5.0         # a job that misses no more than this (or 5 %) counts as fully recovered
 SUB_GAP_MIN_S = 2.0           # inside a job, holes shorter than this are left alone (a keyframe's worth)
+MAX_PARALLEL = 3              # recoveries at once on this server (each holds a worker thread for hours); others wait
+CLOCK_AGREE_S = 2.0           # the live clock offset is trusted only this close to the ONVIF clock difference
+LIVE_MIN_SAMPLES = 50         # ... and resting on at least this many metadata frames (when the count is known)
 
 STATES = ("waiting", "recovering", "recovered", "partly recovered", "not on the card", "failed")
 OPEN_STATES = ("waiting", "recovering")
@@ -369,42 +375,68 @@ def restore_range(cam: dict, lo: float, hi: float, offset: float, stop: threadin
     folder = camera_folder(cam["id"])
     sink = WriterSink(folder, lo, hi, offset, on_segment)
     url = sdreplay.replay_url(cam, replay_uri)
-    res = sdreplay.fetch_range(url, cam["username"], cam["password"], lo - offset, hi - offset, sink, stop=stop,
-                               session_factory=session_factory)
+    try:
+        res = sdreplay.fetch_range(url, cam["username"], cam["password"], lo - offset, hi - offset, sink, stop=stop,
+                                   session_factory=session_factory)
+    except BaseException:
+        # the writer failed mid-run (a segment of that name exists, a disk error, unparsable parameter sets): its open
+        # segment's temp file and handle go; segments already published stay and are counted
+        if sink.writer:
+            sink.writer.abort()
+        raise
     written = []
     if sink.writer:
         try:
-            if res.reason == "stopped":
-                sink.writer.abort()                 # shutting down: the open segment's temp file goes
+            if res.reason == "stopped" or res.unsupported:
+                sink.writer.abort()                 # shutting down, or B-frames: the open segment's temp file goes
                 written = sink.writer.written
             else:
                 written = sink.writer.close()
         except fmp4mux.SegmentExists as e:
             log.warning("[%s] not written, a segment of that name exists: %s", cam["id"], e)
+            sink.writer.abort()
             written = sink.writer.written
+        except BaseException:
+            sink.writer.abort()
+            raise
     for w in written:
         assert w.path.parent == folder, w.path   # never outside the camera's own folder
     return written, res
 
 
-def clock_offset_for(camera_id: str, live_offset: float | None, status: dict | None) -> float:
-    """Seconds to add to the camera's time: the metadata reader's live estimate (as ingest re-times detections),
-    else the ONVIF clock difference (whole seconds), else 0."""
+def clock_offset_for(camera_id: str, live_offset: float | None, status: dict | None,
+                     live_samples: int | None = None) -> float:
+    """Seconds to add to the camera's time. The metadata reader's live estimate (as ingest re-times detections; within
+    26 ms of MediaMTX's own frames on cam5) only when it agrees with the ONVIF clock difference within CLOCK_AGREE_S
+    and, when the count is known, rests on LIVE_MIN_SAMPLES: a reader just restarted or backed up can be seconds
+    off. Otherwise the ONVIF difference (whole-second clocks); with no ONVIF difference the live estimate; else 0."""
+    onvif = -float(status["clock_offset_s"]) if status and status.get("clock_offset_s") is not None else None
+    if live_offset is not None and onvif is not None:
+        enough = live_samples is None or live_samples >= LIVE_MIN_SAMPLES
+        if enough and abs(live_offset - onvif) <= CLOCK_AGREE_S:
+            return live_offset + settings.camera_clock_offset
+        log.warning("[%s] live clock offset %+.2f s (%s samples) disagrees with the camera's ONVIF clock (%+.1f s): "
+                    "using the ONVIF one", camera_id, live_offset, "?" if live_samples is None else live_samples, onvif)
+        return onvif + settings.camera_clock_offset
+    if onvif is not None:
+        return onvif + settings.camera_clock_offset
     if live_offset is not None:
         return live_offset + settings.camera_clock_offset
-    if status and status.get("clock_offset_s") is not None:
-        return -float(status["clock_offset_s"]) + settings.camera_clock_offset
     return settings.camera_clock_offset
 
 
 class Backfill:
-    """Runs waiting restored_spans jobs: one per camera at a time, cameras in parallel, newest first."""
+    """Runs waiting restored_spans jobs: one per camera at a time, up to MAX_PARALLEL cameras in parallel (the rest
+    stay waiting), newest first. Replays run on this object's own threads, never the event loop's default executor
+    the rest of the server shares (a replay holds its thread for as long as the range lasts).
+    `live_offset(camera_id)`: the metadata reader's clock offset, or (offset, samples it rests on), or None."""
 
-    def __init__(self, live_offset: Callable[[str], float | None] | None = None, list_spans: Callable | None = None,
+    def __init__(self, live_offset: Callable[[str], float | tuple | None] | None = None, list_spans: Callable | None = None,
                  session_factory: Callable | None = None):
         self.live_offset = live_offset or (lambda _cid: None)
         self.list_spans = list_spans or mediamtx.recording_spans
         self.session_factory = session_factory
+        self.pool = ThreadPoolExecutor(MAX_PARALLEL, thread_name_prefix="sd-backfill")
         self.running: dict[str, asyncio.Task] = {}
         self.stops: dict[str, threading.Event] = {}
         self.progress: dict[int, float] = {}       # job id -> last restored instant
@@ -440,6 +472,8 @@ class Backfill:
             self.running.pop(cid)
         rows = db.all("SELECT * FROM restored_spans WHERE state='waiting' ORDER BY from_ts DESC")
         for r in rows:
+            if len(self.running) >= MAX_PARALLEL:
+                break                                 # the rest stay waiting until one finishes
             if r["camera_id"] in self.running:
                 continue
             self.running[r["camera_id"]] = asyncio.create_task(self._job(r), name=f"sd-backfill-{r['camera_id']}")
@@ -494,19 +528,22 @@ class Backfill:
             self._set(jid, state=("recovered" if before or want else "not on the card"),
                       error=None if want else "the camera's card does not cover this time")
             return
-        offset = clock_offset_for(cid, self.live_offset(cid), st)
+        live = self.live_offset(cid)
+        live, samples = live if isinstance(live, tuple) else (live, None)
+        offset = clock_offset_for(cid, live, st, samples)
         stop = threading.Event()
         self.stops[cid] = stop
         reasons = []
+        loop = asyncio.get_running_loop()
         for a, b in todo:
             log.info("[%s] SD recovery %d: %s -> %s (camera clock %+.2f s)", cid, jid, _clock(a), _clock(b), -offset)
-            _, res = await asyncio.to_thread(
+            _, res = await loop.run_in_executor(self.pool, functools.partial(
                 restore_range, cam, a, b, offset, stop, st.get("replay_uri"),
-                lambda w: self._segment_done(jid, w), self.session_factory)
+                lambda w: self._segment_done(jid, w), self.session_factory))
             if res.reason and res.reason != "end":
                 reasons.append(res.reason)
-            if stop.is_set():
-                break
+            if stop.is_set() or res.unsupported:
+                break                                 # (B-frames: every other part would fail the same way)
         if stop.is_set():
             self._set(jid, state="waiting")          # interrupted (shutdown): resumes with what is still missing
             return

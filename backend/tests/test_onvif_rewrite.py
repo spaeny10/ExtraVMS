@@ -72,6 +72,29 @@ def test_added_by_its_public_address():
     assert not onvif_soap.auto_forward(INTERNAL) and not onvif_soap.auto_forward(FORWARDED)
     assert rewrite("http://10.0.0.7/onvif/Events", INTERNAL) == "http://10.0.0.7/onvif/Events"
     assert onvif_soap.outside(dave) == ("5001.bigview.ai", 8082, 556)
+    # outside ports set without an outside host: the URLs take the ports we connect to (outside()), as camera_url does
+    ports = {**dave, "public_onvif_port": 18082, "public_rtsp_port": 1556}
+    assert onvif_soap.outside(ports) == ("5001.bigview.ai", 18082, 1556)
+    assert rewrite("http://192.168.50.37:80/onvif/Events", ports) == "http://5001.bigview.ai:18082/onvif/Events"
+    assert rewrite("rtsp://192.168.50.37:554/main", ports) == "rtsp://5001.bigview.ai:1556/main"
+    assert rewrite("rtsp://192.168.50.37:555/onvifreplay", ports) == "rtsp://5001.bigview.ai:555/onvifreplay"
+
+
+def test_lan_names_and_vpn_addresses_are_not_rewritten():
+    """Only a camera added by a public IP or a public-looking DNS name is taken to be behind a port forward: a LAN name,
+    a single label, a CGNAT / VPN address (100.64/10) or loopback reaches the camera's own reported address directly."""
+    reported = "http://192.168.50.37/onvif/Events"
+    for host in ("cam1.lan", "nvr.local", "gate.home.arpa", "cam.internal", "camera7", "CAM7.LOCAL.", "100.72.1.5",
+                 "100.64.0.1", "127.0.0.1", "localhost", "169.254.3.4", "10.1.2.3"):
+        cam = {**INTERNAL, "host": host}
+        assert not onvif_soap.auto_forward(cam), host
+        assert rewrite(reported, cam) == reported, host
+    for host in ("5001.bigview.ai", "162.190.144.15", "cam5.example.net"):
+        assert onvif_soap.auto_forward({**INTERNAL, "host": host}), host
+        assert rewrite(reported, {**INTERNAL, "host": host}).startswith(f"http://{host}:80/"), host
+    # forward mode (an outside host set) rewrites whatever the camera was added by
+    assert rewrite(reported, {**INTERNAL, "host": "100.72.1.5", "public_host": "203.0.113.50"}) == \
+        "http://203.0.113.50/onvif/Events"
 
 
 def test_outside_and_camera_url():

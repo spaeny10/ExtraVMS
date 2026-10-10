@@ -18,6 +18,7 @@ The file name is the start in local time, %Y-%m-%d_%H-%M-%S-%f.mp4 (fmp4.segment
 wall-clock start and the first video sample (tfdt 0).
 
 No B-frames: decode order is presentation order (true of the cameras this targets; trun has no composition offsets).
+sdreplay.fetch_range stops a replay whose frame times go backwards (B-frames) rather than feed it here.
 """
 from __future__ import annotations
 
@@ -380,11 +381,11 @@ class SegmentWriter:
             return
         nals = [n for n in nals if n and nal_type(self.codec, n) != AUD_TYPE[self.codec]]
         if keyframe:
+            if self.gop:
+                self._flush_gop(next_t=t)                      # with the parameter sets it was encoded with
             for n in nals:
                 if nal_type(self.codec, n) in PARAM_TYPES[self.codec]:
                     self.params = [p for p in self.params if nal_type(self.codec, p) != nal_type(self.codec, n)] + [n]
-            if self.gop:
-                self._flush_gop(next_t=t)
             self.need_key = False
         self.gop.append((t, nals, keyframe))
 

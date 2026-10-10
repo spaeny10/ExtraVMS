@@ -434,14 +434,21 @@ class FakeCamera(threading.Thread):
     """A minimal ONVIF replay RTSP server on 127.0.0.1: Digest auth, DESCRIBE / SETUP / PLAY (Range: clock=),
     GET_PARAMETER, TEARDOWN; streams RTP over the RTSP connection (H.264: STAP-A, FU-A) with the 0xABAC extension as
     fast as the socket takes it, from the keyframe at or before the requested start through the end (plus one frame).
-    `break_after`: cut each of the first sessions after that many frames."""
+    `break_after`: cut each of the first sessions after that many frames. After its last frame (n) the camera keeps
+    the session open, answering keep-alives (RFC 2326 pauses at the end), or with `close_at_end` closes it.
+    `rotate_nonce`: the first keep-alive is answered 401 with a new nonce (Digest stale=true); `frame_delay`: seconds
+    between frames (a camera replaying at real time)."""
 
-    def __init__(self, t0, n=600, gop=10, break_after=(), user="viewer", password="pw-" + "z" * 6):
+    def __init__(self, t0, n=600, gop=10, break_after=(), user="viewer", password="pw-" + "z" * 6, close_at_end=False,
+                 rotate_nonce=False, frame_delay=0.0):
         super().__init__(daemon=True)
         self.t0, self.n, self.gop = t0, n, gop
         self.frames = [(t0 + 0.05 + i * 0.1, i % gop == 5) for i in range(n)]   # keyframes at x.55 s
         self.break_after = list(break_after)
         self.user, self.password = user, password
+        self.close_at_end, self.rotate_nonce, self.frame_delay = close_at_end, rotate_nonce, frame_delay
+        self.nonce = "n0nce"
+        self.authed: dict[str, list[bool]] = {"GET_PARAMETER": [], "TEARDOWN": []}   # was each one authenticated
         self.srv = socket.socket()
         self.srv.bind(("127.0.0.1", 0))
         self.srv.listen(4)
@@ -467,7 +474,7 @@ class FakeCamera(threading.Thread):
         if not a.startswith("Digest") or m.get("username") != self.user:
             return False
         md5 = lambda s: hashlib.md5(s.encode()).hexdigest()
-        want = md5(f"{md5(f'{self.user}:fake:{self.password}')}:n0nce:{md5(method + ':' + m.get('uri', ''))}")
+        want = md5(f"{md5(f'{self.user}:fake:{self.password}')}:{self.nonce}:{md5(method + ':' + m.get('uri', ''))}")
         return m.get("response") == want
 
     def serve(self, c):
@@ -494,8 +501,15 @@ class FakeCamera(threading.Thread):
                 cseq = hdrs.get("cseq", "0")
                 if method in ("DESCRIBE", "SETUP", "PLAY") and not self._ok_auth(method, hdrs):
                     self.unauthorized += 1
-                    send(f'RTSP/1.0 401 Unauthorized\r\nCSeq: {cseq}\r\nWWW-Authenticate: Digest realm="fake", nonce="n0nce"\r\n\r\n'.encode())
+                    send(f'RTSP/1.0 401 Unauthorized\r\nCSeq: {cseq}\r\nWWW-Authenticate: Digest realm="fake", nonce="{self.nonce}"\r\n\r\n'.encode())
                     continue
+                if method == "GET_PARAMETER" and self.rotate_nonce and self.nonce == "n0nce":
+                    self.nonce = "n3wnonce"
+                    send(f'RTSP/1.0 401 Unauthorized\r\nCSeq: {cseq}\r\n'
+                         f'WWW-Authenticate: Digest realm="fake", nonce="{self.nonce}", stale=true\r\n\r\n'.encode())
+                    continue
+                if method in self.authed:
+                    self.authed[method].append(self._ok_auth(method, hdrs))
                 assert hdrs.get("require") == "onvif-replay" or method in ("GET_PARAMETER", "TEARDOWN"), hdrs
                 if method == "DESCRIBE":
                     sdp = ("v=0\r\ns=replay\r\nm=video 0 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\n"
@@ -542,6 +556,11 @@ class FakeCamera(threading.Thread):
                     return
                 if t >= end:
                     return
+                if self.frame_delay:
+                    time.sleep(self.frame_delay)
+            if self.close_at_end:
+                c.shutdown(socket.SHUT_RDWR)         # no more footage: this camera closes the connection
+                c.close()
         except OSError:
             return
 
@@ -582,6 +601,227 @@ def test_gives_up_when_no_progress():
         sdreplay.time.sleep = old
         cam.close()
     assert not res.complete and "gave up" in res.reason and res.reconnects == 4, res
+
+
+class _QuickStall:
+    """STALL_S / KEEPALIVE_S scaled down (30 s / 20 s) so a camera that goes quiet is noticed in about a second."""
+
+    def __enter__(self):
+        self.old = sdreplay.STALL_S, sdreplay.KEEPALIVE_S
+        sdreplay.STALL_S, sdreplay.KEEPALIVE_S = 1.5, 0.4
+
+    def __exit__(self, *exc):
+        sdreplay.STALL_S, sdreplay.KEEPALIVE_S = self.old
+
+
+def _bounded(fn, timeout=20.0):
+    """fn() in a thread: a regression that never ends fails the test instead of hanging the suite."""
+    box = {}
+    th = threading.Thread(target=lambda: box.setdefault("res", fn()), daemon=True)
+    th.start()
+    th.join(timeout)
+    assert not th.is_alive(), f"still running after {timeout} s"
+    return box["res"]
+
+
+def test_replay_ends_when_the_camera_has_nothing_more():
+    """The card's footage ends before the range does and the camera keeps the session open, answering keep-alives
+    (RFC 2326 pauses at the end of the range): keep-alive replies must not count as data. The replay ends there
+    without a reconnect and the last GOP is written. The camera also rotates its Digest nonce on a keep-alive (401
+    stale=true): answered with the new one; TEARDOWN is authenticated."""
+    t0 = time.time() - 4 * 3600
+    cam = FakeCamera(t0, n=160, rotate_nonce=True)        # footage up to t0+15.95; the range runs to t0+20
+    cam.start()
+    sink = sdbackfill.WriterSink(TMP / "recordings" / "tail", t0 + 10.0, t0 + 20.0, offset=0.0)
+    began = time.monotonic()
+    with _QuickStall():
+        try:
+            res = _bounded(lambda: sdreplay.fetch_range(f"rtsp://127.0.0.1:{cam.port}/onvifreplay", cam.user, cam.password,
+                                                        t0 + 10.0, t0 + 20.0, sink, stop=threading.Event()))
+        finally:
+            cam.close()
+    assert time.monotonic() - began < 10 and res.reconnects == 0 and cam.sessions == 1, res
+    assert not res.complete and "recording ends at" in res.reason, res
+    out = sink.writer.close()
+    got = [frame_index(s[1]) for o in out for s in read_samples(o.path)]
+    assert got == list(range(105, 160)), (got[:3], got[-3:])      # the final GOP (155..159) too
+    for _ in range(50):                                           # TEARDOWN reaches the camera's thread
+        if cam.authed["TEARDOWN"]:
+            break
+        time.sleep(0.05)
+    assert cam.authed["GET_PARAMETER"] and all(cam.authed["GET_PARAMETER"]), cam.authed
+    assert cam.authed["TEARDOWN"] == [True], cam.authed
+
+
+def test_replay_ends_when_the_camera_closes_at_its_last_frame_twice():
+    """A camera that closes the connection when its footage ends: the first close looks like a dropped link (one
+    reconnect); the resumed session ending at the very same frame is the end of the card, not another failure. No
+    reconnects burnt, and the GOP the first close rolled back is written."""
+    t0 = time.time() - 4 * 3600
+    cam = FakeCamera(t0, n=160, close_at_end=True)
+    cam.start()
+    sink = sdbackfill.WriterSink(TMP / "recordings" / "closes", t0 + 10.0, t0 + 20.0, offset=0.0)
+    try:
+        res = _bounded(lambda: sdreplay.fetch_range(f"rtsp://127.0.0.1:{cam.port}/onvifreplay", cam.user, cam.password,
+                                                    t0 + 10.0, t0 + 20.0, sink, stop=threading.Event()))
+    finally:
+        cam.close()
+    assert res.reconnects == 1 and cam.sessions == 2 and "recording ends at" in res.reason, res
+    got = [frame_index(s[1]) for o in sink.writer.close() for s in read_samples(o.path)]
+    assert got == list(range(105, 160)), (got[:3], got[-3:])
+
+
+def test_replay_wall_clock_is_bounded():
+    t0 = time.time() - 4 * 3600
+    cam = FakeCamera(t0, n=600, frame_delay=0.02)               # 300 frames for the range: ~6 s
+    cam.start()
+    sink = sdbackfill.WriterSink(TMP / "recordings" / "slow", t0 + 10.0, t0 + 40.0, offset=0.0)
+    began = time.monotonic()
+    try:
+        res = _bounded(lambda: sdreplay.fetch_range(f"rtsp://127.0.0.1:{cam.port}/onvifreplay", cam.user, cam.password,
+                                                    t0 + 10.0, t0 + 40.0, sink, max_wall_s=1.0))
+    finally:
+        cam.close()
+    assert time.monotonic() - began < 4 and "took longer than 1 s" in res.reason and not res.complete, res
+    assert res.reconnects == 0 and res.last is not None and res.last < t0 + 40.0
+
+
+class BFrameCamera(FakeCamera):
+    """Sends I P B B P B B ... in decode order: the ONVIF / RTP times are presentation times, so they go backwards
+    at every B-frame (from frame 0, whatever the range)."""
+
+    def stream(self, c, send, start, end, cseq, cut):
+        order = [0]
+        for k in range(1, self.n - 2, 3):
+            order += [k + 2, k, k + 1]
+        seq = 0
+        try:
+            for i in order:
+                t, key = self.t0 + 0.05 + i * 0.1, i % 30 == 0
+                pk = packetize_h264(frame_nals(i, key))
+                for j, pl in enumerate(pk):
+                    seq += 1
+                    pkt = rtp(seq, int((t - self.t0) * 90000), pl, marker=j == len(pk) - 1, ntp=t if j == 0 else None, clean=key, cseq=cseq)
+                    send(b"$\x00" + struct.pack(">H", len(pkt)) + pkt)
+        except OSError:
+            return
+
+
+def test_bframes_fail_the_job_instead_of_half_rate_video():
+    t0 = time.time() - 4 * 3600
+    cam = BFrameCamera(t0, n=300)
+    cam.start()
+    db.upsert_camera({**CAM, "id": "bfr", "host": "127.0.0.1"})
+    sdbackfill.save_status({"camera_id": "bfr", "checked_at": time.time(), "supported": True, "has_recording": True,
+                            "earliest": t0, "latest": time.time(), "recording_now": True, "clock_offset_s": 0.0,
+                            "replay_uri": f"rtsp://127.0.0.1:{cam.port}/onvifreplay"})
+
+    async def lister(cid, start, end):
+        return []
+
+    async def go():
+        bf = sdbackfill.Backfill(list_spans=lister)
+        row = bf.submit("bfr", t0 + 1.0, t0 + 25.0, by="test")
+        await bf._job(row)
+        return db.one("SELECT * FROM restored_spans WHERE id=?", [row["id"]])
+    try:
+        written, res = sdbackfill.restore_range({**CAM, "id": "bfr", "host": "127.0.0.1"}, t0 + 1.0, t0 + 25.0, 0.0,
+                                                replay_uri=f"rtsp://127.0.0.1:{cam.port}/onvifreplay")
+        r = asyncio.run(go())
+    finally:
+        cam.close()
+    assert written == [] and res.unsupported and res.reason == sdreplay.BFRAMES and res.reconnects == 0, res
+    assert r["state"] == "failed" and r["error"] == sdreplay.BFRAMES and not r["restored_s"], r
+    folder = sdbackfill.camera_folder("bfr")
+    assert not folder.exists() or not list(folder.iterdir()), list(folder.iterdir())
+    db.execute("DELETE FROM restored_spans")
+
+
+def test_writer_failure_leaves_no_temp_file():
+    """A disk error mid-run: the job fails, the open segment's temp file and handle go."""
+    t0 = time.time() - 4 * 3600
+    cam = FakeCamera(t0, n=300)
+    cam.start()
+    real = fmp4mux.SegmentWriter._write_fragment
+    calls = {"n": 0}
+
+    def failing(self, *a):
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise OSError(28, "No space left on device")
+        return real(self, *a)
+    fmp4mux.SegmentWriter._write_fragment = failing
+    try:
+        sdbackfill.restore_range({**CAM, "id": "fail1", "host": "127.0.0.1"}, t0 + 10.0, t0 + 25.0, 0.0,
+                                 replay_uri=f"rtsp://127.0.0.1:{cam.port}/onvifreplay")
+        raise AssertionError("expected OSError")
+    except OSError as e:
+        assert e.errno == 28, e
+    finally:
+        fmp4mux.SegmentWriter._write_fragment = real
+        cam.close()
+    folder = sdbackfill.camera_folder("fail1")
+    assert calls["n"] == 3 and folder.exists() and not list(folder.glob(".*.sdpart")), list(folder.iterdir())
+
+
+def test_writer_parameter_change_keeps_the_old_gop_with_its_own_parameter_sets():
+    """New parameter sets at a keyframe start a new segment; the GOP before it is written under the old ones."""
+    sps2 = SPS[:3] + bytes([0x0C]) + SPS[4:]                 # the same picture at another level
+    assert fmp4mux.video_info("H264", [sps2, PPS]).params != fmp4mux.video_info("H264", [SPS, PPS]).params
+    w = fmp4mux.SegmentWriter(TMP / "w" / "pchange", "H264")
+    t0 = time.time() - 1800
+    for i in range(40):
+        key = i % 10 == 0
+        nals = frame_nals(i, key)
+        if key and i >= 20:
+            nals = [sps2, PPS] + nals[2:]
+        w.add_video(t0 + i * 0.1, nals, key)
+    out = w.close()
+    assert [round(o.start - t0, 2) for o in out] == [0.0, 2.0], [o.start - t0 for o in out]
+    a, b = out[0].path.read_bytes(), out[1].path.read_bytes()
+    assert SPS in a and sps2 not in a and sps2 in b and SPS not in b
+    assert [frame_index(s[1]) for o in out for s in read_samples(o.path)] == list(range(40))
+
+
+def test_clock_offset_trusts_the_live_estimate_only_when_it_agrees():
+    f, base = sdbackfill.clock_offset_for, settings.camera_clock_offset
+    st = {"clock_offset_s": 3.0}                               # the camera is 3 s ahead: -3 s onto this server's clock
+    assert f("c", -2.6, st) == -2.6 + base                     # within 2 s of ONVIF's: the finer live estimate
+    assert f("c", 4.0, st) == -3.0 + base                      # 7 s apart (a reader backed up, just restarted): ONVIF's
+    assert f("c", -2.6, st, live_samples=5) == -3.0 + base     # too few samples behind it
+    assert f("c", -2.6, st, live_samples=500) == -2.6 + base
+    assert f("c", 4.0, None) == 4.0 + base and f("c", None, st) == -3.0 + base and f("c", None, None) == base
+
+
+def test_at_most_three_recoveries_at_once():
+    async def go():
+        bf = sdbackfill.Backfill(list_spans=lister)
+        gate, started = asyncio.Event(), []
+
+        async def job(row):
+            started.append(row["camera_id"])
+            await gate.wait()
+            db.execute("UPDATE restored_spans SET state='recovered' WHERE id=?", [row["id"]])
+        bf._job = job
+        now = time.time()
+        for i in range(5):
+            bf.submit(f"par{i}", now - 1000 + i, now - 900 + i)
+        bf._start_waiting()
+        await asyncio.sleep(0)
+        assert started == ["par4", "par3", "par2"] and len(bf.running) == 3, started    # newest first, the rest wait
+        assert db.one("SELECT COUNT(*) AS n FROM restored_spans WHERE state='waiting'")["n"] == 5
+        gate.set()
+        await asyncio.sleep(0.05)
+        bf._start_waiting()
+        await asyncio.sleep(0)
+        assert sorted(started) == [f"par{i}" for i in range(5)], started
+        return bf
+
+    async def lister(cid, start, end):
+        return []
+    bf = asyncio.run(go())
+    assert bf.pool._max_workers == sdbackfill.MAX_PARALLEL == 3
+    db.execute("DELETE FROM restored_spans")
 
 
 # --------------------------------------------------------------------------- the worker, end to end

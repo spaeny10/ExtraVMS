@@ -166,10 +166,11 @@ async def lifespan(app: FastAPI):
         t.cancel()
 
 
-def _live_clock_offset(camera_id: str) -> float | None:
-    """The metadata reader's camera-clock offset (arrival minus camera time), or None before it has one."""
+def _live_clock_offset(camera_id: str) -> tuple[float | None, int] | None:
+    """The metadata reader's camera-clock offset (arrival minus camera time) and how many samples it rests on, or None
+    without a reader (sdbackfill.clock_offset_for trusts it only with enough samples and close to the ONVIF offset)."""
     ing = state.ingests.get(camera_id)
-    return ing.meta.clock_offset if ing else None
+    return (ing.meta.clock_offset, len(ing.meta._deltas)) if ing else None
 
 
 def _https_server():

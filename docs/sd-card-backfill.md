@@ -29,7 +29,7 @@ Status: phases 0 and 1 built (2026-10-08, not deployed); phases 2-4 planned. Pro
 
 ### 3. Fetch the footage (backend `sdbackfill.py`)
 - The replay client from the test, hardened: Digest auth, TCP-interleaved RTP, keep-alive, H.264 and H.265 depacketizing, ONVIF timestamps, reconnect and resume from the last good second.
-- One replay session per camera at a time (cameras limit sessions; the live stream keeps running alongside). Cameras of a server run in parallel.
+- One replay session per camera at a time (cameras limit sessions; the live stream keeps running alongside). Cameras of a server run in parallel (up to 3 at once).
 - Output: the restored video is cut into segments named and formatted like the server's own recordings and written into the camera's recording folder, so the Timeline, playback, export and retention treat it as ordinary footage. Restored spans are recorded in a table (`camera, from, to, source='sd', state`) and shown on the Timeline in a different shade with "Recovered from the camera's SD card".
 - Order: newest gap first; a gap shorter than 20 s is ignored.
 
@@ -73,9 +73,9 @@ Status: phases 0 and 1 built (2026-10-08, not deployed); phases 2-4 planned. Pro
 
 ## Phase 1 as built
 
-- `backend/nvr/sdreplay.py`: the replay client (Digest, TCP interleaved, `GET_PARAMETER` every 20 s, H.264 / H.265 depacketizing with loss handling, ONVIF timestamps, G.711 to PCM) and `fetch_range`, which reconnects and resumes from the GOP in progress: the new session starts 4 s early and frames before the resume point are skipped, so nothing is written twice and nothing is skipped. Port-forward mode uses `public_replay_port`.
+- `backend/nvr/sdreplay.py`: the replay client (Digest, TCP interleaved, `GET_PARAMETER` every 20 s, H.264 / H.265 depacketizing with loss handling, ONVIF timestamps, G.711 to PCM) and `fetch_range`, which reconnects and resumes from the GOP in progress: the new session starts 4 s early and frames before the resume point are skipped, so nothing is written twice and nothing is skipped. Port-forward mode uses `public_replay_port`. A replay ends without reconnecting when the camera has nothing more: no video for 30 s while it still answers keep-alives (RFC 2326 pauses at the end of the range), an RTCP BYE, or a resumed session ending at the same frame as the one before; what arrived is kept, last GOP included. A replay gets at most the range at real time × 1.25 + 5 min of wall-clock time. A stream with B-frames (frame times going backwards) fails the job ("camera stream uses B-frames; SD recovery not supported for this camera yet") rather than writing half-rate video. Keep-alives answer a rotated Digest nonce; TEARDOWN is authenticated.
 - `backend/nvr/fmp4mux.py`: writes segments exactly as MediaMTX does (ftyp, moov with mvhd length, hvc1/avc1, `mtxi` with a stream id per run, 1 s fragments, parameter sets in band), named by their start, published by a hard link that fails if the name exists (never overwritten), with the file's modification time set to its end like MediaMTX's.
-- `backend/nvr/sdbackfill.py`: SD status per camera (hourly, read-only ONVIF), the gap finder, the job worker (one session per camera, cameras in parallel, newest first) and the `restored_spans` table.
+- `backend/nvr/sdbackfill.py`: SD status per camera (hourly, read-only ONVIF), the gap finder, the job worker (one session per camera, up to 3 cameras in parallel on the worker's own threads, the rest waiting, newest first) and the `restored_spans` table. Restored frames take the metadata reader's live clock offset only when it agrees with the camera's ONVIF clock within 2 s; otherwise the ONVIF difference.
 - API: `GET /api/cameras/{id}/sd`, `GET /api/sd/gaps`, `POST /api/sd/recover` (admin through the hub), `restored` and `sd_card` in `/api/recordings/{id}`, `status.sd` in `/api/cameras`.
 - UI: Settings → Cameras shows the SD status with a Check button; the Timeline shades recovered and running jobs and offers "recover" on a gap the card covers (admins).
 
