@@ -2,6 +2,8 @@
  * Pure helpers for fleet actions, which are planned and run only on Customer › Actions (FleetActionsPage):
  *  - looksLikeInstruction: Find's Ask box uses it to send an instruction here instead of asking the servers
  *    (mirrors fleet_actions._clean on the hub: polite padding stripped, questions never count, an action verb first);
+ *  - looksLikeRequest: something neither Ask nor Actions can do ("Alert me when someone enters", "Watch for a white
+ *    truck"): the twin of site_ask.looks_like_request, whose answer (REQUEST_MESSAGE) says where alert rules live;
  *  - actionsHref / textFromSearch: the Actions page link with the instruction prefilled (?text=), never auto-planned;
  *  - instructionKey: Enter plans, Shift+Enter is a new line;
  *  - parserLabel, outcomeText, whereText, actionText: the card's "Read by ..." line and the Action log's cells.
@@ -15,13 +17,47 @@ const POLITE = /^\s*(please|pls|kindly|ok|okay|now|go ahead and|can you|could yo
 const QUESTION = /^\s*(how|what|what's|whats|when|where|who|whom|whose|why|which|did|does|do(?!\s+not\b)|is|are|was|were|has|have|had|show|list|find|search|any|anyone|anybody|count|tell|give|should|shall|may|might)\b/i;
 const VERB_FIRST = /^(migrate|move|transfer|relocate|retire|decommission|rename|set|keep|retain|add|lock|protect|quiet|mute|silence|snooze|hush|unmute|stop\s+describing|start\s+describing|describe\s+only)\b/i;
 
-/** Does this Ask text read as a fleet instruction ("Migrate Ironsight to Hailo T1", "Quiet alerts tonight")? */
-export function looksLikeInstruction(text: string): boolean {
+// Requests to DO something Ask can't (mirrors hub/hub/site_ask.py REQUEST_FIRST / REQUEST_ANYWHERE / PAST_QUESTION)
+const ALERTISH = String.raw`(?:alerts?|alarms?|rules?|notifications?|notices?|reminders?|automations?|triggers?|texts?|e-?mails?|messages?)`;
+const REQUEST_FIRST = new RegExp(String.raw`^(?:(?:make|create|add|set\s+up|setup|set|build|configure|schedule|program)\b.{0,80}?\b` + ALERTISH + String.raw`\b`
+  + String.raw`|(?:can|could|may)\s+(?:i|we)\s+(?:get|have|set\s+up|make|create|receive|add)\b.{0,60}?\b` + ALERTISH + String.raw`\b`
+  + String.raw`|(?:alert|notify|warn|text|e-?mail|ping|page|message|call)\s+(?:me|us|someone|security|the\s+\w+)\b`
+  + String.raw`|(?:let|tell)\s+(?:me|us)\s+know\b`
+  + String.raw`|tell\s+(?:me|us)\s+(?:when|whenever|if|once|as\s+soon\s+as|the\s+(?:moment|minute|next\s+time)|next\s+time)\b`
+  + String.raw`|send\s+(?:me|us)\b`
+  + String.raw`|watch\s+(?:out|for|over)\b|look\s+out\b|monitor\b|keep\s+(?:an\s+)?eye\b|keep\s+watch\b|be\s+on\s+the\s+lookout\b`
+  + String.raw`|remind\b`
+  + String.raw`|(?:turn|switch)\s+(?:\S+\s+){0,4}?(?:on|off)\b`
+  + String.raw`|(?:delete|remove|erase|wipe|purge)\b`
+  + String.raw`|(?:enable|disable|change|modify|edit|adjust|configure|reconfigure|reset|arm|disarm)\b)`, "i");
+const REQUEST_ANYWHERE = new RegExp(String.raw`\b(?:(?:alert|notify|warn|text|e-?mail|ping|page)\s+(?:me|us)|let\s+(?:me|us)\s+know|remind\s+(?:me|us)`
+  + String.raw`|(?:be|get|been)\s+(?:notified|alerted|pinged|texted|e-?mailed)`
+  + String.raw`|(?:get|receive|want|like|need)\s+(?:an?\s+)?(?:alert|notification|text|e-?mail)s?\s+(?:when|whenever|if|for)`
+  + String.raw`|(?:set\s+up|create|make|add)\s+(?:an?\s+|the\s+|some\s+)?(?:\w+\s+){0,2}?(?:alerts?|alarms?|notifications?|reminders?))\b`, "i");
+const PAST_QUESTION = /^\s*(?:did|was|were|has|have|had|why|who|which|what)\b/i;
+
+/** The text without polite padding ("please", "can you", ...), and whether there was any. */
+function unpadded(text: string): { t: string; polite: boolean } {
   let t = text.trim();
   let polite = false;
   for (let m = POLITE.exec(t); m && t.slice(m[0].length); m = POLITE.exec(t)) { t = t.slice(m[0].length); polite = true; }
-  t = t.trim();
-  if (!t || QUESTION.test(t) || (t.endsWith("?") && !polite)) return false;
+  return { t: t.trim(), polite };
+}
+
+/**
+ * Does this ask the system to DO something Ask can't ("Alert me when someone enters", "Can you make an alert if someone
+ * is in the kitchen?", "Tell me when…", "Watch for a white truck")? Questions about what happened don't count.
+ */
+export function looksLikeRequest(text: string): boolean {
+  const { t } = unpadded(text);
+  if (!t) return false;
+  return REQUEST_FIRST.test(t) || (!PAST_QUESTION.test(t) && REQUEST_ANYWHERE.test(t));
+}
+
+/** Does this Ask text read as a fleet instruction ("Migrate Ironsight to Hailo T1", "Quiet alerts tonight")? */
+export function looksLikeInstruction(text: string): boolean {
+  const { t, polite } = unpadded(text);
+  if (!t || QUESTION.test(t) || (t.endsWith("?") && !polite) || looksLikeRequest(text)) return false;
   return VERB_FIRST.test(t);
 }
 

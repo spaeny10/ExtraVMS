@@ -18,6 +18,10 @@ When the question names a period ("overnight") and a fallback lookup had to look
 `earlier: true` (before it) or `later: true` (after it). `text` never starts with the camera or the time (the hub formats those in the Site's time zone). Nothing is written:
 no assistant thread, no message. The old text path (/api/assistant/ask) is untouched.
 
+Time: the hub drops a server that answers after ~25 s, with all of its findings, so nothing here runs past HARD_S (see
+run()); lookups that didn't finish are listed in `incomplete` (and `incomplete_cameras` when they concern only some
+cameras). The hub's `tz` (the Site's zone) sets the day boundaries, "today" and the labels; without it, the server's clock.
+
 Follow-ups: the hub sends the last few turns. A follow-up that only changes the period ("and yesterday?") or starts
 with "and / what about" is read with the previous question (contextualize) before planning, and the planner sees the
 history too.
@@ -38,13 +42,20 @@ log = logging.getLogger("nvr.retrieve")
 
 PLAN_TIMEOUT_S = 12.0      # the planner's share; the hub waits ~25 s for the whole retrieve
 BUDGET_S = 20.0            # slow lookups stop starting after this (a note says so)
-SLOW_TOOLS = {"search_footage"}   # CLIP + Qwen over video; everything else is a database lookup well under a second
-FAST_MIN_S = 8.0           # a database lookup still runs (with this long) when the budget is spent
+HARD_S = 22.0              # nothing runs past this: the hub waits RETRIEVE_TIMEOUT_S (25 s) and then drops ALL of a server
+SLOW_TOOLS = {"search_footage"}   # CLIP + Qwen over video; everything else is mostly a database lookup
+FAST_MIN_S = 8.0           # a database lookup still runs (with up to this long, never past HARD_S) when the budget is spent
+MIN_RUN_S = 1.0            # less than this left before HARD_S: a lookup is skipped (a note says so)
+FALLBACK_MIN_S = 3.0       # the "nothing found" fallbacks only start with this much left before HARD_S
+SPARE_S = 2.0              # of a lookup's time, kept for the database after the text embedding / people estimate
 MAX_ITEMS = 60
 HISTORY_TURNS = 4
+_clock = time.monotonic    # tests use a fake clock
 
 FOLLOW_UP = re.compile(r"^\s*(and|also|plus|then|ok(ay)?,?\s*(and|what about|how about)?|what about|how about|same\s+(for|with|question\s+for))\b[\s,]*",
                        re.I)
+_BARE_DAY = re.compile(r"(?:" + A._WD + r")", re.I)
+_CALENDAR_WEEK = re.compile(r"(?:last|previous)\s+week|.*\b(?:" + A._WD + r")\b.*\bweek\b.*", re.I)
 
 
 def _last_user(history: list[dict]) -> str | None:
@@ -70,8 +81,10 @@ def contextualize(question: str, history: list[dict], now: float) -> str:
     rest_clean = FOLLOW_UP.sub("", rest).strip(" ?.!,")
     if win and not rest_clean:
         # only the period changed: the previous question with the new period
-        pm = A._TIME_PHRASES.search(prev.lower())
-        phrase = win["label"]
+        pm = A.time_phrase(prev)
+        phrase = _period_words(win["label"])
+        if pm and _BARE_DAY.fullmatch(phrase) and _CALENDAR_WEEK.fullmatch(pm.group(1)):
+            phrase += " last week"   # "Tuesday last week?" then "and Friday?": that week's Friday
         if pm:
             return (prev[:pm.start()] + phrase + prev[pm.end():]).strip()
         tail = "?" if prev.rstrip().endswith("?") else ""
@@ -80,8 +93,14 @@ def contextualize(question: str, history: list[dict], now: float) -> str:
         if win:
             return q[follow.end():].strip() or q
         pw = A.time_window(prev, now)
-        return f"{rest_clean} {pw['label']}?" if pw else f"{rest_clean}?"
+        return f"{rest_clean} {_period_words(pw['label'])}?" if pw else f"{rest_clean}?"
     return q
+
+
+def _period_words(label: str) -> str:
+    """A window's label without its date ("Friday, Oct 2" -> "Friday"): it reads back as the same period, and no date
+    ends up in the text that is searched for."""
+    return label.split(",")[0].strip()
 
 
 # ---------------------------------------------------------------- collecting structured findings
@@ -178,7 +197,7 @@ def _gap_items(a: dict, now: float) -> list[dict]:
 _PEOPLE = re.compile(r"Number of different people: (?:about (\d+)|between (\d+) and (\d+))")
 
 
-def _counts(a: dict, lines: list[str]) -> dict:
+def _counts(a: dict, lines: list[str], now: float | None = None) -> dict:
     """count_events, structured (same filters as the tool): totals by label and camera (+ hour/day when grouped)."""
     where, p = A._where(a)
     rows = db.all(f"SELECT camera_id, camera_class, COUNT(*) AS n FROM events WHERE {where} GROUP BY camera_id, camera_class", p)
@@ -191,7 +210,8 @@ def _counts(a: dict, lines: list[str]) -> dict:
                  "camera_names": {c: A._cam_name(c) for c in by_camera}, "since": a.get("since"), "until": a.get("until"),
                  "label": a.get("label"), "camera": a.get("camera")}
     if a.get("group_by") in ("hour", "day"):
-        expr = {"hour": "strftime('%H:00', start_ts, 'unixepoch', 'localtime')", "day": "strftime('%Y-%m-%d', start_ts, 'unixepoch', 'localtime')"}[a["group_by"]]
+        loc = A.sql_local(now)   # the Site's hours and days when the hub sent its time zone
+        expr = {"hour": f"strftime('%H:00', start_ts, 'unixepoch', {loc})", "day": f"strftime('%Y-%m-%d', start_ts, 'unixepoch', {loc})"}[a["group_by"]]
         out["by_" + a["group_by"]] = {r["k"]: r["n"] for r in db.all(f"SELECT {expr} AS k, COUNT(*) AS n FROM events WHERE {where} GROUP BY k ORDER BY k", p)}
     for line in lines:
         m = _PEOPLE.search(line)
@@ -218,56 +238,88 @@ def _footage_text(line: str) -> str:
 
 
 def _public_args(a: dict) -> dict:
-    return {k: v for k, v in a.items() if v not in (None, "", False)}
+    return {k: v for k, v in a.items() if v not in (None, "", False) and not k.startswith("_")}
 
 
-async def run(calls: list[dict], ev: Evidence, question: str, now: float, deadline: float) -> tuple[list[dict], list[dict], list[str]]:
-    """assistant.run_calls, collecting items. Returns (summary of calls, items, notes)."""
+async def _lookup(tool: str, a: dict, label: str, ev: Evidence, now: float, notes: list[str]) -> tuple[list[str], int, list[dict]]:
+    """One lookup and its structured findings: (lines, count, items)."""
+    lines, n, found = [], 0, []
+    if tool == "recording_gaps":
+        found = await asyncio.to_thread(_gap_items, a, now)
+        return lines, sum(1 for x in found if x["kind"] == "gap"), found
+    lines, n = await A.TOOL_FUNCS[tool](a, ev)
+    if tool == "count_events":
+        counts = await asyncio.to_thread(_counts, a, lines, now)
+        found = [{"kind": "count", "text": "\n".join(lines), "counts": counts, "label": label}]
+    elif tool == "list_journeys":
+        found = await asyncio.to_thread(_journey_items, a)
+    elif tool == "get_briefing":
+        b = await asyncio.to_thread(_briefing_item, a)
+        found = [b] if b else []
+    elif tool == "search_footage":
+        for key in ev.call_moments:
+            m = ev.moments[key]
+            line = next((x for x in lines if x.startswith(f"[{key}]")), "")
+            found.append({"kind": "footage", "ts": m["ts"], "end_ts": m.get("end") or m["ts"], "camera_id": m["camera_id"],
+                          "camera_name": A._cam_name(m["camera_id"]), "tile": m.get("tile"), "text": _footage_text(line)})
+        if not ev.call_moments and lines:
+            notes.append(lines[0])
+    return lines, n, found
+
+
+async def run(calls: list[dict], ev: Evidence, question: str, now: float, deadline: float,
+              hard: float | None = None) -> tuple[list[dict], list[dict], list[str], list[str] | None]:
+    """assistant.run_calls, collecting items. Returns (summary of calls, items, notes, cameras whose lookups did not
+    finish: [] none, None all of them).
+
+    Time (on the monotonic clock): slow lookups start only before `deadline`; nothing runs past `hard` (the hub drops a
+    server that answers late, so one slow lookup would lose every finding). The fast database lookups run first and
+    still run when the budget is spent (a cold footage search must not leave the answer with no events at all: "White
+    Truck?" found nothing while 12 matched), with at least FAST_MIN_S, but never past `hard`; short on time, a text
+    search goes by keywords only (the embedding is Ollama, cold after a restart) and a count leaves out the
+    different-people estimate."""
+    hard = deadline + (HARD_S - BUDGET_S) if hard is None else hard
     summary: list[dict] = []
     items: list[dict] = []
     notes: list[str] = []
-    # The fast database lookups first, and never skipped for time: a cold footage search (first question after a
-    # restart) must not leave the answer with no events at all ("White Truck?" found nothing while 12 matched).
+    affected: set[str] | None = set()
+    cut_short = False   # a lookup ran out of time or failed: "nothing found" may be wrong, so no fallbacks
+
+    def unfinished(note: str, a: dict) -> None:
+        nonlocal affected
+        notes.append(note)
+        if affected is not None:
+            affected = affected | {a["camera"]} if a.get("camera") else None
+
     queue = sorted(calls, key=lambda c: c["tool"] in SLOW_TOOLS)
     while queue:
         c = queue.pop(0)
-        left = deadline - time.monotonic()
-        if left < 1:
-            if c["tool"] in SLOW_TOOLS:
-                notes.append(f"{A.describe_call(c)} was skipped to answer in time")
-                continue
-            left = FAST_MIN_S
-        ev.call_events, ev.call_moments = [], []
         tool, a = c["tool"], c["args"]
         label = A.describe_call(c)
+        ev.call_events, ev.call_moments = [], []
         lines, n, found = [], 0, []
-        try:
-            if tool == "recording_gaps":
-                found = await asyncio.wait_for(asyncio.to_thread(_gap_items, a, now), left)
-                n = sum(1 for x in found if x["kind"] == "gap")
-            else:
-                lines, n = await asyncio.wait_for(A.TOOL_FUNCS[tool](a, ev), left)
-                if tool == "count_events":
-                    counts = await asyncio.to_thread(_counts, a, lines)
-                    found = [{"kind": "count", "text": "\n".join(lines), "counts": counts, "label": label}]
-                elif tool == "list_journeys":
-                    found = await asyncio.to_thread(_journey_items, a)
-                elif tool == "get_briefing":
-                    b = await asyncio.to_thread(_briefing_item, a)
-                    found = [b] if b else []
-                elif tool == "search_footage":
-                    for key in ev.call_moments:
-                        m = ev.moments[key]
-                        line = next((x for x in lines if x.startswith(f"[{key}]")), "")
-                        found.append({"kind": "footage", "ts": m["ts"], "end_ts": m.get("end") or m["ts"], "camera_id": m["camera_id"],
-                                      "camera_name": A._cam_name(m["camera_id"]), "tile": m.get("tile"), "text": _footage_text(line)})
-                    if not ev.call_moments and lines:
-                        notes.append(lines[0])
-        except asyncio.TimeoutError:
-            notes.append(f"{label} took too long and was skipped")
-        except Exception as e:  # a broken lookup shouldn't sink the others
-            log.exception("retrieve tool %s failed", tool)
-            notes.append(f"{label} failed: {e}")
+        t = _clock()
+        left, hard_left = deadline - t, hard - t
+        if hard_left < MIN_RUN_S or (tool in SLOW_TOOLS and left < 1):
+            unfinished(f"{label} was skipped to answer in time", a)
+        else:
+            limit = min(left, hard_left) if tool in SLOW_TOOLS else min(max(left, FAST_MIN_S), hard_left)
+            spare = 0.0 if left < 1 else max(0.0, limit - SPARE_S)   # the budget is spent: no embedding, no estimate
+            run_args = {**a, "_embed_s": spare} if tool == "search_events" and a.get("text") else \
+                {**a, "_people_s": spare} if tool == "count_events" else a
+            try:
+                lines, n, found = await asyncio.wait_for(_lookup(tool, run_args, label, ev, now, notes), limit)
+            except asyncio.TimeoutError:
+                unfinished(f"{label} took too long and was skipped", a)
+                cut_short = True
+            except Exception as e:  # a broken lookup shouldn't sink the others
+                log.exception("retrieve tool %s failed", tool)
+                unfinished(f"{label} failed: {e}", a)
+                cut_short = True
+            if run_args.get("_keyword_only"):
+                unfinished(f"{label} searched by keywords only (the search by meaning was skipped to answer in time)", a)
+            if run_args.get("_people_skipped"):
+                notes.append("The different-people estimate was left out to answer in time.")
         for eid in dict.fromkeys(ev.call_events):   # search_events, list_unusual, list_journeys' members
             it = next((x for x in items if x["kind"] == "event" and x["event_id"] == eid), None)
             if it is None:
@@ -278,9 +330,14 @@ async def run(calls: list[dict], ev: Evidence, question: str, now: float, deadli
             it["calls"].append(len(summary))
         items.extend(found)
         summary.append({"tool": tool, "args": a, "label": label, "count": n})
-        if not queue and (fb := A.fallback_call(summary, question)):
-            queue.append(fb)
-    return [{**s, "args": _public_args(s["args"])} for s in summary], items, notes
+        # a skipped lookup still counts as empty here: the fallbacks are database lookups and may still find it
+        if not queue and not cut_short and (fb := A.fallback_call(summary, question)):
+            if hard - _clock() >= FALLBACK_MIN_S:
+                queue.append(fb)
+            elif not fb["args"].get("earlier"):
+                unfinished(f"{A.describe_call(fb)}, a wider search, was skipped to answer in time", fb["args"])
+    cams = None if affected is None else sorted(affected)
+    return [{**s, "args": _public_args(s["args"])} for s in summary], items, notes, cams
 
 
 def is_incomplete_note(note: str) -> bool:
@@ -312,7 +369,19 @@ def _cap(items: list[dict]) -> list[dict]:
 
 
 async def retrieve(question: str, history: list[dict] | None = None, now: float | None = None, tz: str | None = None) -> dict:
-    t0 = time.monotonic()
+    """`tz`: the Site's time zone (IANA name) from the hub. Days, "today", the planner's local times and labels follow
+    it; without it (or when this host can't read it) the server's own clock, as before."""
+    zone = A.zone_for(tz)
+    tokens = (A.SITE_TZ.set(zone), A.CAMERA_NAMES.set(tuple(c["name"] for c in db.cameras() if c.get("name"))))
+    try:
+        return await _retrieve(question, history, now, tz, zone)
+    finally:
+        A.SITE_TZ.reset(tokens[0])
+        A.CAMERA_NAMES.reset(tokens[1])
+
+
+async def _retrieve(question: str, history: list[dict] | None, now: float | None, tz: str | None, zone) -> dict:
+    t0 = _clock()
     now = now or time.time()
     history = [{"role": h["role"], "content": str(h.get("content") or "")[:1500]} for h in (history or [])
                if isinstance(h, dict) and h.get("role") in ("user", "assistant")][-HISTORY_TURNS:]
@@ -331,7 +400,7 @@ async def retrieve(question: str, history: list[dict] | None = None, now: float 
         notes.append("The planner was unavailable, so the built-in lookup rules chose the lookups.")
     calls = A.check_plan(raw, used, now)
     ev = Evidence()
-    summary, items, more = await run(calls, ev, used, now, t0 + BUDGET_S)
+    summary, items, more, unfinished_cams = await run(calls, ev, used, now, t0 + BUDGET_S, t0 + HARD_S)
     notes += more
     window = _window(used, calls, now)
     if window and A.time_window(used, now):
@@ -346,15 +415,17 @@ async def retrieve(question: str, history: list[dict] | None = None, now: float 
     count_items = [x for x in items if x["kind"] == "count"]
     counts = dict(count_items[0]["counts"]) if count_items else {}
     counts["found"] = {k: sum(1 for x in items if x["kind"] == k) for k in ("event", "footage", "journey", "gap")}
-    off = dt.datetime.fromtimestamp(now).astimezone()
+    off = dt.datetime.fromtimestamp(now, zone) if zone else dt.datetime.fromtimestamp(now).astimezone()
     out = {
         "question": used, "asked": question, "window": window,
         "calls": summary, "results": _cap(items), "counts": counts, "plan_model": raw.get("_model"), "notes": notes,
         "now": now, "tz": tz, "server_tz": off.tzname(), "utc_offset": off.utcoffset().total_seconds() if off.utcoffset() else 0,
-        "truncated": max(0, len(items) - MAX_ITEMS), "duration_ms": round((time.monotonic() - t0) * 1000),
+        "truncated": max(0, len(items) - MAX_ITEMS), "duration_ms": round((_clock() - t0) * 1000),
         # lookups that did not finish: the answer must not read their absence as "nothing found"
         "incomplete": [n for n in notes if is_incomplete_note(n)],
     }
+    if out["incomplete"] and unfinished_cams is not None:
+        out["incomplete_cameras"] = unfinished_cams   # only these cameras' lookups did not finish (absent: all of them)
     log.info("retrieve: %d calls, %d events, %d items in %d ms (planner %s)", len(summary), len(events), len(items),
              out["duration_ms"], raw.get("_model") or "rules")
     return out

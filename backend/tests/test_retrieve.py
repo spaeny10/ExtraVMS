@@ -8,10 +8,14 @@ import datetime as dt
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
+from unittest import mock
+from zoneinfo import ZoneInfo
 
 os.environ["NVR_DATA_DIR"] = tempfile.mkdtemp(prefix="nvr-retrieve-test-")        # never the real DB
 os.environ["NVR_RECORDINGS_DIR"] = tempfile.mkdtemp(prefix="nvr-retrieve-rec-")   # never the real recordings
+os.environ["NVR_RUNTIME_DIR"] = tempfile.mkdtemp(prefix="nvr-retrieve-run-")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nvr import api, assistant, retrieve  # noqa: E402
@@ -73,8 +77,31 @@ def setup_module(_=None):
     assistant.vlmroute.router.chat_json = PLANNER
 
 
-def run(question, history=None):
-    return asyncio.run(retrieve.retrieve(question, history or [], NOW))
+def run(question, history=None, tz=None, now=NOW):
+    return asyncio.run(retrieve.retrieve(question, history or [], now, tz))
+
+
+class PinnedTime:
+    """The time module with time() fixed, patched into one module (never the real time.time)."""
+
+    def __init__(self, now):
+        self.now = now
+
+    def time(self):
+        return self.now
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+class FakeClock:
+    """retrieve._clock stand-in: stands still unless a test moves it (e.g. the planner "took" 19.5 s)."""
+
+    def __init__(self):
+        self.t = 1000.0
+
+    def __call__(self):
+        return self.t
 
 
 def events(r):
@@ -134,12 +161,9 @@ def test_last_seen_includes_events():
 
 def test_period_question_counts_and_lists():
     PLANNER.plans = [{"calls": [{"tool": "get_briefing", "since": "2026-10-05 18:00"}]}]
-    real_time = api.time.time
-    api.time.time = lambda: NOW   # the route only trusts a client "now" near the server's clock: pin the clock to the fixture day
-    try:
+    # the route only trusts a client "now" near the server's clock: pin the route's clock (only api's, only here)
+    with mock.patch.object(api, "time", PinnedTime(NOW)):
         r = asyncio.run(api.assistant_retrieve(api.RetrieveIn(question="What happened overnight?", now=NOW)))
-    finally:
-        api.time.time = real_time
     assert r["window"]["label"] == "overnight"
     count = next(x for x in r["results"] if x["kind"] == "count")
     assert count["counts"]["events"] == 2 and count["counts"]["by_label"] == {"person": 1, "vehicle": 1}
@@ -201,6 +225,111 @@ def test_slow_footage_search_never_starves_the_event_search():
     assert IDS["truck"] in ids and IDS["old_truck"] in ids, r
     assert r["calls"][0]["tool"] == "search_events", r["calls"]          # the fast lookup went first
     assert r["incomplete"] and any("search_footage" in n or "footage" in n.lower() for n in r["incomplete"]), r["incomplete"]
+
+
+def _planner_taking(seconds, clock, plan):
+    """A planner that answers with `plan` after `seconds` on the fake clock."""
+    async def plan_after(*a, **k):
+        clock.t += seconds
+        return {**plan, "_model": "fake-planner"}
+    return plan_after
+
+
+def test_slow_lookups_never_run_past_the_hard_ceiling():
+    """The hub drops a server that answers after ~25 s, with ALL its findings. Once the budget was spent every fast
+    lookup still got FAST_MIN_S and the fallbacks more, so three slow database lookups ran ~36 s. Now nothing runs past
+    HARD_S, and a lookup that ran out of time stops the fallbacks (its emptiness proves nothing)."""
+    started = []
+
+    async def slow(a, ev):
+        started.append(time.monotonic())
+        await asyncio.sleep(5)
+        return [], 0
+    PLANNER.plans = [{"calls": [{"tool": "count_events"}, {"tool": "list_unusual"}, {"tool": "list_journeys"}]}]
+    funcs = {**assistant.TOOL_FUNCS, "count_events": slow, "list_unusual": slow, "list_journeys": slow}
+    with mock.patch.multiple(retrieve, BUDGET_S=0.2, HARD_S=0.6, FAST_MIN_S=0.5, MIN_RUN_S=0.05, FALLBACK_MIN_S=0.05), \
+            mock.patch.object(assistant, "TOOL_FUNCS", funcs):
+        t0 = time.monotonic()
+        r = run("Anything unusual?")
+        took = time.monotonic() - t0
+    assert took < 0.6 + 0.35, took                                        # was 3 x FAST_MIN_S + a fallback
+    assert len(started) == 2 and started[1] - t0 < 0.6, started          # the third had no time left
+    inc = r["incomplete"]
+    assert sum("took too long" in n for n in inc) == 2 and sum("skipped to answer in time" in n for n in inc) == 1, inc
+    assert [c["tool"] for c in r["calls"]] == ["count_events", "list_unusual", "list_journeys"], r["calls"]   # no fallback
+    assert "incomplete_cameras" not in r                                 # all cameras: none of the lookups named one
+
+
+def test_out_of_time_text_search_goes_by_keywords():
+    """With the budget spent, a text search doesn't wait for the embedding (Ollama, cold after a restart, 30 s
+    timeout): it searches by keywords, says so, and only the cameras it covered are reported as unfinished."""
+    clock = FakeClock()
+    embedded = []
+
+    async def embed(text):
+        embedded.append(text)
+        return None
+    plan = {"calls": [{"tool": "search_events", "text": "white pickup truck", "camera": "Front Gate"}]}
+    with mock.patch.object(retrieve, "_clock", clock), mock.patch.object(vlm, "embed", embed), \
+            mock.patch.object(assistant.vlmroute.router, "chat_json", _planner_taking(19.5, clock, plan)):
+        r = run("Was the white pickup truck at the gate?")
+    assert not embedded
+    assert {e["event_id"] for e in events(r)} == {IDS["truck"], IDS["old_truck"]}
+    assert any("keywords only" in n for n in r["incomplete"]), r["incomplete"]
+    assert r["incomplete_cameras"] == ["cam2"]
+    # with time to spare the same search does use the embedding
+    plan_fast = {"calls": [{"tool": "search_events", "text": "white pickup truck", "camera": "Front Gate"}]}
+    with mock.patch.object(retrieve, "_clock", FakeClock()), mock.patch.object(vlm, "embed", embed), \
+            mock.patch.object(assistant.vlmroute.router, "chat_json", _planner_taking(0, clock, plan_fast)):
+        r = run("Was the white pickup truck at the gate?")
+    assert embedded and not r["incomplete"]
+
+
+def test_at_the_ceiling_everything_is_skipped_without_fallbacks():
+    clock = FakeClock()
+    plan = {"calls": [{"tool": "search_events", "text": "cleaning cart"}, {"tool": "count_events"}]}
+    with mock.patch.object(retrieve, "_clock", clock), \
+            mock.patch.object(assistant.vlmroute.router, "chat_json", _planner_taking(21.5, clock, plan)):
+        r = run("Did the cleaning lady come?")
+    assert [c["tool"] for c in r["calls"]] == ["search_events", "count_events"]          # no fallback was queued
+    assert all(c["count"] == 0 for c in r["calls"]) and not events(r)
+    assert sum("skipped to answer in time" in n for n in r["incomplete"]) == 3, r["incomplete"]   # 2 lookups + the wider search
+    assert r["duration_ms"] == 21500
+
+
+def test_a_skipped_footage_search_still_gets_the_fallback():
+    """The skipped footage search was the last in the queue and its `continue` jumped over the "nothing found"
+    fallback, so a camera-filtered search that missed was never widened."""
+    clock = FakeClock()
+    plan = {"calls": [{"tool": "search_events", "text": "white pickup truck", "camera": "Lobby"},
+                      {"tool": "search_footage", "text": "white pickup truck", "camera": "Lobby"}]}
+    with mock.patch.object(retrieve, "_clock", clock), mock.patch.object(retrieve, "FALLBACK_MIN_S", 1.0), \
+            mock.patch.object(assistant.vlmroute.router, "chat_json", _planner_taking(19.5, clock, plan)):
+        r = run("White pickup truck?")
+    tools = [(c["tool"], c["args"].get("camera")) for c in r["calls"]]
+    assert tools[:2] == [("search_events", "cam1"), ("search_footage", "cam1")] and tools[2] == ("search_events", None), tools
+    assert {e["event_id"] for e in events(r)} >= {IDS["truck"], IDS["old_truck"]}
+    assert any(n.startswith("search_footage") and "skipped to answer in time" in n for n in r["incomplete"]), r["incomplete"]
+
+
+def test_the_sites_time_zone_sets_the_days():
+    """The hub sends the Site's zone: "today", the planner's "Now" and the offset follow it, not the server's clock."""
+    now = dt.datetime(2026, 10, 6, 15, 0, tzinfo=ZoneInfo("America/Chicago")).timestamp()   # 20:00 UTC, Oct 6 in both
+    out = {}
+    for tz in ("America/Chicago", "UTC"):
+        PLANNER.plans = [{"calls": [{"tool": "search_events", "text": "cleaning cart"}]}]
+        PLANNER.prompts.clear()
+        out[tz] = (run("Did the cleaning lady come today?", tz=tz, now=now), PLANNER.prompts[0])
+    chicago, utc = out["America/Chicago"][0], out["UTC"][0]
+    assert chicago["window"]["from"] == dt.datetime(2026, 10, 6, tzinfo=ZoneInfo("America/Chicago")).timestamp()
+    assert utc["window"]["from"] == dt.datetime(2026, 10, 6, tzinfo=dt.timezone.utc).timestamp()
+    assert chicago["window"]["from"] - utc["window"]["from"] == 5 * 3600
+    assert chicago["utc_offset"] == -5 * 3600 and utc["utc_offset"] == 0 and chicago["tz"] == "America/Chicago"
+    assert "Now: Tuesday 2026-10-06 15:00" in out["America/Chicago"][1] and "Now: Tuesday 2026-10-06 20:00" in out["UTC"][1]
+    assert assistant.SITE_TZ.get() is None and assistant.CAMERA_NAMES.get() == ()          # nothing leaks out of the request
+    # an unknown zone (or a host without the tz database): the server's own clock, as before
+    PLANNER.plans = [{"calls": [{"tool": "search_events", "text": "cleaning cart"}]}]
+    assert run("Did the cleaning lady come today?", tz="Mars/Olympus")["window"]["from"] == ts(6, 0)
 
 
 if __name__ == "__main__":

@@ -36,6 +36,7 @@ router = APIRouter()
 RELAY_PATH = "/api/ai/v1/chat/completions"
 RELAY_HEADERS = {"content-type": "application/json", "x-hub-internal": "ai", "x-hub-user": "hub", "x-hub-role": "system"}
 FIRST_BYTE_S = 300.0     # a non-streamed answer arrives whole, after generation
+STREAM_IDLE_S = 60.0     # stream_complete: a streamed answer with nothing new for this long has stalled
 
 _site_sem: dict[str, asyncio.Semaphore] = {}
 _org_sem: dict[str, asyncio.Semaphore] = {}
@@ -203,6 +204,31 @@ def _sse_delta(line: str) -> str:
     return str(((choices[0] if choices else {}).get("delta") or {}).get("content") or "")
 
 
+async def _idle_limited(up: Upstream, idle_s: float) -> AsyncIterator[bytes]:
+    """The upstream body, ended with an error when nothing arrives for `idle_s` (a stalled tunnel or model): the
+    upstream is closed (the site's stream aborted) and RuntimeError raised, so the caller can end its own stream."""
+    it = up.body.__aiter__()
+    while True:
+        nxt = asyncio.ensure_future(it.__anext__())
+        try:
+            done, _ = await asyncio.wait({nxt}, timeout=idle_s)
+            if not done:
+                await up.close()   # abort first (that ends the pending read), then stop waiting for it
+                nxt.cancel()
+                await asyncio.wait({nxt}, timeout=5)
+                if nxt.done() and not nxt.cancelled():
+                    nxt.exception()   # retrieved: StopAsyncIteration or the closed stream's error
+                raise RuntimeError(f"the shared AI stopped writing (nothing for {idle_s:.0f} s)")
+        finally:
+            if not nxt.done():   # the caller went away while waiting
+                nxt.cancel()
+        try:
+            c = nxt.result()
+        except StopAsyncIteration:
+            return
+        yield c
+
+
 async def stream_complete(messages: list[dict], max_tokens: int = 700, temperature: float = 0.2) -> AsyncIterator[str]:
     """The answer's text as it is written, for hub-side features that stream (a Site's Ask). Raises (RuntimeError or
     the HTTPException of an offline / busy upstream) before the first piece when the shared AI can't answer."""
@@ -215,7 +241,7 @@ async def stream_complete(messages: list[dict], max_tokens: int = 700, temperatu
         raise RuntimeError(f"shared AI answered {up.status_code}: {raw[:200].decode(errors='replace')}")
     dec = codecs.getincrementaldecoder("utf-8")(errors="replace")
     tail = ""
-    async for c in up.body:
+    async for c in _idle_limited(up, STREAM_IDLE_S):
         lines = (tail + dec.decode(c)).split("\n")
         tail = lines.pop()                     # a line may straddle two chunks
         for line in lines:

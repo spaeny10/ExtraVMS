@@ -1,5 +1,25 @@
 import { describe, expect, it } from "vitest";
-import { actionText, actionsHref, instructionKey, looksLikeInstruction, outcomeText, parserLabel, textFromSearch, whereText } from "./fleetActions";
+import { actionText, actionsHref, instructionKey, looksLikeInstruction, looksLikeRequest, outcomeText, parserLabel, textFromSearch, whereText } from "./fleetActions";
+
+// the same phrasings as hub/tests/test_site_ask.py (site_ask.looks_like_request is the twin)
+const REQUESTS = ["Can you make an alert if someone is in the kitchen?", "Alert me when someone enters", "Notify me if a truck comes",
+  "Let me know if anyone is in the yard", "Create an alert for the kitchen", "Watch for a white truck", "Turn off alerts tonight",
+  "Tell me when someone enters the kitchen", "please add an alert rule for the gate", "I want to be notified when the gate opens",
+  "If a van parks at the dock, text me"];
+const NOT_REQUESTS = ["Was anyone in the kitchen?", "Tell me what happened last night", "Did a truck come today?", "Show me people at the door",
+  "How many alerts were there today?", "Did anyone alert security?", "What happened overnight?", "Quiet alerts tonight", "Migrate Ironsight to Hailo T1"];
+
+describe("looksLikeRequest", () => {
+  it("spots requests Ask can't do, and never sends them to Actions", () => {
+    for (const t of REQUESTS) {
+      expect(looksLikeRequest(t), t).toBe(true);
+      expect(looksLikeInstruction(t), t).toBe(false);
+    }
+  });
+  it("leaves questions and fleet instructions alone", () => {
+    for (const t of NOT_REQUESTS) expect(looksLikeRequest(t), t).toBe(false);
+  });
+});
 
 describe("looksLikeInstruction", () => {
   it("spots fleet instructions, with or without polite padding", () => {

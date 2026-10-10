@@ -14,6 +14,7 @@ them into a headline and a few bullets with citations.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import datetime as dt
 import difflib
 import json
@@ -22,6 +23,7 @@ import re
 import shutil
 import time
 from typing import AsyncIterator
+from zoneinfo import ZoneInfo
 
 from . import baseline, retention, vlmroute
 from . import synopsis as vlm
@@ -64,6 +66,41 @@ class Context:
 
 ctx = Context()
 
+# The hub's Site Ask (retrieve.py) sets these for one request: the Site's time zone (day boundaries, "today", the
+# planner's local times, labels) and the camera names (a day name inside one, "Saturday Market", is not a time).
+# Unset (the server's own Ask, Find, briefings): the server's local clock and no camera names, as before.
+SITE_TZ: contextvars.ContextVar[dt.tzinfo | None] = contextvars.ContextVar("site_tz", default=None)
+CAMERA_NAMES: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar("camera_names", default=())
+
+
+def zone_for(tz: str | dt.tzinfo | None) -> dt.tzinfo | None:
+    """An IANA zone ("America/Chicago") as a tzinfo; None (the server's local clock) when absent or unknown."""
+    if tz is None or isinstance(tz, dt.tzinfo):
+        return tz
+    try:
+        return ZoneInfo(str(tz)) if str(tz).strip() else None
+    except Exception:  # noqa: BLE001 - unknown name, or no tz database on this host: the local clock
+        log.warning("unknown time zone %r: using the server's local time", tz)
+        return None
+
+
+def _zone(tz: str | dt.tzinfo | None = None) -> dt.tzinfo | None:
+    return zone_for(tz) if tz is not None else SITE_TZ.get()
+
+
+def _local(ts: float, tz: str | dt.tzinfo | None = None) -> dt.datetime:
+    """ts as a wall-clock time in the Site's zone (naive local time when there is none)."""
+    return dt.datetime.fromtimestamp(ts, _zone(tz))
+
+
+def sql_local(now: float | None = None) -> str:
+    """The SQLite strftime modifier for local time: 'localtime', or the Site zone's offset at `now`."""
+    z = SITE_TZ.get()
+    if z is None:
+        return "'localtime'"
+    off = dt.datetime.fromtimestamp(now or time.time(), z).utcoffset() or dt.timedelta(0)
+    return f"'{int(off.total_seconds()):+d} seconds'"
+
 
 # ---------------------------------------------------------------- formatting helpers
 
@@ -76,8 +113,8 @@ def _cam_name(cid: str) -> str:
 
 
 def _when(ts: float, now: float | None = None) -> str:
-    t = dt.datetime.fromtimestamp(ts)
-    today = dt.datetime.fromtimestamp(now or time.time()).date()
+    t = _local(ts)
+    today = _local(now or time.time()).date()
     if t.date() == today:
         return f"today {t:%H:%M:%S}"
     if t.date() == today - dt.timedelta(days=1):
@@ -184,7 +221,7 @@ TOOL_HELP = """Tools (pick 1-3; fill only the fields that tool uses):
 
 
 def _plan_prompt(question: str, history: list[dict], now: float) -> tuple[str, str]:
-    n = dt.datetime.fromtimestamp(now)
+    n = _local(now)
     y = n - dt.timedelta(days=1)
     cams = "\n".join(f'- "{c["id"]}" = {c["name"]}' + (f" ({c['scene_notes'].splitlines()[0][:120]})" if (c.get("scene_notes") or "").strip() else "")
                      for c in db.cameras())
@@ -228,12 +265,12 @@ def parse_time(s: str | None, now: float) -> float | None:
         return None
     for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
         try:
-            return dt.datetime.strptime(s[:19], fmt).timestamp()
+            return dt.datetime.strptime(s[:19], fmt).replace(tzinfo=_zone()).timestamp()
         except ValueError:
             continue
     m = re.fullmatch(r"(\d{1,2}):(\d{2})", s)  # bare time = today
     if m:
-        return dt.datetime.fromtimestamp(now).replace(hour=int(m[1]), minute=int(m[2]), second=0, microsecond=0).timestamp()
+        return _local(now).replace(hour=int(m[1]), minute=int(m[2]), second=0, microsecond=0).timestamp()
     return None
 
 
@@ -282,51 +319,107 @@ def check_plan(raw: dict, question: str, now: float) -> list[dict]:
 
 WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 _WD = "|".join(WEEKDAYS)
+_DAY = r"(?:" + _WD + r")"
+_MON = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?"
+# A label read back ("Friday, Oct 2", "Saturday or Sunday, Oct 3–4"): the date belongs to the day name, so it never
+# ends up in the text that is searched for.
+_DATE = r"(?:,?\s+" + _MON + r"\s+\d{1,2}(?:\s*[–-]\s*(?:" + _MON + r"\s+)?\d{1,2})?)?"
+_PART = r"(?:\s+(?:night|evening|morning|afternoon))?"
 # Day names come first so "Tuesday last week" is one phrase, not "last week" with a stray "Tuesday".
-_TIME_PHRASES = re.compile(r"\b((?:on\s+)?(?:" + _WD + r")\s+(?:of\s+)?(?:last|the\s+previous|previous)\s+week|"
-                           r"(?:last|previous)\s+week'?s?\s+(?:" + _WD + r")|"
-                           r"(?:on\s+)?(?:last|this|past)\s+(?:" + _WD + r")|(?:on\s+)?(?:" + _WD + r")|"
-                           r"today|this morning|this afternoon|this evening|tonight|last night|overnight|yesterday|"
-                           r"this week|(?:in the )?(?:last|past|previous)\s+(?:\d+(?:\.\d+)?|one|two|three|four|five|six|seven|twelve|a|an)?\s*"
-                           r"(?:minute|hour|day|week)s?)\b")
+_TIME_PHRASES = re.compile(r"\b((?:since\s+)?(?:on\s+)?" + _DAY + r"\s+(?:of\s+)?(?:last|the\s+previous|previous)\s+week" + _DATE + "|"
+                           r"(?:since\s+)?(?:last|previous)\s+week(?:'?s)?\s+(?:on\s+)?" + _DAY + _DATE + "|"
+                           r"(?:on\s+)?" + _DAY + r"\s+(?:or|and)\s+(?:on\s+)?" + _DAY + _DATE + "|"
+                           r"(?:since\s+)?(?:on\s+)?(?:last|this|past|previous)\s+" + _DAY + _PART + _DATE + "|"
+                           r"(?:since\s+)?(?:on\s+)?" + _DAY + _PART + _DATE + "|"
+                           r"today|this morning|this afternoon|this evening|tonight|last night|overnight|yesterday|this week|"
+                           r"(?:(?:in|over|during|within)\s+the\s+)?(?:last|past|previous)\s+"
+                           r"(?:\d+(?:\.\d+)?|one|two|three|four|five|six|seven|twelve|a|an)?\s*(?:minute|hour|day|week)s?)\b")
+# a day name followed by one of these, or by a capitalized word that isn't a time word, is part of a name
+# ("Saturday Market", "the Tuesday Crew"), not a day
+_NAME_WORDS = {"market", "camera", "cameras", "cam", "street", "st", "road", "rd", "avenue", "ave"}
+_TIME_WORDS = {"night", "morning", "afternoon", "evening", "last", "this", "previous", "week", "or", "and", "of", "on",
+               "since", "i", "we"}
+_PARTS = {"morning": (5, 12), "afternoon": (12, 18), "evening": (18, 24), "night": (18, 30)}   # hours from that day's 00:00
 
 
-def _weekday_window(phrase: str, day: dt.datetime) -> tuple[float, float | None, str] | None:
-    """A day name: "Tuesday" = the most recent Tuesday (today included), "last Tuesday" = the one before today,
-    "Tuesday last week" = the Tuesday of the previous calendar week (weeks start Monday), "this Tuesday" = this week's."""
-    name = next((w for w in WEEKDAYS if w in phrase), None)
+def time_phrase(text: str, cameras: list[str] | tuple[str, ...] | None = None) -> re.Match | None:
+    """The first time phrase in the text that really names a period. Skipped: "every Tuesday" (not one day), a day name
+    inside a camera's name (`cameras`, default CAMERA_NAMES) or followed by a name word ("Saturday Market")."""
+    q = text.lower()
+    names = [c.lower() for c in (CAMERA_NAMES.get() if cameras is None else cameras) if c and c.strip()]
+    inside = [(x.start(), x.end()) for c in names for x in re.finditer(re.escape(c), q)]
+    for m in _TIME_PHRASES.finditer(q):
+        if any(a < m.end() and m.start() < b for a, b in inside):
+            continue
+        if re.search(r"\b(?:every|each)\s+$", q[:m.start()]):
+            continue
+        if any(w in m.group(1) for w in WEEKDAYS):
+            nxt = re.match(r"\s+([A-Za-z]+)", text[m.end():])
+            if nxt and (nxt[1].lower() in _NAME_WORDS or (nxt[1][0].isupper() and nxt[1].lower() not in _TIME_WORDS)):
+                continue
+        return m
+    return None
+
+
+def _one_day(core: str, day: dt.datetime) -> tuple[dt.datetime, str] | None:
+    """The day a day name means, and its label: "Tuesday" = the most recent Tuesday (today included), "last Tuesday" /
+    "previous Tuesday" = the one before today, "Tuesday last week" = the Tuesday of the previous calendar week (weeks
+    start Monday), "this Tuesday" = this week's (None when that is still to come)."""
+    name = next((w for w in WEEKDAYS if w in core), None)
     if name is None:
         return None
     target = WEEKDAYS.index(name)
     monday = day - dt.timedelta(days=day.weekday())
+    if "week" in core:
+        return monday - dt.timedelta(days=7) + dt.timedelta(days=target), f"{name.capitalize()} last week"
+    if re.match(r"(?:on\s+)?this\b", core):
+        d = monday + dt.timedelta(days=target)
+        return (d, f"this {name.capitalize()}") if d <= day else None   # later this week: nothing recorded yet
+    if re.match(r"(?:on\s+)?(?:last|past|previous)\b", core):
+        return day - dt.timedelta(days=(day.weekday() - target) % 7 or 7), f"last {name.capitalize()}"
+    return day - dt.timedelta(days=(day.weekday() - target) % 7), name.capitalize()
+
+
+def _weekday_window(phrase: str, day: dt.datetime) -> tuple[float, float | None, str] | None:
+    """A day-name phrase: one day (00:00 to 00:00), "Tuesday night" (18:00 to 06:00), "Saturday or Sunday" (both),
+    "since Monday" (Monday 00:00 to now). None when it isn't one, or names no day yet ("this Friday" on a Thursday)."""
+    if not any(w in phrase for w in WEEKDAYS):
+        return None
+    core = re.sub(_DATE + r"$", "", phrase).strip()
+    since = re.match(r"since\s+", core)
+    core = core[since.end():] if since else core
+    part = re.search(r"\s+(night|evening|morning|afternoon)$", core)
+    core = core[:part.start()] if part else core
+    days = []
+    for piece in re.split(r"\s+(?:or|and)\s+", core):
+        one = _one_day(piece, day)
+        if one is None:
+            return None
+        days.append(one)
+    days.sort(key=lambda x: x[0])
     # labels keep their own wording so a follow-up that reuses one ("and Friday?" -> "...Friday, Oct 2?") reads back
     # as the same day
-    if "week" in phrase:
-        d = monday - dt.timedelta(days=7) + dt.timedelta(days=target)
-        label = f"{name.capitalize()} last week"
-    elif re.match(r"(?:on\s+)?this\b", phrase):
-        d = monday + dt.timedelta(days=target)
-        if d > day:
-            return None   # later this week: nothing recorded yet
-        label = f"this {name.capitalize()}"
-    elif re.match(r"(?:on\s+)?(?:last|past)\b", phrase):
-        d = day - dt.timedelta(days=(day.weekday() - target) % 7 or 7)
-        label = f"last {name.capitalize()}"
-    else:
-        d = day - dt.timedelta(days=(day.weekday() - target) % 7)
-        label = name.capitalize()
-    return d.timestamp(), (d + dt.timedelta(days=1)).timestamp(), f"{label}, {d:%b} {d.day}"
+    (d, label), (last, last_label) = days[0], days[-1]
+    if len(days) > 1:
+        end = f"{last.day}" if last.month == d.month else f"{last:%b} {last.day}"
+        return d.timestamp(), (last + dt.timedelta(days=1)).timestamp(), f"{label} or {last_label}, {d:%b} {d.day}–{end}"
+    h0, h1 = _PARTS[part[1]] if part else (0, 24)
+    label = f"{label} {part[1]}" if part else label
+    if since:
+        return (d + dt.timedelta(hours=h0)).timestamp(), None, f"since {label}, {d:%b} {d.day}"
+    return (d + dt.timedelta(hours=h0)).timestamp(), (d + dt.timedelta(hours=h1)).timestamp(), f"{label}, {d:%b} {d.day}"
 
 
-def time_window(text: str, now: float | None = None) -> dict | None:
-    """The time window a phrase in the text refers to: {since, until, label, text (phrase removed)} or None."""
+def time_window(text: str, now: float | None = None, tz: str | dt.tzinfo | None = None,
+                cameras: list[str] | tuple[str, ...] | None = None) -> dict | None:
+    """The time window a phrase in the text refers to: {since, until, label, text (phrase removed)} or None.
+    Days start at midnight in `tz` (default: the Site's zone while Site Ask retrieves, else the server's clock)."""
     now = now or time.time()
-    q = text.lower()
-    m = _TIME_PHRASES.search(q)
+    m = time_phrase(text, cameras)
     if not m:
         return None
     phrase = m.group(1)
-    n = dt.datetime.fromtimestamp(now)
+    n = _local(now, tz)
     day = n.replace(hour=0, minute=0, second=0, microsecond=0)
     at = lambda d, h: d.replace(hour=h).timestamp()
     yday = day - dt.timedelta(days=1)
@@ -340,8 +433,9 @@ def time_window(text: str, now: float | None = None) -> dict | None:
     wd = _weekday_window(phrase, day)
     if wd:
         since, until, phrase = wd
-    elif re.fullmatch(r"(?:in the )?(?:last|previous)\s+week", phrase):
-        # "last week" is the previous calendar week (Monday to Sunday); "past week" / "last 7 days" stay rolling
+    elif re.fullmatch(r"(?:last|previous)\s+week", phrase):
+        # bare "last week" is the previous calendar week (Monday to Sunday); "in the last week", "over the last week",
+        # "past week" and "last 7 days" are the rolling days up to now
         monday = day - dt.timedelta(days=day.weekday())
         since, until, phrase = (monday - dt.timedelta(days=7)).timestamp(), monday.timestamp(), "last week"
     elif phrase in windows:
@@ -353,6 +447,8 @@ def time_window(text: str, now: float | None = None) -> dict | None:
         k = float(lm.group(1) or 1) if (lm.group(1) or "").replace(".", "").isdigit() else WORD_NUM.get(lm.group(1) or "", 1)
         since, until = now - k * {"minute": 60, "hour": 3600, "day": 86400, "week": 7 * 86400}[lm.group(2)], None
         phrase = lm.group(0)
+        if re.fullmatch(r"(?:last|previous)\s+week", phrase):
+            phrase = "past week"   # "in the last week": the label reads back as the rolling week, not the calendar one
     if until is not None and until > now:
         until = None
     cleaned = re.sub(r"\s+", " ", (text[:m.start()] + text[m.end():])).strip(" ?.,!") or text
@@ -549,9 +645,23 @@ def newest_first(rows: list[dict], text: str) -> list[dict]:
     return sorted(rows, key=lambda r: (-round(_coverage(words, r), 2), -r["start_ts"]))
 
 
+async def _embed_query(a: dict) -> list[float] | None:
+    """The query's embedding. Site Ask (retrieve.py) passes `_embed_s`, the time the embedding may take (the text
+    model runs in Ollama and is cold after a restart); 0 or slower = search by keywords only, and `_keyword_only` says so."""
+    if "_embed_s" not in a:
+        return await vlm.embed(f"search_query: {a['text']}")
+    if a["_embed_s"] > 0:
+        try:
+            return await asyncio.wait_for(vlm.embed(f"search_query: {a['text']}"), a["_embed_s"])
+        except asyncio.TimeoutError:
+            pass
+    a["_keyword_only"] = True
+    return None
+
+
 async def t_search_events(a: dict, refs: Refs) -> tuple[list[str], int]:
     if a.get("text"):
-        emb = await vlm.embed(f"search_query: {a['text']}")
+        emb = await _embed_query(a)
         rows = await asyncio.to_thread(db.search, a["text"], emb, 100 if a.get("newest") else 25, a.get("camera"),
                                        a.get("since"), a.get("until"), a.get("label"))
         rows = [r for r in rows if r.get("status") == "verified"]
@@ -576,7 +686,8 @@ async def t_search_events(a: dict, refs: Refs) -> tuple[list[str], int]:
 
 
 async def t_count_events(a: dict, refs: Refs) -> tuple[list[str], int]:
-    expr = {"hour": "strftime('%H:00', start_ts, 'unixepoch', 'localtime')", "day": "strftime('%Y-%m-%d', start_ts, 'unixepoch', 'localtime')",
+    loc = sql_local()
+    expr = {"hour": f"strftime('%H:00', start_ts, 'unixepoch', {loc})", "day": f"strftime('%Y-%m-%d', start_ts, 'unixepoch', {loc})",
             "camera": "camera_id", "label": "camera_class"}.get(a.get("group_by") or "", "'all'")
     where, p = _where(a)
     rows = await asyncio.to_thread(db.all, f"SELECT {expr} AS k, camera_class, COUNT(*) AS n FROM events WHERE {where} "
@@ -590,7 +701,16 @@ async def t_count_events(a: dict, refs: Refs) -> tuple[list[str], int]:
     if a.get("label") in (None, "person"):
         where_p, pp = _where({**a, "label": "person"})
         ids = [r["id"] for r in await asyncio.to_thread(db.all, f"SELECT id FROM events WHERE {where_p} ORDER BY start_ts LIMIT 500", pp)]
-        est = await asyncio.to_thread(distinct_people, ids)
+        est = None
+        if "_people_s" not in a:
+            est = await asyncio.to_thread(distinct_people, ids)
+        elif ids and a["_people_s"] > 0:   # Site Ask: the estimate gets what time is left (retrieve.py)
+            try:
+                est = await asyncio.wait_for(asyncio.to_thread(distinct_people, ids), a["_people_s"])
+            except asyncio.TimeoutError:
+                a["_people_skipped"] = True
+        elif ids:
+            a["_people_skipped"] = True
         if est:
             lo, hi, n = est
             span = f"about {lo}" if lo == hi else f"between {lo} and {hi}"
@@ -850,7 +970,7 @@ def _period_note(question: str, now: float) -> str:
     if not win:
         return ""
     until = win["until"] if win["until"] is not None else now
-    f = lambda t: dt.datetime.fromtimestamp(t).strftime("%a %b %d %H:%M")
+    f = lambda t: _local(t).strftime("%a %b %d %H:%M")
     return f"Period asked about ({win['label']}): {f(win['since'])} to {f(until)}.\n"
 
 

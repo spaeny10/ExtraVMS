@@ -12,6 +12,7 @@
  *  - each answer has a Sources disclosure: the merged evidence by camera and time (the server is named only there);
  *    with the References column on screen it is one line pointing there;
  *  - instructions ("Quiet alerts tonight") are not asked: a note links to Customer › Actions with the text prefilled;
+ *    requests Ask can't do ("Alert me when someone enters") get the hub's note saying so (where alert rules live);
  *  - ?q=… (Find's "Ask this site" hint) prefills the box; sending is the user's action.
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -32,7 +33,8 @@ import {
 type Pending = {
   question: string; answer: string; status?: string; sources?: SiteAskSources; model?: string | null; fallback?: string; error?: string;
 };
-type Note = { question: string; href: string };
+/** A question that wasn't asked: an instruction (href: Customer › Actions) or a request Ask can't do (message). */
+type Note = { question: string; href?: string; message?: string };
 type Open = { server: string; id: number };
 /** The citation under the pointer: from a chip (the panel scrolls to its card) or from a card (its chips light up). */
 type Hot = { ref: string; from: "chip" | "card" };
@@ -151,6 +153,7 @@ export function SiteAsk({ site, threadId }: { site: Site; threadId?: string }) {
         case "fallback": setPending((p) => p && { ...p, fallback: c.reason }); break;
         case "delta": setPending((p) => p && { ...p, answer: p.answer + c.text, status: undefined }); break;
         case "instruction": instruction = { question: q, href: c.href }; break;
+        case "unsupported": instruction = { question: q, message: c.message }; break;
         case "error": setPending((p) => p && { ...p, error: c.error }); break;
         default: break;
       }
@@ -302,10 +305,12 @@ export function SiteAsk({ site, threadId }: { site: Site; threadId?: string }) {
           {notes.map((n, i) => (
             <div key={`n${i}`} className="sa-pair">
               <div className="ask-msg user">{n.question}</div>
-              <div className="ask-msg assistant instruction-note">
-                That reads as an instruction, so it wasn't asked. Instructions run from{" "}
-                <a href={n.href} onClick={go(n.href)}>Customer › Actions</a> (your text is filled in there; nothing runs until you press Plan).
-              </div>
+              {n.href
+                ? <div className="ask-msg assistant instruction-note">
+                    That reads as an instruction, so it wasn't asked. Instructions run from{" "}
+                    <a href={n.href} onClick={go(n.href)}>Customer › Actions</a> (your text is filled in there; nothing runs until you press Plan).
+                  </div>
+                : <div className="ask-msg assistant instruction-note">{n.message}</div>}
             </div>
           ))}
           {pending && (

@@ -472,26 +472,47 @@ export type SiteAskSources = {
 export type SiteAskThread = { id: number; title: string; created_at: number; updated_at: number; messages: number };
 export type SiteAskMessage = { id: number; thread_id: number; role: "user" | "assistant"; content: string; sources: SiteAskSources | null; model: string | null; created_at: number; duration_ms: number | null };
 export type SiteAskThreadFull = Omit<SiteAskThread, "messages"> & { location_id: string; messages: SiteAskMessage[] };
-/** The stream's chunks: thread, user, status, sources, model, delta, fallback, done, instruction, error. */
+/** The stream's chunks: thread, user, status, sources, model, delta, fallback, done, instruction, unsupported, error. */
 export type SiteAskChunk =
   | { type: "thread"; thread_id: number } | { type: "user"; id: number } | { type: "status"; text: string; servers: number; online: number }
   | ({ type: "sources" } & SiteAskSources) | { type: "model"; model: string | null } | { type: "delta"; text: string }
   | { type: "fallback"; reason: string } | { type: "done"; id: number | null; duration_ms?: number }
-  | { type: "instruction"; text: string; href: string; message: string } | { type: "error"; error: string };
+  | { type: "instruction"; text: string; href: string; message: string } | { type: "unsupported"; text: string; message: string }
+  | { type: "error"; error: string };
 
-/** Ask a Site (one answer for all its servers); chunks arrive as the hub writes them. */
-export async function siteAsk(location: string, body: { question: string; thread_id?: number | null }, onChunk: (c: SiteAskChunk) => void, signal?: AbortSignal) {
+/** Nothing new on Ask's stream for this long: the page stops waiting and says so (the hub's own limits are shorter). */
+export const SITE_ASK_IDLE_MS = 90_000;
+
+/**
+ * Ask a Site (one answer for all its servers); chunks arrive as the hub writes them. Throws when nothing arrives for
+ * `idleMs` (the page would otherwise sit on "Writing the answer…") or when the stream ends without done / error.
+ */
+export async function siteAsk(location: string, body: { question: string; thread_id?: number | null }, onChunk: (c: SiteAskChunk) => void,
+  signal?: AbortSignal, idleMs = SITE_ASK_IDLE_MS) {
   const r = await fetch(`/api/locations/${location}/ask`, { ...json("POST", { question: body.question, thread_id: body.thread_id ?? undefined }), signal });
   if (!r.ok || !r.body) throw new Error(`${r.status} ${await r.text()}`);
   const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = "";
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    let nl: number;
-    while ((nl = buf.indexOf("\n")) >= 0) { const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1); if (line) onChunk(JSON.parse(line) as SiteAskChunk); }
-  }
-  if (buf.trim()) onChunk(JSON.parse(buf) as SiteAskChunk);
+  let idle = false; let ended = false; let timer: ReturnType<typeof setTimeout> | undefined;
+  const arm = () => { clearTimeout(timer); timer = setTimeout(() => { idle = true; void reader.cancel(); }, idleMs); };
+  const take = (line: string) => {
+    const c = JSON.parse(line) as SiteAskChunk;
+    if (c.type === "done" || c.type === "error") ended = true;
+    onChunk(c);
+  };
+  try {
+    arm();
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      arm();
+      buf += dec.decode(value, { stream: true });
+      let nl: number;
+      while ((nl = buf.indexOf("\n")) >= 0) { const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1); if (line) take(line); }
+    }
+  } finally { clearTimeout(timer); }
+  if (idle) throw new Error(`The answer stopped arriving (nothing for ${Math.round(idleMs / 1000)} s). Please ask again.`);
+  if (buf.trim()) take(buf);
+  if (!ended && !signal?.aborted) throw new Error("The answer was cut off. Please ask again.");
 }
 
 /**
