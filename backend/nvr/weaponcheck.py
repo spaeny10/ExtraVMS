@@ -27,8 +27,10 @@ So, like policy.confirm_towing, a weapon claim is checked before it is stored or
    - unclear / error (timeout, model down, no evidence): NEVER downgraded. Threat per kept_level() (a firearm:
      high), the wording becomes "possible firearm, unconfirmed" (tag `possible_weapon`) and
      weapon_check.needs_review asks a person to look.
-The outcome is synopsis_json["weapon_check"]; the model's own JSON is kept in events.synopsis_original when the text
-was changed. The pipeline stores the synopsis only after this, so priority and hub publication see the checked text.
+The outcome is synopsis_json["weapon_check"]; the model's own JSON is kept in synopsis_json["weapon_check"]["original"]
+when the text was changed (shown read-only in the event viewer; never events.synopsis_original, which holds the model's
+version an operator corrected and offers "Revert to original"). The pipeline stores the synopsis only after this, so
+priority and hub publication see the checked text.
 """
 from __future__ import annotations
 
@@ -426,9 +428,15 @@ def clip_evidence(clip: Path, predict: Callable[[list], list], deadline: float |
                 batch.append((t, frame.to_ndarray(format="bgr24")))
                 n += 1
                 if len(batch) >= BATCH:
+                    if deadline is not None and time.time() > deadline:
+                        cut = True
+                        break
                     dets += _detect(predict, batch)
                     batch = []
-            dets += _detect(predict, batch)
+            if batch and not (deadline is not None and time.time() > deadline):
+                dets += _detect(predict, batch)
+            elif batch:
+                cut = True   # decoded, but no time left to look at them
             batch = []
     finally:
         gc.collect()   # PyAV frames are freed late (see verifier.grab_frames)
@@ -467,10 +475,13 @@ def gather_evidence(e: dict, predict: Callable[[list], list] | None, deadline: f
                 if ev["persons"]:
                     return ev
                 log.info("event %s: weapon check found nobody in the clip; trying the snapshot and the stored crops", e["id"])
+            except TimeoutError:   # YOLO did not answer in time (GPU busy): asking it again for the snapshot won't help
+                log.warning("event %s: weapon check: YOLO did not answer in time; using the stored crops", e["id"])
+                return keyframe_evidence(e)
             except Exception as ex:  # noqa: BLE001 - fall back to what else there is
                 log.warning("event %s: weapon check could not read the clip (%s: %s)", e["id"], type(ex).__name__, ex)
         snap = settings.data_dir / (e.get("snapshot") or "")
-        if e.get("snapshot") and snap.is_file():
+        if e.get("snapshot") and snap.is_file() and time.time() < deadline:   # past it: no more YOLO, only the crops
             img = cv2.imread(str(snap))
             if img is not None:
                 ev = image_evidence(img, predict)
@@ -862,8 +873,10 @@ async def check_claim(e: dict, result: dict, collect: Callable[[], Awaitable[dic
 
 
 async def review(e: dict, result: dict, collect: Callable[[], Awaitable[dict]] | None = None) -> tuple[dict, dict | None]:
-    """(synopsis to store, the model's original to keep in synopsis_original or None). A synopsis with no weapon
-    claim comes back unchanged. Never raises: an unexpected failure keeps the claim as unconfirmed and high."""
+    """(synopsis to store, the model's original or None). When the check changed the text, the model's original is
+    also kept in the stored synopsis as weapon_check["original"] (read-only history: not an operator correction, so
+    never events.synopsis_original). A synopsis with no weapon claim comes back unchanged. Never raises: an
+    unexpected failure keeps the claim as unconfirmed and high."""
     try:
         check = await check_claim(e, result, collect)
     except Exception as ex:  # noqa: BLE001 - never break the synopsis worker, never drop the claim
@@ -876,4 +889,7 @@ async def review(e: dict, result: dict, collect: Callable[[], Awaitable[dict]] |
     if check is None:
         return result, None
     out = apply(e, result, check)
-    return out, (None if check["verdict"] == "confirmed" else result)
+    if check["verdict"] == "confirmed":
+        return out, None
+    out["weapon_check"]["original"] = {k: v for k, v in copy.deepcopy(result).items() if k != "weapon_check"}
+    return out, result

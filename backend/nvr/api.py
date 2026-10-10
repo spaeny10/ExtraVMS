@@ -1237,7 +1237,9 @@ async def correct_synopsis(event_id: int, body: SynopsisIn):
     e = _require_event(event_id)
     fields = {"synopsis": body.summary.strip(), "synopsis_json": body.model_dump(), "threat": body.threat_level,
               "corrected_at": time.time()}
-    if e.get("synopsis_json") and not e.get("synopsis_original"):
+    # the model's version as it stands now; an older event's synopsis_original may hold the weapon check's
+    # unconfirmed claim (before it moved to synopsis_json.weapon_check.original) with no correction behind it
+    if e.get("synopsis_json") and (not e.get("synopsis_original") or not e.get("corrected_at")):
         fields["synopsis_original"] = e["synopsis_json"]
     db.update_event(event_id, **fields)
     baseline.apply(event_id, rescore=False)
@@ -1250,7 +1252,7 @@ async def correct_synopsis(event_id: int, body: SynopsisIn):
 async def revert_synopsis(event_id: int):
     e = _require_event(event_id)
     orig = e.get("synopsis_original")
-    if not orig:
+    if not orig or not e.get("corrected_at"):   # no operator correction (e.g. a weapon check's unconfirmed claim)
         raise HTTPException(400, "event has no correction")
     db.update_event(event_id, synopsis=orig.get("summary"), synopsis_json=orig, threat=orig.get("threat_level"),
                     synopsis_original=None, corrected_at=None)

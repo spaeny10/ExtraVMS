@@ -10,8 +10,11 @@ work as for any other event.
 
 Per camera `event_source`: "auto" (default) | "metadata" | "onvif_events". Auto uses the ONVIF events only while the
 camera sends no object metadata: its metadata configuration says Analytics=false (streams.py probe), or no classified
-object came from its metadata stream for AUTO_WINDOW_S while its ONVIF detection events kept arriving. A camera that
-sends objects keeps today's behaviour (events from the metadata tracks only, never both).
+object came from its connected metadata stream for AUTO_WINDOW_S while its ONVIF detection events kept arriving (a
+metadata reader that can't connect is a health problem, never a reason to switch). A camera that sends objects keeps
+today's behaviour (events from the metadata tracks only, never both: while an ONVIF-event event is open, the tracker
+opens no metadata event on that camera). Motion opens nothing while a person / vehicle ONVIF event is open on the
+camera, and an open motion event becomes the person / vehicle event when the camera names it (one visit, one event).
 
 Motion topics (CellMotionDetector, VideoSource/MotionAlarm) open nothing unless the camera's `motion_events` is on;
 then they open "motion" events that YOLO must confirm as a person or a vehicle.
@@ -158,9 +161,13 @@ class SourceWatch:
         self.heard(camera_id, now)
         self.detect_at.setdefault(camera_id, now)
 
-    def decide(self, cam: dict | None, camera_id: str, now: float, no_track: bool = False) -> tuple[bool, str]:
+    def decide(self, cam: dict | None, camera_id: str, now: float, no_track: bool = False,
+               reader: float | None = None) -> tuple[bool, str]:
         """(use ONVIF events for detections, why). no_track: the camera's RTSP stream has no metadata track at all
-        (ingest.MetadataReader: "no application track in SDP"; the Reolink RP-PCT8MD)."""
+        (ingest.MetadataReader: "no application track in SDP"; the Reolink RP-PCT8MD). reader: when the metadata
+        reader's session connected, 0 while it isn't connected, None when unknown (ingest.metadata_since). "No
+        objects for AUTO_WINDOW_S" only counts while the reader is connected: a reader that can't connect (a 401 for
+        hours) is a problem to show (health: "metadata reader not attached"), not a camera without objects."""
         src = setting(cam)
         if src == "metadata":
             return False, "set to the camera's object metadata"
@@ -173,7 +180,9 @@ class SourceWatch:
             return True, "the camera's stream has no metadata track"
         if metadata_analytics(cam) is False:
             return True, "the camera's metadata has no analytics (Analytics=false)"
-        quiet_since = max(self.first_heard.get(camera_id, now), seen or 0.0)
+        if reader is not None and not reader:
+            return False, "the camera's metadata stream is not connected (its objects can't be seen until it is)"
+        quiet_since = max(self.first_heard.get(camera_id, now), seen or 0.0, reader or 0.0)
         d = self.detect_at.get(camera_id)
         if now - quiet_since >= AUTO_WINDOW_S and d is not None and now - d >= AUTO_SETTLE_S:
             return True, f"no objects in the camera's metadata for {AUTO_WINDOW_S // 60} minutes while its ONVIF detection events arrive"

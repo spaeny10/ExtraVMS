@@ -3,7 +3,8 @@
 Per camera: live bitrate, an estimate of recording GB/day, how long since the main stream last delivered
 any bytes (a frozen camera can stay "ready" in MediaMTX for a while), corrupt frames from the camera in the
 last hour (packet loss: bad cable / Wi-Fi / switch), and whether the NVR's own metadata reader is attached
-to the main stream (if not, recording continues but detections are silently missed).
+to the main stream (if not, recording continues but detections are silently missed); for a camera whose detections
+come from its ONVIF events (ruleevents.py), whether its event subscription works instead.
 
 Per server: bandwidth from the cameras (inbound Mbit/s over 5 min, GB today and this month, kept per day in the
 settings table) for cellular sites and central recording, and "site link down": every enabled camera without
@@ -20,7 +21,7 @@ from collections import deque
 
 import httpx
 
-from . import mediamtx
+from . import ingest, mediamtx
 from .db import db
 
 log = logging.getLogger("nvr.health")
@@ -31,6 +32,7 @@ STALL_S = 30                 # no bytes for this long = "no video"
 LINK_DOWN_S = 90             # every enabled camera without bytes for this long = the site link is down
 LINK_DOWN_MIN_CAMERAS = 2    # with one camera, its own camera_down alert says the same thing
 LINK_DOWN_TEXT = "All cameras unreachable: the link to the site may be down"
+EVENTS_DOWN_S = 180          # a camera whose detections come from its ONVIF events: subscription down this long = a problem
 BANDWIDTH_SPAN_S = 300       # Mbit/s averaged over 5 min
 BANDWIDTH_KEY = "bandwidth_daily"   # settings: {"YYYY-MM-DD" (site time): bytes received from the cameras}
 BANDWIDTH_KEEP_DAYS = 62
@@ -131,6 +133,8 @@ class StreamHealth:
         # camera id -> its detections come from its ONVIF events (ruleevents.py; set by the API): no metadata reader
         # is expected there, so "metadata reader not attached" is not a problem (the hub would raise camera_down)
         self.event_only = lambda camera_id: False
+        # ...and that camera's ONVIF event subscription: since when it pulls nothing (None while it works)
+        self.events_down_since = ingest.events_down_since
 
     async def sample(self) -> None:
         async with httpx.AsyncClient(timeout=5) as c:
@@ -244,6 +248,9 @@ class StreamHealth:
             out["problems"].append(f"no video for {int(stalled)} s (stream still open)")
         if out["metadata_reader"] is False and len(main.samples) >= 3 and not self._event_only(camera_id):
             out["problems"].append("metadata reader not attached: detections are being missed")
+        down = self._events_down(camera_id, now)
+        if down is not None:
+            out["problems"].append(f"ONVIF event subscription down for {down // 60} min: detections are being missed")
         if out["frames_in_error_1h"]:
             out["problems"].append(f"{out['frames_in_error_1h']} corrupt frames in the last hour (packet loss?)")
         return out
@@ -253,6 +260,17 @@ class StreamHealth:
             return bool(self.event_only(camera_id))
         except Exception:  # noqa: BLE001 - never let the lookup hide the camera's health
             return False
+
+    def _events_down(self, camera_id: str, now: float) -> int | None:
+        """Seconds a camera that relies on its ONVIF events (no metadata reader) has had no working event subscription,
+        once that is EVENTS_DOWN_S or more, else None. Its metadata problem is suppressed, so this is what shows."""
+        if not self._event_only(camera_id):
+            return None
+        try:
+            since = self.events_down_since(camera_id)
+        except Exception:  # noqa: BLE001
+            return None
+        return int(now - since) if since and now - since >= EVENTS_DOWN_S else None
 
     def all(self) -> dict[str, dict]:
         return {c["id"]: self.camera(c["id"]) for c in db.cameras(enabled_only=True)}

@@ -7,7 +7,7 @@ import logging
 import re
 import time
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 
 import cv2
 import httpx
@@ -449,10 +449,11 @@ class Pipeline:
         result["summary"] = summary
         # A weapon in the description is checked at full resolution BEFORE anything is stored: the threat, priority
         # and the hub's high-priority alert only ever see the checked wording (event 9118: a towel read as a handgun).
-        result, original = await weaponcheck.review(e, result, lambda: self.weapon_evidence(e))
+        # The model's unchecked wording is kept in synopsis_json["weapon_check"]["original"], never in synopsis_original:
+        # that column is the operator's correction ("Revert to original" would bring the false "handgun" back).
+        result, _original = await weaponcheck.review(e, result, lambda: self.weapon_evidence(e))
         summary = result.get("summary", summary)
-        extra = {"synopsis_original": original} if original is not None and not e.get("synopsis_original") else {}
-        db.update_event(event_id, synopsis=summary, synopsis_json=result, threat=result.get("threat_level"), error=None, **extra)
+        db.update_event(event_id, synopsis=summary, synopsis_json=result, threat=result.get("threat_level"), error=None)
         if not e.get("ptz_preset"):
             await policy.confirm_towing(event_id)   # a towing claim needs a second, focused look before a rule can break
             policy.check(event_id, camera)          # site rules (who may tow what) now that Qwen has looked
@@ -463,13 +464,21 @@ class Pipeline:
 
     async def weapon_evidence(self, e: dict) -> dict:
         """Full-resolution crops of every person in the event for weaponcheck: the clip is decoded on a decode thread,
-        YOLO (the verifier's model) runs on the GPU thread like every other YOLO call."""
+        YOLO (the verifier's model) runs on the GPU thread like every other YOLO call. One deadline a little inside
+        COLLECT_TIMEOUT_S bounds all of it: decoding stops, no YOLO call starts after it, and a YOLO call still queued
+        behind other GPU work when it passes is cancelled, so nothing runs on after check_claim stopped waiting."""
         model = self.verifier.model if self.verifier else None
+        deadline = time.time() + weaponcheck.COLLECT_TIMEOUT_S - 5
         predict = None
         if model is not None:
-            predict = lambda imgs: self.gpu.submit(weaponcheck.yolo_predict, model, imgs).result(  # noqa: E731
-                timeout=weaponcheck.COLLECT_TIMEOUT_S)
-        return await asyncio.get_running_loop().run_in_executor(self.decode, weaponcheck.gather_evidence, e, predict)
+            def predict(imgs):
+                fut = self.gpu.submit(weaponcheck.yolo_predict, model, imgs)
+                try:
+                    return fut.result(timeout=max(0.1, deadline - time.time()))
+                except FutureTimeout:
+                    fut.cancel()   # not started yet: don't run it for a check that has given up
+                    raise
+        return await asyncio.get_running_loop().run_in_executor(self.decode, weaponcheck.gather_evidence, e, predict, deadline)
 
     @staticmethod
     def correction_examples(camera_id: str, n: int = 3, label: str | None = None) -> list[dict]:

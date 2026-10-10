@@ -11,7 +11,10 @@ import tempfile
 import time
 from pathlib import Path
 
-os.environ["NVR_DATA_DIR"] = tempfile.mkdtemp(prefix="nvr-weapon-test-")  # never the real DB
+_TMP = Path(tempfile.mkdtemp(prefix="nvr-weapon-test-"))
+os.environ["NVR_DATA_DIR"] = str(_TMP)  # never the real DB
+os.environ["NVR_RECORDINGS_DIR"] = str(_TMP / "recordings")   # nor its recordings or mediamtx.yml
+os.environ["NVR_RUNTIME_DIR"] = str(_TMP / "runtime")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import cv2  # noqa: E402
@@ -286,7 +289,9 @@ def test_review_towel_is_not_confirmed():
     assert [p["object"] for p in w["persons"]] == ["water bottle", "black microfiber towel"]
     assert w["model"] == "fake-vl" and w["evidence"] == "clip" and w["persons_found"] == 2 and w["kind"] == "firearm"
     assert "holding a black microfiber towel." in out["summary"] and out["threat_level"] == "low"
-    assert original == SYN_9118                                          # kept for synopsis_original
+    assert original == SYN_9118
+    # the unchecked wording is kept with the check (read-only), not as an operator's original to revert to
+    assert w["original"]["summary"] == SYN_9118["summary"] and "weapon_check" not in w["original"]
     assert len(asked) == 2 and all(a["task"] == wc.TASK and a["priority"] == "chat" and a["images"] == 2 for a in asked)
     assert "green corner marks" in asked[0]["text"]
 
@@ -296,7 +301,7 @@ def test_review_confirmed_stops_at_the_first_weapon():
     out, original = run(wc.review(EVENT, SYN_9118, collector(evidence(3))))
     assert out["weapon_check"]["verdict"] == "confirmed" and out["weapon_check"]["confirmed"]
     assert out["threat_level"] == "high" and "holding a black handgun" in out["summary"] and "firearm" in out["tags"]
-    assert original is None and len(asked) == 1
+    assert original is None and len(asked) == 1 and "original" not in out["weapon_check"]
 
 
 def test_review_unclear_stays_high():
@@ -481,6 +486,43 @@ def test_gather_evidence_falls_back():
     assert ev["evidence"] == "clip" and len(ev["persons"]) == 2 and ev["complete"]
 
 
+def test_evidence_deadline_is_cooperative():
+    clip = DATA / "clip_two.mp4"
+    if not clip.exists():
+        make_clip(clip)
+    calls = []
+
+    def slow_yolo(imgs):   # each YOLO call takes the rest of the budget
+        calls.append(time.time())
+        time.sleep(0.3)
+        return fake_yolo(imgs)
+    deadline = time.time() + 0.1
+    ev = wc.clip_evidence(clip, slow_yolo, deadline=deadline)
+    assert ev["cut"] and not ev["complete"] and all(t <= deadline for t in calls)   # no YOLO call starts after it
+    # a YOLO call that timed out is not asked again for the snapshot: the stored crops (no YOLO) are what's left
+    eid = 4243
+    d = DATA / "events" / str(eid)
+    d.mkdir(parents=True, exist_ok=True)
+    import shutil
+    shutil.copy(clip, d / "clip.mp4")
+    cv2.imwrite(str(d / "snapshot.jpg"), np.full((360, 640, 3), 90, np.uint8))
+    (d / "crop_0.jpg").write_bytes(b"crop")
+    e = {"id": eid, "clip": f"events/{eid}/clip.mp4", "snapshot": f"events/{eid}/snapshot.jpg",
+         "detections": {"keyframes": [{"file": "crop_0.jpg", "kind": "crop"}]}}
+    calls.clear()
+
+    def timed_out(imgs):
+        calls.append(len(imgs))
+        raise TimeoutError()
+    ev = wc.gather_evidence(e, timed_out, deadline=time.time() + 30)
+    assert ev["evidence"] == "keyframes" and len(calls) == 1
+    # past the deadline: no snapshot YOLO either
+    calls.clear()
+    (d / "clip.mp4").unlink()
+    ev = wc.gather_evidence(e, slow_yolo, deadline=time.time() - 1)
+    assert ev["evidence"] == "keyframes" and calls == []
+
+
 # ---------------------------------------------------------------- the pipeline stores only the checked synopsis
 
 def test_pipeline_stores_only_the_checked_synopsis():
@@ -525,7 +567,9 @@ def test_pipeline_stores_only_the_checked_synopsis():
     e = db.event(eid)
     assert e["synopsis"].endswith("holding a black microfiber towel.") and e["threat"] == "low"
     assert e["synopsis_json"]["weapon_check"]["verdict"] == "not_confirmed"
-    assert e["synopsis_original"]["summary"].endswith("holding a black handgun.")
+    # the unchecked claim is history of the check, not an operator correction: "Revert to original" must not bring it back
+    assert e["synopsis_original"] is None and e["corrected_at"] is None
+    assert e["synopsis_json"]["weapon_check"]["original"]["summary"].endswith("holding a black handgun.")
     assert e["priority"] in (None, "none", "low")                       # no high-priority alert for the hub
 
 

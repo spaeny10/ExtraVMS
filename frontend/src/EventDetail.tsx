@@ -256,11 +256,28 @@ function WeaponCheckBadge({ check }: { check?: WeaponCheck | null }) {
   return <span className={`badge weapon-check ${cls}`} title={`Second look at full resolution: ${check.reason}`}>{label}</span>;
 }
 
-function WeaponCheckLine({ check }: { check: WeaponCheck }) {
+/**
+ * The two "originals" an event can carry. `correction`: the model's version an operator corrected (events.synopsis_original
+ * with corrected_at set): shown with "Revert to original". `weaponClaim`: what the model wrote before the weapon check
+ * changed it (weapon_check.original; older events kept it in synopsis_original without corrected_at): read-only, never
+ * revertable, since reverting would bring back the unchecked claim (event 9118's "black handgun").
+ */
+export function synopsisOriginals(e: Pick<NvrEvent, "synopsis_json" | "synopsis_original" | "corrected_at">):
+  { correction: Synopsis | null; weaponClaim: Synopsis | null } {
+  const check = e.synopsis_json?.weapon_check as (WeaponCheck & { original?: Synopsis | null }) | null | undefined;
+  const correction = e.corrected_at && e.synopsis_original ? e.synopsis_original : null;
+  const legacy = !e.corrected_at && check && check.verdict !== "confirmed" ? e.synopsis_original ?? null : null;
+  return { correction, weaponClaim: check?.original ?? legacy };
+}
+
+function WeaponCheckLine({ check, original }: { check: WeaponCheck; original?: Synopsis | null }) {
   const { label, cls } = weaponCheckText(check);
   return (
     <div className={`d-line weapon-line ${cls}`} title="The description mentioned a weapon, so every person in the clip was looked at again at full camera resolution before the event was rated">
       <strong>Weapon check:</strong> {label}. <span className="muted small">{check.reason}{check.model ? ` · ${check.model}` : ""}</span>
+      {original?.summary ? (
+        <div className="muted small">Before the check, the description said: {original.summary} <em>(threat: {original.threat_level})</em></div>
+      ) : null}
     </div>
   );
 }
@@ -299,6 +316,7 @@ function Details({ e, site, setE, notes, onUnsave, seek }: {
 }) {
   const [editing, setEditing] = useState(false);
   const s = e.synopsis_json;
+  const originals = synopsisOriginals(e);
   const canGenerate = Boolean(e.detections?.keyframes?.length);
   // Qwen's "activity" line usually restates the summary; show it only when it adds something
   const activity = s?.activity && !(e.synopsis ?? "").toLowerCase().includes(s.activity.toLowerCase().slice(0, 40)) ? s.activity : null;
@@ -351,10 +369,10 @@ function Details({ e, site, setE, notes, onUnsave, seek }: {
                 ⚠ {e.anomaly_json.reasons.join("; ")}{e.priority && e.priority !== "none" ? ` · priority ${e.priority}` : ""}
               </div>
             ) : null}
-            {s?.weapon_check ? <WeaponCheckLine check={s.weapon_check} /> : null}
+            {s?.weapon_check ? <WeaponCheckLine check={s.weapon_check} original={originals.weaponClaim} /> : null}
             {s?.threat_reason && s.threat_level !== "none" && <div className="d-line"><strong>Threat ({s.threat_level}):</strong> {s.threat_reason}</div>}
             {tags.length > 0 && <div className="tags">{tags.slice(0, 8).map((t) => <span key={t} className="tag">{t}</span>)}{tags.length > 8 && <span className="tag muted">+{tags.length - 8}</span>}</div>}
-            {(activity || s?.objects?.length || s?.model || e.synopsis_original) && (
+            {(activity || s?.objects?.length || s?.model || originals.correction) && (
               <details className="d-more">
                 <summary className="muted small">More from Qwen</summary>
                 {activity && <p className="muted">{activity}</p>}
@@ -364,9 +382,9 @@ function Details({ e, site, setE, notes, onUnsave, seek }: {
                   </ul>
                 ) : null}
                 {s?.model && <p className="muted small model-tag">written by {s.model}</p>}
-                {e.synopsis_original && (
+                {originals.correction && (
                   <div className="original small">
-                    <p className="muted">Qwen's original: {e.synopsis_original.summary} <em>(threat: {e.synopsis_original.threat_level})</em></p>
+                    <p className="muted">Qwen's original: {originals.correction.summary} <em>(threat: {originals.correction.threat_level})</em></p>
                     <button className="ghost small" onClick={async () => setE(await site.revertSynopsis(e.id))}>Revert to original</button>
                   </div>
                 )}

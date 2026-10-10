@@ -14,7 +14,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 
-from . import ruleevents, zones
+from . import ingest, ruleevents, zones
 from .config import settings
 from . import cells
 from .db import db
@@ -45,6 +45,9 @@ class Track:
     source: str = "metadata"    # ruleevents.SOURCE: opened by the camera's ONVIF detection event, no boxes
     on: bool = True             # rule-event track: the camera has not said state=false yet
     last_on: float = 0.0        # rule-event track: wall time of the last state=true
+    # rule-event track: the camera's detectors (topic|rule) that said true and not false yet. Two topics can name one
+    # label (Reolink PeopleDetect and FaceDetect): the track is on while any of them is, off when the last one says false
+    states: set = field(default_factory=set)
 
 
 class Tracker:
@@ -59,6 +62,9 @@ class Tracker:
         self.camera = lambda camera_id: None
         self.on_opened = lambda event_id: None   # a rule-event track opened an event (the pipeline publishes it)
         self.metadata_missing = lambda camera_id: False   # its RTSP stream has no metadata track (ingest.MetadataReader)
+        # when its metadata reader connected (0: not connected, None: no reader known): auto mode reads "no objects in
+        # the metadata" as "the camera sends none" only while the reader is connected (a 401 must not look like that)
+        self.metadata_reader = ingest.metadata_since
         self.watch = ruleevents.SourceWatch()
 
     def set_zones(self, camera_id: str, zone_list: list[dict]) -> None:
@@ -90,6 +96,12 @@ class Tracker:
             # zones are drawn for the home view: while the camera is turned away, record everything it sees
             t.in_zone = t.in_zone or away is not None or self._zone_hit(f.camera_id, o.box)
             if t.event_id is None and t.in_zone and t.last_ts - t.first_ts >= settings.track_min_seconds:
+                if self._rule_event_open(f.camera_id):
+                    # never both: the camera's ONVIF event already opened this visit's event (auto mode had switched
+                    # to its events while no objects came). This track counts again from now, so it opens an event
+                    # of its own only if the object is still there after that one ends.
+                    t.first_ts, t.path = f.ts, t.path[-1:]
+                    continue
                 t.event_id = db.create_event(
                     camera_id=t.camera_id, track_id=t.object_id, camera_class=t.label,
                     camera_conf=t.max_conf, start_ts=t.first_ts, path=t.path, status="open",
@@ -118,7 +130,20 @@ class Tracker:
             no_track = bool(self.metadata_missing(camera_id))
         except Exception:  # noqa: BLE001 - the ingest may be restarting
             no_track = False
-        return self.watch.decide(self.camera(camera_id), camera_id, now or time.time(), no_track)
+        try:
+            reader = self.metadata_reader(camera_id)
+        except Exception:  # noqa: BLE001
+            reader = None
+        return self.watch.decide(self.camera(camera_id), camera_id, now or time.time(), no_track, reader)
+
+    def _rule_event_open(self, camera_id: str) -> bool:
+        return any(t.camera_id == camera_id and t.source == ruleevents.SOURCE and t.event_id is not None
+                   for t in self.tracks.values())
+
+    def _object_rule_track(self, camera_id: str) -> Track | None:
+        """The newest open rule-event track of an object (person, vehicle...) on the camera: not motion."""
+        return max((t for t in self.tracks.values() if t.camera_id == camera_id and t.source == ruleevents.SOURCE
+                    and t.label != "motion" and t.event_id is not None), key=lambda t: t.first_ts, default=None)
 
     def detection_status(self, camera_id: str) -> dict:
         """Settings → Cameras: where this camera's detections come from now, and why."""
@@ -136,11 +161,14 @@ class Tracker:
         key = (cid, ruleevents.TRACK_PREFIX + label)
         t = self.tracks.get(key)
         rule = {"ts": round(now, 3), "topic": e.topic, "rule": e.rule}
-        if e.state is False:   # the camera says it's gone: sweep closes it after track_end_gap (unless it comes back)
+        src = f"{e.topic}|{e.rule or ''}"   # one detector of the camera
+        if e.state is False:
             if t is not None and t.on:
-                t.on, t.last_ts, t.last_wall = False, max(t.last_ts, now), now
-                t.path.append(ruleevents.point(now))
                 t.rules.append({**rule, "state": False})
+                t.states.discard(src)
+                if not t.states:   # the last detector says it's gone: sweep closes it after track_end_gap (unless it comes back)
+                    t.on, t.last_ts, t.last_wall = False, max(t.last_ts, now), now
+                    t.path.append(ruleevents.point(now))
             return
         cam = self.camera(cid)
         if cam is not None and not cam.get("enabled", True):
@@ -152,9 +180,22 @@ class Tracker:
         if not ruleevents.wanted(label, cam):
             return
         pulse = e.state is None   # e.g. a line crossing: no state, nothing will turn it off
+        if kind == "motion":
+            host = self._object_rule_track(cid)
+            if host is not None:
+                # one visit, one event: the person (vehicle...) event open on this camera takes the motion as one
+                # more rule; it opens nothing of its own and doesn't keep that event on
+                host.rules.append(rule)
+                return
+        elif t is None:
+            m = self.tracks.get((cid, ruleevents.TRACK_PREFIX + "motion"))
+            if m is not None and m.event_id is not None:
+                t = self._upgrade_motion(m, key, label)
         if t is None:
             t = Track(cid, key[1], label, now, now, now, source=ruleevents.SOURCE, in_zone=True,
                       on=not pulse, last_on=now, away=self.away_preset(cid))
+            if not pulse:
+                t.states.add(src)
             t.path.append(ruleevents.point(now))
             t.rules.append(rule)
             self.tracks[key] = t
@@ -164,8 +205,24 @@ class Tracker:
         t.last_ts, t.last_wall = max(t.last_ts, now), now
         if not pulse:
             t.on, t.last_on = True, now
+            t.states.add(src)
         t.path.append(ruleevents.point(now))
         t.rules.append(rule)
+
+    def _upgrade_motion(self, m: Track, key: tuple[str, str], label: str) -> Track:
+        """The camera now says what its motion was (PeopleDetect after CellMotionDetector): the open motion event
+        becomes the person (vehicle...) event rather than a second event for the same visit. Its motion detectors
+        no longer keep it on; the object detector that upgraded it does (the caller turns it on, unless a pulse)."""
+        del self.tracks[(m.camera_id, m.object_id)]
+        m.object_id, m.label, m.states, m.on = key[1], label, set(), False
+        self.tracks[key] = m
+        db.update_event(m.event_id, camera_class=label, track_id=ruleevents.track_id(label, m.first_ts))
+        log.info("[%s] event %s: the motion is a %s (the camera's ONVIF event)", m.camera_id, m.event_id, label)
+        try:
+            self.on_opened(m.event_id)
+        except Exception:  # noqa: BLE001 - a UI push must not stop the tracker
+            log.exception("publishing event %s failed", m.event_id)
+        return m
 
     def _open_rule_event(self, t: Track) -> None:
         """Rule-event tracks open their event at once: the camera already decided there is a person. No zone check
@@ -211,10 +268,12 @@ class Tracker:
             log.info("[%s] event %s closed after %.1fs (%d samples)", t.camera_id, t.event_id,
                      t.last_ts - t.first_ts, len(t.path))
             await self.on_closed(t.event_id)
-            if too_long and not quiet:
-                # keep following the same object as a new event
+            if too_long and not quiet and (t.on or not rule):
+                # keep following the same object as a new event (a rule-event track only while the camera still says
+                # it's there: after its state=false the next true opens a new event the usual way)
                 nt = self.tracks[key] = Track(t.camera_id, t.object_id, t.label, t.last_ts, t.last_ts, t.last_wall,
-                                              in_zone=t.in_zone, source=t.source, on=t.on, last_on=t.last_on)
+                                              in_zone=t.in_zone, source=t.source, on=t.on, last_on=t.last_on,
+                                              states=set(t.states))
                 if rule:   # the camera still says it's there: the next event opens now, like the first one did
                     nt.away = self.away_preset(t.camera_id)
                     nt.path.append(ruleevents.point(nt.first_ts))

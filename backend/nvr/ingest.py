@@ -105,6 +105,7 @@ CLOCK_WINDOW = 4000        # metadata frames (~3-5 min) for the camera clock est
 CLOCK_PERCENTILE = 0.05    # low percentile: the least-delayed arrivals show the true clock offset
 SILENCE_LIMIT_S = 90  # no packets at all (RTP, RTCP or keepalive replies) for this long = dead session
 NO_TRACK_RETRY_S = 1800   # the stream has no metadata track at all (Reolink RP-PCT8MD): look again this rarely
+NO_TRACK_QUICK_S = (30, 60)   # ...after looking again this soon (one DESCRIBE without it can be a camera restarting)
 
 
 class MetadataReader(threading.Thread):
@@ -123,12 +124,14 @@ class MetadataReader(threading.Thread):
         self.on_frame = on_frame
         self.stop_event = threading.Event()
         self.connected = False
+        self.connected_at = 0.0   # when the current session connected (auto mode counts "no objects" only since then)
         self.last_frame_at = 0.0
         self._deltas: collections.deque[float] = collections.deque(maxlen=CLOCK_WINDOW)
         self._since_update = 0
         self.clock_offset: float | None = None  # seconds to add to camera time to get PC time
         # the camera's stream has no metadata track (its DESCRIBE lists video/audio only): its detections can only come
-        # from its ONVIF events (ruleevents.py, auto mode), so the reader checks again every NO_TRACK_RETRY_S
+        # from its ONVIF events (ruleevents.py, auto mode), so the reader checks again every NO_TRACK_RETRY_S (after
+        # the quick looks of NO_TRACK_QUICK_S)
         self.no_track = False
 
     def _retime(self, raw_ts: float) -> float:
@@ -141,24 +144,29 @@ class MetadataReader(threading.Thread):
         return raw_ts + self.clock_offset + settings.camera_clock_offset
 
     def run(self) -> None:
-        backoff = 1
+        backoff, no_tracks = 1, 0
         while not self.stop_event.is_set():
             started = time.time()
             try:
                 self._session()
             except NoTrack as e:
-                if not self.no_track:
+                # a couple of quick looks first, then rarely
+                wait = NO_TRACK_QUICK_S[no_tracks] if no_tracks < len(NO_TRACK_QUICK_S) else NO_TRACK_RETRY_S
+                if no_tracks in (0, len(NO_TRACK_QUICK_S)):
                     log.warning("[%s] metadata stream: %s: detections can only come from the camera's ONVIF events; "
-                                "checking again every %d min", self.camera_id, e, NO_TRACK_RETRY_S // 60)
+                                "checking again in %d s", self.camera_id, e, wait)
+                no_tracks += 1
                 self.no_track = True
                 self.connected = False
-                self.stop_event.wait(NO_TRACK_RETRY_S)
+                self.stop_event.wait(wait)
                 backoff = 1
                 continue
             except (OSError, ConnectionError, LookupError, ET.ParseError) as e:
                 if time.time() - started > 60:
                     backoff = 1  # the session was healthy for a while; reconnect quickly
                 log.warning("[%s] metadata stream: %s; retry in %ss", self.camera_id, e, backoff)
+            if not self.no_track:
+                no_tracks = 0   # the stream had its metadata track: a later NoTrack starts with the quick looks again
             self.connected = False
             self.stop_event.wait(backoff)
             backoff = min(backoff * 2, 30)
@@ -170,7 +178,7 @@ class MetadataReader(threading.Thread):
             play_track(cam, "application")
             self.no_track = False
             cam.sock.settimeout(5)
-            self.connected = True
+            self.connected, self.connected_at = True, time.time()
             log.info("[%s] metadata stream connected", self.camera_id)
             current, last_ka, last_data = b"", time.time(), time.time()
             while not self.stop_event.is_set():
@@ -212,6 +220,9 @@ class EventPuller(threading.Thread):
         self.on_event = on_event
         self.stop_event = threading.Event()
         self.connected = False
+        # since when no messages could be pulled (None: the subscription works). A camera whose detections come from
+        # its ONVIF events gets no events at all while this is set: health.py reports it after EVENTS_DOWN_S
+        self.down_since: float | None = time.time()
 
     def run(self) -> None:
         backoff = 1
@@ -222,6 +233,7 @@ class EventPuller(threading.Thread):
             except (OnvifError, OSError) as e:
                 log.warning("[%s] ONVIF events: %s; retry in %ss", self.cam["id"], e, backoff)
             self.connected = False
+            self.down_since = self.down_since or time.time()
             self.stop_event.wait(backoff)
             backoff = min(backoff * 2, 60)
 
@@ -258,6 +270,7 @@ class EventPuller(threading.Thread):
             resp = onvif.call(manager, "<tev:PullMessages><tev:Timeout>PT10S</tev:Timeout>"
                                        "<tev:MessageLimit>100</tev:MessageLimit></tev:PullMessages>",
                               header=wsa(ACTION_PULL), timeout=20)
+            self.down_since = None   # a pull answered (a subscription that is created but can't be pulled stays down)
             for n in find_all(resp, "NotificationMessage"):
                 ev = self._parse(n)
                 if ev:
@@ -297,6 +310,7 @@ class CameraIngest:
                  frames: asyncio.Queue, events: asyncio.Queue):
         put_frame = lambda f: loop.call_soon_threadsafe(frames.put_nowait, f)
         put_event = lambda e: loop.call_soon_threadsafe(events.put_nowait, e)
+        self.camera_id = cam["id"]
         self.meta = MetadataReader(cam["id"], put_frame)
         self.events = EventPuller(cam, put_event)
         # set to take its detections from its ONVIF events: no metadata reader at all (none would be used)
@@ -306,14 +320,37 @@ class CameraIngest:
         if self.meta_wanted:
             self.meta.start()
         self.events.start()
+        RUNNING[self.camera_id] = self
 
     def stop(self) -> None:
         self.meta.stop_event.set()
         self.events.stop_event.set()
+        if RUNNING.get(self.camera_id) is self:
+            del RUNNING[self.camera_id]
 
     def status(self) -> dict:
         return {"metadata": self.meta.connected, "metadata_last": self.meta.last_frame_at,
                 "clock_offset": None if self.meta.clock_offset is None else round(self.meta.clock_offset, 2),
-                "onvif_events": self.events.connected,
+                "onvif_events": self.events.connected, "onvif_events_down_since": self.events.down_since,
                 # no metadata track in the camera's stream / no reader (set to ONVIF events): Settings says why
                 "metadata_missing": self.meta.no_track, "metadata_off": not self.meta_wanted}
+
+
+# camera id -> its running CameraIngest (the API's state.ingests holds the same ones): the tracker's auto mode and the
+# stream health read the readers' state from here
+RUNNING: dict[str, CameraIngest] = {}
+
+
+def metadata_since(camera_id: str) -> float | None:
+    """When the camera's metadata reader connected (its current session), 0.0 while it is not connected, None when
+    there is no reader to ask (no ingest running here, or the camera is set to its ONVIF events)."""
+    ing = RUNNING.get(camera_id)
+    if ing is None or not ing.meta_wanted:
+        return None
+    return ing.meta.connected_at if ing.meta.connected else 0.0
+
+
+def events_down_since(camera_id: str) -> float | None:
+    """Since when the camera's ONVIF event subscription could pull nothing, None while it works (or no ingest)."""
+    ing = RUNNING.get(camera_id)
+    return None if ing is None else ing.events.down_since

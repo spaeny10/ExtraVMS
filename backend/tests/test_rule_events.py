@@ -159,6 +159,82 @@ def test_long_presence_splits_like_a_long_track():
     assert closed == opened
 
 
+def test_two_topics_for_one_label_keep_the_event_open():
+    # PeopleDetect and FaceDetect both say person: FaceDetect ending must not end the person event
+    tr, closed, opened = tracker()
+    now = time.time()
+    face = "RuleEngine/MyRuleDetector/FaceDetect"
+    tr.on_rule_event(rule(PEOPLE, True, now - 10))
+    tr.on_rule_event(rule(face, True, now - 9))
+    tr.on_rule_event(rule(face, False, now - 7))
+    sweep(tr)   # 7 s after FaceDetect's false (> track_end_gap), PeopleDetect still true
+    assert len(opened) == 1 and not closed and tr.tracks[("cam6", "onvif:person")].on
+    tr.on_rule_event(rule(PEOPLE, False, now - 4))
+    sweep(tr)
+    e = db.event(opened[0])
+    assert closed == opened and abs(e["end_ts"] - (now - 4)) < 0.01 and not tr.tracks
+
+
+def test_false_before_the_split_opens_no_new_event():
+    # the camera says "gone" just before the track_max_seconds split: closed, nothing follows
+    tr, closed, opened = tracker()
+    now = time.time()
+    tr.on_rule_event(rule(PEOPLE, True, now - settings.track_max_seconds - 1))
+    tr.on_rule_event(rule(PEOPLE, False, now - 0.5))
+    sweep(tr)
+    assert closed == opened and len(opened) == 1 and not tr.tracks
+
+
+def test_motion_and_person_are_one_event():
+    cam = {**REOLINK, "motion_events": 1}
+    now = time.time()
+    # motion first, then the camera names it: the motion event becomes the person event
+    tr, closed, opened = tracker([cam])
+    tr.on_rule_event(rule(CELL, True, now - 10, data={"IsMotion": "true", "Rule": "000"}))
+    tr.on_rule_event(rule(PEOPLE, True, now - 9))
+    assert len(set(opened)) == 1 and list(tr.tracks) == [("cam6", "onvif:person")]
+    e = db.event(opened[0])
+    assert e["camera_class"] == "person" and e["track_id"].startswith("onvif:person-") and e["start_ts"] == now - 10
+    tr.on_rule_event(rule(CELL, True, now - 8, data={"IsMotion": "true", "Rule": "000"}))   # more motion: no new event
+    tr.on_rule_event(rule(CELL, False, now - 7, data={"IsMotion": "false", "Rule": "000"}))
+    sweep(tr)
+    assert len(set(opened)) == 1 and not closed                   # motion ending does not end the person
+    tr.on_rule_event(rule(PEOPLE, False, now - 4))
+    sweep(tr)
+    assert closed == [opened[0]] and db.event(opened[0])["status"] == "pending" and not tr.tracks
+    # the person first: motion opens nothing of its own, it is recorded on the person event
+    tr, closed, opened = tracker([cam])
+    tr.on_rule_event(rule(PEOPLE, True, now - 10))
+    tr.on_rule_event(rule(CELL, True, now - 9, data={"IsMotion": "true", "Rule": "000"}))
+    assert len(opened) == 1 and list(tr.tracks) == [("cam6", "onvif:person")]
+    assert any(r["topic"] == CELL for r in tr.tracks[("cam6", "onvif:person")].rules)
+    tr.on_rule_event(rule(PEOPLE, False, now - 4))
+    sweep(tr)
+    assert closed == opened and db.event(opened[0])["camera_class"] == "person"
+
+
+def test_no_metadata_event_while_an_onvif_event_is_open():
+    # Analytics=false, no objects yet: the PeopleDetect event opens; objects then arrive in the metadata. Never both.
+    cam = {**REOLINK, "id": "cam2"}
+    tr, closed, opened = tracker([cam])
+    now = time.time()
+    tr.on_rule_event(rule(PEOPLE, True, now - 20, cam="cam2"))
+    assert len(opened) == 1
+    obj = DetectedObject(object_id="5", cls="Human", conf=0.9, box=(0.2, 0.2, 0.3, 0.5))
+    for ts in (now - 16, now - 15, now - 14, now - 13):
+        tr.on_frame(MetaFrame(camera_id="cam2", ts=ts, objects=[obj]))
+    assert db.one("SELECT COUNT(*) AS n FROM events WHERE camera_id='cam2'")["n"] == 1
+    assert tr.tracks[("cam2", "5")].event_id is None
+    tr.on_rule_event(rule(PEOPLE, False, now - 10, cam="cam2"))
+    sweep(tr)
+    assert closed == opened
+    # still there after the ONVIF event ended: its own event, starting no earlier than the last suppressed frame
+    for ts in (now - 9, now - 7):
+        tr.on_frame(MetaFrame(camera_id="cam2", ts=ts, objects=[obj]))
+    t = tr.tracks[("cam2", "5")]
+    assert t.event_id is not None and db.event(t.event_id)["start_ts"] >= now - 13
+
+
 def test_vehicle_detect_is_a_vehicle_event():
     tr, closed, opened = tracker()
     now = time.time()
@@ -187,6 +263,9 @@ def test_motion_topics_only_with_the_flag():
     tr2.on_rule_event(rule(ALARM, True, now - 4))
     assert len(opened2) == 1 and db.event(opened2[0])["camera_class"] == "motion"
     tr2.on_rule_event(rule(CELL, False, now - 3, data={"IsMotion": "false", "Rule": "000"}))
+    sweep(tr2)
+    assert closed2 == []   # MotionAlarm still says motion: on while any of its detectors is
+    tr2.on_rule_event(rule(ALARM, False, now - 3))
     sweep(tr2)
     assert closed2 == opened2
 
@@ -508,12 +587,14 @@ def test_no_metadata_track_backs_off_for_half_an_hour():
 
         def wait(t):
             waits.append(t)
-            if len(waits) >= 2:
+            if len(waits) >= 4:
                 r.stop_event.set()
             return r.stop_event.is_set()
         r.stop_event.wait = wait
         r.run()
-        assert r.no_track and waits == [ingest.NO_TRACK_RETRY_S] * 2, waits
+        # one DESCRIBE without the track can be a camera restarting: two quick looks, then every half hour
+        assert r.no_track and waits == [*ingest.NO_TRACK_QUICK_S, ingest.NO_TRACK_RETRY_S, ingest.NO_TRACK_RETRY_S], waits
+        assert ingest.NO_TRACK_QUICK_S == (30, 60)
     finally:
         ingest.Rtsp, ingest.play_track, ingest.mediamtx.reader_credentials = old
 
@@ -526,10 +607,53 @@ def test_ingest_set_to_onvif_events_starts_no_metadata_reader():
         ing.events.start = lambda: None   # no ONVIF session in a test
         ing.start()
         assert not ing.meta.is_alive() and ing.status()["metadata_off"] is True
+        assert ingest.metadata_since("cam6") is None   # no reader to ask
+        ing.stop()
         ing2 = ingest.CameraIngest({**REOLINK, "host": "10.0.0.6"}, loop, q, q)
         assert ing2.meta_wanted and ing2.status()["metadata_missing"] is False
     finally:
         loop.close()
+
+
+def test_ingest_registry_reports_reader_and_subscription_state():
+    loop = asyncio.new_event_loop()
+    try:
+        q = asyncio.Queue()
+        ing = ingest.CameraIngest({**REOLINK, "id": "cam9", "host": "10.0.0.6"}, loop, q, q)
+        ing.meta.start = ing.events.start = lambda: None   # no threads, no camera
+        assert ingest.metadata_since("cam9") is None and ingest.events_down_since("cam9") is None   # not running
+        ing.start()
+        assert ingest.metadata_since("cam9") == 0.0                      # not connected
+        ing.meta.connected, ing.meta.connected_at = True, 123.0
+        assert ingest.metadata_since("cam9") == 123.0
+        assert ingest.events_down_since("cam9") == ing.events.down_since > 0   # never pulled yet
+        assert ing.status()["onvif_events_down_since"] == ing.events.down_since
+        ing.events.down_since = None
+        assert ingest.events_down_since("cam9") is None
+        ing.stop()
+        assert ingest.metadata_since("cam9") is None and "cam9" not in ingest.RUNNING
+    finally:
+        loop.close()
+
+
+def test_event_puller_failing_stays_down():
+    p = ingest.EventPuller({**REOLINK, "host": "10.0.0.6"}, lambda e: None)
+    first = p.down_since
+    n = []
+
+    def fail():
+        n.append(1)
+        if len(n) >= 3:
+            p.stop_event.set()
+        raise soap.OnvifError("401 Unauthorized")
+    p._session = fail
+    p.stop_event.wait = lambda t: p.stop_event.is_set()
+    ingest.log.disabled = True
+    try:
+        p.run()
+    finally:
+        ingest.log.disabled = False
+    assert p.down_since == first and not p.connected   # down since it started, not reset by each retry
 
 
 def sample(bytes_, readers):
@@ -550,6 +674,61 @@ def test_health_problem_only_for_metadata_cameras():
     assert any("metadata reader" in x for x in h.camera("cam1")["problems"])
     h.event_only = lambda cid: 1 / 0   # a failing lookup never hides a problem
     assert any("metadata reader" in x for x in h.camera("cam6")["problems"])
+
+
+def test_health_event_subscription_down_for_event_only_cameras():
+    h = StreamHealth()
+    h.last_sample = 1.0
+    now = time.time()
+    for cid in ("cam6", "cam1"):
+        p = h.paths.setdefault(cid, PathStats())
+        for i in range(4):
+            p.update(now - 40 + i * 10, sample(1000 * (i + 1), {}))
+    tr, _, _ = tracker()
+    h.event_only = lambda cid: tr.uses_rule_events(cid)[0]
+    down = {"cam6": now - 600, "cam1": now - 600}
+    h.events_down_since = lambda cid: down.get(cid)
+    probs = h.camera("cam6")["problems"]
+    assert any("ONVIF event subscription down for 10 min" in x for x in probs), probs
+    assert not any("ONVIF event" in x for x in h.camera("cam1")["problems"])   # metadata camera: its reader is what counts
+    down["cam6"] = now - 60     # a short outage (reconnecting): not yet a problem
+    assert not any("ONVIF event" in x for x in h.camera("cam6")["problems"])
+    down["cam6"] = None         # working
+    assert not h.camera("cam6")["problems"]
+    h.events_down_since = lambda cid: 1 / 0
+    assert not any("ONVIF event" in x for x in h.camera("cam6")["problems"])
+
+
+def test_auto_mode_window_needs_a_connected_metadata_reader():
+    cam = {**REOLINK, "id": "cam3", "streams": None}   # never probed
+    now = time.time()
+
+    def watched(reader):
+        tr, _, _ = tracker([cam])
+        tr.watch.first_heard["cam3"] = now - 4 * ruleevents.AUTO_WINDOW_S
+        tr.watch.detect_at["cam3"] = now - 120
+        tr.metadata_reader = lambda cid: reader
+        return tr
+    # the reader can't connect (a 401 for hours): no switch, so "metadata reader not attached" still shows
+    tr = watched(0.0)
+    on, why = tr.uses_rule_events("cam3", now)
+    assert not on and "not connected" in why
+    h = StreamHealth()
+    h.last_sample = 1.0
+    p = h.paths.setdefault("cam3", PathStats())
+    for i in range(4):
+        p.update(now - 40 + i * 10, sample(1000 * (i + 1), {}))
+    h.event_only = lambda cid: tr.uses_rule_events(cid)[0]
+    assert any("metadata reader not attached" in x for x in h.camera("cam3")["problems"])
+    # connected a minute ago: the window counts from then
+    assert not watched(now - 60).uses_rule_events("cam3", now)[0]
+    # connected all along and genuinely no objects: ONVIF events
+    assert watched(now - 2 * ruleevents.AUTO_WINDOW_S).uses_rule_events("cam3", now)[0]
+    assert watched(None).uses_rule_events("cam3", now)[0]   # no reader known (as before)
+    # Analytics=false still switches at once, whatever the reader does
+    tr = watched(0.0)
+    tr.camera = lambda cid: REOLINK
+    assert tr.uses_rule_events("cam3", now)[0]
 
 
 if __name__ == "__main__":
