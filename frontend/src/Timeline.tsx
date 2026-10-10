@@ -149,13 +149,48 @@ function clampView(start: number, end: number): View {
   return { start, end };
 }
 
-function nextRecording(lanes: Record<string, Lane>, ids: string[], t: number): number | null {
+function nextRecording(lanes: Record<string, { spans: Span[] }>, ids: string[], t: number): number | null {
   let best: number | null = null;
   for (const id of ids) {
     const s = lanes[id]?.spans.find((x) => x.start > t);
     if (s && (best == null || s.start < best)) best = s.start;
   }
   return best;
+}
+
+type Sighting = { cam: string; start: number; end: number };
+/** A journey sighting under way at t: from its pre-roll to a second after it ends (the phone follower's window). */
+const sightingAt = (m: Sighting, t: number) => m.start - FOCUS_PREROLL_S <= t && t <= m.end + 1;
+
+/**
+ * The clock's gap skip. gap: no shown camera has footage at t; next: where to go (null: nowhere).
+ * `journey` (only while a phone follows one, one camera shown at a time): the camera of a sighting under way counts as
+ * shown, and the skip never goes past the next sighting's pre-roll. Otherwise the shown camera's next recording can lie
+ * past sightings on other cameras (older footage is only kept clips; an offline camera has none) and the follower,
+ * which switches cameras when the playhead reaches a sighting, would never get there.
+ */
+export function gapSkip(lanes: Record<string, { spans: Span[] }>, ids: string[], t: number,
+  journey?: readonly Sighting[] | null): { gap: boolean; next: number | null } {
+  const shown = journey ? [...new Set([...ids, ...journey.filter((m) => sightingAt(m, t)).map((m) => m.cam)])] : ids;
+  if (shown.some((id) => spanAt(lanes[id]?.spans, t))) return { gap: false, next: null };
+  let next = nextRecording(lanes, shown, t);
+  for (const m of journey ?? []) {
+    const at = m.start - FOCUS_PREROLL_S;
+    if (at > t && (next == null || at < next)) next = at;
+  }
+  return { gap: true, next };
+}
+
+/** The sighting a journey starts from here: the first on a camera this Timeline has (allIds), else the first. */
+export const journeyLead = <M extends Sighting>(members: readonly M[], allIds: readonly string[]): M =>
+  members.find((m) => allIds.includes(m.cam)) ?? members[0];
+
+/** The journey camera to show at t (a phone turning to one camera mid-journey): a sighting under way, else the next
+ *  one, else the lead; only cameras this Timeline has. */
+export function journeyCamAt(members: readonly Sighting[], t: number | null, allIds: readonly string[]): string {
+  const ours = members.filter((m) => allIds.includes(m.cam)).sort((a, b) => a.start - b.start);
+  const pick = t == null ? undefined : ours.find((m) => sightingAt(m, t)) ?? ours.find((m) => m.start - FOCUS_PREROLL_S > t);
+  return (pick ?? journeyLead(members, allIds)).cam;
 }
 
 function loadConfig(key: string): LayoutConfig {
@@ -386,6 +421,10 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
     if (fromGrip) begin(e.clientX, e.clientY);
   };
   const isPhone = useIsPhone();
+  /** phone + journey: the camera the follower last switched to (null: not following) */
+  const journeyFollow = useRef<string | null>(null);
+  /** a camera to start following once it is the one shown (the solo is set in the same breath, applied a render later) */
+  const followWhenShown = useRef<string | null>(null);
   const autoSolo = useRef(false);
   useEffect(() => {  // a phone can't show a grid of full-resolution streams: one camera at a time
     const flag = sk("timelineAutoSolo"); // survives a reload, so a phone visit never leaves a desktop stuck on one camera
@@ -393,18 +432,23 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
     if (isPhone && !config.solo && allIds.length) {
       autoSolo.current = true;
       try { localStorage.setItem(flag, "1"); } catch { /* private mode */ }
-      setConfig((c) => ({ ...c, solo: allIds[0] }));
+      // mid-journey (a desktop narrowed to a phone): the journey's camera at the playhead, and follow it from there;
+      // a focus still waiting for its seek arms the follower when the seek lands
+      const journey = (focus?.members?.length ?? 0) > 1 ? focus!.members! : null;
+      const pick = journey ? journeyCamAt(journey, playhead, allIds) : allIds[0];
+      if (journey && allIds.includes(pick) && !pendingFocus.current) followWhenShown.current = pick;
+      setConfig((c) => ({ ...c, solo: allIds.includes(pick) ? pick : allIds[0] }));
+      if (journey) setCam(pick);
     } else if (!isPhone && wasAuto) {  // back to the grid on a desktop
       autoSolo.current = false;
       try { localStorage.removeItem(flag); } catch { /* private mode */ }
       setConfig((c) => ({ ...c, solo: null }));
     }
+    if (!isPhone) journeyFollow.current = followWhenShown.current = null;   // a desktop shows the journey's cameras side by side
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isPhone, allIds.join(",")]);
   const visibleIds = allIds.filter((id) => config.visible == null || config.visible.includes(id));
   const solo = config.solo && allIds.includes(config.solo) ? config.solo : null;
-  /** phone + journey: the camera the follower last switched to (null: not following) */
-  const journeyFollow = useRef<string | null>(null);
   const tileIds = solo ? [solo] : visibleIds;
   const norm = (c: LayoutConfig) => JSON.stringify({ visible: [...(c.visible ?? allIds)].filter((id) => allIds.includes(id)).sort(), solo: c.solo ?? null,
     order: (c.order ?? []).filter((id) => allIds.includes(id)) });
@@ -556,8 +600,8 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
   const [scrubbing, setScrubbing] = useState(false);
   const [scrubT, setScrubT] = useState<number | null>(null);
   const [scrubDir, setScrubDir] = useState<1 | -1>(1);
-  const loopState = useRef({ playing, speed, scrubbing, tileIds, lanes, isRemote, live });
-  loopState.current = { playing, speed, scrubbing, tileIds, lanes, isRemote, live };
+  const loopState = useRef({ playing, speed, scrubbing, tileIds, lanes, isRemote, live, journey: focus?.members ?? null });
+  loopState.current = { playing, speed, scrubbing, tileIds, lanes, isRemote, live, journey: focus?.members ?? null };
 
   const setClock = (t: number) => {
     clockRef.current = t;
@@ -580,16 +624,18 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
         }
         t = Math.max(t, inside.start);
       }
-    } else if (!tileIds.some((id) => spanAt(lanes[id]?.spans, t))) {
-      const next = nextRecording(lanes, tileIds, t);
-      if (next == null) {
+    } else {
+      const skip = gapSkip(lanes, tileIds, t, journeyFollow.current ? focus?.members : null);
+      if (skip.gap && skip.next == null) {
         setClock(t);
         setPlaying(false);
         setMessage(`No recording at ${fmtClock(t)} on the cameras shown`);
         return;
       }
-      t = next;
-      setMessage(`Skipped a gap to ${fmtClock(t)}`);
+      if (skip.gap && skip.next != null) {
+        t = skip.next;
+        setMessage(`Skipped a gap to ${fmtClock(t)}`);
+      }
     }
     setClock(t);
     setPlaying(autoplay);
@@ -625,10 +671,9 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
           clockRef.current = nowS() - LIVE_LAG;
         } else if (!hold) {
           t = Math.min(t + dt * st.speed, nowS() - LIVE_LAG);
-          if (st.tileIds.length && !st.tileIds.some((id) => spanAt(st.lanes[id]?.spans, t!))) {
-            const next = nextRecording(st.lanes, st.tileIds, t);
-            if (next != null) t = next;
-          }
+          // a phone following a journey: not past the next sighting, so the follower can switch cameras there
+          const skip = gapSkip(st.lanes, st.tileIds, t, journeyFollow.current ? st.journey : null);
+          if (st.tileIds.length && skip.gap && skip.next != null) t = skip.next;
           clockRef.current = t;
         }
       }
@@ -658,9 +703,11 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
     setConfig((c) => ({
       visible: c.visible ? [...new Set([...c.visible, ...cams])] : c.visible,
       // a phone shows one camera at a time, so it follows the journey (see below) instead of a grid of every camera
-      solo: focus.members?.length ? (isPhone ? focus.members[0].cam : null) : c.solo && c.solo !== focus.cam ? focus.cam : c.solo,
+      solo: focus.members?.length ? (isPhone ? journeyLead(focus.members, allIds).cam : null) : c.solo && c.solo !== focus.cam ? focus.cam : c.solo,
     }));
-    journeyFollow.current = isPhone && (focus.members?.length ?? 0) > 1 ? focus.members![0].cam : null;
+    // the follower is armed once the focus seek lands (below): until then the playhead is the old one, and following
+    // it would switch to whatever sighting it happens to be in, then back
+    journeyFollow.current = followWhenShown.current = null;
     const span = Math.max(180, focus.end - focus.start + 120);
     const mid = (focus.start + focus.end) / 2;
     setView(clampView(mid - span / 2, mid + span / 2));
@@ -677,13 +724,19 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
     const lf = loadedFor.current;
     if (!f || !lf || f.start < lf.start || f.end > lf.end || !lanes[f.cam] || lanes[f.cam].error) return; // failed lane: wait for the retry
     pendingFocus.current = null;
-    const first = f.members?.length ? f.members[0] : { cam: f.cam, start: f.start, end: f.end };
+    const first = f.members?.length ? journeyLead(f.members, allIds) : { cam: f.cam, start: f.start, end: f.end };
     seekTo(first.start - FOCUS_PREROLL_S, first.cam, true, { noSkip: true, until: first.end });
+    // phone + journey: follow from here, now that the playhead is the focus's (the focus effect showed this camera)
+    if (isPhone && (f.members?.length ?? 0) > 1 && allIds.includes(first.cam)) followWhenShown.current = first.cam;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lanes]);
   // Phone + journey: the one camera shown follows the playhead from sighting to sighting. Picking another camera by
   // hand (the shown camera is no longer the one we switched to) stops following.
   useEffect(() => {
+    if (isPhone && followWhenShown.current && solo === followWhenShown.current) {
+      journeyFollow.current = solo;
+      followWhenShown.current = null;
+    }
     const was = journeyFollow.current;
     if (!was || !isPhone || playhead == null || !focus?.members?.length) return;
     if (solo !== was) { journeyFollow.current = null; return; }
@@ -700,13 +753,14 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playhead, solo, isPhone]);
   const replayFocus = () => {
-    if (isPhone && (focus?.members?.length ?? 0) > 1) {
-      journeyFollow.current = focus!.members![0].cam;
-      setCam(focus!.members![0].cam);
-      setConfig((c) => ({ ...c, solo: focus!.members![0].cam }));
-    }
     if (!focus) return;
-    const first = focus.members?.length ? focus.members[0] : { cam: focus.cam, start: focus.start, end: focus.end };
+    const first = focus.members?.length ? journeyLead(focus.members, allIds) : { cam: focus.cam, start: focus.start, end: focus.end };
+    if (isPhone && (focus.members?.length ?? 0) > 1) {
+      journeyFollow.current = first.cam;
+      followWhenShown.current = null;
+      setCam(first.cam);
+      setConfig((c) => ({ ...c, solo: first.cam }));
+    }
     seekTo(first.start - FOCUS_PREROLL_S, first.cam, true, { noSkip: true, until: first.end });
   };
   const focusMembers = focus ? (focus.members?.length ? focus.members : [{ id: focus.eventId, cam: focus.cam, start: focus.start, end: focus.end }]) : [];

@@ -12,7 +12,7 @@ import { Skeleton, confirmDialog, errorText, swipeHandlers, toast, useIsPhone } 
 import { RegionBadge, RegionOverlay } from "./RegionPaint";
 import { PtzBadge, PtzOverlay, PtzSettings } from "./PtzControl";
 import { ZoomScope } from "./VideoZoom";
-import { encodeCells, regionPass, regions, useRegions } from "./region";
+import { regionFetchKey, regionPass, regions, useRegionResults, useRegions } from "./region";
 import { useRef } from "react";
 import { yoloFallbackText, yoloState } from "./yoloStatus";
 import { vlmSub, vlmValue } from "./vlmStatus";
@@ -105,7 +105,7 @@ export function RegionChips({ items }: { items: { key: string; label: string }[]
 }
 
 const FEED_STEP = 12;
-/** How many feed cards to show: 12, then 12 more per "Show more"; back to 12 when `reset` changes (another region). */
+/** How many feed cards to show: 12, then 12 more per "Show more"; back to 12 when `reset` changes (pass the set of painted cameras, not their cells: a repaint keeps the count). */
 export function useFeedCount(reset: unknown): [number, () => void] {
   const [n, setN] = useState(FEED_STEP);
   useEffect(() => { setN(FEED_STEP); }, [reset]);
@@ -136,25 +136,16 @@ export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: n
   // `recent` is just the last few events site-wide, so fetch a deeper history for the scoped cameras.
   // The server matches the region itself (`region`), so a burst of other events can't crowd the matches out of the
   // 100; a server without that filter ignores it and the regionPass below still applies.
-  const regionKey = Object.keys(regionMap).sort().map((cam) => `${cam}=${encodeCells(regionMap[cam])}`).join(",");
-  const scoped = regionKey.length > 0;
-  const [scopedEvents, setScopedEvents] = useState<NvrEvent[]>([]);
-  useEffect(() => {
-    if (!scoped) { setScopedEvents([]); return; }
-    let canceled = false;
-    const t = setTimeout(() => {   // painting changes the region cell by cell: fetch once the stroke settles
-      Promise.all(regionKey.split(",").map((kv) => {
-        const [camera, region] = kv.split("=");
-        return api.events({ camera, region, status: "open,pending,verified", limit: 100 }).catch(() => [] as NvrEvent[]);
-      })).then((lists) => { if (!canceled) setScopedEvents(lists.flat()); });
-    }, 400);
-    return () => { canceled = true; clearTimeout(t); };
-  }, [regionKey, scoped]);
+  // Repainting a camera refetches only that camera (useRegionResults keeps the others' results).
+  const paintedKey = Object.keys(regionMap).sort().join(",");
+  const scoped = paintedKey.length > 0;
+  const scopedEvents = useRegionResults<NvrEvent>(regionFetchKey(paintedKey.split(","), regionMap), (camera, region) =>
+    api.events({ camera, region, status: "open,pending,verified", limit: 100 }).catch(() => [] as NvrEvent[]));
   const pool = scoped
     ? [...new Map([...scopedEvents, ...recent].map((e) => [e.id, e])).values()].sort((a, b) => b.start_ts - a.start_ts)
     : recent;
   const feed = pool.filter((e) => !scoped || (regionMap[e.camera_id] && regionPass(e, regionMap[e.camera_id])));
-  const [feedShown, showMore] = useFeedCount(regionKey);
+  const [feedShown, showMore] = useFeedCount(paintedKey);   // back to 12 when the painted cameras change, not per stroke
   const [open, setOpen] = useState<number | null>(null);
   // SD = H.264 sub stream (light, plays everywhere); HD = the recorded H.265 main stream.
   const [quality, setQualityState] = useState<Record<string, Quality>>(loadQuality);

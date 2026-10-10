@@ -21,7 +21,7 @@ import { LiveBudgetProvider, useBudget } from "@site/dashboard/Dashboard";
 import { useIceServers } from "@site/dashboard/ice";
 import { camKey, splitKey, type DashboardSource } from "@site/dashboard/source";
 import type { FleetEvent } from "@site/dashboard/types";
-import { encodeCells, useRegions } from "@site/region";
+import { regionFetchKey, useRegionResults, useRegions } from "@site/region";
 import { Icon, swipeHandlers, useIsPhone } from "@site/ui";
 import { type Camera as RegistryCam, type Fleet, type Org, type Server, type Site, api } from "./api";
 import { type EventRef, applyLiveEvent, cameraNameFor, mergePool, regionFeed, removeLiveEvent, siteRegionKeys, tagServer } from "./eventOpen";
@@ -200,24 +200,14 @@ function useSiteActivity(site: Site, servers: Server[], source: DashboardSource,
   const regionMap = useRegions();
   const regionKeys = useMemo(() => siteRegionKeys(regionMap, serverKey.split(",")), [regionMap, serverKey]);
   const scopeKey = regionKeys.join(",");
-  // the regions' contents too: repainting refetches (the server matches the region, so a burst of other events
-  // can't crowd the matches out of SCOPED_LIMIT; a server without that filter ignores it)
-  const fetchKey = regionKeys.map((k) => `${k}=${encodeCells(regionMap[k])}`).join(",");
-  const [scoped, setScoped] = useState<FleetEvent[]>([]);
-  useEffect(() => {
-    if (!enabled || !fetchKey) { setScoped([]); return; }
-    let alive = true;
-    const nameOf = (id: string) => serversRef.current.find((s) => s.id === id)?.name ?? id;
-    const t = setTimeout(() => {   // painting changes the region cell by cell: fetch once the stroke settles
-      Promise.all(fetchKey.split(",").map((kv) => {
-        const [k, region] = kv.split("=");
-        const { server, id } = splitKey(k);
-        return siteApi(server).events({ camera: id, region, status: "open,pending,verified", limit: SCOPED_LIMIT })
-          .then((evs) => tagServer(evs, server, nameOf(server))).catch(() => [] as FleetEvent[]);
-      })).then((lists) => { if (alive) setScoped(lists.flat()); });
-    }, 400);
-    return () => { alive = false; clearTimeout(t); };
-  }, [enabled, fetchKey]);
+  // the regions' contents too: repainting a camera refetches that camera only (the server matches the region, so a
+  // burst of other events can't crowd the matches out of SCOPED_LIMIT; a server without that filter ignores it)
+  const scoped = useRegionResults<FleetEvent>(enabled ? regionFetchKey(regionKeys, regionMap) : "", (k, region) => {
+    const { server, id } = splitKey(k);
+    const name = serversRef.current.find((s) => s.id === server)?.name ?? server;
+    return siteApi(server).events({ camera: id, region, status: "open,pending,verified", limit: SCOPED_LIMIT })
+      .then((evs) => tagServer(evs, server, name)).catch(() => [] as FleetEvent[]);
+  });
 
   const pool = useMemo(() => (scopeKey ? mergePool(scoped, recent ?? []) : recent ?? []), [scopeKey, scoped, recent]);
   return { recent, pool, regionKeys, regionMap, offline };

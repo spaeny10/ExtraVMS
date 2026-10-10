@@ -1,6 +1,7 @@
 /**
- * Digital zoom for a video picture (Live and Timeline): mouse wheel zooms toward the cursor, left-drag pans while
- * zoomed, double-click resets; on touch, pinch zooms about the fingers, one finger pans while zoomed, double-tap
+ * Digital zoom for a video picture (Live and Timeline): the wheel or a trackpad pinch zooms toward the cursor (at 1× a
+ * plain wheel scrolls the page first while it can, so a page of tiles never traps the scroll);
+ * left-drag pans while zoomed, double-click resets; on touch, pinch zooms about the fingers, one finger pans while zoomed, double-tap
  * resets. A CSS transform on a layer around the <video> (zoom.ts has the math): no re-encoding, nothing server-side.
  *
  *   <ZoomFrame>       wraps the <video> inside a player box; owns the gestures and the "2.5× · Reset" pill.
@@ -20,6 +21,28 @@ import {
 import "./videoZoom.css";
 
 type Listener = (xf: Xform, animate: boolean) => void;
+
+/** What a wheel over the picture does. page: left to the page (not prevented) · pan: a sideways trackpad swipe while
+ *  zoomed · zoom. At 1× a plain wheel zooms in only when the page has nowhere to scroll that way (`canScroll`
+ *  false): a single big picture zooms with the mouse wheel, but scrolling a page of tiles, up or down, never gets
+ *  caught zooming the tile under the cursor. ctrl + wheel (a trackpad pinch sends ctrlKey) always zooms. */
+export function wheelAction(zoomed: boolean, ev: { ctrlKey: boolean; deltaX: number; deltaY: number }, canScroll = false): "page" | "pan" | "zoom" {
+  if (!ev.ctrlKey && Math.abs(ev.deltaX) > Math.abs(ev.deltaY)) return zoomed ? "pan" : "page";
+  if (zoomed || ev.ctrlKey) return "zoom";
+  return ev.deltaY < 0 && !canScroll ? "zoom" : "page";
+}
+
+/** Can anything around `el` still scroll vertically in the wheel's direction (deltaY < 0: up)? */
+export function scrollRoom(el: Element, deltaY: number): boolean {
+  for (let n: Element | null = el.parentElement; n; n = n.parentElement) {
+    const oy = getComputedStyle(n).overflowY;
+    const scrollable = n === document.scrollingElement || oy === "auto" || oy === "scroll" || oy === "overlay";
+    if (scrollable && n.scrollHeight > n.clientHeight + 1) {
+      if (deltaY < 0 ? n.scrollTop > 0 : n.scrollTop + n.clientHeight < n.scrollHeight - 1) return true;
+    }
+  }
+  return false;
+}
 
 /** The zoom state of one picture, shared by its frame and any overlay layers. */
 export class ZoomController {
@@ -170,18 +193,17 @@ export function ZoomFrame({ children, doubleClickReset: dblProp = true, keyboard
     const meta = () => ctl.resized();
     el.addEventListener("loadedmetadata", meta, true);
     el.addEventListener("resize", meta, true);
-    // wheel: non-passive so zooming doesn't scroll the page; at 1× a wheel toward "zoom out" is left to the page
+    // wheel: non-passive so zooming doesn't scroll the page; at 1× a plain wheel is left to the page (wheelAction)
     const wheel = (ev: WheelEvent) => {
       if (opts.current.disabled) return;
       const zoomed = isZoomed(ctl.xf);
-      if (!ev.ctrlKey && Math.abs(ev.deltaX) > Math.abs(ev.deltaY)) {   // sideways swipe on a trackpad: pan
-        if (!zoomed) return;
-        ev.preventDefault();
+      const action = wheelAction(zoomed, ev, !zoomed && !ev.ctrlKey && ev.deltaY < 0 && scrollRoom(el, ev.deltaY));
+      if (action === "page") return;
+      ev.preventDefault();   // ctrl+wheel (a trackpad pinch) must not zoom the whole page either
+      if (action === "pan") {   // sideways swipe on a trackpad
         ctl.panBy(-ev.deltaX * (ev.deltaMode === 1 ? 40 : 1), 0);
         return;
       }
-      if (!zoomed && ev.deltaY >= 0 && !ev.ctrlKey) return;
-      ev.preventDefault();   // ctrl+wheel (a trackpad pinch) must not zoom the whole page either
       const r = el.getBoundingClientRect();
       const notch = ev.deltaMode !== 0 || Math.abs(ev.deltaY) >= 50;   // a mouse wheel click, not a trackpad stream
       ctl.zoomTo(wheelScale(ctl.xf.s, ev.deltaY * (ev.ctrlKey ? 4 : 1), ev.deltaMode), { x: ev.clientX - r.left, y: ev.clientY - r.top }, notch);
@@ -310,10 +332,11 @@ export function ZoomFrame({ children, doubleClickReset: dblProp = true, keyboard
   };
 
   const stop = (e: React.SyntheticEvent) => e.stopPropagation();
-  const hint = dblReset ? "wheel or pinch to zoom, drag to move, double-click to reset" : "wheel or pinch to zoom, drag to move";
+  // the pill shows only while zoomed, when the wheel alone zooms; from 1× it takes ctrl + wheel or a pinch
+  const hint = `wheel or pinch to zoom, drag to move${dblReset ? ", double-click to reset" : ""}`;
   return (
     <div ref={frame} className="vzoom" role="group" tabIndex={keyboard && !disabled ? 0 : undefined}
-      aria-label={keyboard && !disabled ? "Video: + and − zoom, arrow keys move, 0 resets" : undefined}
+      aria-label={keyboard && !disabled ? "Video: + and − zoom (or wheel, pinch), arrow keys move, 0 resets" : undefined}
       onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp}
       onPointerLeave={(e) => { if (!frame.current?.hasPointerCapture(e.pointerId)) onPointerUp(e); }}
       onTouchStart={onTouch} onTouchMove={onTouch} onTouchEnd={onTouch} onTouchCancel={onTouch}

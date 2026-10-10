@@ -1008,24 +1008,30 @@ def _event_filters(**kw) -> tuple[list[str], list]:
 
 
 REGION_SCAN_MAX = 20000   # rows a region filter looks through before giving up on more matches
+REGION_RE = re.compile(r"[A-Za-z0-9_-]{%d}" % (cells.NBYTES * 4 // 3))   # 72-byte bitmap, base64url unpadded: 96 chars
 
 
 def _region_ids(where: list[str], params: list, order: str, region: str, limit: int, offset: int) -> list[int]:
-    """Ids of the newest events (in `order`) passing `where` whose cells cross `region`, skipping `offset` matches."""
-    sql = "SELECT id, status, cells FROM events" + (f" WHERE {' AND '.join(where)}" if where else "") + f" ORDER BY {order} LIMIT ? OFFSET ?"
+    """Ids of the newest events (in `order`) passing `where` whose cells cross `region`, skipping `offset` matches.
+
+    One query, matched here in Python: not pages of LIMIT/OFFSET, where each page re-ran the sort under db.lock and
+    rows inserted between pages shifted the offsets (duplicates, skips). The rows are only (id, status, cells)."""
+    from base64 import urlsafe_b64decode
+    if limit <= 0:
+        return []
+    want = int.from_bytes(urlsafe_b64decode(region), "little")   # REGION_RE: exactly 96 chars, no padding needed
+    sql = "SELECT id, status, cells FROM events" + (f" WHERE {' AND '.join(where)}" if where else "") + f" ORDER BY {order} LIMIT ?"
     out: list[int] = []
-    skip, scanned, page = offset, 0, 1000
-    while scanned < REGION_SCAN_MAX:
-        rows = db.all(sql, [*params, page, scanned])
-        for r in rows:
-            if r["status"] == "open" or cells.overlaps(r["cells"], region):
-                if skip:
-                    skip -= 1
-                elif len(out) < limit:
-                    out.append(r["id"])
-        scanned += len(rows)
-        if len(out) >= limit or len(rows) < page:
-            break
+    skip = offset
+    for r in db.all(sql, [*params, REGION_SCAN_MAX]):
+        c = r["cells"]
+        if r["status"] == "open" or (c and int.from_bytes(urlsafe_b64decode(c + "=" * (-len(c) % 4)), "little") & want):
+            if skip:
+                skip -= 1
+            else:
+                out.append(r["id"])
+                if len(out) >= limit:
+                    break
     return out
 
 
@@ -1050,7 +1056,7 @@ async def list_events(camera: str | None = None, status: str | None = None, labe
         where.append("id<?"); params.append(before_id)
     order = f"{PRIORITY_RANK_SQL} DESC, id DESC" if sort == "priority" else "id DESC"
     if region:
-        if not re.fullmatch(r"[A-Za-z0-9_-]{1,96}", region):
+        if not REGION_RE.fullmatch(region):
             raise HTTPException(400, "region: not a cell bitmap")
         where.append("(status='open' OR (cells IS NOT NULL AND ptz_preset IS NULL))")
         ids = await asyncio.to_thread(_region_ids, where, params, order, region, limit, max(0, int(offset or 0)))

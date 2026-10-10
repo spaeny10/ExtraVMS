@@ -109,11 +109,30 @@ def test_list_events_region_filter():
     # paging by offset counts matches, not scanned rows
     assert [r["id"] for r in asyncio.run(api.list_events(camera="cam1", status="verified,open", min_yolo=0, limit=5,
                                                          offset=1, region=region))][0] == old
+    # offset past every match: nothing, not a repeat of the last page
+    assert asyncio.run(api.list_events(camera="cam1", status="verified,open", min_yolo=0, limit=5, offset=50, region=region)) == []
+    # anything but the 96-char bitmap is a 400, never a decode error (a 97-char string is ≡1 mod 4: invalid base64)
+    for bad in ("!!not-base64!!", region[:-1], region + "A", region[:95] + "=", "A"):
+        try:
+            asyncio.run(api.list_events(camera="cam1", min_yolo=0, limit=5, region=bad))
+            raise AssertionError(f"a malformed region must be refused: {bad!r}")
+        except api.HTTPException as e:
+            assert e.status_code == 400
+
+
+def test_region_scan_is_one_query_on_the_camera_id_index():
+    """The region scan reads the camera's newest events in one query, walking the (camera_id, id) index (no sort)."""
+    from nvr import api
+    seen = []
+    orig = db.execute
+    db.execute = lambda sql, params=(): (seen.append(sql), orig(sql, params))[1]
     try:
-        asyncio.run(api.list_events(camera="cam1", min_yolo=0, limit=5, region="!!not-base64!!"))
-        raise AssertionError("a malformed region must be refused")
-    except api.HTTPException as e:
-        assert e.status_code == 400
+        api._region_ids(["camera_id=?"], ["cam1"], "id DESC", cells.encode({cells.cell(0.9, 0.1)}), 500, 0)
+    finally:
+        db.execute = orig
+    assert len(seen) == 1, seen
+    plan = " ".join(r[3] for r in db.conn.execute("EXPLAIN QUERY PLAN " + seen[0], ["cam1", 1]))
+    assert "events_cam_id" in plan and "TEMP B-TREE" not in plan, plan
 
 
 if __name__ == "__main__":

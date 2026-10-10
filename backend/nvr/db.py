@@ -67,6 +67,8 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS events_cam_ts ON events(camera_id, start_ts);
 CREATE INDEX IF NOT EXISTS events_status ON events(status);
+-- newest-first per camera (browse, the region filter's scan) without sorting the camera's events; ~0.25 s to build per 100k rows
+CREATE INDEX IF NOT EXISTS events_cam_id ON events(camera_id, id);
 
 CREATE TABLE IF NOT EXISTS rule_events (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
