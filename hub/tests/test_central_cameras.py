@@ -162,6 +162,25 @@ def test_rules_unit():
         with pytest.raises(central_cameras.Refused) as e:
             central_cameras.classify(bad)
         assert e.value.status == 400, bad
+    # wildcard DNS that spells out an IP (nip.io, sslip.io): refused, whatever the address
+    for bad in ("10.20.8.1.nip.io", "cam.10.20.8.1.nip.io", "10-20-8-1.sslip.io", "ip-10-20-8-1.sslip.io", "app.192-168-1-5.example.net",
+                "93.184.216.34.nip.io"):
+        with pytest.raises(central_cameras.Refused) as e:
+            central_cameras.classify(bad)
+        assert e.value.status == 400 and "spells out an IP address" in e.value.detail, bad
+    for ok in ("cam1.example.net", "10.example.net", "1.2.3.example.net", "cam-2024-01-01.example.net", "a1.20.8.1x.example.net"):
+        assert central_cameras.classify(ok)[0] == "host", ok
+    # "enabled": read exactly as the server reads it (backend/nvr/siteconfig.py camera_enabled), anything else refused
+    for raw, want in ((True, True), (1, True), ("1", True), ("true", True), ("True", True), (False, False), (0, False), ("0", False),
+                      ("false", False), ("FALSE", False)):
+        assert central_cameras.camera_enabled(raw) is want, raw
+        assert central_cameras._cams_in("merge", "/api/config/merge", {"data": {"cameras": [{"id": "c", "enabled": raw}]}})[0]["enabled"] is want
+    assert central_cameras._cams_in("camera", "/api/cameras/c", {"host": "x"})[0]["enabled"] is True   # left out: on
+    for raw in ("no", "yes", "off", "", 2, -1, 0.0, None, [], {}):
+        assert central_cameras.camera_enabled(raw) is None, raw
+        with pytest.raises(central_cameras.Refused) as e:
+            central_cameras._cams_in("merge", "/api/config/merge", {"data": {"cameras": [{"id": "c", "enabled": raw}]}})
+        assert e.value.status == 400, raw
 
 
 def test_allocate_with_camera_limit_and_admin_only(world):
@@ -316,6 +335,119 @@ def test_addresses_of_others_are_refused(world, monkeypatch):
     assert w.root.put(url, json={"subnets": [_subnet(w), "10.99.0.0/25"]}).status_code == 409
     assert w.root.put(url, json={"subnets": [_subnet(w)], "public_ips": ["93.184.216.50"]}).status_code == 409
     assert not w.site.st["cameras"]
+
+
+def test_resolved_and_spelled_out_addresses_are_refused(world, monkeypatch):
+    w = world
+    _forget_cameras(w)
+    _limit(w, None)
+    owner = w.users["owner"]
+    # a name that spells out another Site's VPN address (or any address): the host would resolve it for us
+    for name in ("10.20.8.1.nip.io", "10-20-8-1.sslip.io"):
+        r = _put(owner, w, "cam1", "192.168.1.10", public_host=name)
+        assert r.status_code == 400 and "spells out an IP address" in r.json()["detail"], name
+    # the FusionHub's public address (the hub's setting, or a host's own) is Axiom Vision's, not a camera
+    monkeypatch.setattr(settings, "fusionhub_address", "198.51.100.210")
+    r = _put(owner, w, "cam1", "192.168.1.10", public_host="198.51.100.210")
+    assert r.status_code == 409 and "Axiom Vision's own systems" in r.json()["detail"]
+    db.run(sa.update(db.hosts).where(db.hosts.c.id == w.host["host"]["id"]).values(fusionhub="FH.Example.net:443"))
+    try:
+        assert _put(owner, w, "cam1", "192.168.1.10", public_host="fh.example.net").status_code == 409
+    finally:
+        db.run(sa.update(db.hosts).where(db.hosts.c.id == w.host["host"]["id"]).values(fusionhub=None))
+    # an address another Site's camera DNS name resolves to (as its host last said) is that Site's
+    ci_b = hosts.get_instance(w.ci_b["id"])
+    db.run(sa.update(db.central_instances).where(db.central_instances.c.id == ci_b["id"])
+           .values(info={**(ci_b.get("info") or {}), "host_ips": {"b-router.example.net": ["93.184.216.88"]}}))
+    try:
+        r = _put(owner, w, "cam1", "192.168.1.10", public_host="93.184.216.88")
+        assert r.status_code == 409 and "another Site" in r.json()["detail"]
+        assert central_cameras.auto_of([{"id": "c", "enabled": True, "public_host": "93.184.216.88"}], w.ci)[0]["public_ips"] == []
+    finally:
+        db.run(sa.update(db.central_instances).where(db.central_instances.c.id == ci_b["id"]).values(info=ci_b.get("info")))
+    assert not w.site.st["cameras"]
+
+
+def test_enabled_text_cannot_slip_past_the_limit(world):
+    """A merge or import with "enabled": "false" / "0" counts as off at the hub and is off at the server (the same rule
+    both sides); text the server would not read as true or false is refused."""
+    w = world
+    _forget_cameras(w)
+    _limit(w, 1)
+    owner = w.users["owner"]
+    assert _put(owner, w, "cam1", _ip(w, 11)).status_code == 200
+    for raw in ("no", "off", "yes", None, 2):
+        r = owner.post(f"/s/{w.sid}/api/config/merge", json={"data": {"format": 1, "partial": True, "cameras": [_cam("cam2", _ip(w, 12), enabled=raw)]}})
+        assert r.status_code == 400 and "enabled must be true or false" in r.json()["detail"], raw
+    for raw in ("1", "true", 1, True):
+        r = owner.post(f"/s/{w.sid}/api/config/merge", json={"data": {"format": 1, "partial": True, "cameras": [_cam("cam2", _ip(w, 12), enabled=raw)]}})
+        assert r.status_code == 409, raw
+    assert set(w.site.st["cameras"]) == {"cam1"}
+    _limit(w, None)
+
+
+def test_backup_restore_keeps_the_camera_limit(world):
+    w = world
+    _forget_cameras(w)
+    _limit(w, 1)
+    owner = w.users["owner"]
+    assert _put(owner, w, "cam1", _ip(w, 11)).status_code == 200
+    data = {"format": 1, "cameras": [{k: v for k, v in _cam(c, _ip(w, n)).items() if k != "password"} for c, n in (("cam8", 18), ("cam9", 19))]}
+    db.insert(db.config_backups, {"site_id": w.sid, "org_id": w.org["id"], "created_at": time.time(), "bytes": 10, "data": data,
+                                  "cameras": 2, "identities": 0, "site_version": "test"})
+    bid = db.one(sa.select(db.config_backups.c.id).where(db.config_backups.c.site_id == w.sid).order_by(db.config_backups.c.id.desc()))["id"]
+    for who in (owner, w.root):   # hub administrators too: raise the limit instead
+        r = who.post(f"/api/servers/{w.sid}/backups/{bid}/restore", json={})
+        assert r.status_code == 409 and r.json()["detail"] == "This Site's central recording allows 1 camera; ask Axiom Vision to raise it.", r.text
+    assert set(w.site.st["cameras"]) == {"cam1"}
+    # within the limit it goes to the server (this fake one has no import route); its reservations are released
+    _limit(w, 5)
+    r = owner.post(f"/api/servers/{w.sid}/backups/{bid}/restore", json={})
+    assert r.status_code == 503
+    assert not {k for k in (central_cameras._pending.get(w.sid) or {}) if k in ("cam8", "cam9")}
+    db.run(sa.delete(db.config_backups).where(db.config_backups.c.site_id == w.sid))
+    _limit(w, None)
+
+
+def test_sync_keeps_reservations_made_while_it_reads(world, monkeypatch):
+    """A camera accepted through the hub while sync reads the instance's list still counts against the limit; one
+    accepted before the read began is now the list's business."""
+    w = world
+    _forget_cameras(w)
+    _limit(w, 3)
+    real = central_cameras.live_cameras
+
+    async def slow(server_id):
+        got = await real(server_id)
+        # meanwhile a camera is accepted through the hub (not on the instance yet)
+        await central_cameras.check(hosts.get_instance(w.ci["id"]), "camera", "/api/cameras/cam5", _cam("cam5", _ip(w, 15), public_host=""))
+        return got
+    central_cameras._pending[w.sid] = {"cam4": time.time() - 5 + central_cameras.PENDING_TTL_S}   # accepted before the read
+    monkeypatch.setattr(central_cameras, "live_cameras", slow)
+    in_hub(w, lambda: central_cameras.sync(w.ci["id"]))
+    assert set(central_cameras._pending.get(w.sid) or {}) == {"cam5"}
+    _forget_cameras(w)
+    _limit(w, None)
+
+
+def test_customers_cannot_retire_a_central_server_through_actions(world):
+    w = world
+    owner = w.users["owner"]
+    p = owner.post(f"/api/orgs/{w.org['id']}/actions/plan", json={"text": "Retire Lot A Central", "origin": "actions_page"}).json()
+    assert p["action"] == "retire_site", p
+    assert not p["card"]["can_execute"] and any("only Axiom Vision can retire it" in b for b in p["card"]["blockers"]), p["card"]
+    r = owner.post(f"/api/orgs/{w.org['id']}/actions/execute", json={"plan_id": p["id"], "confirm_name": "Lot A Central"})
+    assert r.status_code == 409 and "only Axiom Vision" in r.json()["detail"]
+    assert db.one(sa.select(db.sites.c.retired_at).where(db.sites.c.id == w.sid))["retired_at"] is None
+    # the same for migrating it away (which retires it) and for an undo that would restore it
+    ref = {"id": w.sid, "name": "Lot A Central"}
+    owner_u = {"id": "u", "email": "owner@camguard.example"}
+    for p in ({"action": "migrate_site", "source": ref}, {"action": "retire_site", "site": ref}, {"action": "restore_site", "site": ref}):
+        assert "only Axiom Vision can retire it" in fleet_actions.central_refusal(p, owner_u), p
+        assert fleet_actions.central_refusal(p, {**owner_u, "is_super": True}) is None   # hub administrators: as on the Hosts page
+    assert fleet_actions.central_refusal({"action": "migrate_site", "source": {"id": "s_other", "name": "Other"}}, owner_u) is None
+    root = w.root.post(f"/api/orgs/{w.org['id']}/actions/plan", json={"text": "Retire Lot A Central", "origin": "actions_page"}).json()
+    assert not any("Axiom Vision" in b for b in root["card"]["blockers"])
 
 
 def test_fleet_add_camera_keeps_the_rules(world, monkeypatch):

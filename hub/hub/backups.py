@@ -10,7 +10,7 @@ import time
 
 import sqlalchemy as sa
 
-from . import db
+from . import central_cameras, db
 from .agents import registry
 from .config import settings
 
@@ -60,17 +60,29 @@ def latest_for(server_ids: list[str]) -> dict[str, dict]:
 
 
 async def restore(site: dict, backup_id: int, user_email: str, replace_identities: bool = False) -> dict:
+    """POST /api/config/import of a stored backup. A central recording instance's camera limit and address rules apply
+    as for an import through the console (central_cameras.check): central_cameras.Refused when it breaks them."""
     b = db.one(sa.select(db.config_backups).where(db.config_backups.c.id == backup_id, db.config_backups.c.site_id == site["id"]))
     if not b:
         raise LookupError("no such backup")
     conn = registry.get(site["id"])
     if conn is None:
         raise RuntimeError("site offline")
-    payload = json.dumps({"data": b["data"], "replace_identities": replace_identities}).encode()
-    status, body = await conn.call("POST", "/api/config/import", "", {"x-hub-user": user_email, "x-hub-role": "admin", "content-type": "application/json"}, payload, 60)
+    body = {"data": b["data"], "replace_identities": replace_identities}
+    ci = central_cameras.instance_for_server(site["id"])
+    reserved = await central_cameras.check(ci, "import", "/api/config/import", body) if ci else []
+    try:
+        status, raw = await conn.call("POST", "/api/config/import", "", {"x-hub-user": user_email, "x-hub-role": "admin", "content-type": "application/json"},
+                                      json.dumps(body).encode(), 60)
+    except BaseException:
+        central_cameras.release(site["id"], reserved)
+        raise
     if status != 200:
-        raise RuntimeError(f"site answered {status}: {body.decode()[:200]}")
-    return json.loads(body.decode())
+        central_cameras.release(site["id"], reserved)
+        raise RuntimeError(f"site answered {status}: {raw.decode()[:200]}")
+    if ci:
+        central_cameras.after_write(site["id"])   # the firewall follows the instance's cameras
+    return json.loads(raw.decode())
 
 
 async def nightly_loop() -> None:

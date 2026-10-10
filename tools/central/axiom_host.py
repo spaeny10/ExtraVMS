@@ -58,12 +58,14 @@ MODES = ("vpn", "forward")
 # An instance's camera allow-list: LAN/VPN subnets (any protocol), public IPs and DNS names (TCP only)
 CAMERA_KEYS = ("subnets", "public_ips", "hosts")
 MAX_CAMERA_ENTRIES = 32                         # all three lists together, per instance
+BRIDGE_PREFIX = "axb"                           # instance network bridges: axb<slot> (the firewall matches axb*)
 CAMERA_NETS = tuple(ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",   # RFC 1918
                                                        "100.64.0.0/10"))                                 # carrier-grade NAT
 
 DEFAULTS: dict[str, Any] = {
     "root": "/srv/axiom",                       # instances/<id>/, recordings/<id>/, registry.json, firewall.nft
     "image": "axiom/instance:latest",
+    "image_prefix": "axiom/instance:",          # the only images create/restart run (a hub-sent image must start so)
     "pool": "10.200.0.0/16",                    # instance networks: one /28 each (4096 instances)
     "vllm_container": "axiom-vllm",             # tools/central/ai/compose.yml container_name
     "vlm_url": "http://vllm:8000/v1",           # "vllm" = the alias the vLLM container gets on each instance network
@@ -295,6 +297,7 @@ def render_firewall(instances: list[dict], *, pool: str, hub_ips: list[str], dns
           "\t# Instance -> the host itself (gateway address, public IP, sshd, this agent): never.",
           "\tchain input {",
           "\t\ttype filter hook input priority filter - 10; policy accept;",
+          f"\t\tmeta nfproto ipv6 iifname \"{BRIDGE_PREFIX}*\" counter drop comment \"instances are IPv4 only\"",
           f"\t\tip saddr {pool} ct state established,related accept",
           f"\t\tip saddr {pool} counter drop comment \"instance to host\"",
           "\t}",
@@ -303,6 +306,9 @@ def render_firewall(instances: list[dict], *, pool: str, hub_ips: list[str], dns
           "\t# only ends this chain, Docker's chains still decide (and masquerade) afterwards.",
           "\tchain forward {",
           "\t\ttype filter hook forward priority filter - 10; policy accept;",
+          "\t\t# the rules below match IPv4 only: IPv6 from or to an instance bridge never gets that far",
+          f"\t\tmeta nfproto ipv6 iifname \"{BRIDGE_PREFIX}*\" counter drop comment \"instances are IPv4 only\"",
+          f"\t\tmeta nfproto ipv6 oifname \"{BRIDGE_PREFIX}*\" counter drop comment \"instances are IPv4 only\"",
           f"\t\tip saddr != {pool} ip daddr != {pool} accept",
           "\t\tct state established,related accept",
           "\t\tct state invalid drop"]
@@ -426,6 +432,31 @@ def camera_addr_ok(addr: str, forbidden: Forbidden) -> bool:
         return False
     return ip.version == 4 and not (ip.is_loopback or ip.is_multicast or ip.is_unspecified or ip.is_link_local
                                     or ip.is_reserved) and not any(ip in n for n, _ in forbidden)
+
+
+def resolved_addr_problem(addr: str, forbidden: Forbidden, own_subnets: list[str], other_subnets: list[str]) -> str | None:
+    """Why the firewall may not open what one of an instance's camera DNS names resolved to (None = it may). Beyond
+    camera_addr_ok: a private or carrier-grade NAT address (CAMERA_NETS) only inside the instance's own subnets, which
+    a hub administrator set (so a name like 10.20.8.1.nip.io never reaches another Site's VPN subnet or the datacenter
+    LAN), and never inside another instance's subnets."""
+    if not camera_addr_ok(addr, forbidden):
+        return "not a usable camera address"
+    ip = ipaddress.ip_address(addr)
+    if any(ip in ipaddress.ip_network(s) for s in other_subnets):
+        return "inside another instance's camera subnet"
+    if any(ip in n for n in CAMERA_NETS) and not any(ip in ipaddress.ip_network(s) for s in own_subnets):
+        return "a private address outside this instance's camera subnets"
+    return None
+
+
+def check_image(image: Any, prefix: str) -> str:
+    """The instance image the hub (or the command line) asked for, if it is one of ours: `prefix` (host.json
+    image_prefix, default axiom/instance:) followed by a tag. OpError otherwise."""
+    image = str(image or "")
+    if not (image.startswith(prefix) and len(image) > len(prefix)
+            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}", image)):
+        raise OpError(f"image {image[:80]!r} is not allowed here: it must be {prefix}<tag>")
+    return image
 
 
 def check_camera_network(subnets: Any, public_ips: Any, hosts: Any, forbidden: Forbidden) -> dict[str, list[str]]:
@@ -878,26 +909,59 @@ class Host:
                 out.append((ipaddress.ip_network(f"{ip}/32"), f"the hub address {ip}"))
         return out
 
-    def resolve_camera_hosts(self, reg: dict, hub_ips: list[str] | None = None) -> dict[str, dict[str, list[str]]]:
+    def resolve_camera_hosts(self, reg: dict, hub_ips: list[str] | None = None, *,
+                             lookup: bool = True) -> dict[str, dict[str, list[str]]]:
         """{instance id: {DNS name: IPv4 addresses}} for every instance's camera host names. A name that does not
-        resolve keeps its last known addresses; resolved addresses a camera may not have (loopback, the instance
-        pool, the AI network, the hub...) are left out."""
+        resolve (or every name, with lookup=False) keeps its last known addresses. Left out, and logged: addresses a
+        camera may not have (resolved_addr_problem: loopback, the pool, the AI network, the hub, a private address
+        outside the instance's own subnets...) and addresses another instance has. One Site's address is never
+        another's, compared as resolved addresses: an instance's public IPs are its own, then what its names already
+        resolved to before (still resolving so), then new addresses in slot order. The instance that had an address
+        keeps it; the newcomer goes without until the other lets go of it."""
         bad = self.forbidden(reg, hub_ips)
-        out: dict[str, dict[str, list[str]]] = {}
-        for iid, rec in reg["instances"].items():
-            known = rec.get("host_ips") or {}
-            got: dict[str, list[str]] = {}
+        recs = sorted(reg["instances"].values(), key=lambda r: r["slot"])
+        found: dict[str, dict[str, set[str]]] = {}
+        for rec in recs:
+            iid, known = rec["id"], rec.get("host_ips") or {}
+            others = [s for o in recs if o["id"] != iid for s in o.get("subnets") or []]
+            found[iid] = {}
             for name in rec.get("hosts") or []:
-                try:
-                    ips = set(self.resolver(name))
-                except OSError as e:
-                    log.warning("%s: could not resolve camera host %s (%s); keeping the last known addresses", iid, name, e)
-                    ips = set(known.get(name) or [])
-                ok = {ip for ip in ips if camera_addr_ok(ip, bad)}
-                if ips - ok:
-                    log.warning("%s: camera host %s resolves to %s: not allowed, left out", iid, name, ", ".join(sorted(ips - ok)))
-                got[name] = sorted(ok, key=ipaddress.ip_address)
-            out[iid] = got
+                ips = set(known.get(name) or [])
+                if lookup:
+                    try:
+                        ips = set(self.resolver(name))
+                    except OSError as e:
+                        log.warning("%s: could not resolve camera host %s (%s); keeping the last known addresses", iid, name, e)
+                ok = set()
+                for ip in sorted(ips):
+                    why = resolved_addr_problem(ip, bad, rec.get("subnets") or [], others)
+                    if why:
+                        log.warning("%s: camera host %s resolves to %s (%s): left out", iid, name, ip, why)
+                    else:
+                        ok.add(ip)
+                found[iid][name] = ok
+        owner: dict[str, str] = {}
+        for rec in recs:
+            for p in rec.get("public_ips") or []:
+                owner.setdefault(p, rec["id"])
+        for rec in recs:
+            before = {ip for ips in (rec.get("host_ips") or {}).values() for ip in ips}
+            for ips in found[rec["id"]].values():
+                for ip in sorted(ips & before):
+                    owner.setdefault(ip, rec["id"])
+        for rec in recs:
+            for ips in found[rec["id"]].values():
+                for ip in sorted(ips):
+                    owner.setdefault(ip, rec["id"])
+        out: dict[str, dict[str, list[str]]] = {}
+        for rec in recs:
+            got: dict[str, list[str]] = {}
+            for name, ips in found[rec["id"]].items():
+                theirs = {ip for ip in ips if owner[ip] != rec["id"]}
+                for ip in sorted(theirs):
+                    log.warning("%s: camera host %s resolves to %s, a camera address of %s: left out", rec["id"], name, ip, owner[ip])
+                got[name] = sorted(ips - theirs, key=ipaddress.ip_address)
+            out[rec["id"]] = got
         return out
 
     def dns_changed(self, reg: dict) -> str:
@@ -996,14 +1060,15 @@ class Host:
             zfs = {"datasets": datasets, "instance_quota_gb": inst_q}
         return {"id": iid, "location_id": loc, "name": name, "mode": mode, **cams, "host_ips": {},
                 "quota_gb": quota, "gpu": gpu, "mem_gb": mem_gb, "cpus": cpus, "quota_mode": qm, **zfs,
-                "image": a.get("image") or self.cfg["image"], "hub_url": hub_url,
+                "image": check_image(a.get("image") or self.cfg["image"], self.cfg["image_prefix"]), "hub_url": hub_url,
                 "vlm_url": a.get("vlm_url") or self.cfg["vlm_url"],
                 "vlm_model": a.get("vlm_model") or self.cfg["vlm_model"] or ai.get("AXIOM_VLM_MODEL", ""),
                 "_token": token, "_vlm_key": a.get("vlm_key") or ai.get("VLLM_API_KEY", "")}
 
     def _validate_cameras(self, a: dict, reg: dict, exclude: str | None = None) -> dict[str, list[str]]:
         """check_camera_network plus: no other instance on this host has an overlapping subnet, the same public IP
-        (or one inside this instance's subnets) or the same DNS name; one site's cameras are never another's."""
+        (or one inside this instance's subnets, or one its DNS names resolve to) or the same DNS name; one site's
+        cameras are never another's (what DNS names resolve to: resolve_camera_hosts)."""
         cams = check_camera_network(a.get("subnets"), a.get("public_ips"), a.get("hosts"), self.forbidden(reg))
         mine = [ipaddress.ip_network(s) for s in cams["subnets"]]
         for other in reg["instances"].values():
@@ -1015,9 +1080,12 @@ class Host:
                     raise OpError(f"subnet {s} overlaps {other['id']}'s camera subnet: every site needs its own")
                 if any(ipaddress.ip_address(p) in s for p in other.get("public_ips", [])):
                     raise OpError(f"subnet {s} contains a public IP of {other['id']}")
+            resolved = {ip for ips in (other.get("host_ips") or {}).values() for ip in ips}
             for p in cams["public_ips"]:
                 if p in other.get("public_ips", []):
                     raise OpError(f"public IP {p} already used by {other['id']}")
+                if p in resolved:
+                    raise OpError(f"public IP {p} is what a camera host name of {other['id']} resolves to")
                 if any(ipaddress.ip_address(p) in o for o in theirs):
                     raise OpError(f"public IP {p} is inside {other['id']}'s camera subnet")
             for h in cams["hosts"]:
@@ -1083,8 +1151,9 @@ class Host:
         firewall.nft and load it with one `nft -f` (atomic: on failure the kernel keeps the previous ruleset)."""
         if resolve:
             reg["hub_ips"] = self.resolve_hub(reg)
-            for iid, got in self.resolve_camera_hosts(reg).items():
-                reg["instances"][iid]["host_ips"] = got
+        # without a lookup too: the last known addresses go through the same rules (a registry from before them)
+        for iid, got in self.resolve_camera_hosts(reg, lookup=resolve).items():
+            reg["instances"][iid]["host_ips"] = got
         if not reg["hub_ips"]:
             log.warning("no hub address known: instances cannot reach the hub until it resolves")
         text = self.firewall_text(reg)
@@ -1103,7 +1172,7 @@ class Host:
             net = self.slot_net(slot)
             hosts = list(net.hosts())
             rec = {**spec, "slot": slot, "net_subnet": str(net), "gateway": str(hosts[0]), "ip": str(hosts[1]),
-                   "vllm_ip": str(hosts[2]), "bridge": f"axb{slot}", "uid": self.cfg["uid_base"] + slot,
+                   "vllm_ip": str(hosts[2]), "bridge": f"{BRIDGE_PREFIX}{slot}", "uid": self.cfg["uid_base"] + slot,
                    "project_id": self.cfg["project_base"] + slot, "enroll_pending": bool(token),
                    "created_at": int(time.time())}
             iid = rec["id"]
@@ -1297,7 +1366,7 @@ class Host:
             reg = self.load()
             rec = self._get(reg, a)
             if a.get("image"):
-                rec["image"] = str(a["image"])
+                rec["image"] = check_image(a["image"], self.cfg["image_prefix"])
                 self.save(reg)
         with self._inst_locks[rec["id"]]:
             if a.get("recreate") or a.get("image"):

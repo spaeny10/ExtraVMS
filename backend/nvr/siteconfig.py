@@ -26,6 +26,19 @@ class InvalidCamera(ValueError):
     """A camera in an import or handoff that would produce an unsafe or broken RTSP URL (api answers 422)."""
 
 
+def camera_enabled(v) -> bool | None:
+    """A camera's `enabled` in an import or handoff: true / false, 1 / 0 or those as text; None for anything else
+    (refused). The hub counts a central instance's cameras against its limit by the same rule (hub/hub/central_cameras.py
+    camera_enabled: keep the two the same), so "false" can never be off at the hub and on here."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, int) and v in (0, 1):
+        return bool(v)
+    if isinstance(v, str) and v.strip().lower() in ("1", "true", "0", "false"):
+        return v.strip().lower() in ("1", "true")
+    return None
+
+
 def _check_cameras(cams, remap_ids: bool = False) -> None:
     """Validate every camera before any is stored (the same rules as PUT /api/cameras: mediamtx.camera_problem).
     `remap_ids`: a merge gives a camera with an unusable id a new one, so only its address fields matter."""
@@ -35,6 +48,8 @@ def _check_cameras(cams, remap_ids: bool = False) -> None:
     for c in cams:
         if not isinstance(c, dict):
             raise InvalidCamera("each camera must be an object")
+        if "enabled" in c and camera_enabled(c["enabled"]) is None:
+            raise InvalidCamera(f"camera {str(c.get('id'))[:40]!r}: enabled must be true or false")
         problem = camera_problem({**c, "id": "x"} if remap_ids else c, partial=True)
         if problem:
             raise InvalidCamera(problem.replace("camera x:", f"camera {str(c.get('id'))[:40]!r}:") if remap_ids else problem)
@@ -98,6 +113,8 @@ def import_config(data: dict, replace_identities: bool = False) -> dict:
     existing_pw = {c["id"]: c["password"] for c in db.cameras()}
     for c in data.get("cameras", []):
         cam = {**c, "password": existing_pw.get(c["id"], "")}
+        if "enabled" in c:
+            cam["enabled"] = int(camera_enabled(c["enabled"]))
         db.upsert_camera(cam)
         if c.get("ptz_config") is not None:
             db.set_ptz_config(c["id"], c["ptz_config"])
@@ -186,7 +203,7 @@ def merge_cameras(data: dict) -> dict:
         if pw is None:
             pw = (by_id.get(new_id) or {}).get("password") or ""
         cam = {k: c[k] for k in CAMERA_COLS if k in c}
-        enabled = bool(c.get("enabled", 1))
+        enabled = camera_enabled(c.get("enabled", True))
         if new_id in by_id and by_id[new_id]["enabled"]:
             enabled = True   # updating a camera in place never switches it off (e.g. a copy already disabled at the source)
         cam.update(id=new_id, password=pw, enabled=int(enabled))

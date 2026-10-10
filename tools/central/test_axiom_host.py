@@ -245,6 +245,28 @@ class Validation(unittest.TestCase):
         with self.assertRaises(ah.OpError):
             self.host.create_instance({**FWD_ARGS, "id": "gamma"})   # same public IP
 
+    def test_image_must_be_ours(self):
+        for image in ("evil/miner:latest", "axiom/instance:", "axiom/instancex:1", "--privileged", "axiom/instance:1 --privileged",
+                      "docker.io/axiom/instance:1"):
+            self.bad(image=image)
+        self.assertEqual(self.host.load()["instances"], {})
+        out = self.host.create_instance({**VPN_ARGS, "image": "axiom/instance:2026.10.06"})
+        self.assertEqual(self.host.exe.cmds("docker run")[-1][-1], "axiom/instance:2026.10.06")
+        self.assertEqual(out["instance"]["image"], "axiom/instance:2026.10.06")
+        # restart-instance --image: the same rule; a refused image changes nothing
+        n = len(self.host.exe.cmds("docker"))
+        with self.assertRaises(ah.OpError):
+            self.host.dispatch("restart_instance", {"id": "acme-gate", "image": "evil/miner:latest"})
+        self.assertEqual(self.host.load()["instances"]["acme-gate"]["image"], "axiom/instance:2026.10.06")
+        self.assertEqual(len(self.host.exe.cmds("docker")), n)
+        self.host.dispatch("restart_instance", {"id": "acme-gate", "image": "axiom/instance:2026.10.07"})
+        self.assertEqual(self.host.exe.cmds("docker run")[-1][-1], "axiom/instance:2026.10.07")
+        # a host that runs its images from its own registry says so in host.json (image_prefix)
+        self.host.cfg["image_prefix"] = "registry.example.net/axiom/instance:"
+        with self.assertRaises(ah.OpError):
+            self.host.restart_instance({"id": "acme-gate", "image": "axiom/instance:2026.10.08"})
+        self.host.restart_instance({"id": "acme-gate", "image": "registry.example.net/axiom/instance:2026.10.08"})
+
     def test_leftover_data_blocks_reuse(self):
         self.host.create_instance(dict(VPN_ARGS))
         (self.host.rec_dir("acme-gate") / "seg.mp4").write_bytes(b"x")
@@ -295,6 +317,15 @@ class Isolation(unittest.TestCase):
         self.assertGreater(into_drop, pool_drop)
         self.assertIn("ip saddr 10.200.0.0/16 counter drop", chain(fw, "input"))
         self.assertIn("priority filter - 10", chain(fw, "forward"))
+        # the rules match IPv4 only: IPv6 on an instance bridge (axb<slot>) is dropped before any accept
+        self.assertEqual((self.reg["instances"]["acme-gate"]["bridge"], self.reg["instances"]["beta-yard"]["bridge"]), ("axb0", "axb1"))
+        v6_in = 'meta nfproto ipv6 iifname "axb*" counter drop'
+        v6_out = 'meta nfproto ipv6 oifname "axb*" counter drop'
+        inp = [l.strip() for l in chain(fw, "input").splitlines()]
+        self.assertTrue(inp[1].startswith(v6_in), inp)                    # right after the hook line
+        first_accept = next(i for i, l in enumerate(fwd) if l.strip().endswith("accept"))
+        self.assertLess(next(i for i, l in enumerate(fwd) if v6_in in l), first_accept)
+        self.assertLess(next(i for i, l in enumerate(fwd) if v6_out in l), first_accept)
         # atomic replacement of exactly our table
         self.assertTrue(fw.splitlines()[3:6] == ["table inet axiom", "delete table inet axiom", "table inet axiom {"])
 
@@ -789,6 +820,80 @@ class CameraNetwork(unittest.TestCase):
         asked = len(self.dns.asked)
         self.host.reconcile(resolve=False)
         self.assertEqual(len(self.dns.asked), asked)
+
+    def test_resolved_private_addresses_stay_in_own_subnets(self):
+        """A camera DNS name (a Site admin can set one through the hub) never opens another Site's VPN subnet or the
+        datacenter LAN: a private or carrier-grade NAT address it resolves to counts only inside the instance's own
+        subnets, which a hub administrator set."""
+        self.dns.table.update({"10.20.8.1.nip.io": ["10.20.8.1"], "10-20-8-1.sslip.io": ["10.20.8.1"], "lan.example.net": ["10.20.7.50"],
+                               "dc.example.net": ["192.168.1.5", "203.0.113.30"], "cgnat.example.net": ["100.64.3.3"],
+                               "theirs.example.net": ["10.20.7.9"]})
+        self.host.set_camera_network({"id": "acme-gate", "hosts": ["10.20.8.1.nip.io", "10-20-8-1.sslip.io", "lan.example.net",
+                                                                    "dc.example.net", "cgnat.example.net"]})
+        rec = self.host.load()["instances"]["acme-gate"]
+        self.assertEqual(rec["host_ips"], {"10.20.8.1.nip.io": [], "10-20-8-1.sslip.io": [], "lan.example.net": ["10.20.7.50"],
+                                           "dc.example.net": ["203.0.113.30"], "cgnat.example.net": []})
+        c = chain(self.fw(), "inst_acme_gate")
+        self.assertIn("ip daddr { 10.20.7.50, 203.0.113.30 } meta l4proto tcp accept", c)
+        for ip in ("10.20.8.1", "192.168.1.5", "100.64.3.3"):
+            self.assertNotIn(ip, "\n".join(l for l in c.splitlines() if "accept" in l))
+        # beta-yard (port forwards, no subnets): a name pointing into acme-gate's VPN subnet opens nothing
+        self.host.set_camera_network({"id": "beta-yard", "hosts": ["theirs.example.net"]})
+        self.assertEqual(self.host.load()["instances"]["beta-yard"]["host_ips"], {"theirs.example.net": []})
+        self.assertNotIn("10.20.7.9", chain(self.fw(), "inst_beta_yard"))
+        # once a hub administrator adds 100.64.3.0/24 to acme-gate's subnets, the name may use it
+        self.host.set_camera_network({"id": "acme-gate", "subnets": ["10.20.7.0/24", "100.64.3.0/24"]})
+        self.assertEqual(self.host.load()["instances"]["acme-gate"]["host_ips"]["cgnat.example.net"], ["100.64.3.3"])
+        # the same rules apply without a lookup (boot, --offline): a registry from before them is cleaned
+        reg = self.host.load()
+        reg["instances"]["beta-yard"]["host_ips"] = {"theirs.example.net": ["10.20.7.9", "192.168.1.5"]}
+        self.host.save(reg)
+        asked = len(self.dns.asked)
+        self.host.reconcile(resolve=False)
+        self.assertEqual(len(self.dns.asked), asked)
+        self.assertEqual(self.host.load()["instances"]["beta-yard"]["host_ips"], {"theirs.example.net": []})
+        self.assertNotIn("10.20.7.9", chain(self.fw(), "inst_beta_yard"))
+        # the pure rule
+        self.assertIsNone(ah.resolved_addr_problem("203.0.113.30", FORBID, [], []))
+        self.assertIsNone(ah.resolved_addr_problem("10.20.7.5", FORBID, ["10.20.7.0/24"], ["10.20.9.0/24"]))
+        self.assertIn("outside", ah.resolved_addr_problem("172.16.0.1", FORBID, ["10.20.7.0/24"], []))
+        self.assertIn("another instance", ah.resolved_addr_problem("10.20.9.5", FORBID, ["10.20.0.0/16"], ["10.20.9.0/24"]))
+        self.assertIn("usable", ah.resolved_addr_problem("10.200.0.5", FORBID, ["10.200.0.0/24"], []))
+
+    def test_resolved_addresses_are_never_shared(self):
+        """One Site's address is never another's, compared as resolved addresses in both directions: the instance that
+        had an address keeps it and the newcomer goes without (logged), whatever their slots."""
+        self.dns.table.update({"first.example.net": ["203.0.113.50"], "second.example.net": ["203.0.113.50", "203.0.113.51"],
+                               "router.example.net": ["198.51.100.7"]})
+        # a name resolving to another instance's public IP (beta-yard's router): left out
+        self.host.set_camera_network({"id": "acme-gate", "hosts": ["router.example.net"]})
+        self.assertEqual(self.host.load()["instances"]["acme-gate"]["host_ips"], {"router.example.net": []})
+        self.assertNotIn("198.51.100.7", chain(self.fw(), "inst_acme_gate"))
+        # beta-yard (slot 1) has 203.0.113.50 first; acme-gate (slot 0) comes later with another name for it
+        self.host.set_camera_network({"id": "beta-yard", "hosts": ["first.example.net"]})
+        with self.assertLogs("axiom-host", "WARNING") as logs:
+            self.host.set_camera_network({"id": "acme-gate", "hosts": ["second.example.net"]})
+        self.assertTrue(any("203.0.113.50, a camera address of beta-yard: left out" in m for m in logs.output), logs.output)
+        reg = self.host.load()
+        self.assertEqual(reg["instances"]["beta-yard"]["host_ips"], {"first.example.net": ["203.0.113.50"]})
+        self.assertEqual(reg["instances"]["acme-gate"]["host_ips"], {"second.example.net": ["203.0.113.51"]})
+        self.assertIn("203.0.113.50", chain(self.fw(), "inst_beta_yard"))
+        self.assertNotIn("203.0.113.50", chain(self.fw(), "inst_acme_gate"))
+        self.host.reconcile()                                            # the 10-minute refresh changes nothing
+        self.assertEqual(self.host.dns_changed(self.host.load()), "")
+        self.assertIn("203.0.113.50", chain(self.fw(), "inst_beta_yard"))
+        self.assertNotIn("203.0.113.50", chain(self.fw(), "inst_acme_gate"))
+        # a public IP that another instance's name resolves to is refused like one of its public IPs
+        with self.assertRaises(ah.OpError) as cm:
+            self.host.set_camera_network({"id": "acme-gate", "public_ips": ["203.0.113.50"]})
+        self.assertIn("beta-yard", str(cm.exception))
+        # beta-yard's name moves away: from the next lookup on, acme-gate may have the address
+        self.dns.table["first.example.net"] = ["203.0.113.60"]
+        self.assertIn("camera host addresses changed", self.host.dns_changed(self.host.load()))
+        self.host.reconcile()
+        reg = self.host.load()
+        self.assertEqual(reg["instances"]["acme-gate"]["host_ips"], {"second.example.net": ["203.0.113.50", "203.0.113.51"]})
+        self.assertEqual(reg["instances"]["beta-yard"]["host_ips"], {"first.example.net": ["203.0.113.60"]})
 
     def test_old_registry_migrates(self):
         reg = json.loads(self.host.registry_path.read_text())

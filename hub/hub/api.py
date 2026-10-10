@@ -1869,6 +1869,8 @@ async def site_backup_restore(site_id: str, backup_id: int, body: RestoreIn, u: 
         result = await backups.restore(site, backup_id, u["email"], body.replace_identities)
     except LookupError:
         raise HTTPException(404, "no such backup")
+    except central_cameras.Refused as e:   # a central instance's camera limit or address rules
+        raise HTTPException(e.status, e.detail)
     except Exception as e:
         raise HTTPException(503, f"restore failed: {e}")
     _audit(u, site["org_id"], site_id, f"config restored from backup {backup_id}")

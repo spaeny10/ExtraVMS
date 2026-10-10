@@ -10,11 +10,12 @@ such a request goes down the tunnel, check() applies, for everyone (hub administ
   addresses      where the instance connects to each camera: its `public_host` (port forwarding) or else its `host`.
                  A private address (10/8, 172.16/12, 192.168/16, 100.64/10) must be inside one of the instance's Site
                  networks (400): one customer never reaches another's VPN subnet or the host's own networks. A public
-                 IP or DNS name is allowed, unless it is the hub's, a host's or the datacenter's own address, or
-                 another live instance's camera address (409).
+                 IP or DNS name is allowed, unless it is the hub's, a host's, the datacenter's or the FusionHub's own
+                 address, or another live instance's camera address (409), or a name that spells out an IP such as
+                 10.20.8.1.nip.io (400). The host checks what names resolve to again (axiom_host.py).
 
 Guarded requests: PUT /api/cameras/<id> (create or update), POST /api/cameras, POST /api/config/import and
-/api/config/merge (cameras in a backup or a camera handoff). After a camera change succeeds (and whenever a central
+/api/config/merge (cameras in a backup or a camera handoff), and a backup restored from the hub (backups.restore). After a camera change succeeds (and whenever a central
 server's heartbeat shows its camera list changed), sync() reads the instance's GET /api/cameras over its tunnel (that
 route never returns passwords), refreshes the hub's camera registry, recomputes the automatic addresses (the public
 IPs and DNS names its enabled cameras use) and, when the firewall (Site networks + automatic) differs from what the
@@ -114,28 +115,74 @@ def _cams_in(kind: str, path: str, body) -> list[dict]:
         host, pub = c.get("host"), c.get("public_host")
         if not isinstance(host, (str, type(None))) or not isinstance(pub, (str, type(None))):
             raise Refused(400, "a camera address must be text")
-        out.append({"id": str(c.get("id") or ""), "enabled": c.get("enabled", True) not in (False, 0, "0", "false"),
+        enabled = camera_enabled(c.get("enabled", True))
+        if enabled is None:
+            raise Refused(400, "a camera's enabled must be true or false")
+        out.append({"id": str(c.get("id") or ""), "enabled": enabled,
                     "host": (host or "").strip(), "public_host": (pub or "").strip(), "has_public": "public_host" in c})
     return out
+
+
+def camera_enabled(v) -> bool | None:
+    """A camera's `enabled` as the server reads it (backend/nvr/siteconfig.py camera_enabled: keep the two the same):
+    true / false, 1 / 0 or those as text; None for anything else (refused, so the hub never counts a camera as off
+    that the server switches on)."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, int) and v in (0, 1):
+        return bool(v)
+    if isinstance(v, str) and v.strip().lower() in ("1", "true", "0", "false"):
+        return v.strip().lower() in ("1", "true")
+    return None
 
 
 def _norm(addr: str) -> str:
     return addr.strip().lower().rstrip(".")
 
 
+def _host_of(addr: str | None) -> str:
+    """The address in a setting that may be a bare IP or name, name:port or a URL."""
+    a = (addr or "").strip()
+    if "://" in a:
+        return _norm(urlsplit(a).hostname or "")
+    if a.count(":") == 1:
+        a = a.split(":", 1)[0]
+    return _norm(a)
+
+
 def _hub_addresses() -> tuple[set[str], set[str]]:
-    """(IPs, names) of the hub's own systems: its public name, the datacenter IP and every host's address."""
+    """(IPs, names) of the hub's own systems: its public name, the datacenter IP, every host's address and the
+    FusionHub (the hub's fusionhub_address and each host's own)."""
     ips: set[str] = set()
     names: set[str] = set()
-    name = _norm(urlsplit(settings.public_url).hostname or "")
-    if name:
-        (ips if hosts._is_ip(name) else names).add(name)
-    if settings.datacenter_ip.strip():
-        ips.add(settings.datacenter_ip.strip())
-    for h in db.rows(sa.select(db.hosts.c.agent_ip)):
-        if h["agent_ip"]:
-            ips.add(h["agent_ip"])
+    found = [urlsplit(settings.public_url).hostname, settings.datacenter_ip, settings.fusionhub_address]
+    for h in db.rows(sa.select(db.hosts.c.agent_ip, db.hosts.c.fusionhub)):
+        found += [h["agent_ip"], h["fusionhub"]]
+    for a in found:
+        a = _host_of(a)
+        if a:
+            (ips if hosts._is_ip(a) else names).add(a)
     return ips, names
+
+
+def _others(ci_id: str) -> list[dict]:
+    """Every other live instance's camera addresses: its firewall lists, plus `resolved`, the addresses its host last
+    said its DNS names resolve to (the host compares resolved addresses again: axiom_host.resolve_camera_hosts)."""
+    out = []
+    for o, fw in hosts.taken_elsewhere(ci_id):
+        got = (o.get("info") or {}).get("host_ips") if isinstance(o.get("info"), dict) else None
+        resolved = {ip for ips in (got.values() if isinstance(got, dict) else []) if isinstance(ips, list) for ip in ips}
+        out.append({**fw, "resolved": resolved})
+    return out
+
+
+# a DNS name that spells out an IP (wildcard DNS such as nip.io / sslip.io: 10.20.8.1.nip.io, 10-20-8-1.sslip.io)
+_DOTTED_QUAD = re.compile(r"(?:^|\.)(?:\d{1,3}\.){3}\d{1,3}(?:\.|$)")
+_DASHED_QUAD = re.compile(r"(?:^|[^0-9])\d{1,3}-\d{1,3}-\d{1,3}-\d{1,3}(?:[^0-9]|$)")
+
+
+def _embeds_ip(name: str) -> bool:
+    return bool(_DOTTED_QUAD.search(name) or any(_DASHED_QUAD.search(lb) for lb in name.split(".")))
 
 
 def classify(addr: str) -> tuple[str, str]:
@@ -156,6 +203,8 @@ def classify(addr: str) -> tuple[str, str]:
         return "public_ip", str(ip)
     if not hosts._is_hostname(a) or a.endswith(".localhost"):
         raise Refused(400, f"{addr} is not an IP address or a DNS name like cam1.example.net")
+    if _embeds_ip(a):
+        raise Refused(400, f"{addr} spells out an IP address: use the address itself, or the router's own DNS name")
     return "host", a
 
 
@@ -173,7 +222,7 @@ def _check_address(addr: str, site: dict, hub: tuple[set[str], set[str]], others
     if a in (hub[0] if kind == "public_ip" else hub[1]):
         raise Refused(409, f"{a} is an address of Axiom Vision's own systems, not a camera")
     for fw in others:
-        if a in fw["public_ips" if kind == "public_ip" else "hosts"]:
+        if a in fw["public_ips" if kind == "public_ip" else "hosts"] or (kind == "public_ip" and a in fw.get("resolved", ())):
             raise Refused(409, f"{a} is already a camera address of another Site")
     return kind, a
 
@@ -215,7 +264,7 @@ async def check(ci: dict, kind: str, path: str, body) -> list[str]:
         stored = {str(c.get("id")): c for c in live or [] if isinstance(c, dict)}
     site = hosts.camera_network(ci)
     hub = _hub_addresses()
-    others = [fw for _, fw in hosts.taken_elsewhere(ci["id"])]
+    others = _others(ci["id"])
     union = hosts.firewall(ci)
     added: set[str] = set()
     for c in cams:
@@ -272,7 +321,7 @@ def auto_of(cams: list[dict], ci: dict) -> tuple[dict, list[str]]:
     out: dict[str, list[str]] = {"public_ips": [], "hosts": []}
     skipped: list[str] = []
     hub = _hub_addresses()
-    others = [fw for _, fw in hosts.taken_elsewhere(ci["id"])]
+    others = _others(ci["id"])
     for c in cams:
         if not isinstance(c, dict) or c.get("enabled") in (False, 0):
             continue
@@ -293,14 +342,23 @@ def auto_of(cams: list[dict], ci: dict) -> tuple[dict, list[str]]:
     return out, skipped
 
 
-def _registry_sync(server_id: str, cams: list[dict]) -> None:
+def _registry_sync(server_id: str, cams: list[dict], read_at: float) -> None:
+    """The camera list read at `read_at` into the hub's registry. A camera accepted through the hub stops counting as
+    pending once the list shows it, or when it was accepted before the read began (the list then has it, or its
+    request failed); one accepted while the list was being read still counts."""
     server = db.one(sa.select(db.sites).where(db.sites.c.id == server_id))
     if not server:
         return
     on = [{"id": c.get("id"), "name": c.get("name")} for c in cams if isinstance(c, dict) and c.get("enabled") not in (False, 0)]
     off = [{"id": c.get("id"), "name": c.get("name")} for c in cams if isinstance(c, dict) and c.get("enabled") in (False, 0)]
     cameras.sync(server, on, full=True, disabled=off, source="api")
-    _pending.pop(server_id, None)
+    mine = _pending.get(server_id) or {}
+    listed = {str(c["id"]) for c in on}
+    for k, until in list(mine.items()):
+        if until - PENDING_TTL_S < read_at or k in listed:
+            mine.pop(k, None)
+    if not mine:
+        _pending.pop(server_id, None)
 
 
 async def sync(ci_id: str) -> str:
@@ -309,10 +367,11 @@ async def sync(ci_id: str) -> str:
     ci = hosts.get_instance(ci_id)
     if not ci or ci["state"] not in hosts.LIVE_STATES or ci["state"] == "deleting" or not ci["server_id"]:
         return "gone"
+    read_at = time.time()
     cams = await live_cameras(ci["server_id"])
     if cams is not None:
         try:
-            _registry_sync(ci["server_id"], cams)
+            _registry_sync(ci["server_id"], cams, read_at)
         except Exception:
             log.exception("camera registry of %s", ci["server_id"])
     async with hosts.network_lock(ci_id):

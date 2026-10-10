@@ -1216,6 +1216,8 @@ async def preview(p: dict, u: dict) -> dict:
         n, w = soc_notes(p)
         stays += n
         warnings += w
+    if (why := central_refusal(p, u)):
+        blockers.append(why)
     card = {"title": summary(p), "moves": moves, "stays": stays, "warnings": warnings, "blockers": blockers,
             "needs": p["needs"], "can_execute": not p["needs"] and not blockers, "capacity": cap_lines, "capacity_data": cap,
             "confirm_name": (p.get("source") or p.get("site") or {}).get("name") if verb.get("confirm_name") else None,
@@ -1360,6 +1362,16 @@ def _conn(ref: dict) -> AgentConn:
     if conn is None:
         raise ActionError(f"{ref['name']} is offline")
     return conn
+
+
+def central_refusal(p: dict, u: dict) -> str | None:
+    """Why `u` may not carry out this retire / restore / migrate (None = may): the server it retires or restores is a
+    central recording instance's, which only hub administrators retire (Hosts page), as on the REST route
+    (api.retire_site)."""
+    ref = p.get("source") if p["action"] == "migrate_site" else p.get("site") if p["action"] in ("retire_site", "restore_site") else None
+    if ref and not u.get("is_super") and central_cameras.instance_for_server(ref.get("id")):
+        return f"{ref['name']} is the Site's central recording: only Axiom Vision can retire it (Hosts page)"
+    return None
 
 
 def retire(site_id: str, retired: bool = True) -> None:
@@ -1702,6 +1714,8 @@ async def _current_camera(p: dict, u: dict) -> dict:
 
 async def _run(p: dict, u: dict, lines: list[str], detail: dict, extras: dict) -> None:
     a = p["action"]
+    if (why := central_refusal(p, u)):   # (preview refuses it already; never retire one half-way through a migrate)
+        raise ActionError(why)
     if a in MOVES:
         await _move(p, u, lines, detail)
     elif a == "retire_site":

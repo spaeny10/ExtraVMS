@@ -60,6 +60,30 @@ def test_round_trip():
     assert siteconfig.import_config(json.loads(text))["identities"] == 0 and len(identities.named("person")) == 1
 
 
+def test_enabled_is_strict():
+    """A camera's "enabled" in an import or a merge: true / false, 1 / 0 or those as text, nothing else. The hub counts
+    a central instance's cameras against its limit by the same rule, so "false" is never off there and on here."""
+    base = {k: v for k, v in CAM.items() if k != "password"}
+    enabled = lambda cid: db.one("SELECT enabled FROM cameras WHERE id=?", [cid])["enabled"]  # noqa: E731
+    for raw, want in (("0", 0), ("false", 0), ("False", 0), (False, 0), (0, 0), ("1", 1), ("true", 1), (True, 1), (1, 1)):
+        siteconfig.import_config({"format": 1, "cameras": [{**base, "id": "en1", "enabled": raw}]})
+        assert enabled("en1") == want, raw
+    res = siteconfig.merge_cameras({"format": 1, "partial": True, "cameras": [{**base, "id": "en2", "host": "10.0.0.77", "enabled": "false"},
+                                                                              {**base, "id": "en3", "host": "10.0.0.78", "enabled": "0"}]})
+    assert enabled(res["ids"]["en2"]) == 0 and enabled(res["ids"]["en3"]) == 0
+    before = {c["id"]: c["enabled"] for c in db.cameras()}
+    for raw in ("no", "yes", "off", "", 2, -1, 0.5, None, [], {}):
+        for go in (lambda: siteconfig.import_config({"format": 1, "cameras": [{**base, "id": "en1", "enabled": raw}]}),
+                   lambda: siteconfig.merge_cameras({"format": 1, "partial": True, "cameras": [{**base, "id": "en4", "host": "10.0.0.79", "enabled": raw}]})):
+            try:
+                go()
+            except siteconfig.InvalidCamera as e:
+                assert "enabled must be true or false" in str(e)
+            else:
+                raise AssertionError(f"enabled {raw!r} was accepted")
+    assert {c["id"]: c["enabled"] for c in db.cameras()} == before   # nothing stored
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
