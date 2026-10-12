@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import collections
 import datetime as dt
 import json
 import logging
@@ -2069,10 +2070,18 @@ async def _playback_transcoded(camera_id: str, params: dict) -> StreamingRespons
     browser can play it. G.711 at 8 kHz costs almost nothing to convert, even on a CPU-only site."""
     cmd = [_ffmpeg_exe(), "-v", "error", "-nostdin", "-i", _mediamtx_fmp4(params), "-map", "0:v:0", "-map", "0:a:0?",
            "-c:v", "copy", "-c:a", "aac", "-b:a", "48k", *FMP4_OUT]
-    return await _ffmpeg_stream(camera_id, cmd)
+    return await _ffmpeg_stream(camera_id, cmd, cap=AUDIO_TRANSCODES_PER_CAMERA)
 
 
-async def _ffmpeg_stream(camera_id: str, cmd: list[str], on_close=None) -> StreamingResponse:
+# A Timeline tile asks for a new chunk on every seek, prefetch and drift reload; through the slow hub tunnel the
+# old ones stayed alive waiting for a reader (the desktop 2026-10-12: 22 audio transcodes for two cameras, up to
+# 8 minutes old, all reading the same disk). Per camera only the newest few run: starting one more stops the oldest.
+AUDIO_TRANSCODES_PER_CAMERA = 3
+_running: dict[str, collections.deque] = {}
+_running_lock = threading.Lock()
+
+
+async def _ffmpeg_stream(camera_id: str, cmd: list[str], on_close=None, cap: int = 0) -> StreamingResponse:
     """Run ffmpeg and stream its stdout as video/mp4. `on_close` runs exactly once when ffmpeg is done with
     (error, end of stream, client gone, or a response that was never started).
 
@@ -2102,6 +2111,10 @@ async def _ffmpeg_stream(camera_id: str, cmd: list[str], on_close=None) -> Strea
         done.set()
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
+        if cap:
+            with _running_lock:
+                with contextlib.suppress(ValueError):
+                    _running.get(camera_id, collections.deque()).remove(finish)
         if on_close:
             on_close()
 
@@ -2112,6 +2125,13 @@ async def _ffmpeg_stream(camera_id: str, cmd: list[str], on_close=None) -> Strea
 
         threading.Thread(target=reap, name="ffmpeg-reap", daemon=True).start()
 
+    if cap:
+        with _running_lock:
+            q = _running.setdefault(camera_id, collections.deque())
+            q.append(finish)
+            oldest = [q.popleft() for _ in range(max(0, len(q) - cap))]
+        for f in oldest:   # outside the lock: finish() takes it to remove itself
+            f()
     try:
         first = await asyncio.to_thread(out.read1, 64 * 1024)
     except BaseException:
