@@ -47,10 +47,11 @@ def body_of(xml: str) -> ET.Element:
     return next(e for e in root if soap.local(e) == "Body")
 
 
-def media1_profile(token: str, name: str, enc: str, w: int, h: int, fps: int) -> str:
-    return (f'<trt:Profiles token="{token}" fixed="true"><tt:Name>{name}</tt:Name>'
-            f'<tt:VideoSourceConfiguration token="VideoSourceToken"><tt:Name>VideoSource</tt:Name><tt:UseCount>2</tt:UseCount>'
-            f'<tt:SourceToken>VideoSource_1</tt:SourceToken><tt:Bounds x="0" y="0" width="3840" height="2160"/></tt:VideoSourceConfiguration>'
+def media1_profile(token: str, name: str, enc: str, w: int, h: int, fps: int, source: str | None = "VideoSource_1") -> str:
+    vsc = (f'<tt:VideoSourceConfiguration token="VideoSourceToken"><tt:Name>VideoSource</tt:Name><tt:UseCount>2</tt:UseCount>'
+           f'<tt:SourceToken>{source}</tt:SourceToken><tt:Bounds x="0" y="0" width="3840" height="2160"/></tt:VideoSourceConfiguration>'
+           if source else "")
+    return (f'<trt:Profiles token="{token}" fixed="true"><tt:Name>{name}</tt:Name>{vsc}'
             f'<tt:VideoEncoderConfiguration token="VideoEncoder_{token}"><tt:Name>VideoEncoder</tt:Name><tt:UseCount>1</tt:UseCount>'
             f'<tt:Encoding>{enc}</tt:Encoding><tt:Resolution><tt:Width>{w}</tt:Width><tt:Height>{h}</tt:Height></tt:Resolution>'
             f'<tt:Quality>4</tt:Quality><tt:RateControl><tt:FrameRateLimit>{fps}</tt:FrameRateLimit><tt:EncodingInterval>1</tt:EncodingInterval>'
@@ -154,7 +155,8 @@ def test_probe_one_profile_camera():
     fake = FakeCamera(True, False, ONE_PROFILE, {"Profile_1": "rtsp://192.168.5.31:554/main"})
     r = with_camera(fake, CAM)
     assert r["media"] == "media"
-    assert r["profiles"] == [{"token": "Profile_1", "name": "Profile_1", "encoding": "H.264", "width": 3840, "height": 2160, "fps": 25, "path": "/main"}]
+    assert r["profiles"] == [{"token": "Profile_1", "name": "Profile_1", "encoding": "H.264", "width": 3840, "height": 2160, "fps": 25,
+                             "source": "VideoSource_1", "path": "/main"}]
     assert fake.calls == ["tds:GetSystemDateAndTime", "tds:GetServices", "trt:GetProfiles", "trt:GetStreamUri"]
 
 
@@ -556,6 +558,121 @@ def test_check_route():
         assert pub["streams"]["main"]["width"] == 2592 and "password" not in pub and "u:p@" not in str(pub)
     finally:
         streams.probe_streams = real
+
+
+# ------------------------------------------------------------------ dual-sensor cameras: SD from the main's own source
+
+# Uniview-style TIC2A32SA (2026-10-12): a visible sensor (channel 1) and a thermal one (channel 2), three streams each,
+# listed interleaved. SD was /media2/video1, the thermal picture, while HD showed the visible one.
+SENSORS = [("media_profile1_1", 2560, 1440, "/media1/video1", "VideoSource_1"), ("media_profile2_1", 1280, 960, "/media2/video1", "VideoSource_2"),
+           ("media_profile1_2", 720, 576, "/media1/video2", "VideoSource_1"), ("media_profile2_2", 720, 576, "/media2/video2", "VideoSource_2"),
+           ("media_profile1_3", 352, 288, "/media1/video3", "VideoSource_1"), ("media_profile2_3", 320, 240, "/media2/video3", "VideoSource_2")]
+THERMAL_CAM = {**CAM, "id": "tic", "main_path": "/media1/video1"}
+
+
+def sensor_profiles(with_source: bool = True, tokens: bool = True) -> list[dict]:
+    out = []
+    for i, (token, w, h, path, source) in enumerate(SENSORS):
+        p = prof(token if tokens else str(i), "H.264", w, h, path if tokens else f"/live/{i}")
+        if with_source:
+            p["source"] = source
+        out.append(p)
+    return streams.sort_profiles(out)
+
+
+def test_probe_reads_each_profiles_video_source():
+    xml = envelope("<trt:GetProfilesResponse>" + "".join(media1_profile(t, t, "H264", w, h, 25, source=s) for t, w, h, _, s in SENSORS)
+                   + "</trt:GetProfilesResponse>")
+    r = with_camera(FakeCamera(True, False, xml, {t: f"rtsp://192.168.5.60{path}" for t, _, _, path, _ in SENSORS}), THERMAL_CAM)
+    assert [(p["path"], p["source"]) for p in r["profiles"]] == [
+        ("/media1/video1", "VideoSource_1"), ("/media2/video1", "VideoSource_2"), ("/media1/video2", "VideoSource_1"),
+        ("/media2/video2", "VideoSource_2"), ("/media1/video3", "VideoSource_1"), ("/media2/video3", "VideoSource_2")]
+    p = streams.plan({**THERMAL_CAM, "streams": {"profiles": r["profiles"]}})
+    assert p["main"]["path"] == "/media1/video1" and p["sub_path"] == "/media1/video2" and p["detected"] and p["problems"] == []
+    # Media2: Configurations/VideoSource; no SourceToken: the configuration's token; none at all: None
+    m2 = body_of(envelope(
+        '<tr2:GetProfilesResponse><tr2:Profiles token="a"><tr2:Name>a</tr2:Name><tr2:Configurations>'
+        '<tr2:VideoSource token="vsc2"><tt:Name>v</tt:Name><tt:SourceToken>VS_2</tt:SourceToken></tr2:VideoSource>'
+        '<tr2:VideoEncoder token="ve"><tt:Encoding>H264</tt:Encoding></tr2:VideoEncoder></tr2:Configurations></tr2:Profiles>'
+        '<tr2:Profiles token="b"><tr2:Name>b</tr2:Name><tr2:Configurations><tr2:VideoSource token="vsc9"><tt:Name>v</tt:Name></tr2:VideoSource>'
+        '<tr2:VideoEncoder token="ve"><tt:Encoding>H264</tt:Encoding></tr2:VideoEncoder></tr2:Configurations></tr2:Profiles>'
+        '</tr2:GetProfilesResponse>'))
+    assert [p["source"] for p in streams.parse_profiles(m2)] == ["VS_2", "vsc9"]
+    assert [p["source"] for p in streams.parse_profiles(body_of(MEDIA2_PROFILES))] == [None, None]
+
+
+def test_dual_sensor_sd_is_the_mains_own_source():
+    p = streams.plan({**THERMAL_CAM, "streams": {"profiles": sensor_profiles()}})
+    assert p["sub_path"] == "/media1/video2" and p["sub"]["source"] == "VideoSource_1" and p["problems"] == []
+    v = streams.view({**THERMAL_CAM, "streams": {"profiles": sensor_profiles()}})
+    assert v["sd"]["path"] == "/media1/video2" and v["sub"]["source"] == "VideoSource_1"
+    assert v["sources"] == [
+        {"token": "VideoSource_1", "main": True, "width": 2560, "height": 1440, "profiles": ["/media1/video1", "/media1/video2", "/media1/video3"],
+         "main_path": "/media1/video1", "sub_path": "/media1/video2"},
+        {"token": "VideoSource_2", "main": False, "width": 1280, "height": 960, "profiles": ["/media2/video1", "/media2/video2", "/media2/video3"],
+         "main_path": "/media2/video1", "sub_path": "/media2/video2"}]
+    assert "2 video sources" in v["sources_text"] and "/media2/video1 (1280×960)" in v["sources_text"]
+    cfg = mediamtx.build_config([{**THERMAL_CAM, "streams": {"profiles": sensor_profiles()}}])["paths"]
+    assert cfg["tic_sub"]["source"].endswith(":554/media1/video2")
+    # one source: no sources listed
+    v = streams.view(cam_with(TWO))
+    assert v["sources"] == [] and v["sources_text"] is None
+
+
+def test_dual_sensor_without_source_tokens_uses_the_channel():
+    """Profiles probed before the source was stored: media_profile1_* / media_profile2_* (and /media1/ /media2/) name
+    the channel."""
+    p = streams.plan({**THERMAL_CAM, "streams": {"profiles": sensor_profiles(with_source=False)}})
+    assert p["sub_path"] == "/media1/video2" and p["detected"]
+    assert streams.view({**THERMAL_CAM, "streams": {"profiles": sensor_profiles(with_source=False)}})["sources"] == []
+    # the path alone names it too (/chN/, channel=N)
+    chs = [prof("a", "H.264", 1920, 1080, "/h264/ch1/main/av_stream"), prof("b", "H.264", 1280, 720, "/h264/ch2/main/av_stream"),
+           prof("c", "H.264", 640, 360, "/h264/ch1/sub/av_stream")]
+    assert streams.plan(cam_with(chs, main_path="/h264/ch1/main/av_stream"))["sub_path"] == "/h264/ch1/sub/av_stream"
+    dahua = [prof("a", "H.264", 1920, 1080, "/cam/realmonitor?channel=1&subtype=0"), prof("b", "H.264", 1280, 720, "/cam/realmonitor?channel=2&subtype=0")]
+    assert streams.plan(cam_with(dahua, main_path="/cam/realmonitor?channel=1&subtype=0"))["sub_path"] is None
+    # "Profile_1" / "Profile_2" is not a channel: two streams of one source, as before
+    assert not streams._channels(prof("Profile_1", "H.264", 1, 1, "/main")) and streams.plan(cam_with(TWO))["sub_path"] == "/sub"
+    assert streams.plan(cam_with([prof("1", "H.265", 3840, 2160, "/main"), prof("2", "H.264", 704, 480, "/stream2")]))["sub_path"] == "/stream2"
+
+
+def test_dual_sensor_main_source_without_a_sub_relays_the_main():
+    profiles = [p for p in sensor_profiles() if p["source"] == "VideoSource_2" or p["path"] == "/media1/video1"]
+    p = streams.plan({**THERMAL_CAM, "streams": {"profiles": profiles}})
+    assert p["sub_path"] is None and p["sub"] is None and p["problems"] == [streams.no_sub_text(2560, 1440)]
+    # unknown sources and channels on a camera known to have two: not the other sensor's either
+    odd = [{**x, "source": None, "token": str(i), "path": f"/x{i}"} if x["path"] == "/media2/video2" else x for i, x in enumerate(profiles)]
+    assert streams.plan({**THERMAL_CAM, "streams": {"profiles": odd}})["sub_path"] is None
+
+
+def test_configured_sub_of_the_other_sensor_is_replaced():
+    """The sub_path field names the thermal sensor's stream (e.g. a suggest accepted before this fix): SD detects the
+    visible sensor's own sub stream and suggest offers it; the field itself is never changed."""
+    cam = {**THERMAL_CAM, "sub_path": "/media2/video1", "streams": {"profiles": sensor_profiles()}}
+    p = streams.plan(cam)
+    assert p["sub_path"] == "/media1/video2" and p["detected"]
+    assert p["suggest"] == {"main_path": "/media1/video1", "sub_path": "/media1/video2"}
+    # the same sensor's configured sub is used as configured, nothing suggested
+    p = streams.plan({**cam, "sub_path": "/media1/video3"})
+    assert p["sub_path"] == "/media1/video3" and not p["detected"] and p["suggest"] is None
+
+
+def test_reprobe_corrects_a_cross_source_sd():
+    """Stored before the source was known, with tokens and paths that name no channel: SD was the other sensor's. The
+    next probe (Check, or the periodic one) stores the sources, SD becomes the main's own, and mediamtx.yml is rewritten."""
+    _store({**THERMAL_CAM, "id": "tic2", "main_path": "/live/0"})
+    streams.record_probe("tic2", {"profiles": sensor_profiles(with_source=False, tokens=False), "media": "media"})
+    assert streams.sub_source(_get("tic2")) == "/live/1"          # the thermal 1280x960: the old, wrong choice
+    changes: list[int] = []
+    w = streams.StreamChecker(lambda: changes.append(1), None)
+    real = streams.probe_streams
+    streams.probe_streams = lambda cam, timeout=streams.CALL_TIMEOUT_S: {"profiles": sensor_profiles(tokens=False), "media": "media"}
+    try:
+        v = asyncio.run(w.check("tic2"))
+    finally:
+        streams.probe_streams = real
+    assert v["sd"]["path"] == "/live/2" and streams.sub_source(_get("tic2")) == "/live/2" and changes == [1]
+    assert [s["main_path"] for s in v["sources"]] == ["/live/0", "/live/1"]
 
 
 if __name__ == "__main__":

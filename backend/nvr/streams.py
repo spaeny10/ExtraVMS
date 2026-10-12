@@ -12,6 +12,13 @@ Media service) for its profiles. `plan` decides what <id>_sub pulls:
 * otherwise the best lower-resolution profile the camera lists (H.264 first, then the largest), as a *detected*
   path. The user's sub_path field is never rewritten: the detection is stored with the probe and shown in
   Settings, and a later probe (the camera's sub stream re-enabled, the field corrected) takes it back;
+* only a profile of the main stream's own video source (sensor) is ever SD: a dual-sensor camera (a visible + thermal
+  Uniview TIC2A32SA, 2026-10-12: media_profile1_* at /media1/videoN, media_profile2_* at /media2/videoN) lists the
+  other sensor's 1280x960 among its lower-resolution profiles, and SD showed a different picture from HD. The source
+  is GetProfiles' VideoSource SourceToken; profiles probed before it was stored (or cameras that don't say) are
+  matched by the channel their token or path names (same_source). A configured sub_path from another source is not
+  used either: SD detects one of the main's source and `suggest` offers it. view()["sources"] lists the sources of a
+  camera that has several, so each can be added as its own camera;
 * no lower-resolution profile, or the camera answered RTSP 404 / 453 on the path it would use: <id>_sub relays <id>
   (the recorded main stream, already pulled 24/7) from this MediaMTX, so SD always plays, and the camera gets the
   NO_SUB problem. plan()["encoding"] is what SD then plays: H.265 (a relayed H.265 main) is not playable over
@@ -65,6 +72,12 @@ ENCODINGS = {"H264": "H.264", "H265": "H.265", "HEVC": "H.265", "JPEG": "MJPEG",
 SECRET_PARAM = re.compile(r"^(user(name)?|pass(word|wd)?|pwd|auth|token|key)$", re.I)
 # MediaMTX: "2026/10/08 19:58:14 ERR [path cam4_sub] [RTSP source] bad status code: 404 (Not Found)"
 REFUSED = re.compile(r"\[path ([a-z0-9_]+)\] \[RTSPS? source\][^\n]*\b(404|453)\b")
+# the channel (video source) a profile token or stream path names, for profiles whose source the camera didn't say:
+# media_profile2_1, /media2/video1, /ch2/main, ?channel=2. Only these: "Profile_1" / "Profile_2" are usually two
+# streams of one source, not two channels
+TOKEN_CHANNEL = re.compile(r"^media_?profile(\d+)_\d+$", re.I)
+PATH_CHANNEL = re.compile(r"/(?:media|ch)(\d+)/", re.I)
+QUERY_CHANNEL = re.compile(r"(?:^|&)channel=(\d+)(?:&|$)", re.I)
 # 453 "Not Enough Bandwidth": the camera has no stream connection left for us (Qwenbot's SW Corner PTZ 2026-10-08:
 # something else held its slots). Any extra sub-stream session would be refused too: SD relays the main stream we
 # already pull, whatever the profiles say.
@@ -120,9 +133,11 @@ def _int(s: str | None) -> int | None:
 
 
 def parse_profiles(body) -> list[dict]:
-    """GetProfiles reply (Media or Media2) -> [{token, name, encoding, width, height, fps}] for profiles with a video
-    encoder, in the camera's order. Media: Profiles/VideoEncoderConfiguration; Media2: Profiles/Configurations/
-    VideoEncoder (Encoding there may also be an attribute)."""
+    """GetProfiles reply (Media or Media2) -> [{token, name, encoding, width, height, fps, source}] for profiles with a
+    video encoder, in the camera's order. Media: Profiles/VideoEncoderConfiguration; Media2: Profiles/Configurations/
+    VideoEncoder (Encoding there may also be an attribute). source: the video source (sensor) the profile encodes,
+    VideoSourceConfiguration (Media2: Configurations/VideoSource) SourceToken, else that configuration's token; None
+    when the profile has none."""
     out = []
     for prof in soap.find_all(body, "Profiles"):
         enc = soap.find(prof, "VideoEncoderConfiguration")   # (an Element without children is falsy: no `or`)
@@ -133,6 +148,10 @@ def parse_profiles(body) -> list[dict]:
         res = soap.find(enc, "Resolution")
         fps = soap.text(soap.find(enc, "RateControl"), "FrameRateLimit")
         name = soap.children(prof, "Name")
+        vsc = soap.find(prof, "VideoSourceConfiguration")
+        if vsc is None:
+            vsc = soap.find(prof, "VideoSource")
+        source = (soap.text(vsc, "SourceToken") or (vsc.get("token") or "").strip() or None) if vsc is not None else None
         out.append({
             "token": prof.get("token") or "",
             "name": (name[0].text or "").strip() if name else "",
@@ -140,6 +159,7 @@ def parse_profiles(body) -> list[dict]:
             "width": _int(soap.text(res, "Width")),
             "height": _int(soap.text(res, "Height")),
             "fps": _int(fps),
+            "source": source,
         })
     return out
 
@@ -194,7 +214,7 @@ def _profiles_from(client: soap.Onvif, url: str, get_profiles: str, get_uri: str
 
 
 def probe_streams(cam: dict, timeout: float = CALL_TIMEOUT_S) -> dict:
-    """{profiles: [{token, name, encoding, width, height, fps, path}] largest first, media: "media" | "media2"}.
+    """{profiles: [{token, name, encoding, width, height, fps, source, path}] largest first, media: "media" | "media2"}.
     Raises OnvifError when the camera can't be asked. Blocking: run it in a worker thread."""
     client = soap.Onvif.for_camera(cam, timeout=timeout)
     try:
@@ -251,6 +271,79 @@ def _safe_path(path: str | None) -> bool:
     return bool(path) and PATH_RE.fullmatch(path) is not None
 
 
+def _channels(p: dict) -> dict[str, int]:
+    """The channel a profile's token and/or path names: {"token": n, "path": n} ({} when neither names one)."""
+    out = {}
+    m = TOKEN_CHANNEL.match(p.get("token") or "")
+    if m:
+        out["token"] = int(m.group(1))
+    parts = urllib.parse.urlsplit(p.get("path") or "")
+    m = PATH_CHANNEL.search(parts.path) or QUERY_CHANNEL.search(parts.query)
+    if m:
+        out["path"] = int(m.group(1))
+    return out
+
+
+def _several_sources(profiles: list[dict]) -> bool:
+    return len({p["source"] for p in profiles if p.get("source")}) > 1
+
+
+def same_source(main: dict, p: dict, several: bool = False) -> bool:
+    """Profile `p` shows the picture `main` does: the same video source when the camera said both; else the same
+    channel where both tokens or both paths name one (media_profile1_* / media_profile2_*, /media1/ /media2/, /ch1/,
+    channel=1). With neither: as before (one source), unless one of them names a channel or the camera has several
+    sources (`several`): then not, an SD stream of the other sensor is worse than relaying the main."""
+    if p is main:
+        return True
+    a, b = main.get("source"), p.get("source")
+    if a and b:
+        return a == b
+    ca, cb = _channels(main), _channels(p)
+    common = [k for k in ca if k in cb]
+    if common:
+        return all(ca[k] == cb[k] for k in common)
+    return not ca and not cb and not several
+
+
+def _best_sub(ref: dict, profiles: list[dict], ok=lambda p: True) -> dict | None:
+    """The profile SD plays instead of `ref`: lower resolution, the same source, a safe path; H.264 first (browsers play
+    it everywhere), then the largest."""
+    several = _several_sources(profiles)
+    lower = [p for p in profiles if _area(p) < _area(ref) and _safe_path(p.get("path")) and ok(p)
+             and same_source(ref, p, several)]
+    lower.sort(key=lambda p: (p.get("encoding") != "H.264", -_area(p)))
+    return lower[0] if lower else None
+
+
+def sources(profiles: list[dict], main: dict | None = None) -> list[dict]:
+    """A camera with several video sources (sensors: a visible + thermal camera): [{token, main, width, height,
+    profiles: [paths], main_path, sub_path}] in the camera's order (largest profile first), main: the source this
+    camera shows; main_path / sub_path: what adding that source as its own camera would use. [] for one source."""
+    if not _several_sources(profiles):
+        return []
+    out: dict[str, dict] = {}
+    for p in profiles:
+        if p.get("source") and p.get("path"):
+            out.setdefault(p["source"], {"token": p["source"], "list": []})["list"].append(p)
+    result = []
+    for token, s in out.items():
+        top = s["list"][0]     # profiles are stored largest first
+        sub = _best_sub(top, s["list"])
+        result.append({"token": token, "main": bool(main and main.get("source") == token),
+                       "width": top.get("width"), "height": top.get("height"), "profiles": [p["path"] for p in s["list"]],
+                       "main_path": top["path"], "sub_path": sub["path"] if sub else None})
+    return result
+
+
+def sources_text(srcs: list[dict]) -> str | None:
+    others = [s for s in srcs if not s["main"]]
+    if not srcs or not others:
+        return None
+    other = ", ".join(f"{s['main_path']} ({s['width']}×{s['height']})" for s in others)
+    return (f"This camera has {len(srcs)} video sources (sensors, e.g. visible and thermal). It shows one; "
+            f"add the other as its own camera to see it too: {other}.")
+
+
 def plan(cam: dict) -> dict:
     """What SD live view (<id>_sub) pulls for this camera, and the stream problems to show:
     {sub_path: camera path for <id>_sub, or None = relay <id> (the main stream) from this MediaMTX,
@@ -286,12 +379,12 @@ def plan(cam: dict) -> dict:
         return bool(missing and path and (path == missing or same_path(path, missing)))
 
     configured = None if refused(sub_path) else next((p for p in profiles if same_path(sub_path, p.get("path"))), None)
-    if configured is not None:
+    # the configured sub stream is another sensor's (a dual-sensor camera): SD detects one of the main's source instead
+    other_source = configured is not None and not same_source(ref, configured, _several_sources(profiles))
+    if configured is not None and not other_source:
         chosen, profile = sub_path, configured
     else:
-        lower = [p for p in profiles if _area(p) < _area(ref) and _safe_path(p.get("path")) and not refused(p.get("path"))]
-        lower.sort(key=lambda p: (p.get("encoding") != "H.264", -_area(p)))   # browsers play H.264 everywhere
-        profile = lower[0] if lower else None
+        profile = _best_sub(ref, profiles, lambda p: not refused(p.get("path")))
         chosen = profile["path"] if profile else None
         out["detected"] = profile is not None
     out["sub_path"], out["sub"] = chosen, profile
@@ -302,6 +395,8 @@ def plan(cam: dict) -> dict:
         # the configured main path is not one the camera serves: offer what it lists (the user clicks; never automatic)
         sub_suggest = chosen if chosen and _safe_path(chosen) else None
         out["suggest"] = {"main_path": ref["path"], "sub_path": sub_suggest or sub_path}
+    elif other_source and chosen and _safe_path(chosen):
+        out["suggest"] = {"main_path": main_path, "sub_path": chosen}   # the field names the other sensor's stream
     return out
 
 
@@ -317,14 +412,16 @@ def problems(cam: dict) -> list[str]:
 def _profile_view(p: dict | None) -> dict | None:
     if not p:
         return None
-    return {k: p.get(k) for k in ("token", "encoding", "width", "height", "fps", "path")}
+    return {k: p.get(k) for k in ("token", "encoding", "width", "height", "fps", "path", "source")}
 
 
 def view(cam: dict) -> dict:
-    """What Settings → Cameras shows: {checked_at, error, profiles, main, sub, sd: {path, relay, detected}}."""
+    """What Settings → Cameras shows: {checked_at, error, profiles, main, sub, sd: {path, relay, detected}, sources,
+    sources_text}."""
     st = state_of(cam)
     p = plan(cam)
     nf = st.get("sub_not_found") or {}
+    srcs = sources([x for x in st.get("profiles") or [] if isinstance(x, dict)], p["main"])
     return {
         "checked_at": cam.get("streams_checked_at"),
         "error": st.get("error"),
@@ -339,6 +436,9 @@ def view(cam: dict) -> dict:
         "metadata_analytics": st.get("metadata_analytics"),
         # the configured main path is not listed: the paths the camera does list, for a one-click fix in Settings
         "suggest": p.get("suggest"),
+        # several video sources (a visible + thermal camera): each one's paths, to add the others as their own cameras
+        "sources": srcs,
+        "sources_text": sources_text(srcs),
     }
 
 
