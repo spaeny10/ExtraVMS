@@ -27,7 +27,7 @@ import { LiveBudgetProvider, useBudget } from "@site/dashboard/Dashboard";
 import { useIceServers } from "@site/dashboard/ice";
 import { camKey, splitKey, type DashboardSource } from "@site/dashboard/source";
 import type { FleetEvent } from "@site/dashboard/types";
-import { regionFetchKey, useRegionResults, useRegions } from "@site/region";
+import { regionFetchKey, regionPass, useRegionResults, useRegions } from "@site/region";
 import { Icon, confirmDialog, promptDialog, swipeHandlers, toast, useIsPhone } from "@site/ui";
 import { type Camera as RegistryCam, type Fleet, type Org, type Server, type Site, type SiteLayout, api } from "./api";
 import { type EventRef, applyLiveEvent, cameraNameFor, mergePool, regionFeed, removeLiveEvent, siteRegionKeys, tagServer } from "./eventOpen";
@@ -140,13 +140,16 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
   const [hdUnsupported, setHdUnsupported] = useState(false);
   const q = (key: string): Quality => (hdUnsupported ? "sd" : layout.quality[key] ?? "sd");
   const [expanded, setExpanded] = useState<string | null>(null);
+  // Expand narrows the activity column to that camera too, until the viewer asks for everything again
+  const [feedAll, setFeedAll] = useState(false);
+  useEffect(() => { setFeedAll(false); }, [expanded]);
   const gridRef = useRef<HTMLDivElement>(null);
   const isPhone = useIsPhone();
   // the column shows unless the embed drops it (the SOC) or the viewer hid it (a phone has it under the picture: always)
   const showFeed = !hideActivity && (isPhone || layout.activity);
   // the SOC incident view hides the column (it has its own event list): no feed fetches or socket for it either. Hidden
   // by the viewer, the Site's recent events still mark alerting tiles; only the painted regions' fetches stop.
-  const activity = useSiteActivity(site, servers, source, !hideActivity, showFeed);
+  const activity = useSiteActivity(site, servers, source, !hideActivity, showFeed, !isPhone && !feedAll ? expanded : null);
   const activeOf = (key: string) => activity.recent?.find((e) => camKey(e.site_id, e.camera_id) === key && (e.status === "open" || e.status === "pending"));
 
   // above every early return below: hooks run in the same order every render
@@ -155,7 +158,7 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
   if (tiles.length === 0) return <p className="muted">{Object.keys(full).length || registry.length ? "No cameras at this site yet." : "Loading cameras…"}</p>;
 
   const tileProps = { source, multi, q, dispatch, hdUnsupported, onUnsupported: () => setHdUnsupported(true), activeOf };
-  const feed = showFeed ? <SiteActivity site={site} servers={servers} tiles={tiles} multi={multi} activity={activity} /> : null;
+  const feed = showFeed ? <SiteActivity site={site} servers={servers} tiles={tiles} multi={multi} activity={activity} onShowAll={() => setFeedAll(true)} /> : null;
   if (isPhone) {
     // the phone shows one camera at a time: a layout only sets which cameras are in the strip and their order
     const picker = named.enabled && !!named.list?.length && (
@@ -410,6 +413,8 @@ type Activity = {
   regionKeys: string[];
   regionMap: Record<string, Uint8Array>;
   offline: string[];
+  /** the expanded camera ("server/camera"): the column shows only its events (null: every camera) */
+  focusKey: string | null;
 };
 
 /**
@@ -417,7 +422,7 @@ type Activity = {
  * events from the hub, live updates from the fleet socket (this Site's servers only), and up to 100 recent events of
  * each painted camera from its own server (only while the column shows: `withFeed`).
  */
-function useSiteActivity(site: Site, servers: Server[], source: DashboardSource, enabled: boolean, withFeed: boolean): Activity {
+function useSiteActivity(site: Site, servers: Server[], source: DashboardSource, enabled: boolean, withFeed: boolean, focusKey: string | null = null): Activity {
   const serverKey = servers.map((s) => s.id).sort().join(",");
   const serversRef = useRef(servers);
   serversRef.current = servers;
@@ -452,8 +457,24 @@ function useSiteActivity(site: Site, servers: Server[], source: DashboardSource,
       .then((evs) => tagServer(evs, server, name)).catch(() => [] as FleetEvent[]);
   });
 
-  const pool = useMemo(() => (scopeKey ? mergePool(scoped, recent ?? []) : recent ?? []), [scopeKey, scoped, recent]);
-  return { recent, pool, regionKeys, regionMap, offline };
+  // the expanded camera's own deeper history: the Site's recent list may hold only a few of its events
+  const [focused, setFocused] = useState<FleetEvent[]>([]);
+  useEffect(() => {
+    setFocused([]);
+    if (!enabled || !withFeed || !focusKey) return;
+    let alive = true;
+    const { server, id } = splitKey(focusKey);
+    const name = serversRef.current.find((s) => s.id === server)?.name ?? server;
+    siteApi(server).events({ camera: id, status: "open,pending,verified", limit: SCOPED_LIMIT })
+      .then((evs) => { if (alive) setFocused(tagServer(evs, server, name)); }).catch(() => {});
+    return () => { alive = false; };
+  }, [enabled, withFeed, focusKey]);
+
+  const pool = useMemo(() => {
+    const deeper = [...(scopeKey ? scoped : []), ...focused];
+    return deeper.length ? mergePool(deeper, recent ?? []) : recent ?? [];
+  }, [scopeKey, scoped, focused, recent]);
+  return { recent, pool, regionKeys, regionMap, offline, focusKey };
 }
 
 /** Expand: the height left for the one picture below the grid's top edge, so the expanded camera (picture plus its
@@ -477,7 +498,9 @@ function useExpandFit(grid: React.RefObject<HTMLDivElement | null>, on: boolean)
 }
 
 /** The "Latest activity" column: LiveView's feed and RegionNote, with the event viewer opened in place. */
-function SiteActivity({ site, servers, tiles, multi, activity: a }: { site: Site; servers: Server[]; tiles: Tile[]; multi: boolean; activity: Activity }) {
+function SiteActivity({ site, servers, tiles, multi, activity: a, onShowAll }: {
+  site: Site; servers: Server[]; tiles: Tile[]; multi: boolean; activity: Activity; onShowAll?: () => void;
+}) {
   const [open, setOpen] = useState<EventRef | null>(null);
   const names = useMemo(() => new Map(tiles.map((t) => [t.key, t.name])), [tiles]);
   /** "Server · Camera" on a multi-server Site, as the tiles are labeled */
@@ -486,18 +509,26 @@ function SiteActivity({ site, servers, tiles, multi, activity: a }: { site: Site
     const { server, id } = splitKey(key);
     return t ? tileLabel(t.server.name, t.name, multi) : tileLabel(servers.find((s) => s.id === server)?.name ?? server, id, multi);
   };
-  const feed = regionFeed(a.pool, a.regionMap, a.regionKeys);
-  const [shown, showMore] = useFeedCount(a.regionKeys.join(","));
+  const fk = a.focusKey;
+  // expanded: that camera's events only (through its painted region, if it has one); otherwise the painted cameras'
+  const feed = fk
+    ? a.pool.filter((e) => camKey(e.site_id, e.camera_id) === fk && (!a.regionMap[fk] || regionPass(e, a.regionMap[fk])))
+    : regionFeed(a.pool, a.regionMap, a.regionKeys);
+  const [shown, showMore] = useFeedCount(`${a.regionKeys.join(",")}|${fk ?? ""}`);
   const offline = a.offline.map((id) => servers.find((s) => s.id === id)?.name ?? id);
   return (
     <>
       <aside className="live-feed">
         <h3>Latest activity</h3>
+        {fk && (
+          <p className="muted small">Only {label(fk)} ·{" "}
+            <button type="button" className="linkish" onClick={onShowAll}>Show all cameras</button></p>
+        )}
         <RegionChips items={a.regionKeys.map((k) => ({ key: k, label: label(k) }))} />
         {offline.length > 0 && <p className="muted small">Offline: {offline.join(", ")}</p>}
         {a.recent === null && <p className="muted">Loading…</p>}
         {a.recent !== null && a.pool.length === 0 && <p className="muted">Nothing yet.</p>}
-        {a.pool.length > 0 && feed.length === 0 && <p className="muted">Nothing recent on that camera passed through the painted region.</p>}
+        {a.pool.length > 0 && feed.length === 0 && <p className="muted">{fk && !a.regionMap[fk] ? "Nothing recent on this camera." : "Nothing recent on that camera passed through the painted region."}</p>}
         {feed.slice(0, shown).map((e) => (
           <EventCard key={`${e.site_id}-${e.id}`} e={e} cameraName={names.get(camKey(e.site_id, e.camera_id)) ?? e.camera_id}
             site={mediaApi(e.site_id)} siteName={multi ? e.site_name : undefined}
