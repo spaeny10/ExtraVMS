@@ -149,6 +149,15 @@
 .cams-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .menu-pop .cams-reset { border-top: 1px solid var(--border); border-radius: 0; margin-top: 4px; padding-top: 8px; color: var(--muted); }
 .site-live-cell { min-width: 0; }
+/* Live layouts (SiteLive LayoutPicker): the picker, columns and Activity sit in the same toolbar; tile drag uses the
+   Timeline's visuals (the dragged tile dims, the drop target is outlined, .drag-ghost follows the pointer) */
+.live-toolbar select.site-live-layout-pick { max-width: 200px; }
+.live-toolbar select { padding-top: 3px; padding-bottom: 3px; }
+.menu-pop.site-live-layout-menu { min-width: 180px; }
+.site-live-cell.dragging { opacity: .35; }
+.site-live-cell.drop-target { outline: 3px solid var(--accent); outline-offset: -1px; border-radius: var(--radius); transform: scale(.985); }
+.site-live-phone-pick { gap: 8px; align-items: center; margin-bottom: 8px; }
+.site-live-phone-pick select { flex: 1; min-width: 0; }
 .site-live-down .player { background: #111; }
 .site-live-strip-off { aspect-ratio: 16 / 9; display: grid; place-items: center; background: #111; color: #aaa; font-size: 11px; }
 /* Sites list: the customer-wide Find and Alerts as small ghost buttons (links, so middle-click opens a tab) */

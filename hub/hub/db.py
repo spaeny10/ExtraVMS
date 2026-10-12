@@ -287,6 +287,15 @@ site_ask_messages = Table("site_ask_messages", metadata,
                           Column("model", String(120), nullable=True), Column("created_at", Float, nullable=False),
                           Column("duration_ms", Integer, nullable=True))
 
+# ---- Named view layouts of a Site (layouts.py): private to the user who saved them, per Site, per view ("live"; the
+# Site Timeline can move here from browser storage). Integer ids, as a server's /api/layouts, so the shapes match.
+site_layouts = Table("site_layouts", metadata,
+                     Column("id", Integer, primary_key=True, autoincrement=True),
+                     Column("location_id", String(24), nullable=False, index=True), Column("org_id", String(24), nullable=False),
+                     Column("user_id", String(24), nullable=False, index=True), Column("view", String(16), nullable=False),
+                     Column("name", String(60), nullable=False), Column("config", sa.JSON, nullable=False),
+                     Column("created_at", Float, nullable=False), Column("updated_at", Float, nullable=False))
+
 _engine: Engine | None = None
 
 

@@ -19,6 +19,7 @@ from pydantic import BaseModel, EmailStr, Field
 from . import __version__, alerts, auth, backups, cameras, dashboards, db, digest, direct, fleet_actions, proxy, push, soc_api, turn, vlm_proxy
 from . import fleet as fleet_mod
 from . import find as find_mod
+from . import layouts as layouts_mod
 from . import site_ask
 from . import central_cameras, coverage, geocode, hosts, security, soc, soc_reports
 from fastapi.responses import StreamingResponse
@@ -1004,6 +1005,7 @@ async def delete_location(location_id: str, move_to: str | None = None, u: dict 
         c.execute(sa.delete(db.location_procedures).where(db.location_procedures.c.location_id == location_id))
         find_mod.drop_views(c, location_id)
         site_ask.drop_location(c, location_id)   # everyone's Ask conversations about this place
+        layouts_mod.drop_location(c, location_id)   # everyone's saved layouts of it
         c.execute(sa.delete(db.site_coverage).where(db.site_coverage.c.location_id == location_id))   # describes this place only
         c.execute(sa.delete(db.locations).where(db.locations.c.id == location_id))
     for srv in servers:
@@ -1217,6 +1219,61 @@ async def delete_site_ask_thread(location_id: str, thread_id: int, u: dict = Dep
     loc, _ = auth.location_access(u, location_id)
     if not site_ask.delete_thread(u, loc["id"], thread_id):
         raise HTTPException(404, "no such conversation")
+    return {"ok": True}
+
+
+# ---- a Site's named view layouts (layouts.py): the Live grid's saved arrangements, private to the user who saved them
+
+class SiteLayoutIn(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+    config: dict
+
+
+def _layout_error(e: ValueError) -> HTTPException:
+    if isinstance(e, layouts_mod.NameTaken):
+        return HTTPException(409, str(e))
+    return HTTPException(422, str(e))
+
+
+@app.get("/api/locations/{location_id}/layouts")
+async def list_site_layouts(location_id: str, view: layouts_mod.View = "live", u: dict = Depends(user)):
+    """This user's own layouts of this Site's `view`, by name (nobody else's: they are personal)."""
+    loc, _ = auth.location_access(u, location_id)
+    return layouts_mod.list_for(u, loc["id"], view)
+
+
+@app.post("/api/locations/{location_id}/layouts")
+async def create_site_layout(location_id: str, body: SiteLayoutIn, view: layouts_mod.View = "live", u: dict = Depends(user)):
+    loc, _ = auth.location_access(u, location_id)
+    if not body.name.strip():
+        raise HTTPException(422, "a layout needs a name")
+    try:
+        return layouts_mod.create(u, loc, view, body.name, body.config)
+    except ValueError as e:
+        raise _layout_error(e)
+
+
+@app.put("/api/locations/{location_id}/layouts/{layout_id}")
+async def update_site_layout(location_id: str, layout_id: int, body: SiteLayoutIn, u: dict = Depends(user)):
+    loc, _ = auth.location_access(u, location_id)
+    row = layouts_mod.get(u, loc["id"], layout_id)
+    if not row:
+        raise HTTPException(404, "no such layout")
+    if not body.name.strip():
+        raise HTTPException(422, "a layout needs a name")
+    try:
+        return layouts_mod.update(u, row, body.name, body.config)
+    except ValueError as e:
+        raise _layout_error(e)
+
+
+@app.delete("/api/locations/{location_id}/layouts/{layout_id}")
+async def delete_site_layout(location_id: str, layout_id: int, u: dict = Depends(user)):
+    loc, _ = auth.location_access(u, location_id)
+    row = layouts_mod.get(u, loc["id"], layout_id)
+    if not row:
+        raise HTTPException(404, "no such layout")
+    layouts_mod.delete(row)
     return {"ok": True}
 
 

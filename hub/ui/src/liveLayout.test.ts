@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { EMPTY_LAYOUT, applyFocus, arrange, gridCols, isVisible, layoutReducer, layoutStorageKey, parseLayout, tileLabel, wrapIndex } from "./liveLayout";
+import { EMPTY_LAYOUT, type LiveLayout, applyFocus, arrange, coerceLayout, gridCols, isDirty, isVisible, layoutCols, layoutIdStorageKey, layoutReducer,
+  layoutStorageKey, parseLayout, shownKeys, tileLabel, toSavedConfig, wrapIndex } from "./liveLayout";
 
 describe("gridCols", () => {
   it("is square-ish and at most 4 wide, like the server's LiveView", () => {
@@ -60,14 +61,24 @@ describe("arrange", () => {
 
 describe("parseLayout", () => {
   it("round-trips and tolerates junk", () => {
-    const l = { visible: ["a/1"], order: ["b/1", "a/1"], quality: { "a/1": "hd" as const } };
+    const l: LiveLayout = { visible: ["a/1"], order: ["b/1", "a/1"], quality: { "a/1": "hd" }, cols: 2, activity: false };
     expect(parseLayout(JSON.stringify(l))).toEqual(l);
     expect(parseLayout(null)).toEqual(EMPTY_LAYOUT);
     expect(parseLayout("{nope")).toEqual(EMPTY_LAYOUT);
-    expect(parseLayout(JSON.stringify({ visible: [1], order: "x", quality: { a: "4k", b: "sd" } }))).toEqual({ visible: null, order: null, quality: { b: "sd" } });
+    expect(parseLayout(JSON.stringify({ visible: [1], order: "x", quality: { a: "4k", b: "sd" }, cols: 7, activity: "no" })))
+      .toEqual({ visible: null, order: null, quality: { b: "sd" }, cols: null, activity: true });
+  });
+  it("an arrangement stored before layouts had columns and the activity column reads as Auto, shown", () => {
+    expect(parseLayout(JSON.stringify({ visible: null, order: ["b/1"], quality: {} }))).toEqual({ ...EMPTY_LAYOUT, order: ["b/1"] });
+  });
+  it("a hub layout's config read tolerantly", () => {
+    expect(coerceLayout(null)).toEqual(EMPTY_LAYOUT);
+    expect(coerceLayout(["a/1"])).toEqual(EMPTY_LAYOUT);
+    expect(coerceLayout({ visible: ["a/1"], cols: 3, solo: "a/1" })).toEqual({ ...EMPTY_LAYOUT, visible: ["a/1"], cols: 3 });
   });
   it("storage key per site", () => {
     expect(layoutStorageKey("l_1")).toBe("siteLive.l_1");
+    expect(layoutIdStorageKey("l_1")).toBe("siteLive.l_1.layoutId");
   });
 });
 
@@ -86,5 +97,83 @@ describe("applyFocus", () => {
     expect(applyFocus(all, undefined)).toBe(all);
     expect(applyFocus(all, { keys: [], mode: "only" })).toBe(all);
     expect(applyFocus(all, { keys: ["x/9"], mode: "only" })).toBe(all);
+  });
+});
+
+describe("named layouts", () => {
+  // a saved layout: b/2 then a/1 shown, a/2 hidden, b/2 in HD, 2 columns, no activity column
+  const saved: LiveLayout = { visible: ["b/2", "a/1"], order: ["b/2", "a/1", "a/2", "b/1"], quality: { "b/2": "hd" }, cols: 2, activity: false };
+
+  it("applied to the Site's cameras: its cameras in its order, new cameras left out, gone ones dropped", () => {
+    expect(shownKeys(all, saved)).toEqual(["b/2", "a/1"]);
+    // a camera added to the Site since (c/1) stays out; one removed (b/2) just disappears
+    expect(shownKeys(["a/1", "a/2", "b/1", "c/1"], saved)).toEqual(["a/1"]);
+    // "All cameras" shows everything, new ones included
+    expect(shownKeys([...all, "c/1"], EMPTY_LAYOUT)).toEqual([...all, "c/1"]);
+  });
+
+  it("saved spelled out: explicit cameras and order of the Site's current cameras, quality only for those", () => {
+    const working: LiveLayout = { ...EMPTY_LAYOUT, visible: null, order: ["gone/1", "b/1"], quality: { "a/1": "hd", "gone/1": "hd" }, cols: 3 };
+    expect(toSavedConfig(all, working)).toEqual({ visible: ["b/1", "a/1", "a/2", "b/2"], order: ["b/1", "a/1", "a/2", "b/2"], quality: { "a/1": "hd" },
+      cols: 3, activity: true });
+    // ...so a camera added later doesn't join it
+    expect(shownKeys([...all, "c/1"], toSavedConfig(all, working))).not.toContain("c/1");
+  });
+
+  it("dirty: only what the viewer sees counts", () => {
+    expect(isDirty(all, saved, saved)).toBe(false);
+    // showing every camera again (visible back to null) while the layout lists all of them: the same grid
+    const allListed: LiveLayout = { ...saved, visible: [...all] };
+    expect(isDirty(all, { ...allListed, visible: null }, allListed)).toBe(false);
+    // the order of hidden cameras doesn't show
+    expect(isDirty(all, { ...saved, order: ["b/2", "a/1", "b/1", "a/2"] }, saved)).toBe(false);
+    // a camera the Site no longer has doesn't make it dirty
+    expect(isDirty(["a/1", "a/2", "b/1"], { ...saved, visible: ["a/1"] }, saved)).toBe(false);
+    // a quality set to its default doesn't either
+    expect(isDirty(all, { ...saved, quality: { "b/2": "hd", "a/1": "sd" } }, saved)).toBe(false);
+    for (const a of [
+      { type: "toggle", key: "a/2", all },
+      { type: "drop", key: "a/1", onto: "b/2", all },
+      { type: "quality", key: "a/1", quality: "hd" },
+      { type: "cols", cols: null },
+      { type: "activity", on: true },
+    ] as const) expect(isDirty(all, layoutReducer(saved, a), saved), a.type).toBe(true);
+  });
+
+  it("dirty under All cameras: the activity column is the viewer's preference, not a change", () => {
+    expect(isDirty(all, { ...EMPTY_LAYOUT, activity: false }, EMPTY_LAYOUT, false)).toBe(false);
+    expect(isDirty(all, { ...EMPTY_LAYOUT, cols: 1 }, EMPTY_LAYOUT, false)).toBe(true);
+    expect(isDirty(all, layoutReducer(EMPTY_LAYOUT, { type: "toggle", key: "a/1", all }), EMPTY_LAYOUT, false)).toBe(true);
+  });
+
+  it("load replaces the arrangement; cols and activity", () => {
+    expect(layoutReducer(EMPTY_LAYOUT, { type: "load", layout: saved })).toBe(saved);
+    expect(layoutReducer(saved, { type: "cols", cols: 2 })).toBe(saved);
+    expect(layoutReducer(saved, { type: "cols", cols: 4 }).cols).toBe(4);
+    expect(layoutReducer(saved, { type: "activity", on: true }).activity).toBe(true);
+    expect(layoutCols(saved, 9)).toBe(2);
+    expect(layoutCols(EMPTY_LAYOUT, 9)).toBe(3);
+  });
+});
+
+describe("drop (tile drag)", () => {
+  it("the dragged tile takes the target's place, in either direction", () => {
+    const fwd = layoutReducer(EMPTY_LAYOUT, { type: "drop", key: "a/1", onto: "b/1", all });
+    expect(arrange(all, fwd)).toEqual(["a/2", "b/1", "a/1", "b/2"]);
+    const back = layoutReducer(EMPTY_LAYOUT, { type: "drop", key: "b/2", onto: "a/2", all });
+    expect(arrange(all, back)).toEqual(["a/1", "b/2", "a/2", "b/1"]);
+  });
+  it("past a hidden camera, the shown order is what the drop asked for", () => {
+    const hid = layoutReducer(EMPTY_LAYOUT, { type: "toggle", key: "a/2", all });
+    expect(shownKeys(all, layoutReducer(hid, { type: "drop", key: "a/1", onto: "b/1", all }))).toEqual(["b/1", "a/1", "b/2"]);
+  });
+  it("onto itself or an unknown camera changes nothing", () => {
+    expect(layoutReducer(EMPTY_LAYOUT, { type: "drop", key: "a/1", onto: "a/1", all })).toBe(EMPTY_LAYOUT);
+    expect(layoutReducer(EMPTY_LAYOUT, { type: "drop", key: "a/1", onto: "x/9", all })).toBe(EMPTY_LAYOUT);
+    expect(layoutReducer(EMPTY_LAYOUT, { type: "drop", key: "x/9", onto: "a/1", all })).toBe(EMPTY_LAYOUT);
+  });
+  it("in a saved layout whose cameras have changed, gone ones drop out of the new order", () => {
+    const l: LiveLayout = { ...EMPTY_LAYOUT, order: ["gone/1", "b/2", "a/1"] };
+    expect(layoutReducer(l, { type: "drop", key: "a/1", onto: "b/2", all }).order).toEqual(["a/1", "b/2", "a/2", "b/1"]);
   });
 });

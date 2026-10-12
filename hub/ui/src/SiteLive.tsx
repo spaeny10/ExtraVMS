@@ -11,9 +11,15 @@
  *
  * "Latest activity" mirrors the server UI's LiveView: event cards that open the event viewer in place (HubEventDetail),
  * filtered by a region painted on a tile (only that camera's events whose path crossed it), and tiles with an event
- * in progress marked as alerting. The pool and the filtering are eventOpen.ts.
+ * in progress marked as alerting. The pool and the filtering are eventOpen.ts. The Activity button hides the column
+ * (the grid takes the full width).
+ *
+ * Layouts, as on the Timeline: "All cameras" or a named layout saved on the hub (per user and Site, spanning its
+ * servers: hub/hub/layouts.py), with Save / Save as new / Rename / Delete and a dot while the grid differs from it. A
+ * layout holds which cameras show and in what order, their streams, the grid's columns and the activity column. Tiles
+ * reorder by dragging the ⠿ grip in their bar (desktop); the phone picks a layout only. The logic is liveLayout.ts.
  */
-import { useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { Camera as ServerCam, NvrEvent } from "@site/api";
 import { EventCard } from "@site/Events";
 import { FeedMore, LiveTile, RegionChips, useFeedCount } from "@site/Views";
@@ -22,13 +28,14 @@ import { useIceServers } from "@site/dashboard/ice";
 import { camKey, splitKey, type DashboardSource } from "@site/dashboard/source";
 import type { FleetEvent } from "@site/dashboard/types";
 import { regionFetchKey, useRegionResults, useRegions } from "@site/region";
-import { Icon, swipeHandlers, useIsPhone } from "@site/ui";
-import { type Camera as RegistryCam, type Fleet, type Org, type Server, type Site, api } from "./api";
+import { Icon, confirmDialog, promptDialog, swipeHandlers, toast, useIsPhone } from "@site/ui";
+import { type Camera as RegistryCam, type Fleet, type Org, type Server, type Site, type SiteLayout, api } from "./api";
 import { type EventRef, applyLiveEvent, cameraNameFor, mergePool, regionFeed, removeLiveEvent, siteRegionKeys, tagServer } from "./eventOpen";
 import { HubEventDetail } from "./HubEventDetail";
 import { useDirect, useDirectVersion } from "./direct";
 import { makeHubSource, mediaApi, siteApi } from "./hubSource";
-import { EMPTY_LAYOUT, type LayoutAction, type LiveFocus, type LiveLayout, type Quality, applyFocus, arrange, gridCols, isVisible, layoutReducer, loadLayout, saveLayout, tileLabel,
+import { COLUMN_CHOICES, EMPTY_LAYOUT, type LayoutAction, type LiveFocus, type LiveLayout, type Quality, applyFocus, arrange, coerceLayout, isDirty, isVisible,
+  layoutCols, layoutReducer, loadActivityPref, loadLayout, loadLayoutId, saveActivityPref, saveLayout, saveLayoutId, tileLabel, toSavedConfig,
   wrapIndex } from "./liveLayout";
 
 /** live: full camera record from the server · loading: server online, cameras not fetched yet · unreachable: the
@@ -47,11 +54,17 @@ function siteFleet(org: Org, site: Site): Fleet {
  * `focus` puts the given tile keys (camKey) first or shows only them, and keeps them visible even if hidden in the
  * layout; `persist={false}` starts from the default layout and never writes this browser's stored one (an operator's
  * per-incident reshuffles shouldn't rearrange the customer's Live tab); `compact` drops the stream toolbar (and with it the
- * Cameras picker); `hideActivity` drops the "Latest activity" column (the incident view has its own event list).
+ * Cameras picker and the layout picker); `hideActivity` drops the "Latest activity" column and its button (the
+ * incident view has its own event list).
  */
 export type SiteLiveProps = { org: Org; site: Site; focus?: LiveFocus | null; persist?: boolean; compact?: boolean; hideActivity?: boolean };
 
-export function SiteLive({ org, site, focus: want = null, persist = true, compact = false, hideActivity = false }: SiteLiveProps) {
+export function SiteLive(props: SiteLiveProps) {
+  // keyed by Site: the working arrangement and the picked layout are per Site, never carried over to the next one
+  return <SiteLiveView key={props.site.id} {...props} />;
+}
+
+function SiteLiveView({ org, site, focus: want = null, persist = true, compact = false, hideActivity = false }: SiteLiveProps) {
   const servers = useMemo(() => site.servers.filter((s) => !s.retired_at), [site.servers]);
   const multi = servers.length > 1;
   useDirectVersion(servers);  // re-render (feed snapshots, phone strip) when a server's media route changes
@@ -95,41 +108,77 @@ export function SiteLive({ org, site, focus: want = null, persist = true, compac
     return known.map((c) => ({ key: camKey(s.id, c.id), server: s, id: c.id, name: c.name, state, cam: null, streamReady: false }));
   }), [servers, full, registry]);
 
-  const [layout, dispatch] = useReducer(layoutReducer, site.id, (id) => (persist ? loadLayout(id) : EMPTY_LAYOUT));
+  // the working arrangement (this browser, per Site); under "All cameras" the activity column follows the viewer's
+  // standing preference, under a named layout the layout's own setting
+  const [layout, dispatch] = useReducer(layoutReducer, site.id, (id) => {
+    if (!persist) return EMPTY_LAYOUT;
+    const l = loadLayout(id);
+    return loadLayoutId(id) ? l : { ...l, activity: loadActivityPref() };
+  });
   useEffect(() => { if (persist) saveLayout(site.id, layout); }, [persist, site.id, layout]);
+  // named layouts belong to the Site's own Live tab; an embed that doesn't persist (the SOC) has none
+  const named = useNamedLayouts(site.id, persist && !compact);
   const allKeys = tiles.map((t) => t.key);
   const byKey = new Map(tiles.map((t) => [t.key, t]));
   const ordered = applyFocus(arrange(allKeys, layout), want).map((k) => byKey.get(k)!);
   const pinned = new Set(want?.keys ?? []);
   const shown = ordered.filter((t) => pinned.has(t.key) || isVisible(layout, t.key));
+  const base = named.layoutId ? named.picked?.config : EMPTY_LAYOUT;   // undefined: the picked layout isn't loaded yet
+  const dirty = !!base && isDirty(allKeys, layout, base, named.layoutId !== 0);
+  const pickLayout = (id: number) => {
+    const l = named.list?.find((x) => x.id === id);
+    dispatch({ type: "load", layout: l ? l.config : { ...EMPTY_LAYOUT, activity: loadActivityPref() } });
+    named.setLayoutId(l ? l.id : 0);
+  };
+  const revert = () => pickLayout(named.layoutId);
+  const setActivity = (on: boolean) => {
+    dispatch({ type: "activity", on });
+    if (persist && !named.layoutId) saveActivityPref(on);
+  };
+  const drag = useTileDrag((key, onto) => dispatch({ type: "drop", key, onto, all: allKeys }));
 
   const [hdUnsupported, setHdUnsupported] = useState(false);
   const q = (key: string): Quality => (hdUnsupported ? "sd" : layout.quality[key] ?? "sd");
   const [expanded, setExpanded] = useState<string | null>(null);
   const isPhone = useIsPhone();
-  // the SOC incident view hides the column (it has its own event list): no feed fetches or socket for it either
-  const activity = useSiteActivity(site, servers, source, !hideActivity);
+  // the column shows unless the embed drops it (the SOC) or the viewer hid it (a phone has it under the picture: always)
+  const showFeed = !hideActivity && (isPhone || layout.activity);
+  // the SOC incident view hides the column (it has its own event list): no feed fetches or socket for it either. Hidden
+  // by the viewer, the Site's recent events still mark alerting tiles; only the painted regions' fetches stop.
+  const activity = useSiteActivity(site, servers, source, !hideActivity, showFeed);
   const activeOf = (key: string) => activity.recent?.find((e) => camKey(e.site_id, e.camera_id) === key && (e.status === "open" || e.status === "pending"));
 
   if (servers.length === 0) return <p className="muted">This site has no servers yet.</p>;
   if (tiles.length === 0) return <p className="muted">{Object.keys(full).length || registry.length ? "No cameras at this site yet." : "Loading cameras…"}</p>;
 
   const tileProps = { source, multi, q, dispatch, hdUnsupported, onUnsupported: () => setHdUnsupported(true), activeOf };
-  const feed = hideActivity ? null : <SiteActivity site={site} servers={servers} tiles={tiles} multi={multi} activity={activity} />;
-  if (isPhone) return <PhoneLive tiles={shown.length ? shown : ordered} activity={feed} {...tileProps} />;
+  const feed = showFeed ? <SiteActivity site={site} servers={servers} tiles={tiles} multi={multi} activity={activity} /> : null;
+  if (isPhone) {
+    // the phone shows one camera at a time: a layout only sets which cameras are in the strip and their order
+    const picker = named.enabled && !!named.list?.length && (
+      <div className="row site-live-phone-pick">
+        <span className="muted small">Layout</span>
+        <LayoutSelect named={named} onPick={pickLayout} />
+        {dirty && <span className="dirty-dot" title="Changed since this layout was picked">●</span>}
+      </div>
+    );
+    return <PhoneLive tiles={shown.length ? shown : ordered} activity={feed} picker={picker || null} {...tileProps} />;
+  }
 
   const focused = expanded ? shown.find((t) => t.key === expanded) : undefined;
   const grid = focused ? [focused] : shown;
+  const draggable = !compact && grid.length > 1;
   const liveKeys = shown.filter((t) => t.state === "live").map((t) => t.key);
   const allHd = liveKeys.length > 0 && liveKeys.every((k) => q(k) === "hd");
   const allSd = liveKeys.every((k) => q(k) === "sd");
   return (
     <LiveBudgetProvider>
-      <div className={`live-layout ${hideActivity ? "site-live-solo" : ""} ${compact ? "site-live-compact" : ""}`}>
+      <div className={`live-layout ${showFeed ? "" : "site-live-solo"} ${compact ? "site-live-compact" : ""}`}>
         <div className="live-main">
           {/* LiveView's one slim toolbar; which cameras show (and their order) sits behind "Cameras" in the same row
               rather than a row of chips of its own, so the grid starts as high as on the server */}
           {!compact && <div className="toolbar live-toolbar">
+            {named.enabled && <LayoutPicker named={named} dirty={dirty} onPick={pickLayout} onRevert={revert} current={() => toSavedConfig(allKeys, layout)} />}
             <span className="muted small">Stream</span>
             <div className="segmented">
               <button className={allSd ? "active" : ""} onClick={() => dispatch({ type: "allQuality", keys: liveKeys, quality: "sd" })} title="H.264 sub stream: low bandwidth, plays in any browser">All SD</button>
@@ -137,20 +186,208 @@ export function SiteLive({ org, site, focus: want = null, persist = true, compac
             </div>
             {hdUnsupported && <span className="muted small">This browser can't play the H.265 main stream, so live view is using SD.</span>}
             <span className="spacer" />
-            <CameraPicker tiles={ordered} layout={layout} multi={multi} dispatch={dispatch} />
+            <select className="site-live-cols" value={layout.cols ?? 0} title="Grid columns" aria-label="Grid columns"
+              onChange={(e) => dispatch({ type: "cols", cols: Number(e.target.value) || null })}>
+              <option value={0}>Auto columns</option>
+              {COLUMN_CHOICES.map((n) => <option key={n} value={n}>{n} column{n > 1 ? "s" : ""}</option>)}
+            </select>
+            {!hideActivity && (
+              <button className={`ghost small ${layout.activity ? "on" : ""}`} aria-pressed={layout.activity} onClick={() => setActivity(!layout.activity)}
+                title={layout.activity ? "Hide the Latest activity column: the cameras take the full width" : "Show the Latest activity column"}>
+                Activity
+              </button>
+            )}
+            <CameraPicker tiles={ordered} layout={layout} multi={multi} dispatch={dispatch} dirty={dirty} onRevert={revert}
+              revertLabel={named.layoutId ? "Revert to the saved layout" : "Reset layout"} />
           </div>}
-          <div className="live-grid" style={{ gridTemplateColumns: `repeat(${focused ? 1 : gridCols(grid.length)}, minmax(0, 1fr))` }}>
+          <div className="live-grid" style={{ gridTemplateColumns: `repeat(${focused ? 1 : layoutCols(layout, grid.length)}, minmax(0, 1fr))` }}>
             {grid.map((t) => (
               <SiteTile key={t.key} t={t} {...tileProps}
+                drag={draggable ? { onGrip: (e) => drag.start(t.key, tileLabel(t.server.name, t.name, multi), e), dragging: drag.dragKey === t.key,
+                  dropTarget: drag.dropKey === t.key } : undefined}
                 extra={<button className="ghost small" onClick={() => setExpanded(focused ? null : t.key)}>{focused ? "Grid" : "Expand"}</button>} />
             ))}
             {grid.length === 0 && <div className="empty">Every camera is hidden. Show some under Cameras above, or Reset.</div>}
           </div>
+          {drag.ghost && <div className="drag-ghost" style={{ left: drag.ghost.x, top: drag.ghost.y }}>{drag.ghost.name}</div>}
         </div>
         {feed}
       </div>
     </LiveBudgetProvider>
   );
+}
+
+// ---------------------------------------------------------------- named layouts (saved on the hub) and tile drag
+
+type NamedLayout = Omit<SiteLayout, "config"> & { config: LiveLayout };
+type NamedLayouts = ReturnType<typeof useNamedLayouts>;
+
+/**
+ * The signed-in user's named Live layouts of this Site (the hub's /api/locations/{id}/layouts) and which one is
+ * picked (this browser, per Site; 0 = "All cameras"). `list` is null until the hub answers (or when it can't).
+ */
+function useNamedLayouts(siteId: string, enabled: boolean) {
+  const [list, setList] = useState<NamedLayout[] | null>(null);
+  const [layoutId, setLayoutIdState] = useState(() => (enabled ? loadLayoutId(siteId) : 0));
+  const setLayoutId = (id: number) => {
+    setLayoutIdState(id);
+    if (enabled) saveLayoutId(siteId, id);
+  };
+  const reload = useCallback(() => api.siteLayouts(siteId)
+    .then((ls) => setList(ls.map((l) => ({ ...l, config: coerceLayout(l.config) }))))
+    .catch(() => {}), [siteId]);   // a hub that can't answer keeps what was listed: the picked layout stays picked
+  useEffect(() => { if (enabled) reload(); }, [enabled, reload]);
+  // the picked layout is gone (deleted in another browser): "All cameras", keeping what is on screen (it shows changed)
+  useEffect(() => {
+    if (list && layoutId && !list.some((l) => l.id === layoutId)) {
+      setLayoutIdState(0);
+      if (enabled) saveLayoutId(siteId, 0);
+    }
+  }, [list, layoutId, enabled, siteId]);
+  return { siteId, enabled, list, layoutId, setLayoutId, reload, picked: list?.find((l) => l.id === layoutId) };
+}
+
+function LayoutSelect({ named, onPick }: { named: NamedLayouts; onPick: (id: number) => void }) {
+  const { list, layoutId } = named;
+  return (
+    <select className="site-live-layout-pick" value={layoutId} onChange={(e) => onPick(Number(e.target.value))} aria-label="Layout">
+      <option value={0}>All cameras</option>
+      {/* picked in an earlier visit, the list not loaded (yet) */}
+      {layoutId !== 0 && !list?.some((l) => l.id === layoutId) && <option value={layoutId}>Saved layout…</option>}
+      {list?.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+    </select>
+  );
+}
+
+/**
+ * The Timeline's "Layout" row for Live: the picker, a dot while the grid differs from the picked layout, Save (or
+ * "Save as…" under All cameras), and a ⋯ menu with Save as new, Rename, Delete and Revert.
+ */
+function LayoutPicker({ named, dirty, onPick, onRevert, current }: {
+  named: NamedLayouts; dirty: boolean; onPick: (id: number) => void; onRevert: () => void;
+  /** the arrangement on screen as a layout is saved (liveLayout.toSavedConfig) */
+  current: () => LiveLayout;
+}) {
+  const [open, setOpen] = useState(false);
+  const { picked } = named;
+  const failed = (e: unknown) => toast.error(String(e).includes("409") ? "You already have a layout with that name." : e);
+  const save = async () => {
+    if (!picked) return saveAs();
+    try {
+      await api.updateSiteLayout(named.siteId, picked.id, { name: picked.name, config: current() });
+      await named.reload();
+      toast.success(`Layout "${picked.name}" saved`);
+    } catch (e) { failed(e); }
+  };
+  const saveAs = async () => {
+    setOpen(false);
+    const name = (await promptDialog("Save layout as", { label: "Name, e.g. Doors or Perimeter" }))?.trim();
+    if (!name) return;
+    try {
+      const l = await api.createSiteLayout(named.siteId, { name, config: current() });
+      await named.reload();
+      named.setLayoutId(l.id);
+      toast.success(`Layout "${name}" saved`);
+    } catch (e) { failed(e); }
+  };
+  const rename = async () => {
+    setOpen(false);
+    const name = picked && (await promptDialog("Rename layout", { initial: picked.name, confirmLabel: "Rename" }))?.trim();
+    if (!picked || !name || name === picked.name) return;
+    try {
+      await api.updateSiteLayout(named.siteId, picked.id, { name, config: picked.config });
+      await named.reload();
+      toast.success(`Renamed to "${name}"`);
+    } catch (e) { failed(e); }
+  };
+  const remove = async () => {
+    setOpen(false);
+    if (!picked || !await confirmDialog(`Delete the layout "${picked.name}"?`, { confirmLabel: "Delete", danger: true })) return;
+    try {
+      await api.deleteSiteLayout(named.siteId, picked.id);
+      named.setLayoutId(0);   // what is on screen stays, as on the Timeline
+      await named.reload();
+      toast.success(`Deleted "${picked.name}"`);
+    } catch (e) { failed(e); }
+  };
+  return (
+    <>
+      <span className="muted small">Layout</span>
+      <LayoutSelect named={named} onPick={onPick} />
+      {dirty && <span className="dirty-dot" title={picked ? "Unsaved changes to this layout" : "Changed from All cameras"}>●</span>}
+      {picked ? <button className="ghost small" disabled={!dirty} onClick={save}>Save</button>
+        : <button className="ghost small" onClick={saveAs} title="Save what the grid shows as a named layout">Save as…</button>}
+      <div className="menu-anchor">
+        <button className="ghost small" aria-haspopup="true" aria-expanded={open} aria-label="More layout actions" onClick={() => setOpen(!open)}>⋯</button>
+        {open && (
+          <>
+            <div className="menu-veil" onClick={() => setOpen(false)} />
+            <div className="menu-pop site-live-layout-menu" role="menu">
+              <button role="menuitem" onClick={saveAs}>Save as new…</button>
+              {picked && <button role="menuitem" onClick={rename}>Rename…</button>}
+              {picked && <button role="menuitem" onClick={remove}>Delete…</button>}
+              {dirty && <button role="menuitem" onClick={() => { setOpen(false); onRevert(); }}>{picked ? "Revert to saved" : "Back to all cameras"}</button>}
+            </div>
+          </>
+        )}
+      </div>
+    </>
+  );
+}
+
+/**
+ * Drag a tile onto another to take its place (the Timeline's tile drag and visuals): from the ⠿ grip in the tile's bar,
+ * so a drag on the picture still paints a region, pans a digital zoom or steers PTZ. The dragged tile dims, the one
+ * under the pointer is outlined and a ghost with the camera's name follows the pointer; Esc cancels. Tiles move on
+ * drop, not while dragging: each is a live video, and the grid doesn't reshuffle under the pointer.
+ */
+function useTileDrag(onDrop: (key: string, onto: string) => void) {
+  const [dragKey, setDragKey] = useState<string | null>(null);
+  const [dropKey, setDropKey] = useState<string | null>(null);
+  const [ghost, setGhost] = useState<{ name: string; x: number; y: number } | null>(null);
+  const dropRef = useRef(onDrop);
+  dropRef.current = onDrop;
+  const stop = useRef<(() => void) | null>(null);
+  useEffect(() => () => stop.current?.(), []);
+  const start = (key: string, name: string, e: React.PointerEvent) => {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    stop.current?.();
+    let over: string | null = null;
+    const move = (ev: PointerEvent) => {
+      ev.preventDefault();
+      setGhost({ name, x: ev.clientX, y: ev.clientY });
+      const el = document.elementsFromPoint(ev.clientX, ev.clientY).find((x) => (x as HTMLElement).dataset?.liveKey) as HTMLElement | undefined;
+      const k = el?.dataset.liveKey ?? null;
+      over = k && k !== key ? k : null;
+      setDropKey(over);
+    };
+    const up = () => {
+      const target = over;
+      stop.current?.();
+      if (target) dropRef.current(key, target);
+    };
+    const esc = (ev: KeyboardEvent) => { if (ev.key === "Escape") cancel(); };
+    const cancel = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", cancel);
+      window.removeEventListener("keydown", esc);
+      stop.current = null;
+      setDragKey(null);
+      setDropKey(null);
+      setGhost(null);
+    };
+    stop.current = cancel;
+    window.addEventListener("pointermove", move, { passive: false });
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", cancel);
+    window.addEventListener("keydown", esc);
+    setDragKey(key);
+    setGhost({ name, x: e.clientX, y: e.clientY });
+  };
+  return { dragKey, dropKey, ghost, start };
 }
 
 // ---------------------------------------------------------------- Latest activity (LiveView's feed, across servers)
@@ -172,9 +409,9 @@ type Activity = {
 /**
  * LiveView's `recent + socket` pool and its painted-region fetches, for every server at the Site: the Site's latest
  * events from the hub, live updates from the fleet socket (this Site's servers only), and up to 100 recent events of
- * each painted camera from its own server.
+ * each painted camera from its own server (only while the column shows: `withFeed`).
  */
-function useSiteActivity(site: Site, servers: Server[], source: DashboardSource, enabled: boolean): Activity {
+function useSiteActivity(site: Site, servers: Server[], source: DashboardSource, enabled: boolean, withFeed: boolean): Activity {
   const serverKey = servers.map((s) => s.id).sort().join(",");
   const serversRef = useRef(servers);
   serversRef.current = servers;
@@ -202,7 +439,7 @@ function useSiteActivity(site: Site, servers: Server[], source: DashboardSource,
   const scopeKey = regionKeys.join(",");
   // the regions' contents too: repainting a camera refetches that camera only (the server matches the region, so a
   // burst of other events can't crowd the matches out of SCOPED_LIMIT; a server without that filter ignores it)
-  const scoped = useRegionResults<FleetEvent>(enabled ? regionFetchKey(regionKeys, regionMap) : "", (k, region) => {
+  const scoped = useRegionResults<FleetEvent>(enabled && withFeed ? regionFetchKey(regionKeys, regionMap) : "", (k, region) => {
     const { server, id } = splitKey(k);
     const name = serversRef.current.find((s) => s.id === server)?.name ?? server;
     return siteApi(server).events({ camera: id, region, status: "open,pending,verified", limit: SCOPED_LIMIT })
@@ -257,13 +494,15 @@ type TileCommon = {
 
 /**
  * "Cameras n/m ▾" in the toolbar: a popover listing every camera with an eye toggle (like the Timeline's lanes); drag
- * one onto another to reorder; Reset. A popover rather than a standing row of chips keeps the Live tab to one toolbar.
+ * one onto another to reorder; Reset (back to the picked layout). A popover rather than a standing row of chips keeps
+ * the Live tab to one toolbar.
  */
-function CameraPicker({ tiles, layout, multi, dispatch }: { tiles: Tile[]; layout: LiveLayout; multi: boolean; dispatch: React.Dispatch<LayoutAction> }) {
+function CameraPicker({ tiles, layout, multi, dispatch, dirty, onRevert, revertLabel }: {
+  tiles: Tile[]; layout: LiveLayout; multi: boolean; dispatch: React.Dispatch<LayoutAction>; dirty: boolean; onRevert: () => void; revertLabel: string;
+}) {
   const all = tiles.map((t) => t.key);
   const [open, setOpen] = useState(false);
   const [drag, setDrag] = useState<string | null>(null);
-  const custom = layout.visible !== null || layout.order !== null || Object.keys(layout.quality).length > 0;
   const shownCount = tiles.filter((t) => isVisible(layout, t.key)).length;
   return (
     <div className="menu-anchor">
@@ -293,7 +532,7 @@ function CameraPicker({ tiles, layout, multi, dispatch }: { tiles: Tile[]; layou
                 </button>
               );
             })}
-            {custom && <button className="cams-reset" onClick={() => { dispatch({ type: "reset" }); setOpen(false); }} title="Show every camera in server order, all SD">Reset layout</button>}
+            {dirty && <button className="cams-reset" onClick={() => { onRevert(); setOpen(false); }} title="Undo the changes since the layout was picked or saved">{revertLabel}</button>}
           </div>
         </>
       )}
@@ -318,8 +557,11 @@ function useBudgetSlot(key: string, box: React.RefObject<HTMLDivElement | null>)
 
 const STATE_TEXT: Record<Exclude<TileState, "live">, string> = { offline: "Server offline", unreachable: "Server not answering", loading: "Connecting…" };
 
-function SiteTile({ t, source, multi, q, dispatch, hdUnsupported, onUnsupported, activeOf, extra, phone, onSwipe }: TileCommon & {
-  t: Tile; extra?: React.ReactNode; phone?: boolean; onSwipe?: (dir: -1 | 1) => void;
+/** A grid tile's part in a drag (useTileDrag): its grip, and whether it is the one dragged or the one under the pointer. */
+type TileDrag = { onGrip: (e: React.PointerEvent) => void; dragging: boolean; dropTarget: boolean };
+
+function SiteTile({ t, source, multi, q, dispatch, hdUnsupported, onUnsupported, activeOf, extra, phone, onSwipe, drag }: TileCommon & {
+  t: Tile; extra?: React.ReactNode; phone?: boolean; onSwipe?: (dir: -1 | 1) => void; drag?: TileDrag;
 }) {
   const box = useRef<HTMLDivElement>(null);
   const budget = useBudgetSlot(t.key, box);
@@ -343,11 +585,13 @@ function SiteTile({ t, source, multi, q, dispatch, hdUnsupported, onUnsupported,
       <button className={hd ? "active" : ""} disabled={hdUnsupported} onClick={() => dispatch({ type: "quality", key: t.key, quality: "hd" })}>HD</button>
     </div>
   );
+  const grip = drag && <span className="sync-grip" title="Drag to reorder" onPointerDown={drag.onGrip}>⠿</span>;
   return (
-    <div ref={box} className="site-live-cell">
+    <div ref={box} className={`site-live-cell ${drag?.dragging ? "dragging" : ""} ${drag?.dropTarget ? "drop-target" : ""}`} data-live-key={t.key}>
       {playing && t.cam ? (
         <LiveTile c={t.cam} hd={hd} port={source.port} iceServers={ice} site={site} regionKey={t.key} phone={phone} onSwipe={onSwipe} active={active}
           onUnsupported={hd ? onUnsupported : undefined} bar={<>
+            {grip}
             <span className={`dot ${t.streamReady ? "ok" : "bad"}`} title={t.streamReady ? "Recording" : "No stream"} />
             <span>{label}</span>
             {active && <span className={`label-chip ${active.camera_class}`}>{active.camera_class}</span>}
@@ -364,6 +608,7 @@ function SiteTile({ t, source, multi, q, dispatch, hdUnsupported, onUnsupported,
             )}
           </div>
           <div className="tile-bar">
+            {grip}
             <span className={`dot ${t.state === "live" && t.streamReady ? "ok" : "bad"}`} />
             <span>{label}</span>
             {t.state === "live" && <span className="muted small">paused · still frame</span>}
@@ -378,8 +623,9 @@ function SiteTile({ t, source, multi, q, dispatch, hdUnsupported, onUnsupported,
   );
 }
 
-/** Phone: one camera at a time, a strip of stills across every server's cameras, swipe or tap to switch (wraps). */
-function PhoneLive({ tiles, activity, ...common }: TileCommon & { tiles: Tile[]; activity: React.ReactNode }) {
+/** Phone: one camera at a time, a strip of stills across every server's cameras, swipe or tap to switch (wraps).
+ *  `picker` (the named layouts, when there are any) sets which cameras the strip has and their order. */
+function PhoneLive({ tiles, activity, picker, ...common }: TileCommon & { tiles: Tile[]; activity: React.ReactNode; picker: React.ReactNode }) {
   const [idx, setIdx] = useState(0);
   const [tick, setTick] = useState(0);
   useEffect(() => { const t = setInterval(() => setTick((x) => x + 1), 10000); return () => clearInterval(t); }, []);
@@ -389,6 +635,7 @@ function PhoneLive({ tiles, activity, ...common }: TileCommon & { tiles: Tile[];
   return (
     <LiveBudgetProvider>
       <div className="live-phone">
+        {picker}
         <SiteTile key={t.key} t={t} {...common} phone onSwipe={step} />
         {tiles.length > 1 && (
           <div className="live-strip" role="tablist">

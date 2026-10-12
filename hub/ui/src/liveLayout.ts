@@ -5,17 +5,29 @@
  *
  * Tile keys are `camKey(serverId, cameraId)` = "<server>/<camera>" (frontend/src/playback.ts), so two servers with
  * a camera called "cam1" never collide in the layout, the live budget or painted regions.
+ *
+ * Two kinds of layout: the viewer's working arrangement (what the grid shows now, kept in this browser per Site, as
+ * before), and named layouts saved on the hub per user and Site (hub/hub/layouts.py; they span the Site's servers).
+ * Picking a named layout loads it into the working arrangement; the picker marks it changed (isDirty) until saved.
  */
 
 export type Quality = "sd" | "hd";
 /**
  * What the viewer arranged for one Site. `visible: null` = every camera (so cameras added later show up);
  * `order: null` = server order, then each server's camera order. Keys not in `order` follow in that default order.
- * Stored in localStorage under `siteLive.<siteId>` until the hub keeps layouts (GET/PUT /api/locations/{id}/layouts).
+ * `cols: null` = Auto (gridCols); `activity` = the "Latest activity" column shows.
+ * The names follow the Timeline's LayoutConfig {visible, solo, order}; a saved Live layout stores this shape.
+ * The working arrangement is stored in localStorage under `siteLive.<siteId>`.
  */
-export type LiveLayout = { visible: string[] | null; order: string[] | null; quality: Record<string, Quality> };
-export const EMPTY_LAYOUT: LiveLayout = { visible: null, order: null, quality: {} };
+export type LiveLayout = { visible: string[] | null; order: string[] | null; quality: Record<string, Quality>; cols: number | null; activity: boolean };
+export const EMPTY_LAYOUT: LiveLayout = { visible: null, order: null, quality: {}, cols: null, activity: true };
 export const layoutStorageKey = (siteId: string) => `siteLive.${siteId}`;
+/** the named layout picked for a Site (0 = "All cameras") */
+export const layoutIdStorageKey = (siteId: string) => `siteLive.${siteId}.layoutId`;
+/** whether the activity column shows under "All cameras": one preference per viewer, every Site */
+export const ACTIVITY_PREF_KEY = "siteLive.activity";
+/** a layout's fixed grid widths (null = Auto) */
+export const COLUMN_CHOICES = [1, 2, 3, 4] as const;
 
 /** Same shape as the server's LiveView: a square-ish grid, never wider than 4. */
 export const gridCols = (n: number) => Math.min(4, Math.ceil(Math.sqrt(Math.max(1, n))));
@@ -39,12 +51,26 @@ export function isVisible(layout: LiveLayout, key: string) {
   return layout.visible === null || layout.visible.includes(key);
 }
 
+/** The cameras the grid shows, in order. A layout's cameras the Site no longer has are dropped here. */
+export function shownKeys(all: string[], layout: LiveLayout): string[] {
+  return arrange(all, layout).filter((k) => isVisible(layout, k));
+}
+
+/** Columns for n tiles: the layout's fixed count, or Auto. */
+export const layoutCols = (layout: LiveLayout, n: number) => layout.cols ?? gridCols(n);
+
 export type LayoutAction =
   | { type: "toggle"; key: string; all: string[] }
   | { type: "quality"; key: string; quality: Quality }
   | { type: "allQuality"; keys: string[]; quality: Quality }
   /** move `key` to just before `before` (null = to the end), in the arranged order of `all` */
   | { type: "move"; key: string; before: string | null; all: string[] }
+  /** a tile dropped on another takes its place (the Timeline's tile drag): from before it lands after, and vice versa */
+  | { type: "drop"; key: string; onto: string; all: string[] }
+  | { type: "cols"; cols: number | null }
+  | { type: "activity"; on: boolean }
+  /** replace the arrangement (a named layout picked, or reverted to) */
+  | { type: "load"; layout: LiveLayout }
   | { type: "reset" };
 
 export function layoutReducer(layout: LiveLayout, a: LayoutAction): LiveLayout {
@@ -66,23 +92,69 @@ export function layoutReducer(layout: LiveLayout, a: LayoutAction): LiveLayout {
       if (at < 0) return layout;
       return { ...layout, order: [...rest.slice(0, at), a.key, ...rest.slice(at)] };
     }
+    case "drop": {
+      const cur = arrange(a.all, layout);
+      const to = cur.indexOf(a.onto);
+      if (a.key === a.onto || to < 0 || !cur.includes(a.key)) return layout;
+      const rest = cur.filter((k) => k !== a.key);
+      rest.splice(to, 0, a.key);
+      return { ...layout, order: rest };
+    }
+    case "cols":
+      return layout.cols === a.cols ? layout : { ...layout, cols: a.cols };
+    case "activity":
+      return layout.activity === a.on ? layout : { ...layout, activity: a.on };
+    case "load":
+      return a.layout;
     case "reset":
       return EMPTY_LAYOUT;
   }
 }
 
-/** Tolerant read of a stored layout: anything malformed falls back to the default rather than breaking the page. */
+/**
+ * The config a named layout is saved with: what the grid shows now, spelled out. `visible` and `order` list the
+ * Site's current cameras explicitly (never null), so a camera added to the Site later stays out of this layout (it
+ * shows under "All cameras", and Cameras adds it to the layout); quality only for those cameras.
+ */
+export function toSavedConfig(all: string[], layout: LiveLayout): LiveLayout {
+  const known = new Set(all);
+  const quality = Object.fromEntries(Object.entries(layout.quality).filter(([k]) => known.has(k)));
+  return { visible: shownKeys(all, layout), order: arrange(all, layout), quality, cols: layout.cols, activity: layout.activity };
+}
+
+/**
+ * What the viewer sees under a layout, as a comparable string: the shown cameras in order, their streams, the
+ * columns and (unless `withActivity` is false) the activity column. The order of hidden cameras doesn't show, so it
+ * doesn't count; neither do cameras the Site no longer has.
+ */
+function signature(all: string[], layout: LiveLayout, withActivity: boolean) {
+  const shown = shownKeys(all, layout);
+  return JSON.stringify({ shown, quality: shown.map((k) => layout.quality[k] ?? "sd"), cols: layout.cols, activity: withActivity ? layout.activity : null });
+}
+
+/**
+ * Does the working arrangement differ from the picked layout (`saved`)? Under "All cameras" (`saved` = EMPTY_LAYOUT,
+ * `withActivity` false) the activity column is left out: there it is the viewer's standing preference, not a change.
+ */
+export function isDirty(all: string[], current: LiveLayout, saved: LiveLayout, withActivity = true): boolean {
+  return signature(all, current, withActivity) !== signature(all, saved, withActivity);
+}
+
+/** Tolerant read of a layout (stored in this browser, or a named layout's config from the hub): anything malformed
+ *  falls back to the default rather than breaking the page. */
+export function coerceLayout(raw: unknown): LiveLayout {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return EMPTY_LAYOUT;
+  const v = raw as Partial<Record<keyof LiveLayout, unknown>>;
+  const strings = (x: unknown) => (Array.isArray(x) && x.every((k) => typeof k === "string") ? (x as string[]) : null);
+  const quality: Record<string, Quality> = {};
+  if (v.quality && typeof v.quality === "object") for (const [k, q] of Object.entries(v.quality)) if (q === "sd" || q === "hd") quality[k] = q;
+  const cols = typeof v.cols === "number" && (COLUMN_CHOICES as readonly number[]).includes(v.cols) ? v.cols : null;
+  return { visible: strings(v.visible), order: strings(v.order), quality, cols, activity: v.activity !== false };
+}
+
 export function parseLayout(raw: string | null): LiveLayout {
   if (!raw) return EMPTY_LAYOUT;
-  try {
-    const v = JSON.parse(raw) as Partial<LiveLayout>;
-    const strings = (x: unknown) => (Array.isArray(x) && x.every((k) => typeof k === "string") ? (x as string[]) : null);
-    const quality: Record<string, Quality> = {};
-    if (v.quality && typeof v.quality === "object") for (const [k, q] of Object.entries(v.quality)) if (q === "sd" || q === "hd") quality[k] = q;
-    return { visible: strings(v.visible), order: strings(v.order), quality };
-  } catch {
-    return EMPTY_LAYOUT;
-  }
+  try { return coerceLayout(JSON.parse(raw)); } catch { return EMPTY_LAYOUT; }
 }
 
 export function loadLayout(siteId: string): LiveLayout {
@@ -91,10 +163,26 @@ export function loadLayout(siteId: string): LiveLayout {
 
 export function saveLayout(siteId: string, layout: LiveLayout) {
   try {
-    const empty = layout.visible === null && layout.order === null && Object.keys(layout.quality).length === 0;
+    const empty = layout.visible === null && layout.order === null && Object.keys(layout.quality).length === 0 && layout.cols === null && layout.activity;
     if (empty) localStorage.removeItem(layoutStorageKey(siteId));
     else localStorage.setItem(layoutStorageKey(siteId), JSON.stringify(layout));
   } catch { /* private mode: the layout just isn't remembered */ }
+}
+
+export function loadLayoutId(siteId: string): number {
+  try { const n = Number(localStorage.getItem(layoutIdStorageKey(siteId))); return Number.isInteger(n) && n > 0 ? n : 0; } catch { return 0; }
+}
+
+export function saveLayoutId(siteId: string, id: number) {
+  try { if (id) localStorage.setItem(layoutIdStorageKey(siteId), String(id)); else localStorage.removeItem(layoutIdStorageKey(siteId)); } catch { /* private mode */ }
+}
+
+export function loadActivityPref(): boolean {
+  try { return localStorage.getItem(ACTIVITY_PREF_KEY) !== "0"; } catch { return true; }
+}
+
+export function saveActivityPref(on: boolean) {
+  try { if (on) localStorage.removeItem(ACTIVITY_PREF_KEY); else localStorage.setItem(ACTIVITY_PREF_KEY, "0"); } catch { /* private mode */ }
 }
 
 /**
