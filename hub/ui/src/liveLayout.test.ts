@@ -146,6 +146,18 @@ describe("named layouts", () => {
     expect(isDirty(all, layoutReducer(EMPTY_LAYOUT, { type: "toggle", key: "a/1", all }), EMPTY_LAYOUT, false)).toBe(true);
   });
 
+  it("shared with the Timeline: its fields are read as Live's defaults and never count as a change", () => {
+    // saved on the Timeline: {visible, solo, order} only; Live reads it with SD streams, Auto columns, activity shown
+    const fromTimeline = coerceLayout({ visible: ["a/1", "b/1"], solo: "b/1", order: ["b/1", "a/1"] });
+    expect(fromTimeline).toEqual({ visible: ["a/1", "b/1"], order: ["b/1", "a/1"], quality: {}, cols: null, activity: true });
+    expect(shownKeys(all, fromTimeline)).toEqual(["b/1", "a/1"]);
+    expect(isDirty(all, layoutReducer(EMPTY_LAYOUT, { type: "load", layout: fromTimeline }), fromTimeline)).toBe(false);
+    // a Live layout the Timeline has since soloed a camera in: the solo isn't Live's, so the grid is unchanged
+    expect(isDirty(all, saved, coerceLayout({ ...saved, solo: "a/1" }))).toBe(false);
+    // and Live saves only its own fields (the hub keeps the solo beside them)
+    expect(Object.keys(toSavedConfig(all, coerceLayout({ ...saved, solo: "a/1" }))).sort()).toEqual(["activity", "cols", "order", "quality", "visible"]);
+  });
+
   it("load replaces the arrangement; cols and activity", () => {
     expect(layoutReducer(EMPTY_LAYOUT, { type: "load", layout: saved })).toBe(saved);
     expect(layoutReducer(saved, { type: "cols", cols: 2 })).toBe(saved);

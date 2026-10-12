@@ -1,6 +1,7 @@
-"""A Site's named view layouts (layouts.py): private to the user who saved them, per Site and per view, only on Sites
-the user can see; configs are validated and bounded; names are unique per user, Site and view (409 like a server's
-/api/layouts); deleting the Site deletes its layouts."""
+"""A Site's named layouts (layouts.py): private to the user who saved them, per Site, one list shared by Live and
+Timeline, only on Sites the user can see; configs are the union of both pages' fields, validated and bounded, and an
+update keeps the fields the other page owns; names are unique per user and Site (409 like a server's /api/layouts);
+deleting the Site deletes its layouts."""
 import pytest
 import sqlalchemy as sa
 
@@ -29,7 +30,7 @@ def world(client, superuser):
             "outsider": _login(client, "fx@layout.example", "layout-pass-123")}
 
 
-def test_crud_private_per_user_and_view(world):
+def test_crud_private_per_user_shared_by_views(world):
     v, v2 = world["viewer"], world["viewer2"]
     url = f"/api/locations/{world['yard']['id']}/layouts"
     assert v.get(url).json() == []
@@ -37,12 +38,15 @@ def test_crud_private_per_user_and_view(world):
     assert r.status_code == 200, r.text
     doors = r.json()
     assert doors["name"] == "Doors" and doors["config"] == LIVE and isinstance(doors["id"], int)
-    # only the fields sent are kept (the Timeline's {visible, solo, order} stays that shape)
-    t = v.post(url + "?view=timeline", json={"name": "Doors", "config": {"visible": None, "solo": "a/cam1", "order": None}}).json()
+    # one list for Live and Timeline: `view` is accepted from older UIs and ignored; only the fields sent are kept
+    assert v.post(url + "?view=timeline", json={"name": "Doors", "config": {}}).status_code == 409
+    t = v.post(url + "?view=timeline", json={"name": "Yard", "config": {"visible": None, "solo": "a/cam1", "order": None}}).json()
     assert t["config"] == {"visible": None, "solo": "a/cam1", "order": None}
-    assert [x["name"] for x in v.get(url).json()] == ["Doors"]
-    assert [x["id"] for x in v.get(url + "?view=timeline").json()] == [t["id"]]
+    assert [x["name"] for x in v.get(url).json()] == ["Doors", "Yard"]
+    assert v.get(url + "?view=timeline").json() == v.get(url).json()
+    assert db.one(sa.select(db.site_layouts.c.view).where(db.site_layouts.c.id == t["id"]))["view"] == "live"
     assert v.get(url + "?view=dashboards").status_code == 422
+    assert v.delete(f"{url}/{t['id']}").json() == {"ok": True}
     # names unique per user/Site/view, case-insensitively; another user may use the same name
     assert v.post(url, json={"name": "doors", "config": {}}).status_code == 409
     assert v2.post(url, json={"name": "Doors", "config": {}}).status_code == 200
@@ -83,10 +87,45 @@ def test_access_scoped_to_visible_sites(world):
     assert v.get("/api/locations/l_nope/layouts").status_code == 404
 
 
+def test_save_keeps_the_other_pages_fields(world):
+    """Live sends {visible, order, quality, cols, activity}, the Timeline {visible, solo, order}: a save from either
+    page replaces its own fields and keeps the rest (the stored config is the union)."""
+    v = world["viewer2"]
+    url = f"/api/locations/{world['yard']['id']}/layouts"
+    lid = v.post(url, json={"name": "Shared", "config": LIVE}).json()["id"]
+    # saved on the Timeline: the shared camera set and order change, a solo is added, Live's own fields stay
+    tl = {"visible": ["a/cam1"], "solo": "a/cam1", "order": ["a/cam1", "b/cam2"]}
+    r = v.put(f"{url}/{lid}", json={"name": "Shared", "config": tl})
+    assert r.status_code == 200, r.text
+    assert r.json()["config"] == {**tl, "quality": {"b/cam2": "hd"}, "cols": 3, "activity": False}
+    # saved on Live again: the Timeline's solo stays; a null sent (cols = Auto) is a value, not "unchanged"
+    live = {"visible": ["a/cam1", "b/cam2"], "order": ["b/cam2", "a/cam1"], "quality": {}, "cols": None, "activity": True}
+    r = v.put(f"{url}/{lid}", json={"name": "Shared", "config": live})
+    assert r.json()["config"] == {**live, "solo": "a/cam1"}
+    # a rename that sends nothing changes nothing
+    r = v.put(f"{url}/{lid}", json={"name": "Shared 2", "config": {}})
+    assert r.json()["name"] == "Shared 2" and r.json()["config"] == {**live, "solo": "a/cam1"}
+    assert [x["config"] for x in v.get(url).json() if x["id"] == lid] == [{**live, "solo": "a/cam1"}]
+    # an invalid field is still refused, and the stored config is left alone
+    assert v.put(f"{url}/{lid}", json={"name": "Shared 2", "config": {"cols": 9}}).status_code == 422
+    assert [x["config"] for x in v.get(url).json() if x["id"] == lid] == [{**live, "solo": "a/cam1"}]
+    v.delete(f"{url}/{lid}")
+
+
+def test_union_config_cleaned():
+    both = {**LIVE, "solo": "b/cam2", "extra": "dropped"}
+    assert layouts.clean_config(both) == {**LIVE, "solo": "b/cam2"}
+    assert layouts.clean_config({"solo": None, "cols": None}) == {"solo": None, "cols": None}
+    assert layouts.merged_config({"solo": "a/1", "cols": 2}, {"cols": None}) == {"solo": "a/1", "cols": None}
+    assert layouts.merged_config(None, {"visible": ["a/1", "a/1"]}) == {"visible": ["a/1"]}
+    with pytest.raises(ValueError):
+        layouts.merged_config({"solo": "a/1"}, {"solo": "x" * 121})
+
+
 @pytest.mark.parametrize("config", [
     {"cols": 5}, {"cols": 0}, {"quality": {"a/cam1": "4k"}}, {"visible": "a/cam1"}, {"visible": [""]},
     {"order": ["x" * 121]}, {"visible": [f"a/c{i}" for i in range(501)]}, {"quality": {f"a/c{i}": "sd" for i in range(501)}},
-    {"activity": "maybe"},
+    {"activity": "maybe"}, {"solo": ["a/cam1"]}, {"solo": "x" * 121},
 ])
 def test_config_validated(world, config):
     r = world["viewer"].post(f"/api/locations/{world['yard']['id']}/layouts", json={"name": "Bad", "config": config})

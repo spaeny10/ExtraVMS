@@ -2,7 +2,8 @@
  * The Site's combined Timeline: the server UI's TimelineView over every camera of every online server at the Site.
  * Each lane's recordings, previews, locks and event details go to its own server through the hub tunnel
  * (apiFor = siteApi → /s/<server>/…); lane keys are camKey(server, camera) and each server's clock skew is applied.
- * Named layouts are kept in this browser per Site until the hub stores them (timelineLink.localLayoutStore).
+ * Named layouts are the hub's per-user list for the Site, shared with Site › Live (timelineLink.hubLayoutStore: the
+ * Timeline sees and saves only its own fields); layouts this browser kept before are moved there on the first visit.
  *
  * Direct-on-LAN (direct.ts): a server this browser reaches on its LAN plays from the server itself (mediaFor =
  * mediaApi), at full quality with the server UI's local chunking. Servers still reached through the hub play the SD
@@ -19,11 +20,11 @@ import { camKey } from "@site/playback";
 import { toast } from "@site/ui";
 import { decodeCells, regions } from "@site/region";
 import { TimelineView, type TimelineCamera } from "@site/Timeline";
-import type { Org, Server, Site } from "./api";
+import { api, type Org, type Server, type Site } from "./api";
 import { directStateOf, useDirectVersion } from "./direct";
 import { isDirect, mediaApi, siteApi } from "./hubSource";
-import { effectiveOffset, focusFor, fromLaneKeys, initialTimelineLayout, journeyMembers, localLayoutStore, momentTarget, parseSiteTimelineQuery,
-  siteTimelineHref, withoutTimelineParams, type StoredLayoutConfig } from "./timelineLink";
+import { effectiveOffset, focusFor, fromLaneKeys, hubLayoutStore, initialTimelineLayout, journeyMembers, migrateLocalLayouts, momentTarget,
+  parseSiteTimelineQuery, siteTimelineHref, withoutTimelineParams, type StoredLayoutConfig } from "./timelineLink";
 import "./siteTimeline.css";
 
 const CAMERA_REFRESH_MS = 60000;
@@ -44,6 +45,17 @@ const canSd = (server: string): Promise<boolean> => {
   return p;
 };
 const dropHashLink = (hash: string) => (hash.startsWith("#timeline") ? "" : hash);
+
+/** This browser's older Timeline layouts of a Site moved to the hub, once per page load (a failure is retried next visit). */
+const layoutMoves = new Map<string, Promise<unknown>>();
+const moveLocalLayouts = (siteId: string, layoutIdKey: string): Promise<unknown> => {
+  let p = layoutMoves.get(siteId);
+  if (!p) {
+    p = migrateLocalLayouts(siteId, api, layoutIdKey).catch(() => { layoutMoves.delete(siteId); });
+    layoutMoves.set(siteId, p);
+  }
+  return p;
+};
 
 /** ICE servers (the hub's TURN relay) per server for the live tiles at the live edge; asked once per server per page load. */
 const iceCache = new Map<string, Promise<RTCIceServer[]>>();
@@ -103,7 +115,15 @@ export function SiteTimeline({ site, query, syncUrl = true, canRecoverSd = false
   const settled = online.every((s) => byServer[s.id] !== undefined || failed[s.id]);
 
   const storageKey = `timeline.${site.id}.`;
-  const layoutStore = useMemo(() => localLayoutStore(site.id), [site.id]);
+  const layoutStore = useMemo(() => hubLayoutStore(site.id, api), [site.id]);
+  // TimelineView reads the picked layout's id when it mounts: move this browser's older layouts (and that id) first
+  const [layoutsMovedFor, setLayoutsMovedFor] = useState<string | null>(null);
+  const layoutsMoved = layoutsMovedFor === site.id;
+  useEffect(() => {
+    let alive = true;
+    moveLocalLayouts(site.id, `${storageKey}timelineLayoutId`).finally(() => { if (alive) setLayoutsMovedFor(site.id); });
+    return () => { alive = false; };
+  }, [site.id, storageKey]);
 
   // ---- Direct-on-LAN: which servers' media comes straight from them (re-rendered when that changes)
   useDirectVersion(online);
@@ -151,7 +171,7 @@ export function SiteTimeline({ site, query, syncUrl = true, canRecoverSd = false
   const ready = readyFor === site.id;
   const search = typeof query === "string" ? query : `?${query.toString()}`;
   useEffect(() => {
-    if (ready || !settled || !cameras.length || !directSettled) return;
+    if (ready || !settled || !cameras.length || !directSettled || !layoutsMoved) return;
     const k = `${storageKey}timelineLayoutConfig`, flagKey = `${storageKey}timelineHubSolo`;
     let soloed = false;
     try {
@@ -172,7 +192,7 @@ export function SiteTimeline({ site, query, syncUrl = true, canRecoverSd = false
     setHubSolo(soloed);
     setReadyFor(site.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, settled, cameras, storageKey, site.id, directSettled]);
+  }, [ready, settled, cameras, storageKey, site.id, directSettled, layoutsMoved]);
 
   // ---- focus: from the deep link, or from an event viewer's "Open in Timeline"
   const [focus, setFocus] = useState<TimelineFocus | null>(null);

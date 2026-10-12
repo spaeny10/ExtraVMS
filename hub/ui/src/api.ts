@@ -366,10 +366,10 @@ export const api = {
   siteAskThread: (id: string, tid: number | string) => req<SiteAskThreadFull>(`/api/locations/${id}/ask/threads/${tid}`),
   renameSiteAskThread: (id: string, tid: number, title: string) => req<SiteAskThreadFull>(`/api/locations/${id}/ask/threads/${tid}`, json("PATCH", { title })),
   deleteSiteAskThread: (id: string, tid: number) => req<{ ok: boolean }>(`/api/locations/${id}/ask/threads/${tid}`, { method: "DELETE" }),
-  // a Site's named view layouts (layouts.py): the signed-in user's own, per view; same shape as a server's /api/layouts
-  siteLayouts: (id: string, view: SiteLayoutView = "live") => req<SiteLayout[]>(`/api/locations/${id}/layouts?${qs({ view })}`),
-  createSiteLayout: (id: string, b: { name: string; config: unknown }, view: SiteLayoutView = "live") =>
-    req<SiteLayout>(`/api/locations/${id}/layouts?${qs({ view })}`, json("POST", b)),
+  // a Site's named layouts (layouts.py): the signed-in user's own, one list for Live and Timeline; same shape as a
+  // server's /api/layouts. Each page sends only the config fields it owns: an update keeps the other page's.
+  siteLayouts: (id: string) => req<SiteLayout[]>(`/api/locations/${id}/layouts`),
+  createSiteLayout: (id: string, b: { name: string; config: unknown }) => req<SiteLayout>(`/api/locations/${id}/layouts`, json("POST", b)),
   updateSiteLayout: (id: string, lid: number, b: { name: string; config: unknown }) => req<SiteLayout>(`/api/locations/${id}/layouts/${lid}`, json("PUT", b)),
   deleteSiteLayout: (id: string, lid: number) => req<{ ok: boolean }>(`/api/locations/${id}/layouts/${lid}`, { method: "DELETE" }),
   ack: (id: number) => req(`/api/alerts/${id}/ack`, { method: "POST" }),
@@ -475,8 +475,8 @@ export type SiteAskSources = {
   items: SiteAskSource[]; servers: SiteAskServer[]; counts: SiteAskCounts; window: { from: number; to: number; label: string | null } | null;
   question: string | null; dropped: number; fallback?: string;
 };
-export type SiteLayoutView = "live" | "timeline";
-/** A named layout saved on the hub; `config` is the view's own (liveLayout.ts LiveLayout for Live), read tolerantly. */
+/** A named layout saved on the hub; `config` holds both pages' fields (liveLayout.ts LiveLayout for Live, the
+ *  Timeline's {visible, solo, order}; timelineLink.timelineConfig), each page reading its own tolerantly. */
 export type SiteLayout = { id: number; name: string; config: unknown; created_at: number; updated_at: number };
 export type SiteAskThread = { id: number; title: string; created_at: number; updated_at: number; messages: number };
 export type SiteAskMessage = { id: number; thread_id: number; role: "user" | "assistant"; content: string; sources: SiteAskSources | null; model: string | null; created_at: number; duration_ms: number | null };

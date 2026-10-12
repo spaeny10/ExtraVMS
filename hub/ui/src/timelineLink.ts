@@ -1,6 +1,7 @@
 /**
  * Pure helpers for the Site's combined Timeline (SiteTimeline.tsx): its deep link, how a server's event becomes a
- * Timeline focus on lane keys, the first-visit visible lanes, and the hub-side (browser) store of named layouts.
+ * Timeline focus on lane keys, the first-visit visible lanes, and the named layouts (the hub's list shared with Live,
+ * and the move of this browser's older Timeline layouts into it).
  *
  * Link: /sites/<location_id>/timeline?server=<server_id>&cam=<camera_id>&event=<id>[&journey=1]
  *   or  /sites/<location_id>/timeline?server=<server_id>&cam=<camera_id>&t=<unix seconds>
@@ -8,6 +9,7 @@
  * "Copy link" appends a server-UI style hash (#timeline?cam=…&event=…&server=…), which is accepted too.
  */
 import type { Layout, LayoutConfig, NvrEvent } from "@site/api";
+import type { SiteLayout } from "./api";
 import { parseTimelineHash, type FocusMember, type HashRegion, type TimelineFocus, type TimelineTarget } from "@site/nav";
 import { camKey, splitKey } from "@site/playback";
 import type { LayoutStore } from "@site/Timeline";
@@ -140,10 +142,43 @@ export function initialTimelineLayout(o: {
   return {};
 }
 
-// ---- named layouts kept in this browser per Site (until the hub stores them: GET/PUT /api/locations/{id}/layouts)
+// ---- named layouts: the hub's per-user, per-Site list (hub/hub/layouts.py), shared with the Site's Live grid
 
+/** The hub calls a layout store needs (api.ts), passed in so these helpers stay testable without a hub. */
+export type SiteLayoutsApi = {
+  siteLayouts(id: string): Promise<SiteLayout[]>;
+  createSiteLayout(id: string, b: { name: string; config: unknown }): Promise<SiteLayout>;
+  updateSiteLayout(id: string, lid: number, b: { name: string; config: unknown }): Promise<SiteLayout>;
+  deleteSiteLayout(id: string, lid: number): Promise<unknown>;
+};
+
+/**
+ * The Timeline's own fields of a stored layout config, read tolerantly. The hub keeps Live's fields (quality, cols,
+ * activity) beside them; the Timeline neither sees them (so they never count as a change here) nor sends them (the
+ * hub merges an update into the stored config, so they are kept).
+ */
+export function timelineConfig(raw: unknown): LayoutConfig {
+  const v = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+  const strings = (x: unknown) => (Array.isArray(x) && x.every((k) => typeof k === "string") ? (x as string[]) : null);
+  return { visible: strings(v.visible), solo: typeof v.solo === "string" && v.solo ? v.solo : null, order: strings(v.order) };
+}
+
+/** A LayoutStore (Timeline.tsx) over the hub's list for one Site, seeing and sending only the Timeline's fields. */
+export function hubLayoutStore(siteId: string, hub: SiteLayoutsApi): LayoutStore {
+  const own = (l: SiteLayout): Layout => ({ ...l, config: timelineConfig(l.config) });
+  return {
+    list: async () => (await hub.siteLayouts(siteId)).map(own),
+    create: async ({ name, config }) => own(await hub.createSiteLayout(siteId, { name, config: timelineConfig(config) })),
+    update: async (id, { name, config }) => own(await hub.updateSiteLayout(siteId, id, { name, config: timelineConfig(config) })),
+    remove: (id) => hub.deleteSiteLayout(siteId, id),
+  };
+}
+
+// Before the hub stored them, the Timeline's named layouts were kept in this browser per Site under this key. A visit
+// to the Site's Timeline moves them to the hub once (migrateLocalLayouts).
 export const layoutsStorageKey = (siteId: string) => `siteTimelineLayouts.${siteId}`;
-type KV = Pick<Storage, "getItem" | "setItem">;
+type KV = Pick<Storage, "getItem" | "setItem" | "removeItem">;
+const NAME_MAX = 60;   // the hub's limit on a layout name
 
 export function parseLayouts(raw: string | null): Layout[] {
   try {
@@ -154,34 +189,47 @@ export function parseLayouts(raw: string | null): Layout[] {
   }
 }
 
-/** A LayoutStore (Timeline.tsx) over one storage key. `kv` defaults to localStorage, read lazily. */
-export function localLayoutStore(siteId: string, kv?: KV, now = () => Math.floor(Date.now() / 1000)): LayoutStore {
+/** `name`, or when the list has it already (names are unique ignoring case) "name (Timeline)", then "(Timeline 2)"… */
+export function uniqueLayoutName(name: string, taken: ReadonlySet<string>): string {
+  const base = name.trim() || "Timeline layout";
+  const fit = (suffix: string) => base.slice(0, NAME_MAX - suffix.length).trimEnd() + suffix;
+  for (let n = 0; ; n++) {
+    const candidate = fit(n === 0 ? "" : n === 1 ? " (Timeline)" : ` (Timeline ${n})`);
+    if (!taken.has(candidate.toLowerCase())) return candidate;
+  }
+}
+
+/**
+ * Move this browser's old Timeline layouts of a Site into the hub's shared list, once: each is created there (a name
+ * the list has already gets " (Timeline)"), and the local copy is removed once it is. One the hub refused stays here
+ * and is tried again on the next visit. The picked layout (`layoutIdKey`, TimelineView's timelineLayoutId) named a
+ * local id: it is moved to the hub's id, or to "All cameras" (0) while its layout is still here. A hub that can't list
+ * the layouts throws, and nothing is moved. Returns how many moved and how many are left.
+ */
+export async function migrateLocalLayouts(siteId: string, hub: SiteLayoutsApi, layoutIdKey: string, kv?: KV): Promise<{ moved: number; left: number }> {
   const key = layoutsStorageKey(siteId);
-  const storage = (): KV | null => { try { return kv ?? localStorage; } catch { return null; } };
-  const read = () => { try { return parseLayouts(storage()?.getItem(key) ?? null); } catch { return []; } };
-  const write = (ls: Layout[]) => {
-    const s = storage();
-    if (!s) throw new Error("Layouts can't be saved in this browser");
-    s.setItem(key, JSON.stringify(ls));
-  };
-  const sorted = (ls: Layout[]) => [...ls].sort((a, b) => a.name.localeCompare(b.name));
-  return {
-    list: async () => sorted(read()),
-    create: async ({ name, config }) => {
-      const ls = read();
-      const t = now();
-      const l: Layout = { id: ls.reduce((m, x) => Math.max(m, x.id), 0) + 1, name, config, created_at: t, updated_at: t };
-      write([...ls, l]);
-      return l;
-    },
-    update: async (id, { name, config }) => {
-      const ls = read();
-      const old = ls.find((x) => x.id === id);
-      if (!old) throw new Error("Layout not found");
-      const l: Layout = { ...old, name, config, updated_at: now() };
-      write(ls.map((x) => (x.id === id ? l : x)));
-      return l;
-    },
-    remove: async (id) => { write(read().filter((x) => x.id !== id)); return { ok: true }; },
-  };
+  let s: KV;
+  let raw: string | null;
+  try { s = kv ?? localStorage; raw = s.getItem(key); } catch { return { moved: 0, left: 0 }; }   // no storage: nothing kept here
+  if (raw == null) return { moved: 0, left: 0 };
+  const local = parseLayouts(raw).sort((a, b) => a.id - b.id);
+  const taken = local.length ? new Set((await hub.siteLayouts(siteId)).map((l) => l.name.toLowerCase())) : new Set<string>();
+  const left: Layout[] = [];
+  const ids = new Map<number, number>();
+  for (const l of local) {
+    try {
+      const made = await hub.createSiteLayout(siteId, { name: uniqueLayoutName(l.name, taken), config: timelineConfig(l.config) });
+      taken.add(made.name.toLowerCase());
+      ids.set(l.id, made.id);
+    } catch {
+      left.push(l);
+    }
+  }
+  try {
+    if (left.length) s.setItem(key, JSON.stringify(left));
+    else s.removeItem(key);
+    const picked = Number(s.getItem(layoutIdKey));
+    if (picked && local.some((l) => l.id === picked)) s.setItem(layoutIdKey, String(ids.get(picked) ?? 0));
+  } catch { /* storage gone mid-way: a later visit finds the copies and tries again */ }
+  return { moved: ids.size, left: left.length };
 }

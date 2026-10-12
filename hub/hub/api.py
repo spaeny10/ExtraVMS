@@ -1222,7 +1222,7 @@ async def delete_site_ask_thread(location_id: str, thread_id: int, u: dict = Dep
     return {"ok": True}
 
 
-# ---- a Site's named view layouts (layouts.py): the Live grid's saved arrangements, private to the user who saved them
+# ---- a Site's named layouts (layouts.py): one list shared by Live and Timeline, private to the user who saved them
 
 class SiteLayoutIn(BaseModel):
     name: str = Field(min_length=1, max_length=60)
@@ -1237,9 +1237,10 @@ def _layout_error(e: ValueError) -> HTTPException:
 
 @app.get("/api/locations/{location_id}/layouts")
 async def list_site_layouts(location_id: str, view: layouts_mod.View = "live", u: dict = Depends(user)):
-    """This user's own layouts of this Site's `view`, by name (nobody else's: they are personal)."""
+    """This user's own layouts of this Site, by name (nobody else's: they are personal). `view` is accepted from older
+    UIs and ignored: Live and Timeline share the list."""
     loc, _ = auth.location_access(u, location_id)
-    return layouts_mod.list_for(u, loc["id"], view)
+    return layouts_mod.list_for(u, loc["id"])
 
 
 @app.post("/api/locations/{location_id}/layouts")
@@ -1248,7 +1249,7 @@ async def create_site_layout(location_id: str, body: SiteLayoutIn, view: layouts
     if not body.name.strip():
         raise HTTPException(422, "a layout needs a name")
     try:
-        return layouts_mod.create(u, loc, view, body.name, body.config)
+        return layouts_mod.create(u, loc, body.name, body.config)
     except ValueError as e:
         raise _layout_error(e)
 

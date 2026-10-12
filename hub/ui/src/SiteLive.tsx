@@ -228,8 +228,9 @@ type NamedLayout = Omit<SiteLayout, "config"> & { config: LiveLayout };
 type NamedLayouts = ReturnType<typeof useNamedLayouts>;
 
 /**
- * The signed-in user's named Live layouts of this Site (the hub's /api/locations/{id}/layouts) and which one is
- * picked (this browser, per Site; 0 = "All cameras"). `list` is null until the hub answers (or when it can't).
+ * The signed-in user's named layouts of this Site (the hub's /api/locations/{id}/layouts, shared with the Timeline and
+ * re-read on every visit, so one saved, renamed or deleted there shows here) and which one is picked (this browser,
+ * per Site; 0 = "All cameras"). `list` is null until the hub answers (or when it can't).
  */
 function useNamedLayouts(siteId: string, enabled: boolean) {
   const [list, setList] = useState<NamedLayout[] | null>(null);

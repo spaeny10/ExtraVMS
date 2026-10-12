@@ -1,6 +1,9 @@
-import { describe, expect, it } from "vitest";
-import { defaultVisible, effectiveOffset, focusFor, fromLaneKeys, initialTimelineLayout, journeyMembers, layoutsStorageKey, lightSolo, localLayoutStore,
-  momentTarget, parseLayouts, parseSiteTimelineQuery, siteTimelineHref, withoutTimelineParams } from "./timelineLink";
+import { describe, expect, it, vi } from "vitest";
+import type { LayoutConfig } from "@site/api";
+import type { SiteLayout } from "./api";
+import { type SiteLayoutsApi, defaultVisible, effectiveOffset, focusFor, fromLaneKeys, hubLayoutStore, initialTimelineLayout, journeyMembers,
+  layoutsStorageKey, lightSolo, migrateLocalLayouts, momentTarget, parseLayouts, parseSiteTimelineQuery, siteTimelineHref, timelineConfig,
+  uniqueLayoutName, withoutTimelineParams } from "./timelineLink";
 
 describe("siteTimelineHref", () => {
   it("links an event, a journey and a moment", () => {
@@ -86,23 +89,139 @@ describe("defaultVisible", () => {
   });
 });
 
-describe("localLayoutStore", () => {
-  const memory = () => { const m = new Map<string, string>(); return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v), m }; };
-  it("creates, lists by name, updates and removes per site", async () => {
-    const kv = memory();
-    const s = localLayoutStore("loc1", kv, () => 1000);
-    const a = await s.create({ name: "Night", config: { visible: ["x/1"], solo: null } });
-    const b = await s.create({ name: "Doors", config: { visible: null, solo: "x/2" } });
-    expect([a.id, b.id]).toEqual([1, 2]);
-    expect((await s.list()).map((l) => l.name)).toEqual(["Doors", "Night"]);
-    const u = await s.update(1, { name: "Nights", config: { visible: ["x/3"], solo: null } });
-    expect(u).toMatchObject({ id: 1, name: "Nights", created_at: 1000 });
-    await s.remove(2);
-    expect((await s.list()).map((l) => l.id)).toEqual([1]);
-    expect(kv.m.has(layoutsStorageKey("loc1"))).toBe(true);
-    expect(await localLayoutStore("loc2", kv).list()).toEqual([]);
-    await expect(s.update(99, { name: "x", config: { visible: null, solo: null } })).rejects.toThrow();
+/** an in-memory hub (api.ts's layout calls): one list per Site, names unique ignoring case, updates merged like the hub */
+function fakeHub(seed: { name: string; config: unknown }[] = []) {
+  let next = 100;
+  const rows: SiteLayout[] = seed.map((l) => ({ id: next++, name: l.name, config: l.config, created_at: 1, updated_at: 1 }));
+  const calls: string[] = [];
+  const hub: SiteLayoutsApi & { rows: SiteLayout[]; calls: string[]; failOn?: string } = {
+    rows, calls,
+    siteLayouts: async () => { calls.push("list"); return rows.map((r) => ({ ...r })); },
+    createSiteLayout: async (_id, b) => {
+      calls.push(`create ${b.name}`);
+      if (b.name === hub.failOn || rows.some((r) => r.name.toLowerCase() === b.name.toLowerCase())) throw new Error("409 a layout with that name already exists");
+      const r = { id: next++, name: b.name, config: b.config, created_at: 2, updated_at: 2 };
+      rows.push(r);
+      return { ...r };
+    },
+    updateSiteLayout: async (_id, lid, b) => {
+      const r = rows.find((x) => x.id === lid)!;
+      Object.assign(r, { name: b.name, config: { ...(r.config as object), ...(b.config as object) } });
+      return { ...r };
+    },
+    deleteSiteLayout: async (_id, lid) => { rows.splice(rows.findIndex((x) => x.id === lid), 1); return { ok: true }; },
+  };
+  return hub;
+}
+const memory = () => {
+  const m = new Map<string, string>();
+  return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v), removeItem: (k: string) => void m.delete(k), m };
+};
+const LIVE_SAVED = { visible: ["a/1", "b/1"], order: ["b/1", "a/1", "a/2"], quality: { "b/1": "hd" }, cols: 2, activity: false };
+
+describe("timelineConfig", () => {
+  it("keeps the Timeline's fields of a shared layout, read tolerantly", () => {
+    expect(timelineConfig({ ...LIVE_SAVED, solo: "a/1" })).toEqual({ visible: ["a/1", "b/1"], solo: "a/1", order: ["b/1", "a/1", "a/2"] });
+    expect(timelineConfig({})).toEqual({ visible: null, solo: null, order: null });
+    expect(timelineConfig(null)).toEqual({ visible: null, solo: null, order: null });
+    expect(timelineConfig({ visible: "a/1", solo: 3, order: [1] })).toEqual({ visible: null, solo: null, order: null });
   });
+  it("what the Timeline compares for its dirty dot ignores Live's fields", () => {
+    // the same layout after Live changed its columns, streams and activity column: nothing changed for the Timeline
+    expect(timelineConfig({ ...LIVE_SAVED, cols: 4, quality: {}, activity: true })).toEqual(timelineConfig(LIVE_SAVED));
+  });
+});
+
+describe("hubLayoutStore", () => {
+  it("lists the shared list and sends only the Timeline's fields, so Live's are kept", async () => {
+    const hub = fakeHub([{ name: "Doors", config: LIVE_SAVED }]);
+    const s = hubLayoutStore("loc1", hub);
+    const [doors] = await s.list();
+    expect(doors).toMatchObject({ id: 100, name: "Doors", config: { visible: ["a/1", "b/1"], solo: null, order: ["b/1", "a/1", "a/2"] } });
+    // picked on the Timeline, a camera soloed, saved: whatever extra the working config carries isn't sent
+    const sent = vi.spyOn(hub, "updateSiteLayout");
+    const u = await s.update(100, { name: "Doors", config: { ...doors.config, solo: "b/1", cols: 4 } as LayoutConfig });
+    expect(sent.mock.calls[0][2]).toEqual({ name: "Doors", config: { visible: ["a/1", "b/1"], solo: "b/1", order: ["b/1", "a/1", "a/2"] } });
+    expect(u.config).toEqual({ visible: ["a/1", "b/1"], solo: "b/1", order: ["b/1", "a/1", "a/2"] });
+    expect(hub.rows[0].config).toEqual({ ...LIVE_SAVED, solo: "b/1" });
+    const made = await s.create({ name: "Yard", config: { visible: null, solo: null } });
+    expect(made.config).toEqual({ visible: null, solo: null, order: null });
+    expect((await s.list()).map((l) => l.name)).toEqual(["Doors", "Yard"]);
+    await s.remove(made.id);
+    expect(hub.rows.map((r) => r.name)).toEqual(["Doors"]);
+  });
+});
+
+describe("uniqueLayoutName", () => {
+  it("adds (Timeline) on a clash, ignoring case, and stays within the hub's 60 characters", () => {
+    expect(uniqueLayoutName("Night", new Set())).toBe("Night");
+    expect(uniqueLayoutName("Doors", new Set(["doors"]))).toBe("Doors (Timeline)");
+    expect(uniqueLayoutName("Doors", new Set(["doors", "doors (timeline)"]))).toBe("Doors (Timeline 2)");
+    const long = uniqueLayoutName("x".repeat(70), new Set(["x".repeat(60)]));
+    expect(long).toHaveLength(60);
+    expect(long.endsWith(" (Timeline)")).toBe(true);
+    expect(uniqueLayoutName("  ", new Set())).toBe("Timeline layout");
+  });
+});
+
+describe("migrateLocalLayouts", () => {
+  const ID_KEY = "timeline.loc1.timelineLayoutId";
+  const local = (ls: { id: number; name: string; config: object }[]) => JSON.stringify(ls.map((l) => ({ ...l, created_at: 1, updated_at: 1 })));
+
+  it("uploads this browser's layouts once, renaming a clash, and moves the picked id to the hub's", async () => {
+    const hub = fakeHub([{ name: "Doors", config: LIVE_SAVED }]);
+    const kv = memory();
+    kv.setItem(layoutsStorageKey("loc1"), local([{ id: 1, name: "doors", config: { visible: ["a/1"], solo: null, order: null } },
+      { id: 2, name: "Night", config: { visible: null, solo: "b/1", junk: 1 } }]));
+    kv.setItem(ID_KEY, "2");
+    expect(await migrateLocalLayouts("loc1", hub, ID_KEY, kv)).toEqual({ moved: 2, left: 0 });
+    expect(hub.rows.map((r) => [r.name, r.config])).toEqual([
+      ["Doors", LIVE_SAVED],
+      ["doors (Timeline)", { visible: ["a/1"], solo: null, order: null }],
+      ["Night", { visible: null, solo: "b/1", order: null }],
+    ]);
+    expect(kv.m.has(layoutsStorageKey("loc1"))).toBe(false);
+    expect(kv.getItem(ID_KEY)).toBe("102");
+    // a second visit finds nothing here: no hub calls, nothing uploaded twice
+    hub.calls.length = 0;
+    expect(await migrateLocalLayouts("loc1", hub, ID_KEY, kv)).toEqual({ moved: 0, left: 0 });
+    expect(hub.calls).toEqual([]);
+    expect(hub.rows).toHaveLength(3);
+    expect(kv.getItem(ID_KEY)).toBe("102");
+  });
+
+  it("keeps a layout the hub refused for the next visit; its pick goes to All cameras meanwhile", async () => {
+    const hub = fakeHub();
+    hub.failOn = "Gate";
+    const kv = memory();
+    kv.setItem(layoutsStorageKey("loc1"), local([{ id: 1, name: "Gate", config: { visible: null, solo: null } }, { id: 2, name: "Yard", config: { visible: null, solo: null } }]));
+    kv.setItem(ID_KEY, "1");
+    expect(await migrateLocalLayouts("loc1", hub, ID_KEY, kv)).toEqual({ moved: 1, left: 1 });
+    expect(JSON.parse(kv.getItem(layoutsStorageKey("loc1"))!).map((l: { name: string }) => l.name)).toEqual(["Gate"]);
+    expect(kv.getItem(ID_KEY)).toBe("0");
+    hub.failOn = undefined;
+    expect(await migrateLocalLayouts("loc1", hub, ID_KEY, kv)).toEqual({ moved: 1, left: 0 });
+    expect(hub.rows.map((r) => r.name)).toEqual(["Yard", "Gate"]);
+    expect(kv.m.has(layoutsStorageKey("loc1"))).toBe(false);
+  });
+
+  it("a hub that can't list moves nothing; an unrelated pick, junk and no storage are left alone", async () => {
+    const kv = memory();
+    kv.setItem(layoutsStorageKey("loc1"), local([{ id: 1, name: "Gate", config: {} }]));
+    kv.setItem(ID_KEY, "555");
+    const down = { ...fakeHub(), siteLayouts: () => Promise.reject(new Error("502")) };
+    await expect(migrateLocalLayouts("loc1", down, ID_KEY, kv)).rejects.toThrow("502");
+    expect(kv.m.has(layoutsStorageKey("loc1"))).toBe(true);
+    const hub = fakeHub();
+    await migrateLocalLayouts("loc1", hub, ID_KEY, kv);
+    expect(kv.getItem(ID_KEY)).toBe("555");   // already a hub id (or a layout deleted long ago): not this migration's
+    kv.setItem(layoutsStorageKey("loc2"), "not json");
+    expect(await migrateLocalLayouts("loc2", hub, ID_KEY, kv)).toEqual({ moved: 0, left: 0 });
+    expect(kv.m.has(layoutsStorageKey("loc2"))).toBe(false);
+    const broken = { getItem: () => { throw new Error("denied"); }, setItem: () => {}, removeItem: () => {} };
+    expect(await migrateLocalLayouts("loc1", hub, ID_KEY, broken)).toEqual({ moved: 0, left: 0 });
+  });
+
   it("survives junk in storage", () => {
     expect(parseLayouts("not json")).toEqual([]);
     expect(parseLayouts('[{"id":1,"name":"ok","config":{}},{"id":"2"}]')).toHaveLength(1);

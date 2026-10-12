@@ -8,6 +8,8 @@
  *
  * Two kinds of layout: the viewer's working arrangement (what the grid shows now, kept in this browser per Site, as
  * before), and named layouts saved on the hub per user and Site (hub/hub/layouts.py; they span the Site's servers).
+ * The Site's Timeline lists the same layouts: a layout carries its {visible, solo, order} too, and each page reads and
+ * saves only its own fields (Live never sends solo; the hub keeps it), so the Timeline's fields never count as a change.
  * Picking a named layout loads it into the working arrangement; the picker marks it changed (isDirty) until saved.
  */
 
