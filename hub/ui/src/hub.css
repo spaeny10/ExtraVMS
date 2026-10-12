@@ -513,3 +513,38 @@ button.sa-ref-row:hover, .sa-ref-row.hot { background: var(--panel-2); border-co
 .modal.central-dialog > :not(.modal-head) { margin-left: 16px; margin-right: 16px; }
 .modal.central-dialog .field > span { display: block; }
 .central-row-actions { display: flex; flex-wrap: wrap; gap: 4px; }
+/* Customer → Servers (customer/ServersBox.tsx): toolbar, Site groups, one console link and a ⋯ menu per server */
+.servers-box > .card { background: var(--panel-2); margin: 10px 0 0; }
+.servers-toolbar { margin: 10px 0 4px; gap: 8px; }
+.servers-search { flex: 1 1 220px; max-width: 360px; }
+.server-table .group-row th { padding-top: 14px; font-size: 14px; color: var(--text); }
+.server-table .group-row a { color: var(--text); text-decoration: none; }
+.server-table .group-row a:hover { color: var(--accent); }
+.server-table td.acts { width: 1%; white-space: nowrap; }
+.server-table tr.offline-row td { opacity: .8; }
+.server-table .retired-rows tr:not(.group-row) { opacity: .7; }
+.server-group-head { margin: 16px 0 8px; font-size: 14px; }
+.server-group-head a { color: var(--text); text-decoration: none; }
+.server-group-head a:hover { color: var(--accent); }
+.retired-toggle { color: var(--muted); font-size: 14px; font-weight: 600; }
+.update-chip { margin-left: 6px; padding: 1px 7px; border-color: var(--accent); color: var(--accent); white-space: nowrap; }
+.alerts-chip { display: inline-block; margin-top: 4px; text-decoration: none; white-space: nowrap; }
+.cams-down { max-width: 28ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nowrap { white-space: nowrap; }
+.server-menu { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
+.console-link { font-size: 12px; padding: 3px 9px; border: 1px solid var(--border); border-radius: 8px; color: var(--text); text-decoration: none; white-space: nowrap; }
+.console-link:hover { background: var(--panel-2); }
+.menu-pop.server-menu-pop { min-width: 180px; }
+.menu-sep { border-top: 1px solid var(--border); margin: 4px 0; }
+.menu-pop button.menu-danger { color: var(--bad); }
+.server-list-card .stats.kv { grid-template-columns: auto 1fr; align-items: baseline; }
+.server-list-card .cams-down { max-width: none; }
+.server-list-card > .linkish { margin-top: 8px; }
+.server-list-card .server-actions { justify-content: flex-end; }
+@media (max-width: 700px) {
+  .servers-search { max-width: none; flex-basis: 100%; }
+  .server-table .group-row { padding: 12px 2px 2px; }
+  .server-table .group-row th { flex: 1 0 100%; border: 0; padding: 0; }
+  .server-table td.acts { width: auto; }
+  .cams-down { max-width: none; white-space: normal; }
+}

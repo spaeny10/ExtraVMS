@@ -2,11 +2,12 @@
  * A server (one NVR box: the hub's `sites` row) as cards and admin actions. Used by the Site page's Servers tab,
  * the server panel and Customer → Servers, so the actions behave the same everywhere.
  */
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { confirmDialog, promptDialog, toast } from "@site/ui";
 import { type Backup, type Server, type Site, ago, api, fmtTime } from "./api";
 import { consoleHref } from "./nav";
 import { CENTRAL_TAG, fmtGB, fmtMbps, quotaText, serverBandwidth } from "./central";
+import { anyAction, serverActions } from "./serverList";
 
 /**
  * Status card. With `children` (actions) it is a plain box whose name links to `href`; without, the whole card is the link.
@@ -58,70 +59,154 @@ export function ServerCard({ s, now, href = consoleHref(s.id), central, children
   return children ? <div className={cls}>{body}<div className="row server-actions">{children}</div></div> : <a className={cls} href={href}>{body}</a>;
 }
 
+/** The admin actions' handlers, shared by the inline buttons (ServerActions) and the ⋯ menu (ServerMenu). */
+function serverOps(s: Server, onChanged: () => void) {
+  const act = (f: () => Promise<unknown>, done?: string) => async () => { try { await f(); if (done) toast.success(done); onChanged(); } catch (e) { toast.error(e); } };
+  return {
+    rename: async () => { const name = await promptDialog("Rename server", { initial: s.name, label: "Name" }); if (name?.trim()) await act(() => api.updateServer(s.id, { name: name.trim() }))(); },
+    note: async () => { const loc = await promptDialog("Where is this server?", { initial: s.location, label: "Note (rack, room…)" }); if (loc != null) await act(() => api.updateServer(s.id, { location: loc.trim() }))(); },
+    move: (to: Pick<Site, "id" | "name">) => act(() => api.updateServer(s.id, { location_id: to.id }), `${s.name} moved to ${to.name}`)(),
+    rotate: async () => { if (await confirmDialog(`Rotate ${s.name}'s token?`)) await act(() => api.rotateServer(s.id), "New token sent to the server")(); },
+    retire: async () => { if (s.retired_at || await confirmDialog(`Retire ${s.name}?`, { message: "It disappears from Sites, Home, Find, Ask and alerts. The server, its tunnel and its recordings are untouched; you can restore it under Customer → Servers.", confirmLabel: "Retire" })) await act(() => api.retireServer(s.id, !s.retired_at))(); },
+    remove: async () => { if (await confirmDialog(`Remove ${s.name}?`, { message: "The server is told to unenroll; recordings stay on it.", confirmLabel: "Remove", danger: true })) await act(() => api.removeServer(s.id))(); },
+  };
+}
+const MOVE_MESSAGE = "Its cameras, alerts and events follow it. People who can see only the old site stop seeing it.";
+const ROTATE_TITLE = "Issue a new device token (the old one stops working after 10 minutes)";
+const retireTitle = (s: Server) => (s.retired_at ? "Show it in Sites, Home, Find and alerts again" : "Hide it from Sites, Home, Find and alerts (the server keeps running)");
+
 /**
- * Rename, note, token, backups, retire, remove, and Move to another Site. `sites` = the customer's Sites for the move
- * picker (omit to hide it). Viewers get only the console link. A central recording server keeps only the console,
- * Rename, Note and Backups: it stays in the Site it was allocated to, its token is the instance's own, and retiring or
- * removing it is done on the Hosts page (the hub refuses them here); a retired one may still be restored.
+ * Rename, note, token, backups, retire, remove, and Move to another Site as inline buttons (Site → Servers, the server
+ * panel). `sites` = the customer's Sites for the move picker (omit to hide it). Which of them show is serverList.ts
+ * serverActions: viewers get only the console link, a central recording server fewer.
  */
 export function ServerActions({ s, admin, sites, onChanged }: { s: Server; admin: boolean; sites?: Pick<Site, "id" | "name">[]; onChanged: () => void }) {
-  const act = (f: () => Promise<unknown>, done?: string) => async () => { try { await f(); if (done) toast.success(done); onChanged(); } catch (e) { toast.error(e); } };
   const others = (sites ?? []).filter((l) => l.id !== s.location_id);
-  const box = admin && !s.central;   // actions for an ordinary server only
+  const can = serverActions(s, admin, others.length);
+  const op = serverOps(s, onChanged);
   return (
     <>
       <a className="small" href={consoleHref(s.id)} title="The server's own interface, through its tunnel">Open server console ↗</a>
-      {admin && <button className="ghost small" onClick={async () => { const name = await promptDialog("Rename server", { initial: s.name, label: "Name" }); if (name?.trim()) await act(() => api.updateServer(s.id, { name: name.trim() }))(); }}>Rename</button>}
-      {admin && <button className="ghost small" title="A free-text note on where this box is (rack, room…)" onClick={async () => { const loc = await promptDialog("Where is this server?", { initial: s.location, label: "Note (rack, room…)" }); if (loc != null) await act(() => api.updateServer(s.id, { location: loc.trim() }))(); }}>Note</button>}
-      {box && others.length > 0 && (
+      {can.rename && <button className="ghost small" onClick={op.rename}>Rename</button>}
+      {can.note && <button className="ghost small" title="A free-text note on where this box is (rack, room…)" onClick={op.note}>Note</button>}
+      {can.move && (
         <select className="small" value="" aria-label="Move to site" onChange={async (e) => {
           const to = others.find((l) => l.id === e.target.value);
-          if (to && await confirmDialog(`Move ${s.name} to ${to.name}?`, { message: "Its cameras, alerts and events follow it. People who can see only the old site stop seeing it.", confirmLabel: "Move" }))
-            await act(() => api.updateServer(s.id, { location_id: to.id }), `${s.name} moved to ${to.name}`)();
+          if (to && await confirmDialog(`Move ${s.name} to ${to.name}?`, { message: MOVE_MESSAGE, confirmLabel: "Move" })) await op.move(to);
         }}>
           <option value="">Move to site…</option>
           {others.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
         </select>
       )}
-      {box && <button className="ghost small" title="Issue a new device token (the old one stops working after 10 minutes)" onClick={async () => { if (await confirmDialog(`Rotate ${s.name}'s token?`)) await act(() => api.rotateServer(s.id), "New token sent to the server")(); }}>Rotate token</button>}
-      {admin && <BackupsButton server={s} />}
-      {admin && (!s.central || s.retired_at) && <button className="ghost small" title={s.retired_at ? "Show it in Sites, Home, Find and alerts again" : "Hide it from Sites, Home, Find and alerts (the server keeps running)"}
-        onClick={async () => { if (s.retired_at || await confirmDialog(`Retire ${s.name}?`, { message: "It disappears from Sites, Home, Find, Ask and alerts. The server, its tunnel and its recordings are untouched; you can restore it under Customer → Servers.", confirmLabel: "Retire" })) await act(() => api.retireServer(s.id, !s.retired_at))(); }}>{s.retired_at ? "Restore" : "Retire"}</button>}
-      {box && <button className="ghost small" onClick={async () => { if (await confirmDialog(`Remove ${s.name}?`, { message: "The server is told to unenroll; recordings stay on it.", confirmLabel: "Remove", danger: true })) await act(() => api.removeServer(s.id))(); }}>Remove</button>}
+      {can.rotate && <button className="ghost small" title={ROTATE_TITLE} onClick={op.rotate}>Rotate token</button>}
+      {can.backups && <BackupsButton server={s} />}
+      {can.retire && <button className="ghost small" title={retireTitle(s)} onClick={op.retire}>{can.retire === "restore" ? "Restore" : "Retire"}</button>}
+      {can.remove && <button className="ghost small" onClick={op.remove}>Remove</button>}
     </>
+  );
+}
+
+/**
+ * The same actions as one "Open console" link and a ⋯ menu (Customer → Servers): Rename, Note, Move to site…, Backups,
+ * Restore, Rotate token, then Retire and Remove apart. Move and Backups open dialogs; the rest confirm as the buttons do.
+ */
+export function ServerMenu({ s, admin, sites, onChanged }: { s: Server; admin: boolean; sites?: Pick<Site, "id" | "name">[]; onChanged: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [dialog, setDialog] = useState<"move" | "backups" | null>(null);
+  const others = (sites ?? []).filter((l) => l.id !== s.location_id);
+  const can = serverActions(s, admin, others.length);
+  const op = serverOps(s, onChanged);
+  const item = (f: () => unknown) => () => { setOpen(false); f(); };
+  return (
+    <div className="server-menu">
+      <a className="console-link" href={consoleHref(s.id)} title="The server's own interface, through its tunnel">Open console ↗</a>
+      {anyAction(can) && (
+        <div className="menu-anchor">
+          <button className="ghost small" aria-haspopup="true" aria-expanded={open} aria-label={`More actions for ${s.name}`} onClick={() => setOpen(!open)}>⋯</button>
+          {open && (
+            <>
+              <div className="menu-veil" onClick={() => setOpen(false)} />
+              <div className="menu-pop server-menu-pop" role="menu">
+                {can.rename && <button role="menuitem" onClick={item(op.rename)}>Rename…</button>}
+                {can.note && <button role="menuitem" title="A free-text note on where this box is (rack, room…)" onClick={item(op.note)}>Note…</button>}
+                {can.move && <button role="menuitem" onClick={item(() => setDialog("move"))}>Move to site…</button>}
+                {can.backups && <button role="menuitem" onClick={item(() => setDialog("backups"))}>Backups…</button>}
+                {can.retire === "restore" && <button role="menuitem" title={retireTitle(s)} onClick={item(op.retire)}>Restore</button>}
+                {can.rotate && <button role="menuitem" title={ROTATE_TITLE} onClick={item(op.rotate)}>Rotate token…</button>}
+                {(can.retire === "retire" || can.remove) && <div className="menu-sep" role="separator" />}
+                {can.retire === "retire" && <button role="menuitem" className="menu-danger" title={retireTitle(s)} onClick={item(op.retire)}>Retire…</button>}
+                {can.remove && <button role="menuitem" className="menu-danger" onClick={item(op.remove)}>Remove…</button>}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+      {dialog === "move" && <MoveDialog s={s} sites={others} onClose={() => setDialog(null)} onMove={(to) => { setDialog(null); op.move(to); }} />}
+      {dialog === "backups" && <BackupsDialog server={s} onClose={() => setDialog(null)} />}
+    </div>
+  );
+}
+
+/** Move to site… from the ⋯ menu: pick the Site; the dialog says what moving does, so its Move button is the confirmation. */
+function MoveDialog({ s, sites, onClose, onMove }: { s: Server; sites: Pick<Site, "id" | "name">[]; onClose: () => void; onMove: (to: Pick<Site, "id" | "name">) => void }) {
+  const [to, setTo] = useState(sites.length === 1 ? sites[0].id : "");
+  const site = sites.find((l) => l.id === to);
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <form className="modal central-dialog" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 460 }} onSubmit={(e) => { e.preventDefault(); if (site) onMove(site); }}>
+        <header className="modal-head"><h2>Move {s.name} to another site</h2><button type="button" className="ghost" onClick={onClose} aria-label="Close">✕</button></header>
+        <label className="field"><span>Site</span>
+          <select value={to} onChange={(e) => setTo(e.target.value)} autoFocus>
+            {sites.length !== 1 && <option value="" disabled>Choose…</option>}
+            {sites.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+          </select>
+        </label>
+        <p className="small muted">{MOVE_MESSAGE}</p>
+        <div className="row">
+          <button type="submit" disabled={!site}>{site ? `Move to ${site.name}` : "Move"}</button>
+          <button type="button" className="ghost" onClick={onClose}>Cancel</button>
+        </div>
+      </form>
+    </div>
   );
 }
 
 export function BackupsButton({ server }: { server: Server }) {
   const [open, setOpen] = useState(false);
-  const [rows, setRows] = useState<Backup[]>([]);
-  const load = () => api.backups(server.id).then(setRows).catch((e) => toast.error(e));
   return (
     <>
-      <button className="ghost small" onClick={() => { setOpen(true); load(); }}>Backups</button>
-      {open && (
-        <div className="modal-backdrop" onClick={() => setOpen(false)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 640 }}>
-            <header className="modal-head"><h2>{server.name} · configuration backups</h2><button className="ghost" onClick={() => setOpen(false)} aria-label="Close">✕</button></header>
-            <p className="muted small">Cameras, zones, places, rules, PTZ, neighbors, named people/vehicles, layouts, retention and briefing settings — taken nightly, 30 kept. Camera passwords are not included. Recordings and events stay on the server.</p>
-            <div className="row"><button className="ghost small" onClick={async () => { try { await api.backupNow(server.id); toast.success("Backup taken"); load(); } catch (e) { toast.error(e); } }}>Back up now</button></div>
-            <table className="hub-table">
-              <thead><tr><th>When</th><th>Size</th><th>Cameras</th><th>Identities</th><th>Version</th><th /></tr></thead>
-              <tbody>{rows.map((b) => (
-                <tr key={b.id}><td>{fmtTime(b.created_at)}</td><td>{(b.bytes / 1024).toFixed(0)} KB</td><td>{b.cameras}</td><td>{b.identities}</td><td>{b.site_version}</td>
-                  <td className="row">
-                    <a className="small" href={`/api/sites/${server.id}/backups/${b.id}`}>Download</a>
-                    <button className="ghost small" onClick={async () => {
-                      if (!await confirmDialog(`Restore ${server.name} from ${fmtTime(b.created_at)}?`, { message: "Cameras, zones, rules, topology and layouts on the server are replaced; named people/vehicles are merged by name. Camera passwords must already be set on the server.", confirmLabel: "Restore", danger: true })) return;
-                      try { const r = await api.restore(server.id, b.id); toast.success(`Restored: ${Object.entries(r).map(([k, v]) => `${v} ${k}`).join(", ")}`); } catch (e) { toast.error(e); }
-                    }}>Restore</button>
-                  </td></tr>))}
-              </tbody>
-            </table>
-            {rows.length === 0 && <p className="muted">No backups yet.</p>}
-          </div>
-        </div>
-      )}
+      <button className="ghost small" onClick={() => setOpen(true)}>Backups</button>
+      {open && <BackupsDialog server={server} onClose={() => setOpen(false)} />}
     </>
+  );
+}
+
+/** A server's configuration backups: back up now, download one, restore from one. */
+export function BackupsDialog({ server, onClose }: { server: Server; onClose: () => void }) {
+  const [rows, setRows] = useState<Backup[]>([]);
+  const load = useCallback(() => api.backups(server.id).then(setRows).catch((e) => toast.error(e)), [server.id]);
+  useEffect(() => { load(); }, [load]);
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 640 }}>
+        <header className="modal-head"><h2>{server.name} · configuration backups</h2><button className="ghost" onClick={onClose} aria-label="Close">✕</button></header>
+        <p className="muted small">Cameras, zones, places, rules, PTZ, neighbors, named people/vehicles, layouts, retention and briefing settings — taken nightly, 30 kept. Camera passwords are not included. Recordings and events stay on the server.</p>
+        <div className="row"><button className="ghost small" onClick={async () => { try { await api.backupNow(server.id); toast.success("Backup taken"); load(); } catch (e) { toast.error(e); } }}>Back up now</button></div>
+        <table className="hub-table">
+          <thead><tr><th>When</th><th>Size</th><th>Cameras</th><th>Identities</th><th>Version</th><th /></tr></thead>
+          <tbody>{rows.map((b) => (
+            <tr key={b.id}><td>{fmtTime(b.created_at)}</td><td>{(b.bytes / 1024).toFixed(0)} KB</td><td>{b.cameras}</td><td>{b.identities}</td><td>{b.site_version}</td>
+              <td className="row">
+                <a className="small" href={`/api/sites/${server.id}/backups/${b.id}`}>Download</a>
+                <button className="ghost small" onClick={async () => {
+                  if (!await confirmDialog(`Restore ${server.name} from ${fmtTime(b.created_at)}?`, { message: "Cameras, zones, rules, topology and layouts on the server are replaced; named people/vehicles are merged by name. Camera passwords must already be set on the server.", confirmLabel: "Restore", danger: true })) return;
+                  try { const r = await api.restore(server.id, b.id); toast.success(`Restored: ${Object.entries(r).map(([k, v]) => `${v} ${k}`).join(", ")}`); } catch (e) { toast.error(e); }
+                }}>Restore</button>
+              </td></tr>))}
+          </tbody>
+        </table>
+        {rows.length === 0 && <p className="muted">No backups yet.</p>}
+      </div>
+    </div>
   );
 }
