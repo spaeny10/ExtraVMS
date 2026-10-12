@@ -85,12 +85,19 @@ def sync_cameras() -> None:
 async def _mediamtx_config_check() -> None:
     """Every 5 minutes: mediamtx.yml must match the cameras and the stored reader password. Anything that left them
     apart (Qwenbot 2026-10-08: the file and the database held different reader passwords, every metadata session got
-    401 for 4.5 h) is repaired by rewriting it; MediaMTX hot-reloads."""
+    401 for 4.5 h) is repaired by rewriting it; MediaMTX hot-reloads. Every minute: MediaMTX must have loaded the file
+    (its watcher can miss a change: mediamtx.ensure_loaded)."""
+    tick = 0
     while True:
-        await asyncio.sleep(300)
+        await asyncio.sleep(60)
+        tick += 1
         try:
-            if state.mtx.write_config(db.cameras(enabled_only=True)):
+            if tick % 5 == 0 and state.mtx.write_config(db.cameras(enabled_only=True)):
                 log.warning("mediamtx.yml had drifted from the cameras / reader password: rewritten")
+            else:
+                await state.mtx.ensure_loaded()
+        except httpx.HTTPError:  # MediaMTX restarting, its API not up yet: next minute
+            log.debug("mediamtx config check: API not answering", exc_info=True)
         except Exception:  # noqa: BLE001 - a bad cycle must not end the check
             log.exception("mediamtx config check failed")
 

@@ -284,6 +284,33 @@ class MediaMTX:
             return True
         return False
 
+    def file_paths(self) -> set[str]:
+        """The path names mediamtx.yml configures (what MediaMTX should have loaded)."""
+        try:
+            return set((yaml.safe_load(self.config_path.read_text()) or {}).get("paths") or {})
+        except (OSError, yaml.YAMLError):
+            return set()
+
+    async def ensure_loaded(self) -> set[str]:
+        """Make MediaMTX reload mediamtx.yml if its running configuration is missing paths the file has, or still has
+        ones the file dropped: its file watcher can miss a change (DC1 Server 2026-10-12: two writes 24 ms apart when a
+        camera was added; the second, with the new camera, was never loaded and the camera stayed "path not configured"
+        until the file was touched). The same text is swapped in again, which the watcher sees. Returns the paths that
+        differed (empty = in step)."""
+        want = self.file_paths()
+        if not want:
+            return set()
+        async with httpx.AsyncClient(timeout=5) as c:
+            r = await c.get(f"{settings.mediamtx_api}/v3/config/paths/list", params={"itemsPerPage": 1000})
+            r.raise_for_status()
+            loaded = {p["name"] for p in r.json().get("items", []) if not str(p.get("name", "")).startswith("~")}
+        loaded.discard("all_others")
+        differ = want ^ loaded
+        if differ:
+            atomic_write(self.config_path, self.config_path.read_text())
+            log.warning("MediaMTX had not loaded mediamtx.yml (%s): asked it to reload", ", ".join(sorted(differ)[:8]))
+        return differ
+
     async def run(self) -> None:
         """Keep MediaMTX running; restart with backoff if it exits."""
         backoff = 1

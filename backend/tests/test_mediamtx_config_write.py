@@ -88,6 +88,49 @@ def test_write_config_reports_drift_and_repairs_it():
     assert m.write_config([]) is True and pw in m.config_path.read_text()
 
 
+def test_ensure_loaded_makes_mediamtx_reload_a_missed_change():
+    """MediaMTX's watcher missed a config write (DC1 Server 2026-10-12): its loaded paths lack the new camera, so the
+    same file is swapped in again; when they match nothing is written."""
+    import asyncio
+    m = mediamtx.MediaMTX()
+    m.config_path.write_text("paths:\n  cam1: {}\n  cam1_sub: {}\n  cam3: {}\n")
+    loaded = {"names": ["cam1", "cam1_sub"]}
+
+    class Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"items": [{"name": n} for n in loaded["names"]] + [{"name": "~^any$"}]}
+
+    class Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, params=None):
+            assert url.endswith("/v3/config/paths/list")
+            return Resp()
+
+    writes = []
+    real_client, real_write = mediamtx.httpx.AsyncClient, mediamtx.atomic_write
+    mediamtx.httpx.AsyncClient = Client
+    mediamtx.atomic_write = lambda path, text: writes.append(text)
+    try:
+        assert asyncio.run(m.ensure_loaded()) == {"cam3"}
+        assert writes == [m.config_path.read_text()]          # the same text again: the watcher sees a change
+        loaded["names"] = ["cam1", "cam1_sub", "cam3"]
+        assert asyncio.run(m.ensure_loaded()) == set()
+        assert len(writes) == 1
+    finally:
+        mediamtx.httpx.AsyncClient, mediamtx.atomic_write = real_client, real_write
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):
