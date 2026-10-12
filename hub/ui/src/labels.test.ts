@@ -25,6 +25,7 @@ describe("KIND_LABEL", () => {
     expect(KIND_LABEL.detector_fallback).toBe("Detection on CPU");
     expect(KIND_LABEL.vlm_fallback_active).toBe("AI on fallback model");
     expect(KIND_LABEL.detector_stalled).toBe("Verification stalled");
+    expect(KIND_LABEL.storage_failing).toBe("Storage failing");
   });
   it("names the central recording alerts", () => {
     expect(KIND_LABEL.site_link_down).toBe("Site link down");

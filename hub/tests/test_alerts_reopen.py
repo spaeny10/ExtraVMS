@@ -101,3 +101,36 @@ def test_detector_health_alerts_follow_the_heartbeat(client, superuser):
     assert [r for r in _rows(s) if r["closed_at"] is None] == []
     assert "detector_fallback" in alerts.KINDS and "detector_stalled" in alerts.KINDS
     assert not set(alerts.HEALTH_KINDS) & set(alerts.EVENT_KINDS)
+
+
+def test_storage_failing_alert_follows_the_heartbeat(client, superuser):
+    """A server whose database can't be written (backend health.storage_alert): the minimal heartbeat it sends while
+    its database is dead (no cameras) opens storage_failing and pushes it by default; a heartbeat without it closes it,
+    and leaves camera alerts alone."""
+    from hub import push
+    oid = _org(client, superuser, "storage-co")
+    s = server(oid, "Desktop")
+    opened = []
+    prev, alerts.on_open = alerts.on_open, lambda org_id, site, kind, detail: opened.append((kind, detail))
+    try:
+        alerts.on_heartbeat(s, {"cameras": [{"id": "cam1", "stream_ready": False}]}, 0)
+        alerts.on_heartbeat(s, {"cameras": [{"id": "cam1", "stream_ready": False}]}, 0)
+        assert [r["kind"] for r in _rows(s) if r["closed_at"] is None] == ["camera_down"]
+        sf = {"kind": "storage_failing", "since": 1000.0, "error": "disk I/O error",
+              "text": "Database can't be written (disk I/O error) since 05:44: events are not being stored. Check the data disk (E:)."}
+        minimal = {"now": time.time(), "version": "x", "degraded": True, "error": "disk I/O error", "health_alerts": [sf]}
+        alerts.on_heartbeat(s, minimal, 0)
+        alerts.on_heartbeat(s, minimal, 0)
+        rows = [r for r in _rows(s) if r["closed_at"] is None]
+        assert sorted(r["kind"] for r in rows) == ["camera_down", "storage_failing"]   # one row; cameras untouched
+        d = next(r["detail"] for r in rows if r["kind"] == "storage_failing")
+        assert d == {"text": sf["text"], "since": 1000.0, "error": "disk I/O error"}
+        assert [k for k, _ in opened] == ["camera_down", "storage_failing"]
+        alerts.on_heartbeat(s, {"health_alerts": []}, 0)            # the disk is back
+        assert [r["kind"] for r in _rows(s) if r["closed_at"] is None] == ["camera_down"]
+        alerts.on_heartbeat(s, minimal, 0)                          # and fails again: a new alert
+        assert len(_rows(s, "storage_failing")) == 2
+    finally:
+        alerts.on_open = prev
+    assert "storage_failing" in alerts.KINDS and "storage_failing" in alerts.HEALTH_KINDS
+    assert "storage_failing" in push.DEFAULT_KINDS and "storage_failing" in push.CUSTOMER_KINDS

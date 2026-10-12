@@ -5,6 +5,8 @@ export const KIND_LABEL: Record<string, string> = {
   event_high: "High-priority event", event_policy: "Site rule broken", event_watched: "Watched person/vehicle",
   // one alert instead of a camera_down per camera when the server can reach none of the Site's cameras
   site_link_down: "Site link down",
+  // the server's database / data disk can't be written: events are not being stored
+  storage_failing: "Storage failing",
   // hub administrators only: a central recording host stopped heartbeating
   host_offline: "Central host offline",
   // hub administrators only: the CoverageMap monthly unit budget is used up (automatic coverage refreshes stopped)

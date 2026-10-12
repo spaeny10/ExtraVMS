@@ -13,7 +13,7 @@ import time
 
 import httpx
 
-from . import backup, detector, direct, mediamtx, retention, vlmroute
+from . import backup, detector, direct, health, mediamtx, retention, vlmroute
 from .config import settings
 from .db import db
 
@@ -71,10 +71,11 @@ async def site_summary(state, since: float | None = None, version: str = "") -> 
         "retention_alert": retention.alert,
         "queues": {"verify": p.verify_q.qsize(), "synopsis": p.synopsis_q.qsize()},
         "yolo_ready": detector.yolo_status(p)["yolo_ready"], "vlm_ready": p.vlm_ready, "vlm_model": settings.vlm_model,
-        # detector_fallback / detector_stalled / vlm_fallback_active / site_link_down: the hub opens an alert per kind while it is listed
-        # (hub alerts.py)
-        "health_alerts": detector.health_alerts(p) + vlmroute.router.health_alerts() + ([link] if link else []),
+        # storage_failing / detector_fallback / detector_stalled / vlm_fallback_active / site_link_down: the hub opens an
+        # alert per kind while it is listed (hub alerts.py)
+        "health_alerts": _storage_alerts() + detector.health_alerts(p) + vlmroute.router.health_alerts() + ([link] if link else []),
         "site_link_down": bool(link),
+        "storage": dict(db.storage),   # {ok, error, failing_since, last_ok, reopens} (db.py): is the database taking writes
         # what the cameras send this server: {mbps (5-min average), today_gb, month_gb, cameras: {id: mbps}}
         "bandwidth": state.health.bandwidth(enabled) if hasattr(state.health, "bandwidth") else None,
         "cameras": cams, "today": today, "attention": attention,
@@ -86,3 +87,27 @@ async def site_summary(state, since: float | None = None, version: str = "") -> 
         # Direct-on-LAN: where a browser on this LAN can reach the server and the HTTPS cert's fingerprint (None = off)
         "direct": direct.summary(),
     }
+
+
+def _storage_alerts() -> list[dict]:
+    a = health.storage_alert()
+    return [a] if a else []
+
+
+def minimal_summary(state, version: str = "", error: str = "") -> dict:
+    """The heartbeat when site_summary can't be built (2026-10-10: every query said "disk I/O error", the heartbeat was
+    skipped, and the hub saw nothing wrong for 6 hours). Only what needs no database: the storage problem, the
+    detector and AI alerts (the hub closes those kinds when a heartbeat doesn't list them), disk space. No `cameras`
+    key: the hub leaves its camera registry and camera_down alerts as they were."""
+    now = time.time()
+    alerts = _storage_alerts()
+    p = getattr(state, "pipeline", None)
+    for part in (lambda: detector.health_alerts(p) if p is not None else [], vlmroute.router.health_alerts):
+        with contextlib.suppress(Exception):
+            alerts += part()
+    out = {"now": now, "version": version, "uptime_s": round(now - STARTED_AT), "degraded": True, "error": error[:200],
+           "storage": dict(db.storage), "retention_alert": retention.alert, "health_alerts": alerts}
+    with contextlib.suppress(OSError):
+        rec = shutil.disk_usage(settings.recordings_dir)
+        out["disk"] = {"free_gb": round(rec.free / 1e9), "total_gb": round(rec.total / 1e9)}
+    return out

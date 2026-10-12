@@ -21,6 +21,7 @@ import logging
 import random
 import secrets
 import socket
+import sqlite3
 import ssl
 import string
 import time
@@ -98,7 +99,11 @@ class HubAgent:
         self.state = state
         self.summary_fn = summary_fn
         self.connected = False
-        self.enrolled = bool(db.get_setting("hub_token"))
+        # the device token and hub address as last read: while the database fails (2026-10-10, a dying SSD) the agent
+        # still reconnects with them, so the heartbeat carrying storage_failing reaches the hub
+        self._known_token: str | None = db.get_setting("hub_token")
+        self._known_url: str | None = db.get_setting("hub_url")
+        self.enrolled = bool(self._known_token)
         self.site_id: str | None = db.get_setting("hub_site_id")
         self.org: str | None = None
         self.location: str | None = None      # the hub Site this server belongs to (welcome; None from older hubs)
@@ -116,7 +121,18 @@ class HubAgent:
 
     # ---- status for the UI
     def hub_url(self) -> str:
-        return db.get_setting("hub_url") or settings.hub_url
+        try:
+            self._known_url = db.get_setting("hub_url")
+        except sqlite3.Error:
+            pass   # database failing: the address last read
+        return self._known_url or settings.hub_url
+
+    def _token(self) -> str | None:
+        try:
+            self._known_token = db.get_setting("hub_token")
+        except sqlite3.Error:
+            pass   # database failing: the token last read
+        return self._known_token
 
     def claim(self) -> dict | None:
         if self.enrolled:
@@ -154,9 +170,11 @@ class HubAgent:
             if (url or settings.hub_url) != self.hub_url():
                 unenrol = True
             db.set_setting("hub_url", url)
+            self._known_url = url
         if unenrol:
             for k in ("hub_token", "hub_site_id", "hub_vlm", "hub_turn", "hub_claim"):
                 db.set_setting(k, None)
+            self._known_token = None
             self.enrolled, self.site_id, self.org = False, None, None
             self.location = self.location_id = None
             self._apply_vlm(None)
@@ -203,7 +221,7 @@ class HubAgent:
         return tok
 
     def _auth_header(self) -> str:
-        token = db.get_setting("hub_token")
+        token = self._token()
         self._enrolling = False
         if token:
             self._parked_code = None
@@ -247,9 +265,13 @@ class HubAgent:
             raise
         async with conn as ws:
             self._ws = ws
-            cams = [{"id": c["id"], "name": c["name"]} for c in db.cameras(enabled_only=True)]
-            await self._send({"t": "hello", "proto": PROTO, "site_version": __version__, "cameras": cams, "now": time.time(),
-                              "site_id": self.site_id, "hostname": socket.gethostname(), "caps": ["events", "turn", "vlm", *(["direct"] if settings.direct_enabled else [])]})
+            hello = {"t": "hello", "proto": PROTO, "site_version": __version__, "now": time.time(),
+                     "site_id": self.site_id, "hostname": socket.gethostname(), "caps": ["events", "turn", "vlm", *(["direct"] if settings.direct_enabled else [])]}
+            try:
+                hello["cameras"] = [{"id": c["id"], "name": c["name"]} for c in db.cameras(enabled_only=True)]
+            except sqlite3.Error:
+                pass   # database failing: no camera list (the hub then leaves its registry alone), but connect anyway
+            await self._send(hello)
             try:
                 async for msg in ws:
                     await self._on_message(decode(msg))
@@ -288,20 +310,25 @@ class HubAgent:
             self.connected, self.last_error = True, None
             self.site_id, self.org = m.get("site_id", self.site_id), m.get("org")
             self.location, self.location_id = m.get("location"), m.get("location_id")
-            if self.site_id:
-                db.set_setting("hub_site_id", self.site_id)
             hb = float(m.get("heartbeat_s") or HEARTBEAT_S)
             self._tasks = [asyncio.create_task(self._heartbeat_loop(hb), name="hub-heartbeat"),
                            asyncio.create_task(self._event_loop(), name="hub-events"),
                            asyncio.create_task(self._ping_loop(), name="hub-ping")]
             if "vlm" in m:
-                db.set_setting("hub_vlm", m["vlm"])
                 self._apply_vlm(m["vlm"])
-            if "turn" in m:
-                self._apply_turn(m["turn"])
+            try:
+                if self.site_id:
+                    db.set_setting("hub_site_id", self.site_id)
+                if "vlm" in m:
+                    db.set_setting("hub_vlm", m["vlm"])
+                if "turn" in m:
+                    self._apply_turn(m["turn"])
+            except sqlite3.Error as e:   # database failing: stay connected, the heartbeat says what is wrong
+                log.warning("hub: could not save the hub's settings: %s", e)
             log.info("hub: connected as %s (%s)", self.site_id, self.org or "no org")
         elif t == "enrolled":
             db.set_setting("hub_token", m["token"])
+            self._known_token = m["token"]
             db.set_setting("hub_site_id", m.get("site_id"))
             db.set_setting("hub_claim", None)
             if self._enrolling:   # single use: never presented again, even after an unenroll
@@ -311,6 +338,7 @@ class HubAgent:
             await self.reconnect()
         elif t == "rotate":
             db.set_setting("hub_token", m["token"])
+            self._known_token = m["token"]
             await self._send({"t": "rotated"})
             await self.reconnect()
         elif t == "revoked":
@@ -406,14 +434,28 @@ class HubAgent:
 
     # ---- background loops while connected
     async def _heartbeat_loop(self, every: float) -> None:
+        failing = False
         while True:
             try:
                 fn = self.summary_fn
                 if fn is None:
                     from .summary import site_summary
                     fn = lambda st, since: site_summary(st, since, __version__)  # noqa: E731
-                summary = await fn(self.state, self._last_summary_at)
-                self._last_summary_at = time.time()
+                try:
+                    summary = await fn(self.state, self._last_summary_at)
+                    self._last_summary_at = time.time()
+                    failing = False
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    # 2026-10-10 the data disk failed, every query raised "disk I/O error", this skipped the heartbeat
+                    # and the hub saw nothing wrong for 6 hours. Send what needs no database instead (storage_failing
+                    # among it); _last_summary_at stays, so the next full summary lists the attention events missed.
+                    if not failing:
+                        log.warning("hub heartbeat: the summary failed (%s); sending a minimal one until it works", e)
+                    failing = True
+                    from .summary import minimal_summary
+                    summary = minimal_summary(self.state, __version__, str(e))
                 await self._send({"t": "heartbeat", "now": time.time(), "summary": summary})
                 self.last_heartbeat = time.time()
             except asyncio.CancelledError:

@@ -261,7 +261,12 @@ class AgentRegistry:
                 await self._on_hello(conn, frame)
             elif t == "heartbeat":
                 conn.last_seen = time.time()
-                conn.summary = frame.get("summary") or {}
+                prev, summary = conn.summary or (conn.site or {}).get("summary") or {}, frame.get("summary") or {}
+                if summary and "cameras" not in summary and isinstance(prev.get("cameras"), list):
+                    # a minimal heartbeat (the server's database is failing: summary.minimal_summary) has no camera
+                    # data: keep the last known cameras for the site card and camera alerts, with its problems on top
+                    summary = {**prev, **summary, "minimal": True}
+                conn.summary = summary
                 if conn.site:
                     skew = float(frame.get("now") or time.time()) - time.time()
                     db.run(sa.update(db.sites).where(db.sites.c.id == conn.site_id).values(

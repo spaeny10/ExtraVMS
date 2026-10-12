@@ -15,7 +15,7 @@ from . import alerts, auth, db
 from .config import settings
 
 log = logging.getLogger("hub.push")
-DEFAULT_KINDS = ["offline", "event_policy", "event_watched", "event_high", "site_link_down",
+DEFAULT_KINDS = ["offline", "event_policy", "event_watched", "event_high", "site_link_down", "storage_failing",
                  "host_offline", "coverage_budget", "host_queue_growing"]   # the last three only ever reach hub administrators (alerts.HUB_KINDS)
 _sender: Callable | None = None   # tests inject a fake
 
@@ -152,7 +152,8 @@ async def notify_alert(org_id: str, site: dict, kind: str, detail: dict) -> int:
              "clock": f"{name}: clock skew", "detector_fallback": f"{name}: detection on the CPU", "vlm_fallback_active": f"{name}: AI on the fallback model",
              "detector_stalled": f"{name}: event verification stalled", "event_high": f"{name}: high-priority event",
              "event_policy": f"{name}: site rule broken", "event_watched": f"{name}: watched person seen",
-             "site_link_down": f"{name}: link to the site down"}.get(kind, f"{name}: {kind}")
+             "site_link_down": f"{name}: link to the site down",
+             "storage_failing": f"{name}: events not being stored (disk failing)"}.get(kind, f"{name}: {kind}")
     body = detail.get("text") or detail.get("synopsis") or detail.get("name") or ", ".join(detail.get("problems") or []) or ""
     url = f"/s/{site['id']}/#timeline?cam={detail.get('camera_id')}&event={detail.get('id')}" if detail.get("id") and detail.get("camera_id") else f"/s/{site['id']}/"
     if kind == "site_link_down" and site.get("location_id"):

@@ -9,19 +9,27 @@ come from its ONVIF events (ruleevents.py), whether its event subscription works
 Per server: bandwidth from the cameras (inbound Mbit/s over 5 min, GB today and this month, kept per day in the
 settings table) for cellular sites and central recording, and "site link down": every enabled camera without
 video at once means the link to the site (VPN tunnel, 5G router) is down, one alert instead of one per camera.
+
+Storage: "storage_failing" once the database has been failing to write for STORAGE_ALERT_S (db.storage, kept by every
+statement in db.py) or a write probe of the data directory (every PROBE_S) has failed that long. 2026-10-10 the SSD
+holding nvr.db failed: for 6 hours no event was stored and nothing said so. None of this needs the database itself.
 """
 from __future__ import annotations
 
 import asyncio
 import datetime as dt
 import logging
+import os
 import re
+import sqlite3
 import time
 from collections import deque
+from pathlib import Path
 
 import httpx
 
 from . import ingest, mediamtx
+from .config import settings
 from .db import db
 
 log = logging.getLogger("nvr.health")
@@ -37,6 +45,10 @@ BANDWIDTH_SPAN_S = 300       # Mbit/s averaged over 5 min
 BANDWIDTH_KEY = "bandwidth_daily"   # settings: {"YYYY-MM-DD" (site time): bytes received from the cameras}
 BANDWIDTH_KEEP_DAYS = 62
 BANDWIDTH_SAVE_S = 60
+STORAGE_ALERT_S = 60         # the database (or the data disk's write probe) failing this long = a server problem
+PROBE_S = 60                 # write probe of settings.data_dir: a failing disk shows even when no event is being stored
+PROBE_TIMEOUT_S = 20         # a write that hangs this long counts as a failure (a dying disk often hangs, not errors)
+PROBE_FILE = ".write-probe"
 LINE = re.compile(r'^(\w+)\{([^}]*)\}\s+([0-9.eE+-]+)$')
 LABEL = re.compile(r'(\w+)="([^"]*)"')
 
@@ -68,8 +80,81 @@ def stream_problems(camera_id: str) -> list[str]:
     """What the camera's ONVIF stream check found (streams.plan): no low-resolution stream, a main path it doesn't
     list. Shown with the other problems in Settings → Cameras and sent to the hub."""
     from . import streams
-    cam = db.one("SELECT id, main_path, sub_path, streams FROM cameras WHERE id=?", [camera_id])
+    try:
+        cam = db.one("SELECT id, main_path, sub_path, streams FROM cameras WHERE id=?", [camera_id])
+    except sqlite3.Error:   # the database is failing (storage_alert says so): the camera's live health still counts
+        return []
     return streams.problems(cam) if cam else []
+
+
+# ---- storage: can this server still write its database?
+def data_drive(path: Path | None = None) -> str:
+    """How the problem names the data disk: the drive on Windows ("E:"), the data directory elsewhere."""
+    p = Path(path or settings.data_dir)
+    return p.drive or str(p)
+
+
+def storage_alert(now: float | None = None) -> dict | None:
+    """The `storage_failing` health alert once db.storage has been failing for more than STORAGE_ALERT_S, else None.
+    Reads only the in-memory state, so it works (and the heartbeat carries it) while every statement fails."""
+    s = db.storage
+    since = s.get("failing_since")
+    now = now or db.clock()
+    if s.get("ok") or not since or now - since <= STORAGE_ALERT_S:
+        return None
+    err = s.get("error") or "write failed"
+    at = dt.datetime.fromtimestamp(since).strftime("%H:%M")
+    return {"kind": "storage_failing", "since": since, "error": err,
+            "text": f"Database can't be written ({err}) since {at}: events are not being stored. "
+                    f"Check the data disk ({data_drive()})."}
+
+
+def probe_data_dir(path: Path | None = None) -> None:
+    """Write, fsync and delete a tiny file in the data directory; raises OSError when the disk won't take it."""
+    f = Path(path or settings.data_dir) / PROBE_FILE
+    with open(f, "wb") as fh:
+        fh.write(b"ok")
+        fh.flush()
+        os.fsync(fh.fileno())
+    f.unlink()
+
+
+class StorageWatch:
+    """Every PROBE_S, probe_data_dir in a worker thread; failures (and a probe that hangs PROBE_TIMEOUT_S) feed db.storage
+    like a failing statement does, a success clears what an earlier probe found."""
+
+    def __init__(self, probe=probe_data_dir) -> None:
+        self.probe = probe
+        self._pending: asyncio.Future | None = None   # a probe stuck on a hung disk: never start a second one beside it
+        self._pending_since = 0.0
+
+    async def check(self) -> bool:
+        """One probe; True when the data directory took the write."""
+        if self._pending is not None and not self._pending.done():
+            db.storage_failed(f"data disk not responding: a write has hung for {time.time() - self._pending_since:.0f} s",
+                              source="probe")
+            return False
+        self._pending, self._pending_since = asyncio.ensure_future(asyncio.to_thread(self.probe)), time.time()
+        try:
+            await asyncio.wait_for(asyncio.shield(self._pending), PROBE_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            db.storage_failed(f"data disk not responding: a write hung for {PROBE_TIMEOUT_S} s", source="probe")
+            return False
+        except OSError as e:
+            db.storage_failed(f"data disk not writable: {e.strerror or e}", source="probe")
+            return False
+        db.storage_ok(source="probe")
+        return True
+
+    async def run(self) -> None:
+        while True:
+            try:
+                await self.check()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 - the watch itself must keep going
+                log.warning("storage probe: %s", e)
+            await asyncio.sleep(PROBE_S)
 
 
 class PathStats:
@@ -128,6 +213,7 @@ class StreamHealth:
         self.first_sample = 0.0
         self.error: str | None = None
         self.sub_recorded: set[str] = set()        # cameras whose <id>_sub relays <id> locally (mediamtx.sub_relays_main)
+        self.from_cameras: set[str] = set()        # MediaMTX paths pulled from the cameras (bandwidth counts these)
         self._daily: dict[str, float] | None = None   # BANDWIDTH_KEY, loaded on first use
         self._daily_saved = 0.0
         # camera id -> its detections come from its ONVIF events (ruleevents.py; set by the API): no metadata reader
@@ -145,13 +231,16 @@ class StreamHealth:
     def ingest(self, metrics_text: str, now: float | None = None) -> None:
         """One metrics scrape: per-path stats, and the bytes the cameras sent into today's total."""
         now = now or time.time()
-        cams = db.cameras(enabled_only=True)
-        self.sub_recorded = {c["id"] for c in cams if mediamtx.sub_relays_main(c)}
-        from_cameras = {p for c in cams for p in mediamtx.camera_paths(c)}
+        try:
+            cams = db.cameras(enabled_only=True)
+            self.sub_recorded = {c["id"] for c in cams if mediamtx.sub_relays_main(c)}
+            self.from_cameras = {p for c in cams for p in mediamtx.camera_paths(c)}
+        except sqlite3.Error:
+            pass   # the database is failing: keep sampling with the last camera list (stalls still show)
         received = 0.0
         for path, m in parse_metrics(metrics_text).items():
             delta = self.paths.setdefault(path, PathStats()).update(now, m)
-            if path in from_cameras:
+            if path in self.from_cameras:
                 received += delta
         self.add_bytes(received, now)
         self.first_sample = self.first_sample or now
@@ -160,25 +249,36 @@ class StreamHealth:
     # ---- bandwidth (cellular sites, central recording)
     def _days(self) -> dict[str, float]:
         if self._daily is None:
-            v = db.get_setting(BANDWIDTH_KEY)
+            try:
+                v = db.get_setting(BANDWIDTH_KEY)
+            except sqlite3.Error:
+                return {}   # not loaded (database failing): add_bytes counts nothing rather than overwrite the saved days
             self._daily = {k: float(n) for k, n in v.items() if isinstance(n, (int, float))} if isinstance(v, dict) else {}
         return self._daily
 
     def add_bytes(self, n: float, now: float | None = None) -> None:
         now = now or time.time()
         days = self._days()
+        if self._daily is None:
+            return
         day = dt.datetime.fromtimestamp(now).strftime("%Y-%m-%d")   # site time, like "today" on Home
         new_day = day not in days
         days[day] = days.get(day, 0.0) + max(0.0, n)
         if new_day or now - self._daily_saved >= BANDWIDTH_SAVE_S:
             for old in sorted(days)[:-BANDWIDTH_KEEP_DAYS]:
                 days.pop(old)
-            db.set_setting(BANDWIDTH_KEY, {k: round(v) for k, v in days.items()})
-            self._daily_saved = now
+            try:
+                db.set_setting(BANDWIDTH_KEY, {k: round(v) for k, v in days.items()})
+                self._daily_saved = now
+            except sqlite3.Error:
+                pass   # kept in memory; saved by a later sample once the database takes writes again
 
     def flush(self) -> None:
         if self._daily is not None:
-            db.set_setting(BANDWIDTH_KEY, {k: round(v) for k, v in self._daily.items()})
+            try:
+                db.set_setting(BANDWIDTH_KEY, {k: round(v) for k, v in self._daily.items()})
+            except sqlite3.Error as e:   # shutting down with the database failing: the rest of shutdown still runs
+                log.warning("bandwidth totals not saved: %s", e)
 
     def bandwidth(self, cams: list[dict] | None = None, now: float | None = None) -> dict:
         """{mbps, today_gb, month_gb, cameras: {id: mbps}}: what the cameras send this server (every stream pulled

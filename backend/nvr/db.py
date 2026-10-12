@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import struct
 import threading
@@ -12,6 +13,8 @@ import sqlite_vec
 
 from . import diskguard
 from .config import settings
+
+log = logging.getLogger("nvr.db")
 
 EMBED_DIM = 768  # nomic-embed-text
 REID_DIM = 512   # OSNet person re-ID
@@ -367,9 +370,73 @@ def event_filters(camera: str | None = None, label: str | None = None, threat: s
     return where, params
 
 
+# SQLite errors that mean the database file or its handle is gone (a failing disk, a disk that was unplugged and came
+# back, a remount): the open connection stays dead even once the file is fine again, so close it, open the file
+# afresh and retry once. 2026-10-12 a drive swap "surprise removed" the data disk for a few seconds; the file was
+# intact, but every call said "disk I/O error" until someone restarted the server 10 minutes later.
+# Never "database disk image is malformed" (reopening can't fix corruption and would hide it) or "database is locked"
+# (another writer; busy_timeout's business).
+REOPEN_ERRORS = ("disk i/o error", "unable to open database file", "attempt to write a readonly database")
+# ...and what counts as "the database can't be written" for the storage state (health.storage_alert): the above,
+# plus a full disk, which reopening doesn't help
+STORAGE_ERRORS = (*REOPEN_ERRORS, "database or disk is full")
+REOPEN_EVERY_S = 5.0      # a dead disk must not spin: at most one reopen per this many seconds
+# statements whose success doesn't prove the disk takes writes (reads can be answered from SQLite's page cache)
+READ_SQL = ("SELECT", "WITH", "PRAGMA", "EXPLAIN", "VALUES", "BEGIN", "ROLLBACK")
+
+
+def _is(e: Exception, kinds: tuple[str, ...]) -> bool:
+    msg = str(e).lower()
+    return any(k in msg for k in kinds)
+
+
+def _writes(sql: str) -> bool:
+    words = sql.lstrip().split(None, 1)
+    return not words or words[0].upper() not in READ_SQL
+
+
+class _DbLock:
+    """db.lock: a re-entrant lock that also knows how deeply the current thread holds it. Recovery (Database._reopen)
+    must not swap the connection out from under a caller that holds the lock around its own BEGIN ... COMMIT."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._local = threading.local()
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        ok = self._lock.acquire(blocking, timeout)
+        if ok:
+            self._local.depth = self.depth() + 1
+        return ok
+
+    def release(self) -> None:
+        self._local.depth = self.depth() - 1
+        self._lock.release()
+
+    def depth(self) -> int:
+        return getattr(self._local, "depth", 0)
+
+    def __enter__(self) -> "_DbLock":
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.release()
+
+
 class Database:
     def __init__(self, path):
         path.parent.mkdir(parents=True, exist_ok=True)
+        self.path = path
+        # Whether statements are going through (health.storage_alert turns a long failure into a server problem the hub
+        # alerts on): ok, the last error, failing since when, the last statement that wrote, connections reopened.
+        self.storage: dict = {"ok": True, "error": None, "failing_since": None, "last_ok": time.time(), "reopens": 0}
+        self._fail_source: str | None = None    # "db" (a statement failed) or "probe" (health's write probe of data_dir)
+        self._last_reopen = 0.0
+        # its own lock, not db.lock: health's write probe reports from another thread and must not wait behind a
+        # statement stuck on the dead disk
+        self._storage_lock = threading.Lock()
+        self.clock = time.time                  # tests move time forward
         # A full disk must not stop the service from starting (it restart-looped 41 times on a box whose event
         # clips had filled it): make room from event media, on the filesystem alone, before SQLite needs any.
         need = int(settings.disk_emergency_free_gb * 1e9)
@@ -398,15 +465,20 @@ class Database:
             cols = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {definition}")
-        self.lock = threading.RLock()
+        self.lock = _DbLock()
         self._null_cleared_clips()
 
     def _connect(self, path) -> None:
-        self.conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.enable_load_extension(True)
-        sqlite_vec.load(self.conn)
-        self.conn.enable_load_extension(False)
+        self.conn = self._open(path)
+
+    @staticmethod
+    def _open(path) -> sqlite3.Connection:
+        conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        return conn
 
     def _null_cleared_clips(self) -> None:
         """Events whose clips diskguard deleted before the database opened: their clip is gone, say so."""
@@ -415,21 +487,109 @@ class Database:
             chunk = ids[i:i + 500]
             self.conn.execute(f"UPDATE events SET clip=NULL WHERE id IN ({','.join('?' * len(chunk))})", chunk)
 
-    def execute(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
+    # ---- running statements: every statement in this module goes through _run, which notices a dead disk,
+    # reopens the connection and retries once (api.py, journeys.py, siteconfig.py and merge.py run their own
+    # transactions on db.conn under db.lock; those aren't retried, the next statement here recovers)
+    def _run(self, fn, write: bool = True):
+        """fn(conn) under the lock. A statement that fails because the file or its handle is gone (REOPEN_ERRORS):
+        reopen the connection (at most once per REOPEN_EVERY_S) and run fn once more. `write`: success proves the disk
+        takes writes again (clears a failing storage state; a SELECT can still be answered from SQLite's cache)."""
         with self.lock:
-            return self.conn.execute(sql, tuple(params))
+            try:
+                out = fn(self.conn)
+            except sqlite3.OperationalError as e:
+                if not _is(e, STORAGE_ERRORS):
+                    raise
+                self.storage_failed(str(e))
+                if not (_is(e, REOPEN_ERRORS) and self._reopen(e)):
+                    raise
+                try:
+                    out = fn(self.conn)
+                except sqlite3.OperationalError as e2:
+                    if _is(e2, STORAGE_ERRORS):
+                        self.storage_failed(str(e2))
+                    raise
+            if write:
+                self.storage_ok()
+            return out
+
+    def _reopen(self, err: Exception) -> bool:
+        """Close the connection and open the file again with the startup setup (caller holds the lock). False when
+        a reopen was tried too recently, the caller is inside its own transaction, or the file can't be opened."""
+        now = self.clock()
+        if now - self._last_reopen < REOPEN_EVERY_S:
+            return False
+        if self.lock.depth() > 1 and self.conn.in_transaction:
+            return False   # someone's BEGIN ... COMMIT holds the lock around us: let it fail and roll back, don't swap
+        self._last_reopen = now
+        # the new connection first, the dead one closed after: if the file can't be opened yet, the old one stays in
+        # place and keeps raising OperationalError (a closed one would raise ProgrammingError, which nothing retries)
+        try:
+            conn = self._open(self.path)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+        except Exception as e:  # noqa: BLE001 - sqlite3.Error, or sqlite_vec failing to load off a dead disk
+            log.error("database: reopening %s after \"%s\" failed: %s", self.path, err, e)
+            self.storage_failed(str(e))
+            return False
+        old, self.conn = self.conn, conn
+        try:
+            old.close()
+        except sqlite3.Error:
+            pass
+        self.storage["reopens"] += 1
+        log.warning("database: \"%s\"; reopened %s (reopen #%d), retrying", err, self.path, self.storage["reopens"])
+        return True
+
+    def storage_failed(self, error: str, source: str = "db") -> None:
+        """A statement (or health's write probe of data_dir) couldn't write: the storage state says since when."""
+        with self._storage_lock:
+            s = self.storage
+            if s["ok"]:
+                log.error("database can't be written (%s)", error)
+            s["ok"], s["error"] = False, error
+            s["failing_since"] = s["failing_since"] or self.clock()
+            # a probe failure while statements fail too stays a database failure: only a write through SQLite clears it
+            if self._fail_source != "db":
+                self._fail_source = source
+
+    def storage_ok(self, source: str = "db") -> None:
+        """Something wrote: clear the failing state. A probe success only clears a failure the probe itself found
+        (the filesystem may be back while the SQLite connection is still dead)."""
+        with self._storage_lock:
+            s = self.storage
+            now = self.clock()
+            if not s["ok"] and (source == "db" or self._fail_source == "probe"):
+                log.warning("database writable again after %.0f s", now - (s["failing_since"] or now))
+                s["ok"], s["error"], s["failing_since"] = True, None, None
+                self._fail_source = None
+            if s["ok"]:
+                s["last_ok"] = now
+
+    def execute(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
+        params = tuple(params)
+        return self._run(lambda c: c.execute(sql, params), _writes(sql))
 
     def execute_insert(self, sql: str, params: Iterable[Any] = ()) -> int:
         """INSERT and return the new row id (atomically, under the connection lock)."""
-        with self.lock:
-            return self.conn.execute(sql, tuple(params)).lastrowid
+        params = tuple(params)
+        return self._run(lambda c: c.execute(sql, params).lastrowid)
 
     def all(self, sql: str, params: Iterable[Any] = ()) -> list[dict]:
-        return [dict(r) for r in self.execute(sql, params).fetchall()]
+        return [dict(r) for r in self._fetch(self.execute(sql, params).fetchall)]
 
     def one(self, sql: str, params: Iterable[Any] = ()) -> dict | None:
-        row = self.execute(sql, params).fetchone()
+        row = self._fetch(self.execute(sql, params).fetchone)
         return dict(row) if row else None
+
+    def _fetch(self, fn):
+        """The rest of a result: a long one can hit the dead disk part way through (counted, not retried)."""
+        try:
+            return fn()
+        except sqlite3.OperationalError as e:
+            if _is(e, STORAGE_ERRORS):
+                self.storage_failed(str(e))
+            raise
 
     # ---- cameras
     def cameras(self, enabled_only: bool = False) -> list[dict]:
@@ -500,34 +660,39 @@ class Database:
 
     def index_event_text(self, event_id: int, synopsis: str, labels: str, embedding: list[float] | None) -> None:
         """(Re)index an event for search; replaces any previous entry."""
-        with self.lock:
-            self.conn.execute("DELETE FROM events_fts WHERE rowid=?", (event_id,))
-            self.conn.execute("DELETE FROM events_vec WHERE rowid=?", (event_id,))
-            self.conn.execute("INSERT INTO events_fts(rowid, synopsis, labels) VALUES (?,?,?)",
-                              (event_id, synopsis, labels))
+        def run(c):   # delete-then-insert: safe to run again after a reopen
+            c.execute("DELETE FROM events_fts WHERE rowid=?", (event_id,))
+            c.execute("DELETE FROM events_vec WHERE rowid=?", (event_id,))
+            c.execute("INSERT INTO events_fts(rowid, synopsis, labels) VALUES (?,?,?)", (event_id, synopsis, labels))
             if embedding:
-                self.conn.execute("INSERT INTO events_vec(rowid, embedding) VALUES (?,?)",
-                                  (event_id, serialize(embedding)))
+                c.execute("INSERT INTO events_vec(rowid, embedding) VALUES (?,?)", (event_id, serialize(embedding)))
+        self._run(run)
 
     def unindex_event(self, event_id: int) -> None:
-        with self.lock:
-            self.conn.execute("DELETE FROM events_fts WHERE rowid=?", (event_id,))
-            self.conn.execute("DELETE FROM events_vec WHERE rowid=?", (event_id,))
+        def run(c):
+            c.execute("DELETE FROM events_fts WHERE rowid=?", (event_id,))
+            c.execute("DELETE FROM events_vec WHERE rowid=?", (event_id,))
+        self._run(run)
 
     def delete_event(self, event_id: int) -> None:
         """Remove an event row and everything keyed on it (search index, embeddings); files are the caller's."""
         self.unindex_event(event_id)
-        with self.lock:
-            self.conn.execute("DELETE FROM reid_vec WHERE rowid=?", (event_id,))
-            self.conn.execute("DELETE FROM vehicle_vec WHERE rowid=?", (event_id,))
-            self.conn.execute("DELETE FROM events WHERE id=?", (event_id,))
+
+        def run(c):
+            c.execute("DELETE FROM reid_vec WHERE rowid=?", (event_id,))
+            c.execute("DELETE FROM vehicle_vec WHERE rowid=?", (event_id,))
+            c.execute("DELETE FROM events WHERE id=?", (event_id,))
+        self._run(run)
 
     # ---- person re-ID embeddings
     def set_vec(self, table: str, row_id: int, vec) -> None:
         assert table in ("reid_vec", "vehicle_vec")
-        with self.lock:
-            self.conn.execute(f"DELETE FROM {table} WHERE rowid=?", (row_id,))
-            self.conn.execute(f"INSERT INTO {table}(rowid, embedding) VALUES (?,?)", (row_id, serialize(list(map(float, vec)))))
+        blob = serialize(list(map(float, vec)))
+
+        def run(c):
+            c.execute(f"DELETE FROM {table} WHERE rowid=?", (row_id,))
+            c.execute(f"INSERT INTO {table}(rowid, embedding) VALUES (?,?)", (row_id, blob))
+        self._run(run)
 
     def get_vec(self, table: str, row_id: int):
         import numpy as np
@@ -536,9 +701,7 @@ class Database:
         return np.frombuffer(row["embedding"], dtype=np.float32) if row else None
 
     def set_reid(self, event_id: int, vec) -> None:
-        with self.lock:
-            self.conn.execute("DELETE FROM reid_vec WHERE rowid=?", (event_id,))
-            self.conn.execute("INSERT INTO reid_vec(rowid, embedding) VALUES (?,?)", (event_id, serialize(list(map(float, vec)))))
+        self.set_vec("reid_vec", event_id, vec)
 
     def get_reid(self, event_id: int):
         import numpy as np

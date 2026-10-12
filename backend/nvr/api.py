@@ -9,6 +9,7 @@ import logging
 import mimetypes
 import re
 import shutil
+import sqlite3
 import tempfile
 import threading
 import subprocess
@@ -137,6 +138,7 @@ async def lifespan(app: FastAPI):
         ("briefings", assistant.briefing_loop(p)),
         ("backup", backup.backup_loop()),
         ("stream-health", state.health.run()),
+        ("storage-watch", health.StorageWatch().run()),   # write probe of the data disk (health.storage_alert)
         ("ptz", state.ptz.run()),
         ("hub-agent", state.hub.run()),
         ("sd-backfill", state.sd.run()),
@@ -2280,10 +2282,14 @@ def _bandwidth() -> dict | None:
 
 
 def _health_alerts() -> list[dict]:
-    """Detector problems, vlm_fallback_active (the primary Qwen is down, the fallback model serves) and
-    site_link_down (every camera silent: the link to the site is down)."""
-    link = summary_mod.link_alert(state)
-    return detector.health_alerts(state.pipeline) + vlmroute.router.health_alerts() + ([link] if link else [])
+    """storage_failing (the database can't be written), detector problems, vlm_fallback_active (the primary Qwen is
+    down, the fallback model serves) and site_link_down (every camera silent: the link to the site is down)."""
+    try:
+        link = summary_mod.link_alert(state)
+    except sqlite3.Error:   # the camera list is in the failing database; storage_failing says what matters
+        link = None
+    store = health.storage_alert()
+    return ([store] if store else []) + detector.health_alerts(state.pipeline) + vlmroute.router.health_alerts() + ([link] if link else [])
 
 
 @app.post("/api/backup")

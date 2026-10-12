@@ -303,13 +303,49 @@ class EventPuller(threading.Thread):
         )
 
 
+DROP_WARN_S = 60   # a full queue: one warning per camera and queue this often, with the count dropped since the last
+
+
+class QueueFeed:
+    """Hands items from a reader thread to an asyncio queue on the loop. A full queue (the pipeline isn't keeping up,
+    e.g. every event insert failing on a dead disk) drops the item and warns once per DROP_WARN_S with a count:
+    put_nowait raising inside the loop's callback logged a full traceback per frame (46k of them on 2026-10-10)."""
+
+    def __init__(self, loop: asyncio.AbstractEventLoop, q: asyncio.Queue, camera_id: str, what: str,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        self.loop, self.q, self.camera_id, self.what, self.clock = loop, q, camera_id, what, clock
+        self.dropped = 0              # since the last warning
+        self.dropped_total = 0
+        self._warned_at: float | None = None
+
+    def __call__(self, item) -> None:   # reader thread
+        self.loop.call_soon_threadsafe(self.put, item)
+
+    def put(self, item) -> None:        # event loop
+        try:
+            self.q.put_nowait(item)
+        except asyncio.QueueFull:
+            self.dropped += 1
+            self.dropped_total += 1
+            now = self.clock()
+            if self._warned_at is None:
+                log.warning("[%s] %s queue full (%d waiting): dropping %s until it drains",
+                            self.camera_id, self.what, self.q.qsize(), self.what)
+            elif now - self._warned_at >= DROP_WARN_S:
+                log.warning("[%s] %s queue full (%d waiting): dropped %d %s in the last %.0f s",
+                            self.camera_id, self.what, self.q.qsize(), self.dropped, self.what, now - self._warned_at)
+            else:
+                return
+            self._warned_at, self.dropped = now, 0
+
+
 class CameraIngest:
     """Owns the reader threads for one camera and bridges them onto asyncio queues."""
 
     def __init__(self, cam: dict, loop: asyncio.AbstractEventLoop,
                  frames: asyncio.Queue, events: asyncio.Queue):
-        put_frame = lambda f: loop.call_soon_threadsafe(frames.put_nowait, f)
-        put_event = lambda e: loop.call_soon_threadsafe(events.put_nowait, e)
+        put_frame = QueueFeed(loop, frames, cam["id"], "metadata frames")
+        put_event = QueueFeed(loop, events, cam["id"], "rule events")
         self.camera_id = cam["id"]
         self.meta = MetadataReader(cam["id"], put_frame)
         self.events = EventPuller(cam, put_event)
