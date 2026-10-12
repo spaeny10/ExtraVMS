@@ -1181,7 +1181,22 @@ def _make_thumb(src: Path, dest: Path, width: int) -> None:
 @app.get("/api/events/{event_id}/media/{name}")
 async def event_media(event_id: int, name: str, w: int | None = Query(None, ge=160, le=1280)):
     """An event's clip, snapshot or crop. `w` (snapshot.jpg only): a thumbnail at most that wide, generated on first
-    request and kept beside the snapshot as thumb_<w>.jpg. Cards through the hub tunnel load ~30 KB instead of 1.2 MB."""
+    request and kept beside the snapshot as thumb_<w>.jpg. Cards through the hub tunnel load ~30 KB instead of 1.2 MB.
+    A clip whose file is gone (the desktop's failed SSD took every clip of 2026-10-06..09 with it; retention may also
+    have pruned it) plays the same span from the continuous recording instead, while that is still kept."""
+    if name == "clip.mp4" and not (settings.data_dir / "events" / str(int(event_id)) / name).is_file():
+        e = db.event(event_id)
+        if not e:
+            raise HTTPException(404)
+        start = e.get("clip_start") or e["start_ts"] - settings.clip_pre_roll
+        end = (e.get("end_ts") or e["start_ts"]) + settings.clip_post_roll
+        return await playback(e["camera_id"], start, min(3600.0, max(5.0, end - start)), None, None)
+    if name == "snapshot.jpg" and not (settings.data_dir / "events" / str(int(event_id)) / name).is_file():
+        e = db.event(event_id)   # the same loss: a frame from the recording a moment into the event
+        if not e:
+            raise HTTPException(404)
+        t = e["start_ts"] + min(2.0, max(0.0, ((e.get("end_ts") or e["start_ts"]) - e["start_ts"]) / 2))
+        return await frame(e["camera_id"], t, w=_thumb_width(w) if w else 960, exact=False)
     f = _event_file(event_id, name)
     if w and name == "snapshot.jpg":
         width = _thumb_width(w)
