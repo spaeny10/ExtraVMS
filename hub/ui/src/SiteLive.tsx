@@ -19,7 +19,7 @@
  * layout holds which cameras show and in what order, their streams, the grid's columns and the activity column. Tiles
  * reorder by dragging the ⠿ grip in their bar (desktop); the phone picks a layout only. The logic is liveLayout.ts.
  */
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { Camera as ServerCam, NvrEvent } from "@site/api";
 import { EventCard } from "@site/Events";
 import { FeedMore, LiveTile, RegionChips, useFeedCount } from "@site/Views";
@@ -140,6 +140,7 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
   const [hdUnsupported, setHdUnsupported] = useState(false);
   const q = (key: string): Quality => (hdUnsupported ? "sd" : layout.quality[key] ?? "sd");
   const [expanded, setExpanded] = useState<string | null>(null);
+  const gridRef = useRef<HTMLDivElement>(null);
   const isPhone = useIsPhone();
   // the column shows unless the embed drops it (the SOC) or the viewer hid it (a phone has it under the picture: always)
   const showFeed = !hideActivity && (isPhone || layout.activity);
@@ -148,6 +149,8 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
   const activity = useSiteActivity(site, servers, source, !hideActivity, showFeed);
   const activeOf = (key: string) => activity.recent?.find((e) => camKey(e.site_id, e.camera_id) === key && (e.status === "open" || e.status === "pending"));
 
+  // above every early return below: hooks run in the same order every render
+  const fit = useExpandFit(gridRef, !isPhone && !!expanded && shown.some((t) => t.key === expanded));
   if (servers.length === 0) return <p className="muted">This site has no servers yet.</p>;
   if (tiles.length === 0) return <p className="muted">{Object.keys(full).length || registry.length ? "No cameras at this site yet." : "Loading cameras…"}</p>;
 
@@ -200,7 +203,9 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
             <CameraPicker tiles={ordered} layout={layout} multi={multi} dispatch={dispatch} dirty={dirty} onRevert={revert}
               revertLabel={named.layoutId ? "Revert to the saved layout" : "Reset layout"} />
           </div>}
-          <div className="live-grid" style={{ gridTemplateColumns: `repeat(${focused ? 1 : layoutCols(layout, grid.length)}, minmax(0, 1fr))` }}>
+          <div ref={gridRef} className={`live-grid ${focused ? "expanded" : ""}`}
+            style={{ gridTemplateColumns: `repeat(${focused ? 1 : layoutCols(layout, grid.length)}, minmax(0, 1fr))`,
+              ...(focused && fit ? { "--expand-h": `${fit}px`, "--expand-ar": q(focused.key) === "hd" ? 2592 / 1520 : 4 / 3 } as React.CSSProperties : {}) }}>
             {grid.map((t) => (
               <SiteTile key={t.key} t={t} {...tileProps}
                 drag={draggable ? { onGrip: (e) => drag.start(t.key, tileLabel(t.server.name, t.name, multi), e), dragging: drag.dragKey === t.key,
@@ -448,6 +453,26 @@ function useSiteActivity(site: Site, servers: Server[], source: DashboardSource,
 
   const pool = useMemo(() => (scopeKey ? mergePool(scoped, recent ?? []) : recent ?? []), [scopeKey, scoped, recent]);
   return { recent, pool, regionKeys, regionMap, offline };
+}
+
+/** Expand: the height left for the one picture below the grid's top edge, so the expanded camera (picture plus its
+ *  name bar) fits the window instead of growing with the page width past the bottom of the screen. */
+const EXPAND_BAR_PX = 56;   // the tile's name bar and the gap under it
+function useExpandFit(grid: React.RefObject<HTMLDivElement | null>, on: boolean): number | null {
+  const [h, setH] = useState<number | null>(null);
+  useLayoutEffect(() => {
+    if (!on) { setH(null); return; }
+    const measure = () => {
+      const el = grid.current;
+      if (!el) return;
+      const top = el.getBoundingClientRect().top + window.scrollY;   // from the top of the page, not of the viewport
+      setH(Math.max(200, Math.floor(window.innerHeight - top - EXPAND_BAR_PX)));
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, [grid, on]);
+  return h;
 }
 
 /** The "Latest activity" column: LiveView's feed and RegionNote, with the event viewer opened in place. */

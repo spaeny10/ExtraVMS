@@ -138,6 +138,8 @@
 }
 
 /* ---------- Site › Live (combined grid over the site's servers; tiles reuse the server's live-grid/tile/dash-still) ---------- */
+/* Expand: the camera fits the window (useExpandFit sets --expand-h, the picture's aspect --expand-ar), centered */
+.live-grid.expanded > .site-live-cell { width: min(100%, calc(var(--expand-h, 9999px) * var(--expand-ar, 1.3333))); justify-self: center; }
 /* "Cameras ▾" in the Live toolbar (SiteLive CameraPicker): a popover list of show/hide toggles, drag to reorder */
 .cams-toggle.filtered { border-color: var(--accent); }
 .menu-pop.cams-pop { min-width: 260px; max-height: min(60vh, 480px); overflow-y: auto; }
