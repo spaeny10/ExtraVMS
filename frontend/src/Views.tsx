@@ -1,26 +1,27 @@
 import { useEffect, useState } from "react";
-import { BASE, api, bandwidthText, fmtTime, frameUrl, type Bandwidth, type BaselineCamera, type FootageStatus, type RemoteStatus, type Camera, type EventSource, type FeedbackStats, type HubStatus, type NvrEvent, type RetentionPolicy, type ScannedDevice, type SiteApi, type SystemInfo, type Zone } from "./api";
+import { BASE, api, bandwidthText, fmtTime, frameUrl, type Bandwidth, type BaselineCamera, type FootageStatus, type RemoteStatus, type Camera, type FeedbackStats, type HubStatus, type NvrEvent, type RetentionPolicy, type SiteApi, type SystemInfo } from "./api";
 import { EventCard } from "./Events";
 import { EventDetail } from "./EventDetail";
 import { LivePlayer } from "./LivePlayer";
 import { ZoneEditor } from "./ZoneEditor";
-import { PolicyForm, RetentionPanel } from "./RetentionPanel";
+import { RetentionPanel } from "./RetentionPanel";
 import { Advisor } from "./Advisor";
 import { QwenFeedbackInfo } from "./QwenFeedbackInfo";
-import { NeighborsEditor } from "./Neighbors";
-import { Skeleton, confirmDialog, errorText, swipeHandlers, toast, useIsPhone } from "./ui";
+import { Skeleton, confirmDialog, swipeHandlers, toast, useIsPhone } from "./ui";
 import { RegionBadge, RegionOverlay } from "./RegionPaint";
-import { PtzBadge, PtzOverlay, PtzSettings } from "./PtzControl";
+import { PtzBadge, PtzOverlay } from "./PtzControl";
 import { ZoomScope } from "./VideoZoom";
 import { regionFetchKey, regionPass, regions, useRegionResults, useRegions } from "./region";
 import { useRef } from "react";
 import { yoloFallbackText, yoloState } from "./yoloStatus";
 import { vlmSub, vlmValue } from "./vlmStatus";
 import { sdStatusText } from "./sdcard";
-import { detectionsText, streamsText, streamsTitle, suggestText } from "./cameraStreams";
+import { detectionsText } from "./cameraStreams";
 import { TalkdownPanel } from "./TalkdownPanel";
 import { speakersByCamera, type TalkSpeaker } from "./talkdown";
 import { SpeakersSection } from "./Speakers";
+import { CameraDialog, StreamsLine, blankCamera, zoneSummary } from "./CameraDialog";
+import type { CameraDraft } from "./cameraEdit";
 
 /* ------------------------------------------------------------------ Live */
 
@@ -283,11 +284,6 @@ export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: n
 
 /* ------------------------------------------------------------------ Cameras */
 
-const blank: Camera & { password?: string } = {
-  id: "", name: "", host: "", onvif_port: 80, rtsp_port: 554, username: "admin", main_path: "/main",
-  sub_path: "/sub", enabled: true, zones: [], retention_days: null, scene_notes: "",
-};
-
 /** Settings → Cameras: what the camera's own SD card holds (checked hourly; "Check" asks the camera now). */
 function SdCell({ camera, onChecked }: { camera: Camera; onChecked: () => void }) {
   const [busy, setBusy] = useState(false);
@@ -313,77 +309,17 @@ function SdCell({ camera, onChecked }: { camera: Camera; onChecked: () => void }
   );
 }
 
-/** Settings → Cameras: the streams the camera serves (its ONVIF profiles, backend streams.py); "Check" asks it now. */
-function StreamsLine({ camera, onChecked, onPaths }: { camera: Camera; onChecked: () => void; onPaths?: (p: { main_path: string; sub_path: string }) => void }) {
-  const [busy, setBusy] = useState(false);
-  const s = camera.streams;
-  const text = streamsText(s);
-  const fix = suggestText(s, camera);
-  // the configured main path is not one the camera lists: one click saves the paths it does list (never automatic)
-  const usePaths = async () => {
-    if (!s?.suggest) return;
-    setBusy(true);
-    try {
-      const { status, streams, ...rest } = camera;
-      await api.saveCamera({ ...rest, main_path: s.suggest.main_path, sub_path: s.suggest.sub_path });
-      toast.success(`${camera.name}: now ${s.suggest.main_path} and ${s.suggest.sub_path}`);
-      onPaths?.(s.suggest);
-      onChecked();
-    } catch (e) {
-      toast.error(e);
-    } finally {
-      setBusy(false);
-    }
-  };
-  const check = async () => {
-    setBusy(true);
-    try {
-      const r = await api.checkStreams(camera.id);
-      if (r.pending) toast.success(`${camera.name}: the camera is slow to answer; its streams will show when it does`);
-      else if (r.error) toast.error(`${camera.name}: ${r.error}`);
-      else toast.success(`${camera.name}: ${streamsText(r) || "no video streams listed"}`);
-      onChecked();
-    } catch (e) {
-      toast.error(e);
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <div className={`small ${s?.error && !text ? "muted" : ""}`} title={streamsTitle(s)}>
-      Streams: {text || (s?.error ? "check failed" : s?.checked_at ? "none listed" : "not checked")}{" "}
-      <button className="ghost small" disabled={busy} onClick={check} title="Ask the camera which streams it serves">{busy ? "…" : "Check"}</button>
-      {fix && <button className="small" disabled={busy} onClick={usePaths}
-        title="The camera does not list the configured main stream path: save the paths it lists (largest stream as main)">{fix}</button>}
-    </div>
-  );
-}
-
 export function CamerasView({ cameras, port, reload }: { cameras: Camera[]; port: number; reload: () => void }) {
-  const [edit, setEdit] = useState<(Camera & { password?: string }) | null>(null);
-  const [err, setErr] = useState("");
+  const [edit, setEdit] = useState<CameraDraft | null>(null);
   const [zoneCam, setZoneCam] = useState<Camera | null>(null);
   const [sitePolicy, setSitePolicy] = useState<RetentionPolicy | null>(null);
   useEffect(() => {
     if (edit && !sitePolicy) api.retentionPolicy().then((r) => setSitePolicy(r.policy)).catch(() => {});
   }, [edit, sitePolicy]);
-  const save = async () => {
-    if (!edit) return;
-    setErr("");
-    try {
-      await api.saveCamera({ ...edit, password: edit.password || undefined });
-      setEdit(null);
-      reload();
-      toast.success(`Camera "${edit.name}" saved`);
-    } catch (e) {
-      setErr(errorText(e));
-      toast.error(e);
-    }
-  };
   return (
     <div className="view">
       <div className="toolbar">
-        <button onClick={() => setEdit({ ...blank, id: `cam${cameras.length + 1}` })}>Add camera</button>
+        <button onClick={() => setEdit({ ...blankCamera, id: `cam${cameras.length + 1}` })}>Add camera</button>
       </div>
       <table className="table">
         <thead>
@@ -425,168 +361,8 @@ export function CamerasView({ cameras, port, reload }: { cameras: Camera[]; port
         </tbody>
       </table>
       {edit && (
-        <div className="modal-backdrop" onClick={() => setEdit(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <header className="modal-head">
-              <h2>{cameras.some((c) => c.id === edit.id) ? `Edit ${edit.name}` : "Add camera"}</h2>
-              <button className="ghost" onClick={() => setEdit(null)} aria-label="Close">✕</button>
-            </header>
-            <div className="modal-grid">
-              <div className="form">
-                {!cameras.some((c) => c.id === edit.id) && (
-                  <ScanBox cameras={cameras} username={edit.username} password={edit.password}
-                    onUse={(d) => setEdit({ ...edit, host: d.address, onvif_port: d.port, name: edit.name || [d.manufacturer, d.model].filter(Boolean).join(" ") })} />
-                )}
-                <Field label="ID"><input value={edit.id} disabled={cameras.some((c) => c.id === edit.id)} onChange={(e) => setEdit({ ...edit, id: e.target.value })} /></Field>
-                <Field label="Name"><input value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} /></Field>
-                <Field label="Host / IP"><input value={edit.host} onChange={(e) => setEdit({ ...edit, host: e.target.value })} /></Field>
-                <div className="row">
-                  <Field label="ONVIF port"><input type="number" value={edit.onvif_port} onChange={(e) => setEdit({ ...edit, onvif_port: +e.target.value })} /></Field>
-                  <Field label="RTSP port"><input type="number" value={edit.rtsp_port} onChange={(e) => setEdit({ ...edit, rtsp_port: +e.target.value })} /></Field>
-                </div>
-                <details className="field" open={Boolean(edit.public_host)}>
-                  <summary>Port forwarding (outside address)</summary>
-                  <Field label="Outside address"><input value={edit.public_host ?? ""} placeholder="the site router's public IP or name"
-                    onChange={(e) => setEdit({ ...edit, public_host: e.target.value.trim() || null })} /></Field>
-                  <div className="row">
-                    <Field label="Outside ONVIF port"><input type="number" value={edit.public_onvif_port ?? ""} placeholder={String(edit.onvif_port)}
-                      onChange={(e) => setEdit({ ...edit, public_onvif_port: e.target.value ? +e.target.value : null })} /></Field>
-                    <Field label="Outside RTSP port"><input type="number" value={edit.public_rtsp_port ?? ""} placeholder={String(edit.rtsp_port)}
-                      onChange={(e) => setEdit({ ...edit, public_rtsp_port: e.target.value ? +e.target.value : null })} /></Field>
-                    <Field label="Outside replay port (SD card)"><input type="number" value={edit.public_replay_port ?? ""} placeholder="555"
-                      onChange={(e) => setEdit({ ...edit, public_replay_port: e.target.value ? +e.target.value : null })} /></Field>
-                  </div>
-                  <span className="small">For a camera reached through the site router's port forwards. This server connects to the outside address and ports, and the addresses the camera reports (events, PTZ, streams) are rewritten to them. Host / IP and the ports above stay the camera's own. Leave empty on the same network or over a VPN.</span>
-                </details>
-                <Field label="Record continuously">
-                  <select value={edit.record_stream ?? "main"} onChange={(e) => setEdit({ ...edit, record_stream: e.target.value as "main" | "sub" })}>
-                    <option value="main">Main stream (full resolution)</option>
-                    <option value="sub">Sub stream (saves cellular data)</option>
-                  </select>
-                </Field>
-                <span className="small">Sub stream saves cellular data: 5 cameras recording 4K continuously upload about 20-30 Mbit/s (7-10 TB a month). With the sub stream, recordings, clips and detection use the smaller picture; HD live view still pulls the main stream while someone watches.</span>
-                <div className="row">
-                  <Field label="Username"><input value={edit.username} onChange={(e) => setEdit({ ...edit, username: e.target.value })} /></Field>
-                  <Field label="Password"><input type="password" placeholder="unchanged" autoComplete="new-password" value={edit.password ?? ""} onChange={(e) => setEdit({ ...edit, password: e.target.value })} /></Field>
-                </div>
-                <div className="row">
-                  <Field label="Main stream path"><input value={edit.main_path} onChange={(e) => setEdit({ ...edit, main_path: e.target.value })} /></Field>
-                  <Field label="Sub stream path"><input value={edit.sub_path} onChange={(e) => setEdit({ ...edit, sub_path: e.target.value })} /></Field>
-                </div>
-                {cameras.some((c) => c.id === edit.id)
-                  ? <StreamsLine camera={cameras.find((c) => c.id === edit.id)!} onChecked={reload}
-                      onPaths={(p) => setEdit({ ...edit, ...p })} />
-                  : <span className="small">The camera is asked which streams it serves when it is saved. Without a low-resolution stream, SD live view plays the main stream.</span>}
-                <div className="row">
-                  <Field label="Enabled"><input type="checkbox" checked={Boolean(edit.enabled)} onChange={(e) => setEdit({ ...edit, enabled: e.target.checked })} /></Field>
-                </div>
-                <Field label="Events from">
-                  <select value={edit.event_source ?? "auto"} onChange={(e) => setEdit({ ...edit, event_source: e.target.value as EventSource })}>
-                    <option value="auto">Automatic</option>
-                    <option value="metadata">The camera's object metadata</option>
-                    <option value="onvif_events">The camera's ONVIF events (people / vehicle detection)</option>
-                  </select>
-                </Field>
-                {(edit.event_source ?? "auto") !== "metadata" && (
-                  <label className="row small">
-                    <input type="checkbox" checked={Boolean(edit.motion_events)} onChange={(e) => setEdit({ ...edit, motion_events: e.target.checked })} />
-                    Open events on the camera's motion alarms too (YOLO must confirm a person or vehicle)
-                  </label>
-                )}
-                {(() => {
-                  const d = cameras.find((c) => c.id === edit.id)?.status?.detections;
-                  const note = detectionsText(d);
-                  return <span className="small">{note ? `${note}: ${d?.reason}.` : d ? `Detections: from the camera's object metadata (${d.reason}).` : ""}{" "}
-                    Automatic uses the camera's ONVIF detection events (e.g. Reolink people detection) only when it sends no objects in its metadata; those events have no positions, so YOLO finds the person or vehicle and the zones apply to what it finds.</span>;
-                })()}
-                <div className="field">
-                  <span>Qwen describes</span>
-                  <div className="row">
-                    {(["person", "vehicle"] as const).map((l) => {
-                      const cur = edit.synopsis_labels ?? ["person"];
-                      return (
-                        <label key={l} className="row small">
-                          <input type="checkbox" checked={cur.includes(l)}
-                            onChange={(e) => setEdit({ ...edit, synopsis_labels: e.target.checked ? [...cur.filter((x) => x !== l), l] : cur.filter((x) => x !== l) })} />
-                          {l === "person" ? "People" : "Vehicles"}
-                        </label>
-                      );
-                    })}
-                  </div>
-                  <span className="small">YOLO-verified detections only, and only inside this camera's zones. Unusual events are described either way.</span>
-                </div>
-                <div className="field">
-                  <span>Site rules</span>
-                  {(edit.policies ?? []).map((r, i) => (
-                    <div key={i} className="rule-row">
-                      <span className="small">Only</span>
-                      <input value={r.allowed.join(", ")} placeholder={r.kind === "entry" ? "names from People & vehicles, e.g. Shawn" : "names from People & vehicles, e.g. BIGView truck"}
-                        onChange={(e) => setEdit({ ...edit, policies: (edit.policies ?? []).map((x, k) => k === i ? { ...x, allowed: e.target.value.split(",").map((s) => s.trim()).filter(Boolean) } : x) })} />
-                      {r.kind === "entry" ? (
-                        <>
-                          <span className="small">may enter through</span>
-                          <select value={r.area ?? ""} onChange={(e) => setEdit({ ...edit, policies: (edit.policies ?? []).map((x, k) => k === i ? { ...x, area: e.target.value } : x) })}>
-                            <option value="">choose a named place…</option>
-                            {(edit.zones ?? []).filter((z) => z.type === "area").map((z) => <option key={z.name} value={z.name}>{z.name}</option>)}
-                          </select>
-                        </>
-                      ) : (
-                        <>
-                          <span className="small">may tow a</span>
-                          <input value={r.asset ?? ""} placeholder="solar light tower"
-                            onChange={(e) => setEdit({ ...edit, policies: (edit.policies ?? []).map((x, k) => k === i ? { ...x, asset: e.target.value } : x) })} />
-                        </>
-                      )}
-                      <select value={r.priority} onChange={(e) => setEdit({ ...edit, policies: (edit.policies ?? []).map((x, k) => k === i ? { ...x, priority: e.target.value as "medium" | "high" } : x) })}>
-                        <option value="high">high priority</option><option value="medium">medium priority</option>
-                      </select>
-                      <button className="ghost small" title="Remove rule" onClick={() => setEdit({ ...edit, policies: (edit.policies ?? []).filter((_, k) => k !== i) })}>✕</button>
-                    </div>
-                  ))}
-                  <div className="row">
-                    <button className="ghost small" onClick={() => setEdit({ ...edit, policies: [...(edit.policies ?? []), { kind: "towing", asset: "", allowed: [], priority: "high" }] })}>+ Towing rule</button>
-                    <button className="ghost small" onClick={() => setEdit({ ...edit, policies: [...(edit.policies ?? []), { kind: "entry", area: "", allowed: [], priority: "high" }] })}>+ Entry rule</button>
-                  </div>
-                  <span className="small">Towing: checked after Qwen describes each vehicle here — a vehicle towing the asset that isn't a named vehicle is flagged. Entry: checked right after verification — a person whose track starts at that named place (an exterior door) who isn't a named person is flagged. Both raise the event to that priority and show it under Needs attention. Name your own people and trucks in People & vehicles first; an unnamed one trips the rule once.</span>
-                </div>
-                <label className="field">
-                  <span>Scene notes for Qwen</span>
-                  <textarea rows={5} value={edit.scene_notes ?? ""} onChange={(e) => setEdit({ ...edit, scene_notes: e.target.value })}
-                    placeholder={"What's normal in this view, e.g.\nThe white trailers in the foreground are our solar light towers.\nThe road and Ford dealership in the background are public; traffic there is routine.\nStaff wear hi-vis vests."} />
-                  <span className="small">Added to every synopsis and chat prompt for this camera.</span>
-                </label>
-                {err && <p className="error">{err}</p>}
-                <div className="row"><button onClick={save}>Save</button></div>
-              </div>
-              <div>
-                <h3>Detection zones</h3>
-                <p>{zoneSummary(edit.zones)}</p>
-                <p className="muted small">Mask out busy areas such as a road, or limit detection to the areas you care about. Drawn on a full-resolution still with recent detections shown.</p>
-                {cameras.some((c) => c.id === edit.id) ? (
-                  <button className="ghost" onClick={() => { const c = cameras.find((x) => x.id === edit.id)!; setEdit(null); setZoneCam(c); }}>Edit zones…</button>
-                ) : (
-                  <p className="muted small">Save the camera first.</p>
-                )}
-                <h3 className="spaced">Neighboring cameras</h3>
-                {cameras.some((c) => c.id === edit.id) ? <NeighborsEditor cameraId={edit.id} cameras={cameras} /> : <p className="muted small">Save the camera first.</p>}
-                <h3 className="spaced">PTZ</h3>
-                {cameras.some((c) => c.id === edit.id) ? <PtzSettings camera={cameras.find((c) => c.id === edit.id)!} onChanged={reload} /> : <p className="muted small">Save the camera first.</p>}
-                <h3 className="spaced">Retention</h3>
-                <label className="row small">
-                  <input type="checkbox" checked={!edit.retention_policy} onChange={(e) => setEdit({
-                    ...edit, retention_days: null,
-                    retention_policy: e.target.checked ? null : { ...(sitePolicy ?? {}), ...(edit.retention_days ? { continuous_days: edit.retention_days } : {}) },
-                  })} />
-                  Use the site retention policy{sitePolicy ? ` (${sitePolicy.continuous_days} days continuous)` : ""}
-                </label>
-                {edit.retention_policy && sitePolicy && (
-                  <PolicyForm value={{ ...sitePolicy, ...edit.retention_policy, keep: { ...sitePolicy.keep, ...(edit.retention_policy.keep ?? {}) } } as RetentionPolicy}
-                    showFloor={false} onChange={(v) => { const { min_free_gb: _floor, ...rest } = v; setEdit({ ...edit, retention_policy: rest }); }} />
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
+        <CameraDialog key={edit.id} draft={edit} cameras={cameras} sitePolicy={sitePolicy} reload={reload}
+          onClose={() => setEdit(null)} onEditZones={(c) => { setEdit(null); setZoneCam(c); }} />
       )}
       <SpeakersSection cameras={cameras} />
       {zoneCam && <ZoneEditor camera={zoneCam} onClose={() => setZoneCam(null)} onSaved={reload} />}
@@ -594,81 +370,8 @@ export function CamerasView({ cameras, port, reload }: { cameras: Camera[]; port
   );
 }
 
-function zoneSummary(zones: Zone[]): string {
-  const valid = zones.filter((z) => z.points.length >= 3);
-  if (!valid.length) return "Full frame";
-  const count = (t: string) => valid.filter((z) => (z.type ?? "include") === t).length;
-  const masks = count("exclude"), areas = count("include"), places = count("area"), ppe = count("ppe");
-  return [masks && `${masks} mask${masks > 1 ? "s" : ""}`, areas && `${areas} detect-only area${areas > 1 ? "s" : ""}`,
-    places && `${places} place${places > 1 ? "s" : ""}`, ppe && `${ppe} PPE zone${ppe > 1 ? "s" : ""}`].filter(Boolean).join(", ");
-}
-
 function Health({ ok }: { ok?: boolean }) {
   return <span className={`dot ${ok ? "ok" : "bad"}`} />;
-}
-
-/** A guess at the subnet to scan: the /24 of the first camera with an IPv4 address. */
-function guessSubnet(cameras: Camera[]): string {
-  const ip = cameras.map((c) => /^(\d+\.\d+\.\d+)\.\d+$/.exec(c.host)?.[1]).find(Boolean);
-  return ip ? `${ip}.0/24` : "";
-}
-
-/** Unicast ONVIF scan (POST /api/cameras/scan): finds cameras where WS-Discovery can't (over a VPN tunnel). */
-function ScanBox({ cameras, username, password, onUse }: {
-  cameras: Camera[]; username?: string; password?: string; onUse: (d: ScannedDevice) => void;
-}) {
-  const [subnet, setSubnet] = useState(() => guessSubnet(cameras));
-  const [ports, setPorts] = useState("80, 8000, 8080");
-  const [busy, setBusy] = useState(false);
-  const [found, setFound] = useState<ScannedDevice[] | null>(null);
-  const [err, setErr] = useState("");
-  const scan = async () => {
-    setBusy(true); setErr(""); setFound(null);
-    try {
-      const p = ports.split(/[\s,]+/).filter(Boolean).map(Number);
-      const r = await api.scanCameras({ subnet: subnet.trim(), ports: p.length ? p : undefined,
-        ...(password ? { username, password } : {}) });
-      setFound(r.devices);
-    } catch (e) {
-      setErr(errorText(e));
-    }
-    setBusy(false);
-  };
-  return (
-    <details className="field scan-box">
-      <summary>Scan a subnet</summary>
-      <div className="row">
-        <input value={subnet} placeholder="10.20.7.0/24" onChange={(e) => setSubnet(e.target.value)} title="A private subnet, at most a /22" />
-        <input value={ports} onChange={(e) => setPorts(e.target.value)} title="ONVIF ports to try" style={{ maxWidth: 140 }} />
-        <button className="ghost small" disabled={busy || !subnet.trim()} onClick={scan}>{busy ? "Scanning…" : "Scan"}</button>
-      </div>
-      <span className="small">Asks every address for ONVIF (works over a VPN, where discovery doesn't). Type the camera password below first to see model names on cameras that hide them.</span>
-      {err && <p className="error small">{err}</p>}
-      {found && !found.length && <p className="muted small">No ONVIF devices answered.</p>}
-      {found && found.length > 0 && (
-        <ul className="scan-results">
-          {found.map((d) => (
-            <li key={`${d.address}:${d.port}`} className="row small">
-              <span><strong>{d.address}</strong>:{d.port}</span>
-              <span className="muted">{[d.manufacturer, d.model, d.firmware && `fw ${d.firmware}`].filter(Boolean).join(" · ")
-                || (d.auth_failed ? "password refused" : d.needs_auth ? "needs credentials" : "ONVIF device")}</span>
-              {d.camera_id ? <span className="muted">added as {d.camera_id}</span>
-                : <button className="ghost small" onClick={() => onUse(d)}>Use</button>}
-            </li>
-          ))}
-        </ul>
-      )}
-    </details>
-  );
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <label className="field">
-      <span>{label}</span>
-      {children}
-    </label>
-  );
 }
 
 /* ------------------------------------------------------------------ System */

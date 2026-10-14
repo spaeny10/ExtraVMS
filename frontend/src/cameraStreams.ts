@@ -41,7 +41,8 @@ export function detectionsText(d: { source: string; reason: string } | null | un
   return "Detections: from the camera's ONVIF events (no object positions)";
 }
 
-function size(p: StreamProfile): string {
+/** "3840×2160 H.264" (either part may be missing). */
+export function profileSize(p: StreamProfile): string {
   const res = p.width && p.height ? `${p.width}×${p.height}` : "";
   return [res, p.encoding ?? ""].filter(Boolean).join(" ");
 }
@@ -51,9 +52,9 @@ export function streamsText(s: CameraStreams | null | undefined): string {
   if (!s) return "";
   const main = s.main ?? s.profiles[0] ?? null;
   if (!main) return s.sd?.relay ? "Main only" : "";
-  const m = size(main);
+  const m = profileSize(main);
   if (s.sd.relay || !s.sub) return m ? `Main ${m} only` : "Main only";
-  return `Main ${m} · Sub ${size(s.sub)}${s.sd.detected ? ` (${s.sub.path})` : ""}`;
+  return `Main ${m} · Sub ${profileSize(s.sub)}${s.sd.detected ? ` (${s.sub.path})` : ""}`;
 }
 
 /** The tooltip under the Streams line: where SD comes from, and when the camera was last asked. */
@@ -62,7 +63,7 @@ export function streamsTitle(s: CameraStreams | null | undefined, now = Date.now
   const parts: string[] = [];
   if (s.sd.relay) parts.push("SD live view plays the main stream (the camera has no low-resolution stream)");
   else if (s.sd.detected) parts.push(`SD live view uses ${s.sd.path}, which the camera lists, instead of the sub stream path`);
-  if (s.profiles.length) parts.push(`The camera lists: ${s.profiles.map((p) => `${p.path} ${size(p)}`.trim()).join(", ")}`);
+  if (s.profiles.length) parts.push(`The camera lists: ${s.profiles.map((p) => `${p.path} ${profileSize(p)}`.trim()).join(", ")}`);
   if (s.error) parts.push(`Last check failed: ${s.error}`);
   if (s.checked_at) {
     const min = Math.max(0, Math.round((now - s.checked_at) / 60));
