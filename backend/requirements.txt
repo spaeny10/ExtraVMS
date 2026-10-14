@@ -20,3 +20,6 @@ pyyaml
 cryptography
 psutil
 tzdata
+# talk-down Piper voices (nvr/tts.py; brings onnxruntime). Optional at run time: without it the server starts and speaks
+# with Windows SAPI / espeak. Voices: python tools/install_piper_voices.py
+piper-tts

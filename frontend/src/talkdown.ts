@@ -6,6 +6,7 @@
  * Describe & warn: the state of the reviewed message (warnReducer) between Qwen's answer and Play.
  */
 import type { DescribeAnswer, SiteApi, SpeakerStatus, TalkdownLibrary, TalkdownMessage } from "./api";
+import { type Spoken, voiceName } from "./talkdownVoice";
 
 /** A speaker as a live tile knows it: GET /api/speakers on the server's own UI, the heartbeat summary on the hub. */
 export type TalkSpeaker = {
@@ -93,13 +94,16 @@ export function uploadProblem(name: string, size: number, max = MAX_UPLOAD, type
   return null;
 }
 
-/** The toast after playing on one or several speakers: what started, and each speaker that refused. */
-export function playOutcome(results: { speaker: string; ok: boolean; error?: string; replaced?: string | null }[]): { ok: string | null; failed: string[] } {
+/** The toast after playing on one or several speakers: what started, and each speaker that refused. A text spoken by
+ *  a fallback (the Site's voice isn't installed on that server: the answer's `tts`) says who speaks instead. */
+export function playOutcome(results: { speaker: string; ok: boolean; error?: string; replaced?: string | null; tts?: Pick<Spoken, "fallback" | "label" | "requested"> | null }[]): { ok: string | null; failed: string[] } {
   const good = results.filter((r) => r.ok);
   const failed = results.filter((r) => !r.ok).map((r) => `${r.speaker}: ${r.error ?? "failed"}`);
   const replaced = good.filter((r) => r.replaced).map((r) => `'${r.replaced}'`);
+  const fb = good.map((r) => r.tts).find((t) => t?.fallback);
   const ok = !good.length ? null
-    : (good.length === 1 ? `Playing on ${good[0].speaker}` : `Playing on ${good.length} speakers`) + (replaced.length ? ` (replaced ${[...new Set(replaced)].join(", ")})` : "");
+    : (good.length === 1 ? `Playing on ${good[0].speaker}` : `Playing on ${good.length} speakers`) + (replaced.length ? ` (replaced ${[...new Set(replaced)].join(", ")})` : "")
+      + (fb ? ` · spoken by ${fb.label} (${voiceName(fb.requested)} isn't installed there)` : "");
   return { ok, failed };
 }
 

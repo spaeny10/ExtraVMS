@@ -8,12 +8,18 @@
  * Talk-down speakers are the ones the Site's servers report (their own Settings › Cameras › Speakers adds them and binds
  * them to cameras of that server, shown read-only here); here a Site admin binds them to groups as well. The logic is
  * cameraGroups.ts.
+ * The talk-down voice (hub talkdown_voice.py) is the Site's: a Piper voice, speed and attention chime that the hub pushes
+ * to every server of the Site; each server says whether it has the voice or what it falls back to (siteVoice.ts).
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { DEFAULT_VOICE, SPEED_MAX, SPEED_MIN, type VoiceSetting, enginesText, optionText, sameSetting, speedText, voiceName, voiceOptions } from "@site/talkdownVoice";
 import { confirmDialog, promptDialog, toast } from "@site/ui";
-import { type Camera, type Site, type SiteCameraGroup, type SiteSpeaker, api, ago } from "../api";
+import { VoicePreview } from "@site/VoicePreview";
+import { type Camera, type Site, type SiteCameraGroup, type SiteSpeaker, type SiteTalkdownVoice, api, ago } from "../api";
+import { siteApi } from "../hubSource";
 import { consoleHref } from "../nav";
 import { type CheckServer, cameraNames, camerasByServer, membersText, toggleKeys } from "./cameraGroups";
+import { previewServer, pushText, serverLine } from "./siteVoice";
 
 export function CamerasBox({ site }: { site: Site }) {
   const [groups, setGroups] = useState<SiteCameraGroup[] | null>(null);
@@ -38,6 +44,7 @@ export function CamerasBox({ site }: { site: Site }) {
     <div className="soc-settings">
       <GroupsCard site={site} groups={groups} speakers={speakers} canEdit={canEdit} checklist={checklist} multi={multi} onChanged={load} />
       <SpeakersCard site={site} groups={groups} speakers={speakers} canEdit={canEdit} checklist={checklist} multi={multi} onChanged={load} />
+      <VoiceCard site={site} />
     </div>
   );
 }
@@ -191,6 +198,93 @@ function SpeakersCard({ site, groups, speakers, canEdit, checklist, multi, onCha
                   ) : (groups.filter((g) => s.group_ids.includes(g.id)).map((g) => g.name).join(", ") || <span className="muted">none</span>)}
                 </td>
                 <td className="small" title={cameraNames(s.cameras, checklist, multi).join(", ")}>{membersText(s.cameras)}</td>
+              </tr>
+            );
+          })}</tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The Site's talk-down voice: Site admins pick the voice, speed and chime (saved on the hub, pushed to every server);
+ * viewers see it read-only; operators and up can Preview it (a sample from a server that has the voice). Per server:
+ * whether it has the voice or what it falls back to, and whether it has taken the saved setting yet.
+ */
+function VoiceCard({ site }: { site: Site }) {
+  const [data, setData] = useState<SiteTalkdownVoice | null>(null);
+  const [draft, setDraft] = useState<VoiceSetting>(DEFAULT_VOICE);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+  const load = useCallback(() => api.siteTalkdownVoice(site.id)
+    .then((d) => { setData(d); setDraft(d.setting ?? DEFAULT_VOICE); setError(null); })
+    .catch((e: Error) => setError(e.message.startsWith("404") ? "Talk-down voices aren't available on this hub yet." : e.message)), [site.id]);
+  useEffect(() => { load(); }, [load]);
+  if (error) return <div className="card"><h3 style={{ marginTop: 0 }}>Talk-down voice</h3><p className="muted" style={{ margin: 0 }}>{error}</p></div>;
+  if (!data) return null;
+  const supported = data.servers.filter((s) => s.supported);
+  const options = voiceOptions(supported.map((s) => ({ name: s.server_name, voices: s.voices, engines: s.engines })));
+  const dirty = data.setting === null || !sameSetting(draft, data.setting);
+  const pv = previewServer(data.servers, draft.voice);
+  const save = async () => {
+    setBusy(true);
+    try {
+      const r = await api.setSiteTalkdownVoice(site.id, draft);
+      setData(r);
+      if (r.setting) setDraft(r.setting);
+      setNote(pushText(r.pushed ?? []));
+      toast.success(`Talk-down voice: ${voiceName(r.setting?.voice)}`);
+    } catch (e) {
+      toast.error(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const edit = data.can_edit;
+  return (
+    <div className="card">
+      <h3 style={{ marginTop: 0 }}>Talk-down voice</h3>
+      <p className="muted small" style={{ marginTop: 0 }}>
+        Every server of this site speaks typed messages, Describe &amp; warn and library texts with this voice (a library text may have its own).
+        A server without the voice falls back to another installed voice, then the Windows voice.{" "}
+        {data.setting ? `Set by ${data.updated_by ?? "?"} ${data.updated_at ? ago(data.updated_at) : ""}.` : "Not set yet: each server uses its own."}
+      </p>
+      <div className="row talk-voice-form">
+        <label className="field">
+          <span>Voice</span>
+          <select value={draft.voice ?? ""} disabled={!edit} onChange={(e) => setDraft({ ...draft, voice: e.target.value || null })}>
+            {options.map((o) => <option key={o.id ?? ""} value={o.id ?? ""}>{optionText(o, supported.length)}</option>)}
+          </select>
+        </label>
+        <label className="field">
+          <span>Speed · {speedText(draft.speed)}</span>
+          <input type="range" min={SPEED_MIN} max={SPEED_MAX} step={0.05} value={draft.speed} disabled={!edit}
+            onChange={(e) => setDraft({ ...draft, speed: +e.target.value })} />
+        </label>
+        <label className="row small">
+          <input type="checkbox" checked={draft.chime} disabled={!edit} onChange={(e) => setDraft({ ...draft, chime: e.target.checked })} /> Attention chime first
+        </label>
+      </div>
+      <div className="row">
+        {data.can_preview && (pv
+          ? <VoicePreview requested={draft.voice} title={`A short sample from ${pv.server_name} (it never plays on a speaker)`}
+              preview={() => siteApi(pv.server_id).previewVoice({ voice: draft.voice, speed: draft.speed, chime: draft.chime })} />
+          : <span className="muted small">Preview needs an online server with talk-down voices.</span>)}
+        {edit && <button className="small" disabled={busy || !dirty} onClick={save}>Save</button>}
+        {note && <span className="muted small">{note}</span>}
+      </div>
+      {data.servers.length > 0 && (
+        <table className="hub-table stack">
+          <thead><tr><th>Server</th><th>{voiceName(draft.voice)} there</th><th>Engines</th></tr></thead>
+          <tbody>{data.servers.map((s) => {
+            const line = serverLine(s, draft.voice, data.setting);
+            return (
+              <tr key={s.server_id}>
+                <td className="lead"><span className={`dot ${s.online ? "ok" : "bad"}`} title={s.online ? "Online" : "Offline"} /> {s.server_name}</td>
+                <td className={`small ${line.ok === false ? "warn-text" : ""}`}>{line.text}</td>
+                <td className="small muted">{s.supported ? enginesText(s.engines) : "—"}</td>
               </tr>
             );
           })}</tbody>

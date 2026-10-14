@@ -1,5 +1,6 @@
 /** Hub API client. Same shape as the site's api.ts: relative URLs, cookie session, errors as `${status} ${text}`. */
 import type { NvrEvent, SavedFindView } from "@site/api";
+import type { Spoken, VoiceEngines, VoiceSetting } from "@site/talkdownVoice";
 import type { ActionCardData, ActionExtras, ActionPlanCore, ActionResult } from "@site/ActionCard";
 import { type AddressParts, type GeoHit, type GeocodeSource, type MapConfig, setMapConfig } from "./place";
 import type { CameraGroup, Dashboard, DashboardConfig, DashboardList, FleetEvent, FleetEvents } from "@site/dashboard/types";
@@ -43,6 +44,8 @@ export type ServerSummary = {
   site_link_down?: boolean; bandwidth?: Bandwidth;
   /** talk-down speakers (newer servers): the Live tiles of their cameras get the Talk-down button */
   speakers?: SummarySpeaker[];
+  /** the talk-down voice (newer servers; backend tts.summary): its setting, installed Piper voices, engines, who speaks */
+  talkdown_voice?: { setting: VoiceSetting; voices: string[]; engines: VoiceEngines; effective: Spoken | null } | null;
 };
 /** `location` is the server's own free-text note (older than Sites); `location_id/location_name` is the Site it belongs to. */
 export type Server = {
@@ -385,6 +388,9 @@ export const api = {
   siteSpeakers: (id: string) => req<{ speakers: SiteSpeaker[]; by_camera: Record<string, unknown[]>; can_edit: boolean }>(`/api/locations/${id}/speakers`),
   setSpeakerGroups: (id: string, server: string, speaker: string, groupIds: number[]) =>
     req<SiteSpeaker>(`/api/locations/${id}/speakers/${encodeURIComponent(server)}/${encodeURIComponent(speaker)}/groups`, json("PUT", { group_ids: groupIds })),
+  // a Site's talk-down voice (hub talkdown_voice.py): everyone who sees the Site reads it, its admins set it (pushed to its servers)
+  siteTalkdownVoice: (id: string) => req<SiteTalkdownVoice>(`/api/locations/${id}/talkdown-voice`),
+  setSiteTalkdownVoice: (id: string, s: VoiceSetting) => req<SiteTalkdownVoice>(`/api/locations/${id}/talkdown-voice`, json("PUT", s)),
   ack: (id: number) => req(`/api/alerts/${id}/ack`, { method: "POST" }),
   audit: (org: string, site?: string) => req<AuditRow[]>(`/api/audit?${qs({ org, site })}`),
   usage: (org: string, days = 30) => req<Usage>(`/api/orgs/${org}/usage?${qs({ days })}`),
@@ -502,6 +508,19 @@ export type SiteCameraGroup = {
 export type SiteSpeaker = {
   server_id: string; server_name: string; id: string; name: string; camera_ids: string[]; online?: boolean | null; playing?: string | null;
   group_ids: number[]; cameras: string[];
+};
+/** One server of the Site as its heartbeat reports the talk-down voice (hub talkdown_voice.servers_status): `supported`
+ *  false = too old for voices (nothing is pushed to it); `voices` = its installed Piper voice ids; `effective` = who
+ *  speaks there now (the Site's voice or the server's fallback). */
+export type SiteVoiceServer = {
+  server_id: string; server_name: string; online: boolean; supported: boolean; setting: VoiceSetting | null; in_sync: boolean;
+  voices: string[]; engines: VoiceEngines; effective: Spoken | null;
+};
+/** A Site's talk-down voice: `setting` null = never set (each server keeps its own). `pushed` (after a PUT): each server's answer. */
+export type SiteTalkdownVoice = {
+  setting: VoiceSetting | null; updated_at: number | null; updated_by: string | null; servers: SiteVoiceServer[];
+  can_edit: boolean; can_preview: boolean;
+  pushed?: { server_id: string; server_name: string; ok: boolean; error: string | null; skipped?: boolean; effective: Spoken | null }[];
 };
 export type SiteAskThread = { id: number; title: string; created_at: number; updated_at: number; messages: number };
 export type SiteAskMessage = { id: number; thread_id: number; role: "user" | "assistant"; content: string; sources: SiteAskSources | null; model: string | null; created_at: number; duration_ms: number | null };

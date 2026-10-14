@@ -21,7 +21,7 @@ from . import fleet as fleet_mod
 from . import find as find_mod
 from . import camera_groups as groups_mod
 from . import layouts as layouts_mod
-from . import site_ask
+from . import site_ask, talkdown_voice
 from . import central_cameras, coverage, geocode, hosts, security, soc, soc_reports
 from fastapi.responses import StreamingResponse
 from .agents import registry
@@ -1008,6 +1008,7 @@ async def delete_location(location_id: str, move_to: str | None = None, u: dict 
         site_ask.drop_location(c, location_id)   # everyone's Ask conversations about this place
         layouts_mod.drop_location(c, location_id)   # everyone's saved layouts of it
         groups_mod.drop_location(c, location_id)   # its camera groups and the speakers bound to them
+        talkdown_voice.drop_location(c, location_id)   # its talk-down voice (moved servers take move_to's)
         c.execute(sa.delete(db.site_coverage).where(db.site_coverage.c.location_id == location_id))   # describes this place only
         c.execute(sa.delete(db.locations).where(db.locations.c.id == location_id))
     for srv in servers:
@@ -1399,6 +1400,50 @@ async def set_site_speaker_groups(location_id: str, server_id: str, speaker_id: 
     out = groups_mod.site_speakers(loc["id"])
     return next((s for s in out["speakers"] if s["server_id"] == server_id and s["id"] == speaker_id),
                 {"server_id": server_id, "id": speaker_id, "group_ids": body.group_ids})
+
+
+# ---- a Site's talk-down voice (talkdown_voice.py): read by everyone who sees the Site, set by its admins, pushed to
+# every server of the Site through the tunnel
+
+class TalkdownVoiceIn(BaseModel):
+    voice: str | None = Field(None, pattern=talkdown_voice.VOICE_RX)   # None = automatic (each server's first installed voice)
+    speed: float = Field(1.0, ge=talkdown_voice.SPEED_MIN, le=talkdown_voice.SPEED_MAX)
+    chime: bool = False
+
+
+def _talkdown_voice(loc: dict, role: str) -> dict:
+    s = talkdown_voice.get(loc["id"])
+    setting = {k: s[k] for k in ("voice", "speed", "chime")} if s else None
+    return {"setting": setting, "updated_at": s["updated_at"] if s else None, "updated_by": s["updated_by"] if s else None,
+            "servers": talkdown_voice.servers_status(loc["id"], setting, registry.get),
+            "can_edit": allows(role, "admin"), "can_preview": allows(role, "operator")}
+
+
+@app.get("/api/locations/{location_id}/talkdown-voice")
+async def get_talkdown_voice(location_id: str, u: dict = Depends(user)):
+    """{setting: {voice, speed, chime} | null (never set: each server keeps its own), updated_at, updated_by, servers: [per
+    server: online, supported, setting, in_sync, voices (installed Piper voice ids), engines, effective], can_edit,
+    can_preview}."""
+    loc, role = auth.location_access(u, location_id)
+    return _talkdown_voice(loc, role)
+
+
+@app.put("/api/locations/{location_id}/talkdown-voice")
+async def put_talkdown_voice(location_id: str, body: TalkdownVoiceIn, u: dict = Depends(user)):
+    """Site admins: store the voice and push it to every connected server of the Site (`pushed`: each one's answer);
+    an offline server takes it on its first heartbeat."""
+    loc = _site_admin(u, location_id)
+    before = talkdown_voice.get(loc["id"])
+    s = talkdown_voice.put(loc, body.model_dump(), u["email"])
+    pushed = await talkdown_voice.push_location(loc["id"], s, registry, u["email"])
+    if not before or talkdown_voice.key(before) != talkdown_voice.key(s):
+        _audit(u, loc["org_id"], None, f"talk-down voice set: {s['voice'] or 'automatic'} ({loc['name']})",
+               {"location_id": loc["id"], "voice": s["voice"], "speed": s["speed"], "chime": s["chime"],
+                "before": {k: before[k] for k in ("voice", "speed", "chime")} if before else None,
+                "pushed": [p["server_id"] for p in pushed if p["ok"]],
+                "failed": [p["server_id"] for p in pushed if not p["ok"] and not p.get("skipped")]})
+    _, role = auth.location_access(u, location_id)
+    return {**_talkdown_voice(loc, role), "pushed": pushed}
 
 
 @app.post("/api/locations/{location_id}/ask")

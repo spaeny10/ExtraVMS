@@ -3,6 +3,7 @@ import type { DashboardConfig } from "./dashboard/types";
 import type { ActionPlanCore, ActionResult } from "./ActionCard";
 import type { CardRange, RestoredSpan, SdStatus } from "./sdcard";
 import type { CameraStreams } from "./cameraStreams";
+import type { CatalogVoice, Spoken, VoiceEngines, VoiceSetting } from "./talkdownVoice";
 /** include = detect only here; exclude = mask out; area = just a name for a place (never filters);
  * ppe = people who stay in it must wear the required items (backend/nvr/ppe.py; never filters) */
 export type ZoneType = "include" | "exclude" | "area" | "ppe";
@@ -156,19 +157,34 @@ export type SpeakerCheck = { ok: boolean; online: boolean; backchannel: boolean;
 export type SpeakerStatus = {
   state: "idle" | "connecting" | "playing"; message: string | null; by: string | null; requested_at: number | null; started_at: number | null;
   elapsed_s: number | null; duration_s: number | null;
-  last: { message: string; by: string; result: "played" | "stopped" | "replaced" | "failed"; error: string | null; at: number; played_s: number } | null;
+  last: { message: string; by: string; result: "played" | "stopped" | "replaced" | "failed"; error: string | null; at: number; played_s: number;
+    /** who spoke a text (newer servers; null for a recording or when it failed before speaking) */
+    tts?: Spoken | null } | null;
 };
 export type Speaker = {
   id: string; name: string; host: string; rtsp_port: number; onvif_port: number; path: string; username: string; codec: SpeakerCodec;
   volume_note: string; camera_ids: string[]; enabled: boolean; check: SpeakerCheck | null; checked_at: number | null; status: SpeakerStatus;
 };
-export type TalkdownMessage = { id: number; name: string; kind: "file" | "tts"; text: string | null; duration_s: number | null; created_at: number; available: boolean };
+/** `voice` / `speed`: a text's own (newer servers); null = the Site's talk-down voice. */
+export type TalkdownMessage = { id: number; name: string; kind: "file" | "tts"; text: string | null; duration_s: number | null; created_at: number; available: boolean;
+  voice?: string | null; speed?: number | null };
 export type TalkdownLibrary = { messages: TalkdownMessage[]; tts: { available: boolean; engine: string | null }; max_s: number; max_upload: number; types: string[] };
 /** An audio file sent in a JSON body (the server takes JSON only). */
 export type AudioUpload = { filename: string; data_b64: string };
 /** What to play: a library message, a text to speak, or a one-off file. */
 export type PlayRequest = { message_id: number } | { text: string } | { upload: AudioUpload };
-export type PlayAnswer = { speaker_id: string; speaker: string; camera_ids: string[]; message: string; message_id: number | null; text?: string | null; replaced: string | null; status: SpeakerStatus };
+/** `tts` (newer servers): who will speak a text, the Site's voice or the server's fallback (null: a recording, or no engine). */
+export type PlayAnswer = { speaker_id: string; speaker: string; camera_ids: string[]; message: string; message_id: number | null; text?: string | null; replaced: string | null; status: SpeakerStatus;
+  tts?: Spoken | null };
+/** The talk-down voice of this server (backend tts.py): `managed` = enrolled with a hub, which sets it per Site. */
+export type TalkdownVoiceState = { setting: VoiceSetting; managed: boolean; set_by: string | null; set_at: number | null; effective: Spoken | null };
+export type InstalledVoice = { id: string; language: string | null; quality: string | null; gender: string | null; sample_rate: number; speakers: number; label: string | null; catalog: boolean };
+export type TalkdownVoices = {
+  voices: InstalledVoice[]; catalog: (CatalogVoice & { language: string; quality: string; url: string; installed: boolean })[];
+  engines: VoiceEngines; voices_dir: string; speed: { min: number; max: number };
+};
+/** A preview: the WAV and who spoke it (X-TTS-* headers). */
+export type VoicePreview = { audio: Blob; engine: string | null; voice: string | null; fallback: boolean };
 /** Describe & warn (backend talkdown_describe.py): how to address the person on the camera's current picture. `phrase` is
  *  "You in the red shirt by the white truck" (null: nothing usable, the template alone); a template's `text` follows it. */
 export type DescribeOption = { description: string; position: string; phrase: string };
@@ -651,8 +667,24 @@ export function makeApi(base: string, opts: ApiOptions = {}) {
   describeSpeaker: (id: string, b: { camera_id: string; template?: string }) => req<DescribeAnswer>(`/api/speakers/${id}/describe`, json("POST", b)),
   speakerStatus: (id: string) => req<SpeakerStatus>(`/api/speakers/${id}/status`),
   talkdownMessages: () => req<TalkdownLibrary>("/api/talkdown/messages"),
-  addTalkdownMessage: (m: { name: string; text: string } | { name: string; upload: AudioUpload }) => req<TalkdownMessage>("/api/talkdown/messages", json("POST", m)),
+  addTalkdownMessage: (m: { name: string; text: string; voice?: string | null; speed?: number | null } | { name: string; upload: AudioUpload }) =>
+    req<TalkdownMessage>("/api/talkdown/messages", json("POST", m)),
   renameTalkdownMessage: (id: number, name: string) => req<TalkdownMessage>(`/api/talkdown/messages/${id}`, json("PUT", { name })),
+  /** a text's own voice / speed (null = back to the Site's) */
+  setTalkdownMessageVoice: (id: number, name: string, voice: string | null, speed: number | null) =>
+    req<TalkdownMessage>(`/api/talkdown/messages/${id}`, json("PUT", { name, voice, speed })),
+  // the talk-down voice (tts.py): read and preview need operator, setting it admin (and no hub: the hub sets it per Site)
+  talkdownVoice: () => req<TalkdownVoiceState>("/api/talkdown/voice"),
+  setTalkdownVoice: (s: VoiceSetting) => req<TalkdownVoiceState>("/api/talkdown/voice", json("PUT", s)),
+  talkdownVoices: () => req<TalkdownVoices>("/api/talkdown/voices"),
+  /** A sample WAV for the browser (never played on a speaker); fields left out = the Site's setting. */
+  previewVoice: async (b: { text?: string; voice?: string | null; speed?: number; chime?: boolean }): Promise<VoicePreview> => {
+    const r = await fetch(u("/api/talkdown/preview"), merged(json("POST", b)));
+    connection.data();
+    if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+    return { audio: await r.blob(), engine: r.headers.get("x-tts-engine"), voice: r.headers.get("x-tts-voice") || null,
+      fallback: r.headers.get("x-tts-fallback") === "1" };
+  },
   deleteTalkdownMessage: (id: number) => req(`/api/talkdown/messages/${id}`, { method: "DELETE" }),
   footageVerify: (b: { camera_id: string; ts: number; tile: number; q: string }) =>
     req<FootageMatch>("/api/footage/verify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(b) }),

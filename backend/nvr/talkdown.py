@@ -14,16 +14,17 @@ and the server log): who, which message (and the words of a spoken text), which 
 
 Messages: a library under data_dir/talkdown/ (uploaded mp3/wav/m4a/ogg of at most 2 MB, or a text the server's
 text-to-speech engine speaks), or a one-off upload or typed text. ffmpeg converts everything to 8 kHz mono G.711.
-Text-to-speech: Windows SAPI (System.Speech through PowerShell); on Linux piper (settings.tts_piper_model) or
-espeak-ng / espeak. Without one, the routes say so and the UI hides the Say field.
+Text-to-speech is tts.py: a Piper neural voice (the Site's voice setting, or a library message's own voice / speed),
+falling back to another Piper voice, Windows SAPI, then espeak-ng / espeak; the play answer says who will speak, the
+finished play's result and the log who did. Without any engine, the routes say so and the UI hides the Say field.
 """
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import hashlib
+import json
 import logging
-import os
 import random
 import re
 import select
@@ -36,9 +37,11 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import tts
 from .config import settings
 from .db import db
 from .rtsp_client import Rtsp
+from .tts import _tts, tts_engine  # noqa: F401 - talkdown.tts_engine / talkdown._tts: the routes' and tests' names
 
 log = logging.getLogger("nvr.talkdown")
 
@@ -288,69 +291,26 @@ def to_g711(src: Path, codec: str = "PCMU") -> bytes:
     return r.stdout
 
 
-_tts: dict = {}
-
-
-def tts_engine(refresh: bool = False) -> str | None:
-    """"sapi", "piper", "espeak-ng", "espeak" or None; found once (a PowerShell start on Windows: call from a thread)."""
-    if refresh or "engine" not in _tts:
-        _tts["engine"] = _find_tts()
-    return _tts["engine"]
-
-
-def _powershell() -> str | None:
-    return shutil.which("powershell") or shutil.which("pwsh")
-
-
-def _find_tts() -> str | None:
-    if os.name == "nt":
-        ps = _powershell()
-        if not ps:
-            return None
-        try:
-            r = subprocess.run([ps, "-NoProfile", "-NonInteractive", "-Command",
-                                "Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).GetInstalledVoices().Count"],
-                               capture_output=True, timeout=30, creationflags=NO_WINDOW)
-        except (OSError, subprocess.TimeoutExpired):
-            return None
-        return "sapi" if r.returncode == 0 and r.stdout.strip() not in (b"", b"0") else None
-    if settings.tts_piper_model and shutil.which("piper") and Path(settings.tts_piper_model).is_file():
-        return "piper"
-    return next((exe for exe in ("espeak-ng", "espeak") if shutil.which(exe)), None)
-
-
 def clean_text(text: str) -> str:
     return " ".join((text or "").split())[:MAX_TEXT]
 
 
-def synthesize(text: str, out: Path) -> Path:
-    """Speak `text` into the WAV file `out`. The text goes through an environment variable or stdin, never a command line."""
-    engine = tts_engine()
-    if not engine:
-        raise TalkdownError("this server has no text-to-speech engine")
-    text = clean_text(text)
-    if not text:
-        raise TalkdownError("nothing to say")
-    out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out.with_name(out.stem + f".{uuid.uuid4().hex[:6]}.tmp.wav")
-    if engine == "sapi":
-        script = ("Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
-                  "$s.SetOutputToWaveFile($env:NVR_TTS_OUT); $s.Speak($env:NVR_TTS_TEXT); $s.Dispose()")
-        cmd, stdin, env = [_powershell(), "-NoProfile", "-NonInteractive", "-Command", script], None, {**os.environ, "NVR_TTS_TEXT": text, "NVR_TTS_OUT": str(tmp)}
-    elif engine == "piper":
-        cmd, stdin, env = ["piper", "--model", settings.tts_piper_model, "--output_file", str(tmp)], text.encode(), None
-    else:
-        cmd, stdin, env = [engine, "--stdin", "-w", str(tmp)], text.encode(), None
+def synthesize(text: str, out: Path, voice: str | None = None, speed=1.0, chime: bool = False) -> tts.Spoken:
+    """Speak `text` into the WAV file `out` (tts.synthesize, its errors as TalkdownError): who spoke it."""
     try:
-        r = subprocess.run(cmd, input=stdin, capture_output=True, timeout=60, env=env, creationflags=NO_WINDOW)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        tmp.unlink(missing_ok=True)
-        raise TalkdownError(f"text-to-speech failed ({e})") from e
-    if r.returncode != 0 or not tmp.is_file() or tmp.stat().st_size < 100:
-        tmp.unlink(missing_ok=True)
-        raise TalkdownError("text-to-speech failed: " + (r.stderr.decode(errors="replace").strip()[-160:] or "no audio"))
-    tmp.replace(out)
-    return out
+        return tts.synthesize(clean_text(text), out, voice, speed, chime)
+    except tts.TTSError as e:
+        raise TalkdownError(str(e)) from e
+
+
+def voice_for(m: dict | None = None) -> dict:
+    """{voice, speed, chime} for a text: the Site's voice setting, a library message's own voice / speed over it."""
+    s = tts.site_setting()
+    if m and m.get("voice"):
+        s["voice"] = m["voice"]
+    if m and m.get("speed"):
+        s["speed"] = tts.clamp_speed(m["speed"])
+    return s
 
 
 # ---------------------------------------------------------------- the message library
@@ -374,7 +334,8 @@ def _seed_defaults() -> None:
 def public_message(m: dict, engine: str | None) -> dict:
     kind = "file" if m.get("file") else "tts"
     return {"id": m["id"], "name": m["name"], "kind": kind, "text": m.get("text"), "duration_s": m.get("duration_s"),
-            "created_at": m["created_at"], "available": kind == "file" or engine is not None}
+            "created_at": m["created_at"], "available": kind == "file" or engine is not None,
+            "voice": m.get("voice"), "speed": m.get("speed")}   # a text's own voice / speed; None = the Site's
 
 
 def messages() -> list[dict]:
@@ -413,11 +374,12 @@ def add_file_message(name: str, filename: str, data: bytes) -> dict:
     return message(mid)
 
 
-def add_text_message(name: str, text: str) -> dict:
+def add_text_message(name: str, text: str, voice: str | None = None, speed: float | None = None) -> dict:
     text = clean_text(text)
     if not text:
         raise TalkdownError("type the text to speak")
-    mid = db.execute_insert("INSERT INTO talkdown_messages (name, text, created_at) VALUES (?,?,?)", [name, text, time.time()])
+    mid = db.execute_insert("INSERT INTO talkdown_messages (name, text, voice, speed, created_at) VALUES (?,?,?,?,?)",
+                            [name, text, voice or None, tts.clamp_speed(speed) if speed else None, time.time()])
     return message(mid)
 
 
@@ -443,6 +405,8 @@ class Message:
     message_id: int | None = None
     cleanup: bool = False          # a one-off upload: deleted after playing
     cache: bool = False            # a library text: its speech is kept under talkdown/tts/
+    voice: dict | None = None      # a text: {voice, speed, chime} (voice_for); None = the Site's at play time
+    spoken: dict | None = None     # a text, once synthesized: who spoke it (tts.Spoken.public)
 
 
 @dataclass
@@ -470,7 +434,14 @@ class Talkdown:
         self._jobs: dict[str, Job] = {}
 
     def play(self, speaker: dict, msg: Message, by: str) -> dict:
+        """Start the playback; the answer says who will speak a text (`tts`: tts.effective, without synthesizing: the
+        finished play's `last.tts` and the log say who did)."""
         sid = speaker["id"]
+        will = None
+        if msg.text is not None:
+            msg.voice = msg.voice or voice_for()
+            eff = tts.effective(msg.voice["voice"], probe=False)
+            will = eff.public() if eff else None
         with self._lock:
             old = self._jobs.get(sid)
             if old and old.thread and old.thread.is_alive():
@@ -486,7 +457,8 @@ class Talkdown:
             job.thread = threading.Thread(target=self._run, args=(job, dict(speaker), old), daemon=True, name=f"talkdown-{sid}")
             job.thread.start()
         return {"speaker_id": sid, "speaker": speaker["name"], "camera_ids": speaker.get("camera_ids") or [], "message": msg.name,
-                "message_id": msg.message_id, "text": msg.text, "replaced": old.message.name if old else None, "status": self.status(sid)}
+                "message_id": msg.message_id, "text": msg.text, "replaced": old.message.name if old else None, "status": self.status(sid),
+                "tts": will}
 
     def stop(self, speaker_id: str) -> bool:
         with self._lock:
@@ -524,17 +496,30 @@ class Talkdown:
         if msg.g711 is not None:
             return msg.g711
         if msg.text is not None:
-            if msg.cache:
-                key = hashlib.sha1(f"{tts_engine()}|{clean_text(msg.text)}".encode()).hexdigest()[:16]
-                wav = talkdown_dir() / "tts" / f"{key}.wav"
-                if not wav.is_file():
-                    synthesize(msg.text, wav)
-                return to_g711(wav, codec)
+            v = msg.voice or voice_for()
             wav = talkdown_dir() / "oneoff" / f"say-{uuid.uuid4().hex[:12]}.wav"
+            meta = None
+            if msg.cache:
+                # a library text keeps its speech per voice / speed / chime, only when the voice asked for spoke it (a
+                # fallback is spoken anew each time, so a voice installed later takes over at once)
+                key = hashlib.sha1(json.dumps([clean_text(msg.text), v["voice"], v["speed"], v["chime"]]).encode()).hexdigest()[:16]
+                wav, meta = talkdown_dir() / "tts" / f"{key}.wav", talkdown_dir() / "tts" / f"{key}.json"
+                with contextlib.suppress(OSError, ValueError):
+                    if wav.is_file():
+                        msg.spoken = json.loads(meta.read_text())
+                        return to_g711(wav, codec)
+            spoken = synthesize(msg.text, wav, v["voice"], v["speed"], v["chime"])
+            msg.spoken = spoken.public()
             try:
-                return to_g711(synthesize(msg.text, wav), codec)
-            finally:
+                audio = to_g711(wav, codec)
+            except TalkdownError:
                 wav.unlink(missing_ok=True)
+                raise
+            if meta is not None and not spoken.fallback:
+                meta.write_text(json.dumps(msg.spoken))
+            else:
+                wav.unlink(missing_ok=True)
+            return audio
         if msg.path is None:
             raise TalkdownError("nothing to play")
         if not msg.path.is_file():
@@ -584,12 +569,15 @@ class Talkdown:
             if job.message.cleanup and job.message.path:
                 job.message.path.unlink(missing_ok=True)
             played = round(time.time() - job.started_at, 1) if job.started_at else 0.0
+            spoken = job.message.spoken
             job.result = {"message": job.message.name, "by": job.by, "result": result, "error": error, "at": time.time(),
-                          "played_s": played}
+                          "played_s": played, "tts": spoken}
             job.state = "done"
+            said = f"{spoken['engine']}:{spoken['voice']}" if spoken and spoken.get("voice") else (spoken or {}).get("engine")
             with contextlib.suppress(Exception):
-                db.execute("UPDATE talkdown_log SET result=?, error=?, duration_s=? WHERE id=?", [result, error, played, job.log_id])
-            (log.warning if error else log.info)("talk-down: %r on %s %s after %.1f s%s", job.message.name, speaker["id"], result, played,
+                db.execute("UPDATE talkdown_log SET result=?, error=?, duration_s=?, tts=? WHERE id=?", [result, error, played, said, job.log_id])
+            (log.warning if error else log.info)("talk-down: %r on %s %s after %.1f s%s%s", job.message.name, speaker["id"], result, played,
+                                                 f", spoken by {said}" + (f" (fallback: {spoken['reason']})" if spoken.get("fallback") else "") if spoken else "",
                                                  f": {error}" if error else "")
 
 
@@ -613,7 +601,10 @@ def summary_speakers() -> list[dict]:
 
 
 async def check_loop() -> None:
-    """Every CHECK_EVERY_S: DESCRIBE each enabled speaker that isn't playing, so the hub can say whether it is online."""
+    """Every CHECK_EVERY_S: DESCRIBE each enabled speaker that isn't playing, so the hub can say whether it is online.
+    First the text-to-speech probes (Piper import, SAPI's PowerShell), so the heartbeat can report the engines."""
+    with contextlib.suppress(Exception):
+        await asyncio.to_thread(tts.engines)
     await asyncio.sleep(30)
     while True:
         for s in db.speakers(enabled_only=True):

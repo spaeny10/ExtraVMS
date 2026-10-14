@@ -13,7 +13,7 @@ import time
 
 import httpx
 
-from . import backup, detector, direct, health, mediamtx, retention, talkdown, vlmroute
+from . import backup, detector, direct, health, mediamtx, retention, talkdown, tts, vlmroute
 from .config import settings
 from .db import db
 
@@ -88,7 +88,17 @@ async def site_summary(state, since: float | None = None, version: str = "") -> 
         "direct": direct.summary(),
         # talk-down speakers and the cameras they are bound to (no address or credentials): the hub's Live tiles
         "speakers": talkdown.summary_speakers(),
+        # the talk-down voice (tts.summary: the setting, installed voice ids, engines): the hub pushes its Site's voice
+        # when this differs and shows which servers have it
+        "talkdown_voice": _talkdown_voice(),
     }
+
+
+def _talkdown_voice() -> dict | None:
+    try:
+        return tts.summary()
+    except Exception:  # noqa: BLE001 - a voices folder problem must not cost the heartbeat
+        return None
 
 
 def _storage_alerts() -> list[dict]:

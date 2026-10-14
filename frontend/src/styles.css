@@ -862,6 +862,12 @@ body:has(.drag-ghost) { cursor: grabbing; user-select: none; }
 .talk-lib-list li { gap: 10px; padding: 3px 0; border-bottom: 1px solid var(--border); }
 .talk-lib-add { flex-wrap: wrap; }
 .talk-lib-add input { max-width: 260px; }
+/* the talk-down voice (Speakers.tsx VoiceSection; the hub's Site settings reuse .voice-preview) */
+.talk-voice-form { flex-wrap: wrap; align-items: flex-end; gap: 8px 16px; }
+.talk-voice-form select { max-width: 100%; }
+.talk-voice-form input[type="range"] { width: 200px; }
+.voice-preview { gap: 8px; flex-wrap: wrap; }
+.voice-preview audio { height: 32px; max-width: 260px; }
 
 /* Settings -> System -> Cloud hub: the claim code */
 .hub-claim { margin: 6px 0; }

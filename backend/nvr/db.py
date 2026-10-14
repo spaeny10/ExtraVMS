@@ -340,6 +340,9 @@ MIGRATIONS = [
     ("cameras", "event_source", "TEXT NOT NULL DEFAULT 'auto'"),   # auto | metadata | onvif_events: what opens events (ruleevents.py)
     ("cameras", "motion_events", "INTEGER NOT NULL DEFAULT 0"),    # ONVIF events mode: motion topics open events (YOLO must confirm)
     ("talkdown_log", "text", "TEXT"),             # the words spoken (a typed text, Describe & warn, a library text); NULL = audio
+    ("talkdown_log", "tts", "TEXT"),              # who spoke a text: "piper:<voice>", "sapi", "espeak-ng" (tts.py)
+    ("talkdown_messages", "voice", "TEXT"),       # a text's own Piper voice; NULL = the Site's (tts.SETTING)
+    ("talkdown_messages", "speed", "REAL"),       # a text's own speed 0.7-1.3; NULL = the Site's
 ]
 JSON_FIELDS = ("path", "rules", "detections", "synopsis_json", "synopsis_original", "feedback", "anomaly_json", "areas", "policy", "migrated_from")
 

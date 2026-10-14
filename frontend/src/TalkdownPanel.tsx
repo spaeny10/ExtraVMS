@@ -98,7 +98,7 @@ export function TalkdownPanel({ speakers, site = api, cameraId, onClose, docked 
       const w = typeof what === "function" ? what(s) : what;
       if (typeof w === "string") return Promise.resolve({ speaker: s.name, ok: false, error: w });
       return siteOf(s.server ?? "").playSpeaker(s.id, w)
-        .then((r) => ({ speaker: s.name, ok: true, replaced: r.replaced }))
+        .then((r) => ({ speaker: s.name, ok: true, replaced: r.replaced, tts: r.tts }))
         .catch((e) => ({ speaker: s.name, ok: false, error: errorText(e) }));
     }));
     setBusy(false);

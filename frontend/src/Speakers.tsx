@@ -2,12 +2,15 @@
  * Settings › Cameras › Speakers (backend talkdown.py, speakers_api.py): IP speakers played over their ONVIF RTSP
  * backchannel, each bound to any number of this server's cameras; the bound cameras' live tiles get the 🔊 Talk-down
  * button. Check asks the speaker (DESCRIBE) whether it offers a backchannel and which codecs. Below: the talk-down
- * message library (uploaded recordings, and texts spoken by the server's text-to-speech engine when it has one).
+ * voice (tts.py: set per Site on the hub when this server is enrolled, here otherwise) and the message library
+ * (uploaded recordings, and texts spoken by the server's text-to-speech engine when it has one).
  */
 import { useEffect, useRef, useState } from "react";
-import { api, type Camera, type Speaker, type SpeakerCodec, type TalkdownLibrary } from "./api";
+import { api, type Camera, type Speaker, type SpeakerCodec, type TalkdownLibrary, type TalkdownVoiceState, type TalkdownVoices } from "./api";
 import { fileToBase64, uploadProblem } from "./talkdown";
+import { SPEED_MAX, SPEED_MIN, type VoiceSetting, enginesText, optionText, predict, sameSetting, speedText, voiceName, voiceOptions } from "./talkdownVoice";
 import { confirmDialog, errorText, promptDialog, toast } from "./ui";
+import { VoicePreview } from "./VoicePreview";
 
 type Draft = Omit<Speaker, "check" | "checked_at" | "status"> & { password?: string };
 const blank: Draft = { id: "", name: "", host: "", rtsp_port: 554, onvif_port: 80, path: "/main", username: "admin", codec: "PCMU",
@@ -98,6 +101,7 @@ export function SpeakersSection({ cameras }: { cameras: Camera[] }) {
         </table>
       )}
       {list && list.length === 0 && <p className="muted small">No speakers yet. Add an ONVIF speaker (Profile T audio output, e.g. a Tonmind IP speaker) and bind it to the cameras that see its area.</p>}
+      <VoiceSection />
       <MessageLibrary />
       {edit && (
         <div className="modal-backdrop" onClick={() => setEdit(null)}>
@@ -156,19 +160,91 @@ export function SpeakersSection({ cameras }: { cameras: Camera[] }) {
   );
 }
 
+/**
+ * The talk-down voice: typed messages, Describe & warn and library texts without their own voice speak with it. A
+ * hub-enrolled server shows it read-only (the hub sets it per Site and pushes it here); a server without a hub edits it.
+ * Hidden on an older server, or for a hub viewer (reading it needs operator).
+ */
+function VoiceSection() {
+  const [state, setState] = useState<TalkdownVoiceState | null>(null);
+  const [voices, setVoices] = useState<TalkdownVoices | null>(null);
+  const [draft, setDraft] = useState<VoiceSetting | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    Promise.all([api.talkdownVoice(), api.talkdownVoices()])
+      .then(([s, v]) => { setState(s); setVoices(v); setDraft(s.setting); })
+      .catch(() => setState(null));
+  }, []);
+  if (!state || !voices || !draft) return null;
+  const here = { name: "this server", voices: voices.voices.map((v) => v.id), engines: voices.engines };
+  const editable = !state.managed;
+  const pred = predict(draft.voice, here);
+  const save = async () => {
+    setBusy(true);
+    try {
+      const s = await api.setTalkdownVoice(draft);
+      setState(s); setDraft(s.setting);
+      toast.success(`Talk-down voice: ${voiceName(s.setting.voice)}`);
+    } catch (e) {
+      toast.error(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="talk-voice">
+      <h3 className="spaced">Talk-down voice</h3>
+      <p className="muted small">
+        Typed messages, Describe &amp; warn and library texts speak with this voice.{" "}
+        {state.managed ? "This server is managed by the hub: the voice is set per Site on the hub (Site › Settings › Cameras)." : ""}
+      </p>
+      <div className="row talk-voice-form">
+        <label className="field">
+          <span>Voice</span>
+          <select value={draft.voice ?? ""} disabled={!editable} onChange={(e) => setDraft({ ...draft, voice: e.target.value || null })}>
+            {voiceOptions([here]).map((o) => <option key={o.id ?? ""} value={o.id ?? ""}>{optionText(o, 1)}</option>)}
+          </select>
+        </label>
+        <label className="field">
+          <span>Speed · {speedText(draft.speed)}</span>
+          <input type="range" min={SPEED_MIN} max={SPEED_MAX} step={0.05} value={draft.speed} disabled={!editable}
+            onChange={(e) => setDraft({ ...draft, speed: +e.target.value })} />
+        </label>
+        <label className="row small">
+          <input type="checkbox" checked={draft.chime} disabled={!editable} onChange={(e) => setDraft({ ...draft, chime: e.target.checked })} /> Attention chime first
+        </label>
+      </div>
+      <p className="small">
+        {pred.ok ? `Speaks with ${voiceName(pred.voice)}.` : `${voiceName(draft.voice)}: ${pred.text}.`}{" "}
+        <span className="muted">Engines here: {enginesText(voices.engines)}.
+          {!voices.engines.piper && " Piper isn't installed: run tools/install_piper_voices.py on this server."}
+          {voices.engines.piper && !voices.voices.length && ` No Piper voice yet: run tools/install_piper_voices.py (folder ${voices.voices_dir}).`}</span>
+      </p>
+      <div className="row">
+        <VoicePreview requested={draft.voice} preview={() => api.previewVoice({ voice: draft.voice, speed: draft.speed, chime: draft.chime })} />
+        {editable && <button className="small" disabled={busy || sameSetting(draft, state.setting)} onClick={save}>Save</button>}
+        {state.set_by && <span className="muted small">set by {state.set_by}{state.set_at ? ` · ${new Date(state.set_at * 1000).toLocaleString()}` : ""}</span>}
+      </div>
+    </div>
+  );
+}
+
 /** The talk-down message library: play order as listed; texts need the server's text-to-speech engine. */
 function MessageLibrary() {
   const [lib, setLib] = useState<TalkdownLibrary | null>(null);
   const [name, setName] = useState("");
   const [text, setText] = useState("");
+  const [voice, setVoice] = useState("");   // a new text's own voice; "" = the Site's
+  const [installed, setInstalled] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const reload = () => api.talkdownMessages().then(setLib).catch((e) => toast.error(e));
   useEffect(() => { reload(); }, []);
+  useEffect(() => { api.talkdownVoices().then((v) => setInstalled(v.voices.map((x) => x.id))).catch(() => setInstalled([])); }, []);
   const addText = async () => {
     setBusy(true);
     try {
-      await api.addTalkdownMessage({ name: name.trim() || text.trim().slice(0, 40), text });
+      await api.addTalkdownMessage({ name: name.trim() || text.trim().slice(0, 40), text, ...(voice ? { voice } : {}) });
       setName(""); setText("");
       reload();
     } catch (e) {
@@ -216,6 +292,8 @@ function MessageLibrary() {
           <li key={m.id} className={`row small ${m.available ? "" : "muted"}`}>
             <strong>{m.name}</strong>
             <span className="muted">{m.kind === "tts" ? `“${m.text}”${m.available ? "" : " (needs text-to-speech)"}` : `recording · ${Math.round(m.duration_s ?? 0)} s`}</span>
+            {m.kind === "tts" && (m.voice || m.speed) && <span className="chip small" title="This text's own voice (others use the Site's)">
+              {voiceName(m.voice ?? null) === "Automatic" ? "Site voice" : voiceName(m.voice ?? null)}{m.speed ? ` · ${m.speed}×` : ""}</span>}
             <span className="spacer" />
             <button className="ghost small" onClick={() => rename(m.id, m.name)}>Rename</button>
             <button className="ghost small" onClick={() => remove(m.id, m.name)}>Delete</button>
@@ -225,6 +303,12 @@ function MessageLibrary() {
       <div className="row talk-lib-add">
         <input value={name} placeholder="Name, e.g. Leave now" maxLength={80} onChange={(e) => setName(e.target.value)} />
         {lib.tts.available && <input value={text} placeholder="Text to speak" maxLength={500} onChange={(e) => setText(e.target.value)} />}
+        {lib.tts.available && installed.length > 0 && (
+          <select value={voice} onChange={(e) => setVoice(e.target.value)} title="The voice of this text (others use the Site's talk-down voice)">
+            <option value="">Site voice</option>
+            {installed.map((id) => <option key={id} value={id}>{voiceName(id)}</option>)}
+          </select>
+        )}
         {lib.tts.available && <button className="small" disabled={busy || !text.trim()} onClick={addText}>Add text</button>}
         <button className="ghost small" disabled={busy} onClick={() => fileRef.current?.click()}>Upload recording…</button>
         <input ref={fileRef} type="file" hidden accept={lib.types.join(",")} onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; upload(f); }} />

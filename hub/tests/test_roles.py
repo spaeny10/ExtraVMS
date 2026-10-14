@@ -38,6 +38,14 @@ def test_role_table_reads_right():
     # Describe & warn: Qwen describes who is on the camera, the operator plays the reviewed text (the same act as play)
     assert required_role("POST", "/api/speakers/spk1/describe") == "operator"
     assert required_role("PUT", "/api/speakers/spk1/describe") == "admin" and required_role("POST", "/api/speakers/spk1/describe/x") == "admin"
+    # the talk-down voice: an operator previews it (in the browser, never on a speaker) and reads it; setting it is configuration.
+    # The operator rules come before the /api/(speakers|talkdown) admin catch-all, and nothing near them opens up.
+    assert required_role("POST", "/api/talkdown/preview") == "operator"
+    assert required_role("GET", "/api/talkdown/voice") == "operator" and required_role("GET", "/api/talkdown/voices") == "operator"
+    assert required_role("HEAD", "/api/talkdown/voices") == "operator"
+    assert required_role("PUT", "/api/talkdown/voice") == "admin" and required_role("POST", "/api/talkdown/voice") == "admin"
+    assert required_role("PUT", "/api/talkdown/preview") == "admin" and required_role("POST", "/api/talkdown/preview/x") == "admin"
+    assert required_role("GET", "/api/talkdown/messages") == "viewer" and required_role("GET", "/api/talkdown/voicesx") == "viewer"
     assert allows("owner", "admin") and allows("operator", "viewer") and not allows("viewer", "operator")
 
 

@@ -18,7 +18,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from tunnelproto import CHUNK, WINDOW, Stream, chunk, decode, encode, split
 
-from . import alerts, cameras, central_cameras, db, hosts, soc, turn
+from . import alerts, cameras, central_cameras, db, hosts, soc, talkdown_voice, turn
 from .config import settings
 
 log = logging.getLogger("hub.agents")
@@ -156,6 +156,14 @@ def _soc(conn: "AgentConn", fn, arg) -> None:
         log.exception("soc feed for %s", conn.site_id)
 
 
+def _talkdown_voice(conn: "AgentConn") -> None:
+    """The server reports another talk-down voice than its Site's: push the Site's (talkdown_voice.py); never breaks the tunnel."""
+    try:
+        talkdown_voice.on_heartbeat(conn)
+    except Exception:
+        log.exception("talk-down voice for %s", conn.site_id)
+
+
 class AgentRegistry:
     def __init__(self) -> None:
         self.by_site: dict[str, AgentConn] = {}
@@ -277,6 +285,7 @@ class AgentRegistry:
                         _central_cameras(conn)
                     alerts.on_heartbeat(conn.site, conn.summary, skew)
                     _soc(conn, soc.on_attention, conn.summary.get("attention"))
+                    _talkdown_voice(conn)
                     await self._refresh_turn(conn)
             elif t == "event":
                 msg = frame.get("msg") or {}

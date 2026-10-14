@@ -1,9 +1,10 @@
 """Talk-down routes (talkdown.py): IP speakers, the message library, play / stop / status, Describe & warn
-(talkdown_describe.py).
+(talkdown_describe.py), the talk-down voice (tts.py).
 
-Roles through the hub (hub/hub/roles.py): play, stop and describe need operator, everything else that writes needs admin.
-Checked here too for a tunneled or direct request (the site's own page has no sign-in: the LAN is the trust
-boundary). A speaker's password is never returned; omitted on PUT = kept, as for cameras.
+Roles through the hub (hub/hub/roles.py): play, stop, describe, the voice preview and reading the voice need operator,
+everything else that writes needs admin. Checked here too for a tunneled or direct request (the site's own page has no
+sign-in: the LAN is the trust boundary). A speaker's password is never returned; omitted on PUT = kept, as for cameras.
+The voice of a hub-enrolled server is the hub's (set per Site, pushed through the tunnel): its own page can't change it.
 """
 from __future__ import annotations
 
@@ -16,10 +17,10 @@ import uuid
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field, model_validator
 
-from . import hub_agent, talkdown, talkdown_describe
+from . import hub_agent, talkdown, talkdown_describe, tts
 from .db import db
 
 router = APIRouter()
@@ -183,13 +184,14 @@ async def play(speaker_id: str, body: PlayIn, request: Request):
             msg = talkdown.Message(m["name"], path=talkdown.talkdown_dir() / m["file"], message_id=m["id"])
         else:
             await _tts_ready()
-            msg = talkdown.Message(m["name"], text=m["text"], message_id=m["id"], cache=True)
+            msg = talkdown.Message(m["name"], text=m["text"], message_id=m["id"], cache=True, voice=talkdown.voice_for(m))
     elif body.text:
         text = talkdown.clean_text(body.text)
         if not text:
             raise HTTPException(422, "nothing to say")
         await _tts_ready()
-        msg = talkdown.Message(f'"{text[:60]}{"…" if len(text) > 60 else ""}"', text=text)
+        # a typed text and Describe & warn speak with the Site's voice
+        msg = talkdown.Message(f'"{text[:60]}{"…" if len(text) > 60 else ""}"', text=text, voice=talkdown.voice_for())
     else:
         data = _decode(body.upload)
         d = talkdown.talkdown_dir() / "oneoff"
@@ -246,6 +248,8 @@ class MessageIn(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     text: str | None = Field(None, max_length=talkdown.MAX_TEXT)
     upload: UploadIn | None = None
+    voice: str | None = Field(None, pattern=tts.VOICE_RX)                 # a text's own voice; None = the Site's
+    speed: float | None = Field(None, ge=tts.SPEED_MIN, le=tts.SPEED_MAX)  # a text's own speed; None = the Site's
 
     @model_validator(mode="after")
     def _one(self):
@@ -254,8 +258,11 @@ class MessageIn(BaseModel):
         return self
 
 
-class RenameIn(BaseModel):
+class MessageEditIn(BaseModel):
+    """Rename; voice / speed when sent (null = back to the Site's), kept when left out."""
     name: str = Field(min_length=1, max_length=80)
+    voice: str | None = Field(None, pattern=tts.VOICE_RX)
+    speed: float | None = Field(None, ge=tts.SPEED_MIN, le=tts.SPEED_MAX)
 
 
 @router.get("/api/talkdown/messages")
@@ -274,18 +281,21 @@ async def add_message(body: MessageIn, request: Request):
         if body.upload is not None:
             m = await asyncio.to_thread(talkdown.add_file_message, body.name.strip(), body.upload.filename, _decode(body.upload))
         else:
-            m = talkdown.add_text_message(body.name.strip(), body.text or "")
+            m = talkdown.add_text_message(body.name.strip(), body.text or "", body.voice, body.speed)
     except talkdown.TalkdownError as e:
         raise HTTPException(422, str(e))
     return talkdown.public_message(m, await asyncio.to_thread(talkdown.tts_engine))
 
 
 @router.put("/api/talkdown/messages/{message_id}")
-async def rename_message(message_id: int, body: RenameIn, request: Request):
+async def rename_message(message_id: int, body: MessageEditIn, request: Request):
     require(request, "admin")
     if not talkdown.message(message_id):
         raise HTTPException(404, "unknown message")
     db.execute("UPDATE talkdown_messages SET name=? WHERE id=?", [body.name.strip(), message_id])
+    for k in ("voice", "speed"):
+        if k in body.model_fields_set:
+            db.execute(f"UPDATE talkdown_messages SET {k}=? WHERE id=?", [getattr(body, k), message_id])
     return talkdown.public_message(talkdown.message(message_id), await asyncio.to_thread(talkdown.tts_engine))
 
 
@@ -302,3 +312,90 @@ async def play_log(limit: int = Query(50, ge=1, le=500), speaker: str | None = N
     """The latest plays: who, which message, which speaker, how it ended."""
     sql = "SELECT * FROM talkdown_log" + (" WHERE speaker_id=?" if speaker else "") + " ORDER BY id DESC LIMIT ?"
     return db.all(sql, [speaker, limit] if speaker else [limit])
+
+
+# ---------------------------------------------------------------- the talk-down voice (tts.py)
+
+class VoiceIn(BaseModel):
+    voice: str | None = Field(None, pattern=tts.VOICE_RX)   # None = automatic: the first installed voice (tts.CATALOG order)
+    speed: float = Field(1.0, ge=tts.SPEED_MIN, le=tts.SPEED_MAX)
+    chime: bool = False
+
+
+class PreviewIn(BaseModel):
+    """Left out = the Site's setting (voice sent as null = automatic)."""
+    text: str | None = Field(None, max_length=tts.PREVIEW_MAX)
+    voice: str | None = Field(None, pattern=tts.VOICE_RX)
+    speed: float | None = Field(None, ge=tts.SPEED_MIN, le=tts.SPEED_MAX)
+    chime: bool | None = None
+
+
+def hub_managed() -> bool:
+    """Enrolled with a hub: the hub sets the voice, per Site."""
+    return bool(db.get_setting("hub_token"))
+
+
+def _voice_state() -> dict:
+    s = tts.site_setting()
+    eff = tts.effective(s["voice"])
+    meta = tts.setting_meta()
+    return {"setting": s, "managed": hub_managed(), "set_by": meta.get("by"), "set_at": meta.get("at"),
+            "effective": eff.public() if eff else None}
+
+
+@router.get("/api/talkdown/voice")
+async def get_voice(request: Request):
+    """The voice texts are spoken with ({voice, speed, chime}), whether the hub sets it (`managed`) and who speaks now
+    (`effective`: the voice, or the fallback when it isn't installed here)."""
+    require(request, "operator")
+    return await asyncio.to_thread(_voice_state)
+
+
+@router.put("/api/talkdown/voice")
+async def put_voice(body: VoiceIn, request: Request):
+    """Admin. The hub pushes its Site setting here through the tunnel; a hub-enrolled server's own page can't change it."""
+    by = require(request, "admin")
+    if hub_role(request) is None and hub_managed():
+        raise HTTPException(409, "this server's talk-down voice is set per Site on the hub")
+    tts.set_site_setting(body.model_dump(), by)
+    return await asyncio.to_thread(_voice_state)
+
+
+def _voices() -> dict:
+    installed = tts.installed_voices()
+    ids = {v["id"] for v in installed}
+    return {"voices": [tts.public_voice(v) for v in installed], "catalog": [{**c, "installed": c["id"] in ids} for c in tts.catalog()],
+            "engines": tts.engines(), "voices_dir": str(tts.voices_dir()), "speed": {"min": tts.SPEED_MIN, "max": tts.SPEED_MAX}}
+
+
+@router.get("/api/talkdown/voices")
+async def list_voices(request: Request):
+    """The Piper voices installed here, the catalog (which of it is installed, where to get it) and the engines."""
+    require(request, "operator")
+    return await asyncio.to_thread(_voices)
+
+
+@router.post("/api/talkdown/preview")
+async def preview(body: PreviewIn, request: Request):
+    """A short sample for the browser (audio/wav at the voice's own rate): never played on a speaker. Who spoke it is in
+    the X-TTS-Engine / X-TTS-Voice / X-TTS-Fallback headers. At most tts.PREVIEW_PER_MIN a minute per user."""
+    by = require(request, "operator")
+    who = by if by != "local" else f"local:{request.client.host if request.client else ''}"
+    if tts.preview_limited(who):
+        raise HTTPException(429, f"at most {tts.PREVIEW_PER_MIN} previews a minute: try again in a moment")
+    s = tts.site_setting()
+    voice = body.voice if "voice" in body.model_fields_set else s["voice"]
+    speed = s["speed"] if body.speed is None else body.speed
+    chime = s["chime"] if body.chime is None else body.chime
+    text = talkdown.clean_text(body.text or "")[:tts.PREVIEW_MAX] or tts.PREVIEW_TEXT
+    out = talkdown.talkdown_dir() / "preview" / f"pv-{uuid.uuid4().hex[:12]}.wav"
+    try:
+        spoken = await asyncio.to_thread(tts.synthesize, text, out, voice, speed, chime)
+        data = out.read_bytes()
+    except tts.TTSError as e:
+        raise HTTPException(409, str(e))
+    finally:
+        out.unlink(missing_ok=True)
+    talkdown.log.info("talk-down voice preview by %s: %s", by, spoken.label())
+    return Response(data, media_type="audio/wav", headers={"cache-control": "no-store", "x-tts-engine": spoken.engine,
+                                                          "x-tts-voice": spoken.voice or "", "x-tts-fallback": "1" if spoken.fallback else "0"})

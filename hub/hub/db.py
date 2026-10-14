@@ -310,6 +310,13 @@ site_speaker_groups = Table("site_speaker_groups", metadata,
                             Column("location_id", String(24), nullable=False, index=True), Column("server_id", String(24), nullable=False),
                             Column("speaker_id", String(64), nullable=False), Column("group_id", Integer, nullable=False, index=True),
                             sa.UniqueConstraint("server_id", "speaker_id", "group_id", name="uq_site_speaker_group"))
+# ---- A Site's talk-down voice (talkdown_voice.py): the Piper voice, speed and attention chime every server of the Site
+# speaks texts with (pushed to them through the tunnel). No row = never set: the servers keep their own.
+site_talkdown_voice = Table("site_talkdown_voice", metadata,
+                            Column("location_id", String(24), primary_key=True), Column("org_id", String(24), nullable=False),
+                            Column("voice", String(80), nullable=True),   # None = automatic (each server's first installed voice)
+                            Column("speed", Float, nullable=False, default=1.0), Column("chime", Boolean, nullable=False, default=False),
+                            Column("updated_at", Float, nullable=False), Column("updated_by", String(200), nullable=True))
 
 _engine: Engine | None = None
 

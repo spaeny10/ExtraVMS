@@ -1,9 +1,10 @@
 """Who may do what through the proxy. Roles nest: viewer < operator < admin < owner.
 
-viewer   watch: every GET, the live WebSocket, WHEP signaling, media, playback, frames
-operator act: PTZ / relay / presets, talk-down (play / stop a message on a speaker, Describe & warn), naming people and vehicles, feedback and synopsis edits, locks,
-         Ask and clip chat, reprocess, briefings on demand
-admin    configure: cameras, speakers and their message library, zones, retention, topology, remote AI, backups, site rules, SD card recovery
+viewer   watch: every GET (but the talk-down voice), the live WebSocket, WHEP signaling, media, playback, frames
+operator act: PTZ / relay / presets, talk-down (play / stop a message on a speaker, Describe & warn, the voice and its
+         preview), naming people and vehicles, feedback and synopsis edits, locks, Ask and clip chat, reprocess, briefings on demand
+admin    configure: cameras, speakers and their message library, the talk-down voice, zones, retention, topology, remote AI,
+         backups, site rules, SD card recovery
 owner    everything an admin can, plus org members and billing (hub-side only)
 Unknown non-GET routes need admin, so a new site endpoint is never accidentally open to viewers.
 """
@@ -16,6 +17,7 @@ RANK = {r: i for i, r in enumerate(ROLES)}
 
 # (methods, path regex, minimum role) — first match wins
 RULES: list[tuple[set[str], re.Pattern, str]] = [
+    ({"GET", "HEAD"}, re.compile(r"^/api/talkdown/voices?$"), "operator"),   # the talk-down voice and the installed voices
     ({"GET", "HEAD"}, re.compile(r".*"), "viewer"),
     ({"POST"}, re.compile(r"^/api/whep/"), "viewer"),
     ({"POST"}, re.compile(r"^/api/(assistant/ask|assistant/plan|assistant/retrieve|assistant/warm|remote/warm|query/parse)$"), "viewer"),
@@ -25,6 +27,8 @@ RULES: list[tuple[set[str], re.Pattern, str]] = [
     ({"PUT"}, re.compile(r"^/api/cameras/[^/]+/ptz/config$"), "admin"),                # return-home timer etc.: configuration
     ({"POST", "PUT", "DELETE"}, re.compile(r"^/api/cameras/[^/]+/(ptz|relay)(/|$)"), "operator"),
     ({"POST"}, re.compile(r"^/api/speakers/[^/]+/(play|stop|describe)$"), "operator"),   # talk-down on a bound camera's live view; Describe & warn
+    ({"POST"}, re.compile(r"^/api/talkdown/preview$"), "operator"),       # a voice sample in the browser, never on a speaker
+    ({"PUT"}, re.compile(r"^/api/talkdown/voice$"), "admin"),             # the voice (the hub pushes its Site setting)
     ({"PUT", "POST", "DELETE"}, re.compile(r"^/api/(speakers|talkdown)(/|$)"), "admin"),  # speakers, Check, the message library
     ({"POST", "PUT", "DELETE"}, re.compile(r"^/api/identities(/|$)"), "operator"),
     ({"PUT", "POST", "DELETE"}, re.compile(r"^/api/events/\d+/(feedback|synopsis|synopsis/generate|synopsis/revert|reprocess|identity|lock|watch)(/|$)"), "operator"),

@@ -137,9 +137,12 @@ class Settings(BaseSettings):
     event_rate_max_per_hour: int = 600      # per camera; above it events still open but keep no clip/crops
                                             # (snapshot only). 0 = no limit
 
-    # Talk-down speakers (talkdown.py): text-to-speech is Windows SAPI on Windows; on Linux piper when this names
-    # its .onnx voice model (and `piper` is on PATH), else espeak-ng / espeak when installed; none = no "Say" field
-    tts_piper_model: str = ""
+    # Talk-down speakers (talkdown.py, tts.py): text-to-speech is a Piper neural voice when the piper-tts package (or a
+    # `piper` binary) and at least one voice are installed, else Windows SAPI, else espeak-ng / espeak; none = no "Say"
+    # field. Voices are <id>.onnx + <id>.onnx.json in the voices folder (tools/install_piper_voices.py fills it).
+    tts_voices_dir: Path | None = None      # default: data_dir/voices
+    tts_piper_bin: str = ""                 # an external piper binary; default `piper` on PATH (used without the package)
+    tts_piper_model: str = ""               # one more voice anywhere on disk (an .onnx with its .onnx.json beside it)
 
     # API
     host: str = "0.0.0.0"

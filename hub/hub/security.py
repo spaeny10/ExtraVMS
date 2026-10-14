@@ -25,10 +25,12 @@ from .config import settings
 
 # What the site UI needs: JSON, NDJSON and SSE streams (type, cache-control), JPEG frames (X-Frame-Time), MP4 and fMP4
 # playback with range requests (content-range, accept-ranges, etag, last-modified), downloads (content-disposition),
-# WHEP answers (content-type application/sdp, location), 429/503 retry hints.
+# WHEP answers (content-type application/sdp, location), 429/503 retry hints, who spoke a talk-down voice preview
+# (x-tts-*: an engine name, a voice id, 0/1).
 PROXY_PASS_HEADERS = frozenset({
     "content-type", "content-range", "accept-ranges", "content-encoding", "content-language", "content-disposition",
     "cache-control", "etag", "last-modified", "expires", "vary", "retry-after", "location", "x-frame-time",
+    "x-tts-engine", "x-tts-voice", "x-tts-fallback",
 })
 # a browser may execute (or render as an active document) any of these
 ACTIVE_TYPE = re.compile(r"html|xml|svg|javascript|ecmascript|jscript|xsl|x-shockwave|cache-manifest|vnd\.wap", re.I)
