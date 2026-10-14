@@ -822,6 +822,19 @@ body:has(.drag-ghost) { cursor: grabbing; user-select: none; }
 .talk-panel { position: absolute; left: 6px; bottom: 6px; z-index: 5; width: min(340px, calc(100% - 12px)); max-height: calc(100% - 12px); overflow-y: auto;
   display: flex; flex-direction: column; gap: 6px; padding: 8px; border-radius: 8px; background: rgb(0 0 0 / .55); backdrop-filter: blur(6px);
   color: #fff; font-size: 12px; text-align: left; }
+/* phone: under the tile, the picture stays whole; solid, full width, bigger touch targets */
+.talk-panel.docked { position: static; width: auto; max-height: none; margin: 6px; border-radius: 8px; background: var(--panel-2); backdrop-filter: none;
+  color: var(--text); font-size: 14px; border: 1px solid var(--border); }
+.talk-panel.docked .ghost { color: var(--text); }
+.talk-panel.docked select, .talk-panel.docked input, .talk-panel.docked textarea { background: var(--panel); color: var(--text); border-color: var(--border); }
+.talk-panel.docked input::placeholder, .talk-panel.docked textarea::placeholder { color: var(--muted); }
+.talk-panel.docked button { min-height: 36px; }
+.talk-panel.docked .talk-msg { background: var(--panel); color: var(--text); border-color: var(--border); font-size: 14px; padding: 6px 12px; }
+.talk-panel.docked .talk-msg.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 25%, var(--panel)); }
+.talk-panel.docked .talk-msgs { max-height: none; }
+.talk-panel.docked .talk-dim { color: var(--muted); }
+.talk-panel.docked .talk-error { color: var(--bad); }
+.talk-panel.docked .talk-warn { border-top-color: var(--border); }
 .talk-panel select, .talk-panel input { background: rgb(255 255 255 / .12); color: #fff; border-color: transparent; min-width: 0; }
 .talk-panel input::placeholder { color: rgb(255 255 255 / .6); }
 .talk-panel select option { color: var(--text); background: var(--panel); }

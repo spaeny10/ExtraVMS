@@ -19,7 +19,7 @@ import { errorText, toast } from "./ui";
 
 const POLL_MS = 1000;
 
-export function TalkdownPanel({ speakers, site = api, cameraId, onClose }: {
+export function TalkdownPanel({ speakers, site = api, cameraId, onClose, docked = false }: {
   speakers: TalkSpeaker[];
   /** the camera's server (default: this server); its writes go through the hub on the hub. A speaker that brings its
    *  own server's client (`site` on the speaker: the hub) is reached through that instead. */
@@ -27,6 +27,8 @@ export function TalkdownPanel({ speakers, site = api, cameraId, onClose }: {
   /** the camera the panel is on (on `site`): what Describe & warn looks at; absent = no Describe & warn */
   cameraId?: string;
   onClose: () => void;
+  /** under the tile instead of over the picture (the phone: an overlay would cover most of a small or wide view) */
+  docked?: boolean;
 }) {
   // per server ("" = `site`): its message library, or why it couldn't be read
   const [libs, setLibs] = useState<Record<string, TalkdownLibrary>>({});
@@ -150,7 +152,7 @@ export function TalkdownPanel({ speakers, site = api, cameraId, onClose }: {
 
   const halt = (e: React.SyntheticEvent) => e.stopPropagation();   // not a paint stroke, zoom or PTZ drag on the picture
   return (
-    <div className="talk-panel" role="dialog" aria-label="Talk-down" onPointerDown={halt} onClick={halt} onDoubleClick={halt} onWheel={halt}
+    <div className={`talk-panel ${docked ? "docked" : ""}`} role="dialog" aria-label="Talk-down" onPointerDown={halt} onClick={halt} onDoubleClick={halt} onWheel={halt}
       onKeyDown={(e) => { if (e.key === "Escape") onClose(); }}>
       <div className="talk-head">
         <strong>🔊 Talk-down</strong>

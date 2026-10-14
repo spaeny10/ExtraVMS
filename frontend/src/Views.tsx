@@ -73,7 +73,7 @@ export function LiveTile({ c, hd, port, active, onUnsupported, bar, phone, onSwi
           onUnsupported={onUnsupported} videoRef={videoRef} iceServers={iceServers} muted={!sound} onAudio={setHasAudio}>
           {!ptzOn && <RegionOverlay cam={regionKey ?? c.id} videoRef={videoRef} editing={painting} onDone={() => setPainting(false)} camera={c} fallbackAspect={aspect} site={site} />}
           {ptz?.available && <PtzOverlay cam={c.id} videoRef={videoRef} active={ptzOn} onDone={() => setPtzOn(false)} fallbackAspect={aspect} site={site} />}
-          {talking && !!speakers?.length && <TalkdownPanel speakers={speakers} site={site} cameraId={c.id} onClose={() => setTalking(false)} />}
+          {talking && !phone && !!speakers?.length && <TalkdownPanel speakers={speakers} site={site} cameraId={c.id} onClose={() => setTalking(false)} />}
         </LivePlayer>
       </ZoomScope>
       <div className="tile-bar">
@@ -92,6 +92,8 @@ export function LiveTile({ c, hd, port, active, onUnsupported, bar, phone, onSwi
         <button className={`ghost small ${painting ? "on" : ""}`} title="Paint a region: the activity feed shows only events that passed through it" disabled={ptzOn}
           onClick={() => setPainting((p) => !p)}>✎</button>
       </div>
+      {/* on a phone the panel goes under the tile: over the picture it hid most of it (a 1920x576 panorama entirely) */}
+      {talking && phone && !!speakers?.length && <TalkdownPanel docked speakers={speakers} site={site} cameraId={c.id} onClose={() => setTalking(false)} />}
     </div>
   );
 }
