@@ -31,6 +31,9 @@ export type Org = { id: string; name: string; slug: string; role: string; soc?: 
  */
 /** `link_down`: unreachable because the whole site link is down (summary.site_link_down); no camera_down then. */
 export type ServerCamera = { id: string; name: string; stream_ready: boolean; metadata?: boolean; onvif_events?: boolean; bitrate_mbps?: number | null; problems: string[]; ptz?: { at_home: boolean; preset_name: string | null } | null; link_down?: boolean };
+/** A talk-down speaker of the server (backend talkdown.summary_speakers; no address or credentials): the cameras it is
+ *  bound to, whether it answered its last check (null = not checked yet) and the message playing now. */
+export type SummarySpeaker = { id: string; name: string; camera_ids: string[]; online?: boolean | null; ok?: boolean | null; checked_at?: number | null; playing?: string | null };
 /** What a server pulls from its cameras (newer servers): now, today and this month, and per camera Mbit/s. */
 export type Bandwidth = { mbps: number; today_gb?: number; month_gb?: number; cameras?: Record<string, number> };
 export type ServerSummary = {
@@ -38,6 +41,8 @@ export type ServerSummary = {
   queues?: { verify: number; synopsis: number }; yolo_ready?: boolean; vlm_ready?: boolean; vlm_model?: string;
   cameras?: ServerCamera[]; today?: Record<string, number>; attention?: unknown[]; backup_last?: number | null; bitrate_mbps?: number;
   site_link_down?: boolean; bandwidth?: Bandwidth;
+  /** talk-down speakers (newer servers): the Live tiles of their cameras get the Talk-down button */
+  speakers?: SummarySpeaker[];
 };
 /** `location` is the server's own free-text note (older than Sites); `location_id/location_name` is the Site it belongs to. */
 export type Server = {

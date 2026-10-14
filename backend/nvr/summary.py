@@ -13,7 +13,7 @@ import time
 
 import httpx
 
-from . import backup, detector, direct, health, mediamtx, retention, vlmroute
+from . import backup, detector, direct, health, mediamtx, retention, talkdown, vlmroute
 from .config import settings
 from .db import db
 
@@ -86,6 +86,8 @@ async def site_summary(state, since: float | None = None, version: str = "") -> 
         "bitrate_mbps": round(sum(c["bitrate_mbps"] or 0 for c in cams), 2),
         # Direct-on-LAN: where a browser on this LAN can reach the server and the HTTPS cert's fingerprint (None = off)
         "direct": direct.summary(),
+        # talk-down speakers and the cameras they are bound to (no address or credentials): the hub's Live tiles
+        "speakers": talkdown.summary_speakers(),
     }
 
 

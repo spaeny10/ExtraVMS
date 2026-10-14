@@ -49,7 +49,7 @@ def test_round_trip():
     db.upsert_camera({**CAM, "name": "renamed", "zones": [], "policies": []})
     db.set_setting("retention_policy", None)
     counts = siteconfig.import_config(json.loads(text))
-    assert counts == {"cameras": 2, "camera_links": 1, "identities": 1, "layouts": 1, "dashboards": 1}
+    assert counts == {"cameras": 2, "camera_links": 1, "identities": 1, "layouts": 1, "dashboards": 1, "speakers": 0}
     cams = {c["id"]: c for c in db.cameras()}
     assert cams["cam1"]["name"] == "Yard" and cams["cam1"]["password"] == "secret-pw" and cams["cam1"]["zones"][0]["name"] == "Door"
     assert cams["cam1"]["ptz_config"]["home_name"] == "parking"

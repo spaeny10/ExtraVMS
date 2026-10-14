@@ -18,6 +18,10 @@
  * servers: hub/hub/layouts.py), with Save / Save as new / Rename / Delete and a dot while the grid differs from it. A
  * layout holds which cameras show and in what order, their streams, the grid's columns and the activity column. Tiles
  * reorder by dragging the ⠿ grip in their bar (desktop); the phone picks a layout only. The logic is liveLayout.ts.
+ *
+ * Talk-down: a camera with speakers bound to it (its server's heartbeat summary lists them) gets the 🔊 Talk-down button
+ * and panel on its live tile, for operators and up (SOC operators too, here and in the SOC incident view that embeds
+ * this grid). Play and Stop go through the hub (audited there); the panel reads its status from the server.
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { Camera as ServerCam, NvrEvent } from "@site/api";
@@ -28,10 +32,12 @@ import { useIceServers } from "@site/dashboard/ice";
 import { camKey, splitKey, type DashboardSource } from "@site/dashboard/source";
 import type { FleetEvent } from "@site/dashboard/types";
 import { regionFetchKey, regionPass, useRegionResults, useRegions } from "@site/region";
+import { speakersByCamera, type TalkSpeaker } from "@site/talkdown";
 import { Icon, confirmDialog, promptDialog, swipeHandlers, toast, useIsPhone } from "@site/ui";
 import { type Camera as RegistryCam, type Fleet, type Org, type Server, type Site, type SiteLayout, api } from "./api";
 import { type EventRef, applyLiveEvent, cameraNameFor, mergePool, regionFeed, removeLiveEvent, siteRegionKeys, tagServer } from "./eventOpen";
 import { HubEventDetail } from "./HubEventDetail";
+import { canTalkDown } from "./access";
 import { useDirect, useDirectVersion } from "./direct";
 import { makeHubSource, mediaApi, siteApi } from "./hubSource";
 import { COLUMN_CHOICES, EMPTY_LAYOUT, type LayoutAction, type LiveFocus, type LiveLayout, type Quality, applyFocus, arrange, coerceLayout, isDirty, isVisible,
@@ -152,12 +158,17 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
   const activity = useSiteActivity(site, servers, source, !hideActivity, showFeed, !isPhone && !feedAll ? expanded : null);
   const activeOf = (key: string) => activity.recent?.find((e) => camKey(e.site_id, e.camera_id) === key && (e.status === "open" || e.status === "pending"));
 
+  // talk-down: per server, camera -> its bound speakers (from the 15 s Site poll's heartbeat summaries)
+  const mayTalk = canTalkDown(org);
+  const talk = useMemo(() => Object.fromEntries(servers.map((s) => [s.id, speakersByCamera(s.summary?.speakers ?? [])])), [servers]);
+
   // above every early return below: hooks run in the same order every render
   const fit = useExpandFit(gridRef, !isPhone && !!expanded && shown.some((t) => t.key === expanded));
   if (servers.length === 0) return <p className="muted">This site has no servers yet.</p>;
   if (tiles.length === 0) return <p className="muted">{Object.keys(full).length || registry.length ? "No cameras at this site yet." : "Loading cameras…"}</p>;
 
-  const tileProps = { source, multi, q, dispatch, hdUnsupported, onUnsupported: () => setHdUnsupported(true), activeOf };
+  const tileProps = { source, multi, q, dispatch, hdUnsupported, onUnsupported: () => setHdUnsupported(true), activeOf,
+    talkOf: (t: Tile) => (mayTalk ? talk[t.server.id]?.[t.id] : undefined) };
   const feed = showFeed ? <SiteActivity site={site} servers={servers} tiles={tiles} multi={multi} activity={activity} onShowAll={() => setFeedAll(true)} /> : null;
   if (isPhone) {
     // the phone shows one camera at a time: a layout only sets which cameras are in the strip and their order
@@ -547,6 +558,8 @@ type TileCommon = {
   hdUnsupported: boolean; onUnsupported: () => void;
   /** the camera's event in progress (open or pending), as LiveView marks a tile alerting */
   activeOf: (key: string) => NvrEvent | undefined;
+  /** the speakers this viewer may talk through on the tile's camera (none: no Talk-down button) */
+  talkOf: (t: Tile) => TalkSpeaker[] | undefined;
 };
 
 /**
@@ -617,7 +630,7 @@ const STATE_TEXT: Record<Exclude<TileState, "live">, string> = { offline: "Serve
 /** A grid tile's part in a drag (useTileDrag): its grip, and whether it is the one dragged or the one under the pointer. */
 type TileDrag = { onGrip: (e: React.PointerEvent) => void; dragging: boolean; dropTarget: boolean };
 
-function SiteTile({ t, source, multi, q, dispatch, hdUnsupported, onUnsupported, activeOf, extra, phone, onSwipe, drag }: TileCommon & {
+function SiteTile({ t, source, multi, q, dispatch, hdUnsupported, onUnsupported, activeOf, talkOf, extra, phone, onSwipe, drag }: TileCommon & {
   t: Tile; extra?: React.ReactNode; phone?: boolean; onSwipe?: (dir: -1 | 1) => void; drag?: TileDrag;
 }) {
   const box = useRef<HTMLDivElement>(null);
@@ -647,6 +660,7 @@ function SiteTile({ t, source, multi, q, dispatch, hdUnsupported, onUnsupported,
     <div ref={box} className={`site-live-cell ${drag?.dragging ? "dragging" : ""} ${drag?.dropTarget ? "drop-target" : ""}`} data-live-key={t.key}>
       {playing && t.cam ? (
         <LiveTile c={t.cam} hd={hd} port={source.port} iceServers={ice} site={site} regionKey={t.key} phone={phone} onSwipe={onSwipe} active={active}
+          speakers={talkOf(t)}
           onUnsupported={hd ? onUnsupported : undefined} bar={<>
             {grip}
             <span className={`dot ${t.streamReady ? "ok" : "bad"}`} title={t.streamReady ? "Recording" : "No stream"} />

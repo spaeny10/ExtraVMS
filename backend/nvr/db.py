@@ -261,6 +261,45 @@ CREATE TABLE IF NOT EXISTS restored_spans (
     requested_by TEXT
 );
 CREATE INDEX IF NOT EXISTS restored_spans_cam ON restored_spans(camera_id, from_ts);
+-- IP speakers for talk-down (talkdown.py): reached over their ONVIF RTSP backchannel, bound to cameras on this server
+-- whose live view carries the talk-down controls. password is never returned by the API (like cameras).
+CREATE TABLE IF NOT EXISTS speakers (
+    id           TEXT PRIMARY KEY,
+    name         TEXT NOT NULL,
+    host         TEXT NOT NULL,
+    rtsp_port    INTEGER NOT NULL DEFAULT 554,
+    onvif_port   INTEGER NOT NULL DEFAULT 80,
+    path         TEXT NOT NULL DEFAULT '/main',
+    username     TEXT NOT NULL DEFAULT 'admin',
+    password     TEXT NOT NULL DEFAULT '',
+    codec        TEXT NOT NULL DEFAULT 'PCMU',      -- PCMU | PCMA: preferred when the speaker offers both
+    volume_note  TEXT NOT NULL DEFAULT '',
+    camera_ids   TEXT NOT NULL DEFAULT '[]',        -- JSON ["cam1", ...]: the cameras whose live view talks through it
+    enabled      INTEGER NOT NULL DEFAULT 1,
+    check_json   TEXT,                              -- JSON {{ok, online, backchannel, codecs, codec, error}}: the last DESCRIBE
+    checked_at   REAL
+);
+-- Talk-down message library: an uploaded audio file under data_dir/talkdown/, or a text the TTS engine speaks
+CREATE TABLE IF NOT EXISTS talkdown_messages (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    file        TEXT,
+    text        TEXT,
+    duration_s  REAL,
+    created_at  REAL NOT NULL
+);
+-- Every talk-down play: who, which message, which speaker, how it ended
+CREATE TABLE IF NOT EXISTS talkdown_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          REAL NOT NULL,
+    speaker_id  TEXT NOT NULL,
+    message     TEXT NOT NULL,
+    by          TEXT,
+    result      TEXT NOT NULL,                    -- playing | played | stopped | replaced | failed
+    error       TEXT,
+    duration_s  REAL
+);
+CREATE INDEX IF NOT EXISTS talkdown_log_ts ON talkdown_log(ts);
 CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(synopsis, labels, content='', contentless_delete=1);
 CREATE VIRTUAL TABLE IF NOT EXISTS events_vec USING vec0(embedding float[{EMBED_DIM}]);
 """
@@ -634,6 +673,36 @@ class Database:
             f"ON CONFLICT(id) DO UPDATE SET {','.join(f'{c}=excluded.{c}' for c in present if c != 'id')}",
             [data[c] for c in present],
         )
+
+    # ---- speakers (talkdown.py)
+    def speakers(self, enabled_only: bool = False) -> list[dict]:
+        sql = "SELECT * FROM speakers" + (" WHERE enabled=1" if enabled_only else "") + " ORDER BY id"
+        out = self.all(sql)
+        for s in out:
+            s["camera_ids"] = json.loads(s["camera_ids"] or "[]")
+            s["check"] = json.loads(s.pop("check_json")) if s.get("check_json") else None
+        return out
+
+    def speaker(self, speaker_id: str) -> dict | None:
+        return next((s for s in self.speakers() if s["id"] == speaker_id), None)
+
+    def upsert_speaker(self, s: dict) -> None:
+        cols = ["id", "name", "host", "rtsp_port", "onvif_port", "path", "username", "password", "codec", "volume_note",
+                "camera_ids", "enabled"]
+        data = {**s}
+        if "camera_ids" in data:
+            data["camera_ids"] = json.dumps(list(data["camera_ids"] or []))
+        if "enabled" in data:
+            data["enabled"] = int(bool(data["enabled"]))
+        present = [c for c in cols if c in data]
+        self.execute(
+            f"INSERT INTO speakers ({','.join(present)}) VALUES ({','.join('?' * len(present))}) "
+            f"ON CONFLICT(id) DO UPDATE SET {','.join(f'{c}=excluded.{c}' for c in present if c != 'id')}",
+            [data[c] for c in present],
+        )
+
+    def set_speaker_check(self, speaker_id: str, check: dict, at: float | None = None) -> None:
+        self.execute("UPDATE speakers SET check_json=?, checked_at=? WHERE id=?", [json.dumps(check), at or time.time(), speaker_id])
 
     # ---- events
     def create_event(self, **fields) -> int:

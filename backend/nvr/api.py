@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field, model_validator
 from . import assistant, backup, baseline, cells, footage, frames, health, identities, journeys, keep, mediamtx, policy, ptz, retention, streams, zones
 from . import synopsis as vlm
 from . import advisor, ai_serve, detector, direct, hub_agent, lan_guard, sdbackfill, site_actions, siteconfig
+from . import speakers_api, talkdown
 from . import vlmroute
 from . import summary as summary_mod
 from .config import ROOT, settings
@@ -153,6 +154,7 @@ async def lifespan(app: FastAPI):
         ("sd-status", sdbackfill.status_loop()),
         ("mediamtx-config-check", _mediamtx_config_check()),
         ("streams", state.streams.run()),
+        ("speaker-check", talkdown.check_loop()),
     ]]
     https = _https_server() if settings.direct_enabled else None
     https_task = asyncio.create_task(_serve_https(https), name="https") if https is not None else None
@@ -164,6 +166,7 @@ async def lifespan(app: FastAPI):
     for ing in state.ingests.values():
         ing.stop()
     state.sd.stop_all()   # a recovery in progress keeps what it published and resumes after the restart
+    talkdown.manager.stop_all()   # each playback tears its speaker session down
     await state.mtx.stop()
     state.health.flush()   # bytes received today since the last save
     if state.ollama is not None:   # a site without a local model has no Ollama to stop
@@ -218,6 +221,7 @@ async def _serve_https(server) -> None:
 
 app = FastAPI(title="Axiom Vision", lifespan=lifespan)
 app.include_router(ai_serve.router)   # this site's Qwen for the fleet, tunnel-only (see ai_serve.py)
+app.include_router(speakers_api.router)   # IP speakers and talk-down (talkdown.py)
 
 
 DIRECT_WRITES = re.compile(r"^/api/whep/")   # WebRTC session lifecycle: the only non-GET a direct browser may send
@@ -755,6 +759,39 @@ async def delete_camera(camera_id: str, moved_to: str | None = Query(None, max_l
         state.ingests.pop(camera_id).stop()
     sync_cameras()
     return {"ok": True, "removed": removed}
+
+
+class ToSpeakerIn(BaseModel):
+    speaker_id: str | None = Field(None, pattern=speakers_api.ID_RX)    # default: the next free spkN
+    name: str | None = Field(None, min_length=1, max_length=80)          # default: the camera's name
+    host: str | None = Field(None, pattern=speakers_api.HOST_RX)         # default: the camera's (correct it here if it is wrong)
+    path: str = Field("/main", pattern=speakers_api.PATH_RX)
+    camera_ids: list[str] = Field(default_factory=list, max_length=64)  # cameras to bind (may be empty)
+    disable_camera: bool = True   # the row was never a camera: stop pulling it as one
+
+
+@app.post("/api/cameras/{camera_id}/to-speaker")
+async def camera_to_speaker(camera_id: str, body: ToSpeakerIn, request: Request):
+    """Admin, one-off: a speaker that was added as a camera becomes a speaker. Its host, ports and login are copied
+    server-side (the password never leaves the server); the camera row is disabled (kept: events may reference it)."""
+    speakers_api.require(request, "admin")
+    cam = db.one("SELECT * FROM cameras WHERE id=?", [camera_id])
+    if not cam:
+        raise HTTPException(404, "unknown camera")
+    taken = {s["id"] for s in db.speakers()}
+    sid = body.speaker_id or next(f"spk{n}" for n in range(1, 1000) if f"spk{n}" not in taken)
+    if sid in taken:
+        raise HTTPException(409, f"there is already a speaker {sid}")
+    binds = list(dict.fromkeys(body.camera_ids))
+    speakers_api.check_cameras(binds)
+    db.upsert_speaker({"id": sid, "name": body.name or cam["name"], "host": body.host or cam["host"], "rtsp_port": cam["rtsp_port"],
+                       "onvif_port": cam["onvif_port"], "path": body.path, "username": cam["username"], "password": cam["password"],
+                       "codec": "PCMU", "volume_note": "", "camera_ids": binds, "enabled": True})
+    if body.disable_camera and cam["enabled"]:
+        db.execute("UPDATE cameras SET enabled=0 WHERE id=?", [camera_id])
+        sync_cameras()
+    log.info("camera %s converted to speaker %s (%d bound cameras)", camera_id, sid, len(binds))
+    return speakers_api.public_speaker(db.speaker(sid))
 
 
 # ---------------------------------------------------------------- PTZ / relay / digital input

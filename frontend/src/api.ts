@@ -148,6 +148,28 @@ export type PtzInfo = {
   status: PtzStatus; presets: PtzPreset[]; config: PtzConfig;
 };
 
+/** Talk-down (backend talkdown.py): an IP speaker reached over its ONVIF RTSP backchannel, bound to cameras on its server. */
+export type SpeakerCodec = "PCMU" | "PCMA";
+/** The last DESCRIBE: online = it answered RTSP, backchannel = it offers a sendonly audio track, codec = the law we send. */
+export type SpeakerCheck = { ok: boolean; online: boolean; backchannel: boolean; codecs: string[]; codec: string | null; error: string | null };
+/** One speaker's playback: at most one at a time (a new one replaces it). `last` is how the previous one ended. */
+export type SpeakerStatus = {
+  state: "idle" | "connecting" | "playing"; message: string | null; by: string | null; requested_at: number | null; started_at: number | null;
+  elapsed_s: number | null; duration_s: number | null;
+  last: { message: string; by: string; result: "played" | "stopped" | "replaced" | "failed"; error: string | null; at: number; played_s: number } | null;
+};
+export type Speaker = {
+  id: string; name: string; host: string; rtsp_port: number; onvif_port: number; path: string; username: string; codec: SpeakerCodec;
+  volume_note: string; camera_ids: string[]; enabled: boolean; check: SpeakerCheck | null; checked_at: number | null; status: SpeakerStatus;
+};
+export type TalkdownMessage = { id: number; name: string; kind: "file" | "tts"; text: string | null; duration_s: number | null; created_at: number; available: boolean };
+export type TalkdownLibrary = { messages: TalkdownMessage[]; tts: { available: boolean; engine: string | null }; max_s: number; max_upload: number; types: string[] };
+/** An audio file sent in a JSON body (the server takes JSON only). */
+export type AudioUpload = { filename: string; data_b64: string };
+/** What to play: a library message, a text to speak, or a one-off file. */
+export type PlayRequest = { message_id: number } | { text: string } | { upload: AudioUpload };
+export type PlayAnswer = { speaker_id: string; speaker: string; camera_ids: string[]; message: string; message_id: number | null; replaced: string | null; status: SpeakerStatus };
+
 /** An ONVIF device found by POST /api/cameras/scan (backend onvif_soap.scan_subnet). */
 export type ScannedDevice = {
   address: string; port: number; onvif: boolean; needs_auth: boolean; auth_failed?: boolean;
@@ -604,6 +626,19 @@ export function makeApi(base: string, opts: ApiOptions = {}) {
   ptzSetHome: (cam: string, token: string | null) => req<PtzInfo>(`/api/cameras/${cam}/ptz/home-preset`, json("POST", { token })),
   ptzConfig: (cam: string, cfg: Partial<Pick<PtzConfig, "return_home_min" | "relay_label" | "input_label">>) => req<PtzInfo>(`/api/cameras/${cam}/ptz/config`, json("PUT", cfg)),
   relay: (cam: string, on: boolean) => req<{ state: boolean; mode: string }>(`/api/cameras/${cam}/relay`, json("POST", { on })),
+  // talk-down (talkdown.py): speakers (admin), play / stop (operator), the message library (admin)
+  speakers: () => req<Speaker[]>("/api/speakers"),
+  saveSpeaker: (s: Omit<Speaker, "check" | "checked_at" | "status"> & { password?: string }) => req<Speaker>(`/api/speakers/${s.id}`, json("PUT", s)),
+  deleteSpeaker: (id: string) => req(`/api/speakers/${id}`, { method: "DELETE" }),
+  checkSpeaker: (id: string) => req<SpeakerCheck & { checked_at: number }>(`/api/speakers/${id}/check`, { method: "POST" }),
+  playSpeaker: (id: string, what: PlayRequest) => req<PlayAnswer>(`/api/speakers/${id}/play`, json("POST", what)),
+  /** keepalive: a Stop still goes out when the tab closes */
+  stopSpeaker: (id: string) => req<{ stopped: boolean; status: SpeakerStatus }>(`/api/speakers/${id}/stop`, { method: "POST", keepalive: true }),
+  speakerStatus: (id: string) => req<SpeakerStatus>(`/api/speakers/${id}/status`),
+  talkdownMessages: () => req<TalkdownLibrary>("/api/talkdown/messages"),
+  addTalkdownMessage: (m: { name: string; text: string } | { name: string; upload: AudioUpload }) => req<TalkdownMessage>("/api/talkdown/messages", json("POST", m)),
+  renameTalkdownMessage: (id: number, name: string) => req<TalkdownMessage>(`/api/talkdown/messages/${id}`, json("PUT", { name })),
+  deleteTalkdownMessage: (id: number) => req(`/api/talkdown/messages/${id}`, { method: "DELETE" }),
   footageVerify: (b: { camera_id: string; ts: number; tile: number; q: string }) =>
     req<FootageMatch>("/api/footage/verify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(b) }),
   footageStatus: () => req<FootageStatus>("/api/footage/status"),

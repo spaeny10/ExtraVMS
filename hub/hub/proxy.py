@@ -6,7 +6,9 @@ serves itself; API and WebSocket requests go down the tunnel with the hub user's
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import re
 import time
 from pathlib import Path
 
@@ -20,6 +22,10 @@ from .roles import allows, required_role
 
 log = logging.getLogger("hub.proxy")
 router = APIRouter()
+
+# talk-down plays are audited with what was played where (the site's answer names the speaker and the message)
+TALKDOWN_PLAY = re.compile(r"^/api/speakers/[^/]+/play$")
+TALKDOWN_ANSWER_MAX = 8192
 
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding",
        "upgrade", "cookie", "authorization", "host", "content-length"}
@@ -86,6 +92,7 @@ async def proxy_api(site_id: str, path: str, request: Request):
             central_cameras.release(site_id, reserved)
     # allow-listed headers only, never an active content type, always nosniff + a sandboxing CSP (security.py)
     status, resp_headers = s.status, security.filter_proxy_headers(s.headers, site_id)
+    answer = bytearray() if TALKDOWN_PLAY.match(api_path) and request.method == "POST" else None
 
     async def body_iter():
         try:
@@ -96,21 +103,43 @@ async def proxy_api(site_id: str, path: str, request: Request):
                 c = await s.read()
                 if c is None:
                     return
+                if answer is not None and len(answer) < TALKDOWN_ANSWER_MAX:
+                    answer.extend(c[:TALKDOWN_ANSWER_MAX - len(answer)])
                 yield c
                 await conn.send({"t": "credit", "id": s.id, "bytes": len(c)})
         finally:
             conn.finish(s)
             if request.method != "GET":
-                _audit(u, site, request, status, time.time() - t0)
+                _audit(u, site, request, status, time.time() - t0, _talkdown(answer, status, conn) if answer is not None else None)
 
     return StreamingResponse(body_iter(), status_code=status, headers=resp_headers, media_type=resp_headers.get("content-type"))
 
 
-def _audit(u: dict, site: dict, request: Request, status: int, dt: float) -> None:
+def _talkdown(answer: bytearray, status: int, conn) -> dict | None:
+    """{action, detail} for a talk-down play: which speaker, which message, its cameras and the Site (None = the site
+    refused it or the answer can't be read; the plain "POST speakers/<id>/play" row is written then)."""
+    if not 200 <= status < 300:
+        return None
+    try:
+        a = json.loads(bytes(answer))
+    except ValueError:
+        return None
+    if not isinstance(a, dict) or not a.get("speaker_id"):
+        return None
+    loc = getattr(conn, "location", None) or {}
+    speaker, message = str(a.get("speaker") or a["speaker_id"])[:80], str(a.get("message") or "?")[:120]
+    return {"action": f"talk-down: {message} on {speaker}",
+            "detail": {"talkdown": {"speaker_id": str(a["speaker_id"])[:40], "speaker": speaker, "message": message,
+                                    "message_id": a.get("message_id"), "camera_ids": [str(c)[:40] for c in (a.get("camera_ids") or [])][:64],
+                                    "replaced": a.get("replaced"), "location_id": loc.get("id"), "location_name": loc.get("name")}}}
+
+
+def _audit(u: dict, site: dict, request: Request, status: int, dt: float, special: dict | None = None) -> None:
     db.insert(db.audit_log, {"ts": time.time(), "user_id": u["id"], "user_email": u["email"], "org_id": site["org_id"], "site_id": site["id"],
-                             "action": f"{request.method} {request.url.path.split('/api/', 1)[-1]}", "method": request.method,
-                             "path": request.url.path, "status": status, "ip": request.client.host if request.client else None,
-                             "detail": {"ms": round(dt * 1000)}})
+                             "action": (special or {}).get("action") or f"{request.method} {request.url.path.split('/api/', 1)[-1]}",
+                             "method": request.method, "path": request.url.path, "status": status,
+                             "ip": request.client.host if request.client else None,
+                             "detail": {"ms": round(dt * 1000), **((special or {}).get("detail") or {})}})
 
 
 @router.websocket("/s/{site_id}/api/ws")

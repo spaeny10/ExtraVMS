@@ -137,6 +137,10 @@ class Settings(BaseSettings):
     event_rate_max_per_hour: int = 600      # per camera; above it events still open but keep no clip/crops
                                             # (snapshot only). 0 = no limit
 
+    # Talk-down speakers (talkdown.py): text-to-speech is Windows SAPI on Windows; on Linux piper when this names
+    # its .onnx voice model (and `piper` is on PATH), else espeak-ng / espeak when installed; none = no "Say" field
+    tts_piper_model: str = ""
+
     # API
     host: str = "0.0.0.0"
     port: int = 8080

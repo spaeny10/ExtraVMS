@@ -816,6 +816,36 @@ body:has(.drag-ghost) { cursor: grabbing; user-select: none; }
 @media (pointer: coarse) { .ptz-arrow { width: 52px; height: 52px; } .ptz-zoom button { width: 44px; height: 44px; } }
 @media (max-width: 767px) { .ptz-pill select { max-width: 110px; } }
 
+/* Talk-down (TalkdownPanel.tsx): the panel sits on the picture, translucent like the PTZ pill, so the video stays in view */
+.dot.idle { background: var(--muted); }
+.talk-btn { white-space: nowrap; }
+.talk-panel { position: absolute; left: 6px; bottom: 6px; z-index: 5; width: min(340px, calc(100% - 12px)); max-height: calc(100% - 12px); overflow-y: auto;
+  display: flex; flex-direction: column; gap: 6px; padding: 8px; border-radius: 8px; background: rgb(0 0 0 / .55); backdrop-filter: blur(6px);
+  color: #fff; font-size: 12px; text-align: left; }
+.talk-panel select, .talk-panel input { background: rgb(255 255 255 / .12); color: #fff; border-color: transparent; min-width: 0; }
+.talk-panel input::placeholder { color: rgb(255 255 255 / .6); }
+.talk-panel select option { color: var(--text); background: var(--panel); }
+.talk-panel .ghost { color: #fff; }
+.talk-head, .talk-actions, .talk-say { display: flex; gap: 6px; align-items: center; }
+.talk-head select { max-width: 170px; }
+.talk-say input { flex: 1; }
+.talk-msgs { display: flex; flex-wrap: wrap; gap: 4px; max-height: 96px; overflow-y: auto; }
+.talk-msg { padding: 2px 9px; border-radius: 99px; border: 1px solid transparent; background: rgb(255 255 255 / .14); color: #fff; font-size: 12px; cursor: pointer; }
+.talk-msg.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 40%, transparent); }
+.talk-stop:not(:disabled) { background: var(--bad); border-color: var(--bad); color: #fff; }
+.talk-dim { color: rgb(255 255 255 / .7); }
+.talk-error { color: #fca5a5; }
+.talk-status { display: flex; flex-direction: column; gap: 2px; }
+/* Settings -> Cameras -> Speakers */
+.speakers { margin-top: 22px; }
+.speakers .toolbar { align-items: center; }
+.speakers .toolbar h3 { margin: 0; }
+.speaker-cams { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 2px 12px; max-height: 200px; overflow-y: auto; }
+.talk-lib-list { list-style: none; padding: 0; margin: 6px 0; }
+.talk-lib-list li { gap: 10px; padding: 3px 0; border-bottom: 1px solid var(--border); }
+.talk-lib-add { flex-wrap: wrap; }
+.talk-lib-add input { max-width: 260px; }
+
 /* Settings -> System -> Cloud hub: the claim code */
 .hub-claim { margin: 6px 0; }
 .hub-code { font-size: 28px; font-weight: 700; letter-spacing: .12em; font-variant-numeric: tabular-nums; }

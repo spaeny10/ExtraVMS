@@ -1,7 +1,7 @@
 """Export / import of a site's configuration (not its recordings or events): cameras, zones, named places,
-site rules, PTZ settings, neighbor topology, named people/vehicles with their looks, timeline layouts,
+site rules, PTZ settings, talk-down speakers, neighbor topology, named people/vehicles with their looks, timeline layouts,
 retention and briefing settings. The fleet hub pulls this nightly; restoring a dead site is
-"install, enroll, import". Camera passwords are not exported: they're re-entered on restore.
+"install, enroll, import". Camera and speaker passwords are not exported: they're re-entered on restore.
 
 Fleet actions (hub/hub/fleet_actions.py) move cameras between sites with `handoff` (a partial export of some
 cameras WITH their passwords, served only down the hub tunnel; see api.config_handoff) and `merge_cameras`
@@ -59,6 +59,26 @@ CAMERA_COLS = ("name", "host", "onvif_port", "rtsp_port", "username", "main_path
                "event_source", "motion_events")
 
 
+# talk-down speakers (talkdown.py): everything but the password and the last check
+SPEAKER_COLS = ("id", "name", "host", "rtsp_port", "onvif_port", "path", "username", "codec", "volume_note", "camera_ids", "enabled")
+
+
+def _parse_speakers(speakers) -> list:
+    """The export's speakers, checked like PUT /api/speakers before anything is stored (ValidationError is a ValueError)."""
+    from .speakers_api import SpeakerIn
+    if not isinstance(speakers, list) or not all(isinstance(sp, dict) for sp in speakers):
+        raise ValueError("speakers must be a list of objects")
+    return [SpeakerIn.model_validate({**sp, "password": None}) for sp in speakers]
+
+
+def _import_speakers(parsed: list) -> int:
+    """Upsert them, each keeping the password stored here (none for a new one: entered again, as for cameras)."""
+    existing_pw = {sp["id"]: sp["password"] for sp in db.speakers()}
+    for sp in parsed:
+        db.upsert_speaker({**sp.model_dump(), "password": existing_pw.get(sp.id, "")})
+    return len(parsed)
+
+
 def _export_identities() -> list[dict]:
     idents = []
     for i in db.all("SELECT id, name, kind, notes, sightings, watch, watch_note FROM identities"):
@@ -96,8 +116,9 @@ def export_config() -> dict:
     links = db.all("SELECT cam_a, cam_b, min_s, max_s, one_way FROM camera_links")
     layouts = [{"name": r["name"], "config": json.loads(r["config"])} for r in db.all("SELECT name, config FROM layouts")]
     dashboards = [{"name": r["name"], "config": json.loads(r["config"])} for r in db.all("SELECT name, config FROM dashboards")]
+    speakers = [{k: v for k, v in sp.items() if k in SPEAKER_COLS} for sp in db.speakers()]
     return {"format": 1, "exported_at": time.time(), "site_version": __version__, "cameras": cams, "camera_links": links,
-            "identities": _export_identities(), "layouts": layouts, "dashboards": dashboards,
+            "speakers": speakers, "identities": _export_identities(), "layouts": layouts, "dashboards": dashboards,
             "settings": {k: db.get_setting(k) for k in SETTINGS_KEYS}}
 
 
@@ -109,7 +130,8 @@ def import_config(data: dict, replace_identities: bool = False) -> dict:
     if data.get("partial"):
         raise ValueError("a partial export (camera handoff) is merged with merge_cameras, not restored")
     _check_cameras(data.get("cameras", []))
-    counts = {"cameras": 0, "camera_links": 0, "identities": 0, "layouts": 0, "dashboards": 0}
+    speakers = _parse_speakers(data["speakers"]) if "speakers" in data else None   # older exports have none: left as they are
+    counts = {"cameras": 0, "camera_links": 0, "identities": 0, "layouts": 0, "dashboards": 0, "speakers": 0}
     existing_pw = {c["id"]: c["password"] for c in db.cameras()}
     for c in data.get("cameras", []):
         cam = {**c, "password": existing_pw.get(c["id"], "")}
@@ -119,6 +141,8 @@ def import_config(data: dict, replace_identities: bool = False) -> dict:
         if c.get("ptz_config") is not None:
             db.set_ptz_config(c["id"], c["ptz_config"])
         counts["cameras"] += 1
+    if speakers is not None:
+        counts["speakers"] = _import_speakers(speakers)
     with db.lock:
         db.conn.execute("DELETE FROM camera_links")
         for l in data.get("camera_links", []):

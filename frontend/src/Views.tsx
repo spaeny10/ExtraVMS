@@ -18,6 +18,9 @@ import { yoloFallbackText, yoloState } from "./yoloStatus";
 import { vlmSub, vlmValue } from "./vlmStatus";
 import { sdStatusText } from "./sdcard";
 import { detectionsText, streamsText, streamsTitle, suggestText } from "./cameraStreams";
+import { TalkdownPanel } from "./TalkdownPanel";
+import { speakersByCamera, type TalkSpeaker } from "./talkdown";
+import { SpeakersSection } from "./Speakers";
 
 /* ------------------------------------------------------------------ Live */
 
@@ -38,17 +41,21 @@ export function livePath(c: Pick<Camera, "id" | "record_stream">, hd: boolean): 
   return c.record_stream === "sub" ? `${c.id}_hd` : c.id;
 }
 
-/** One live camera: the WHEP player with the paint-a-region overlay and the tile bar. */
-export function LiveTile({ c, hd, port, active, onUnsupported, bar, phone, onSwipe, iceServers, site = api, regionKey }: {
+/** One live camera: the WHEP player with the paint-a-region overlay and the tile bar; with `speakers` bound to the camera,
+ *  the 🔊 Talk-down button and its panel over the picture (TalkdownPanel.tsx). */
+export function LiveTile({ c, hd, port, active, onUnsupported, bar, phone, onSwipe, iceServers, site = api, regionKey, speakers }: {
   c: Camera; hd: boolean; port: number; active?: NvrEvent; onUnsupported?: () => void; bar: React.ReactNode; phone?: boolean; onSwipe?: (dir: -1 | 1) => void;
   iceServers?: RTCIceServer[];
   /** the camera's server (the hub's combined Live); default: this server */
   site?: SiteApi;
   /** key the painted region is stored under (the hub uses server/camera); default: the camera id */
   regionKey?: string;
+  /** speakers bound to this camera that the viewer may talk through (none: no Talk-down button) */
+  speakers?: TalkSpeaker[];
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [painting, setPainting] = useState(false);
+  const [talking, setTalking] = useState(false);
   const [ptzOn, setPtzOn] = useState(false);
   const [hasAudio, setHasAudio] = useState(false);
   const [sound, setSound] = useState(false);
@@ -56,7 +63,7 @@ export function LiveTile({ c, hd, port, active, onUnsupported, bar, phone, onSwi
   const aspect = hd ? 2592 / 1520 : 4 / 3;
   return (
     <div className={`tile ${active ? "alerting" : ""} ${painting ? "painting" : ""} ${ptzOn ? "ptz" : ""}`}
-      {...(phone && onSwipe && !painting && !ptzOn ? swipeHandlers(onSwipe) : {})}>
+      {...(phone && onSwipe && !painting && !ptzOn && !talking ? swipeHandlers(onSwipe) : {})}>
       {/* digital zoom: kept across SD/HD and a fallback to recordings, back to 1× on another camera; off in PTZ mode,
           whose drag / click-to-center / wheel steer the camera and map to the unzoomed picture */}
       <ZoomScope resetKey={c.id} disabled={ptzOn}>
@@ -65,6 +72,7 @@ export function LiveTile({ c, hd, port, active, onUnsupported, bar, phone, onSwi
           onUnsupported={onUnsupported} videoRef={videoRef} iceServers={iceServers} muted={!sound} onAudio={setHasAudio}>
           {!ptzOn && <RegionOverlay cam={regionKey ?? c.id} videoRef={videoRef} editing={painting} onDone={() => setPainting(false)} camera={c} fallbackAspect={aspect} site={site} />}
           {ptz?.available && <PtzOverlay cam={c.id} videoRef={videoRef} active={ptzOn} onDone={() => setPtzOn(false)} fallbackAspect={aspect} site={site} />}
+          {talking && !!speakers?.length && <TalkdownPanel speakers={speakers} site={site} onClose={() => setTalking(false)} />}
         </LivePlayer>
       </ZoomScope>
       <div className="tile-bar">
@@ -72,6 +80,10 @@ export function LiveTile({ c, hd, port, active, onUnsupported, bar, phone, onSwi
         <PtzBadge cam={c.id} ptz={ptz} site={site} />
         {!painting && <RegionBadge cam={regionKey ?? c.id} onEdit={() => setPainting(true)} />}
         {hasAudio && <button className={`ghost small ${sound ? "on" : ""}`} title={sound ? "Mute" : "Listen"} onClick={() => setSound((s) => !s)}>{sound ? "🔊" : "🔇"}</button>}
+        {!!speakers?.length && (
+          <button className={`ghost small talk-btn ${talking ? "on" : ""}`} aria-pressed={talking} onClick={() => setTalking((t) => !t)}
+            title={`Talk-down through ${speakers.map((s) => s.name).join(", ")} while watching this camera`}>🔊 Talk-down</button>
+        )}
         {ptz?.available && (
           <button className={`ghost small ${ptzOn ? "on" : ""}`} title={ptz.pan_tilt === false ? "Zoom, relay, digital input" : "Pan / tilt / zoom, presets, relay"} disabled={painting}
             onClick={() => setPtzOn((p) => !p)}>🕹</button>
@@ -131,6 +143,14 @@ export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: n
   // ICE servers: a TURN relay when this UI is served through the fleet hub (or the site knows the hub's relay)
   const [iceServers, setIceServers] = useState<RTCIceServer[] | undefined>(undefined);
   useEffect(() => { api.turn().then((t) => setIceServers(t.iceServers)).catch(() => setIceServers([])); }, []);
+  // talk-down: the speakers bound to each camera (re-read every minute: bindings change in Settings)
+  const [talk, setTalk] = useState<Record<string, TalkSpeaker[]>>({});
+  useEffect(() => {
+    const pull = () => api.speakers().then((l) => setTalk(speakersByCamera(l.map((s) => ({ ...s, online: s.check?.online ?? null }))))).catch(() => {});
+    pull();
+    const t = setInterval(pull, 60000);
+    return () => clearInterval(t);
+  }, []);
   const regionMap = useRegions();
   // a painted region scopes the feed to that camera (or cameras): only their events, only through the region.
   // `recent` is just the last few events site-wide, so fetch a deeper history for the scoped cameras.
@@ -181,7 +201,7 @@ export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: n
     const go = (dir: -1 | 1) => setPhoneCam((i) => (i + dir + cameras.length) % cameras.length);
     return (
       <div className="live-phone">
-        <LiveTile c={c} hd={hd} port={port} active={active} phone onSwipe={go} iceServers={iceServers} onUnsupported={hd ? () => setHdUnsupported(true) : undefined} bar={<>
+        <LiveTile c={c} hd={hd} port={port} active={active} phone onSwipe={go} iceServers={iceServers} speakers={talk[c.id]} onUnsupported={hd ? () => setHdUnsupported(true) : undefined} bar={<>
           <span className={`dot ${c.status?.stream_ready ? "ok" : "bad"}`} />
           <span>{c.name}</span>
           {active && <span className={`label-chip ${active.camera_class}`}>{active.camera_class}</span>}
@@ -230,7 +250,7 @@ export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: n
             const active = recent.find((e) => e.camera_id === c.id && (e.status === "open" || e.status === "pending"));
             const hd = q(c.id) === "hd";
             return (
-              <LiveTile key={c.id} c={c} hd={hd} port={port} active={active} iceServers={iceServers} onUnsupported={hd ? () => setHdUnsupported(true) : undefined} bar={<>
+              <LiveTile key={c.id} c={c} hd={hd} port={port} active={active} iceServers={iceServers} speakers={talk[c.id]} onUnsupported={hd ? () => setHdUnsupported(true) : undefined} bar={<>
                 <span className={`dot ${c.status?.stream_ready ? "ok" : "bad"}`} title={c.status?.stream_ready ? "Recording" : "Offline"} />
                 <span>{c.name}</span>
                 {active && <span className={`label-chip ${active.camera_class}`}>{active.camera_class}</span>}
@@ -568,6 +588,7 @@ export function CamerasView({ cameras, port, reload }: { cameras: Camera[]; port
           </div>
         </div>
       )}
+      <SpeakersSection cameras={cameras} />
       {zoneCam && <ZoneEditor camera={zoneCam} onClose={() => setZoneCam(null)} onSaved={reload} />}
     </div>
   );

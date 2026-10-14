@@ -3,6 +3,10 @@ import type { Access, Me, Org, Server, Site, SocRole } from "./api";
 
 export const isAdmin = (org: Org | undefined, me: Me) => me.user.is_super || org?.role === "admin" || org?.role === "owner";
 
+/** May play talk-down messages (operator and up in this customer, SOC operators included: the hub's proxy needs the
+ *  same for POST /api/speakers/<id>/play, hub roles.py). Only decides whether the tiles offer the button. */
+export const canTalkDown = (org: Org | undefined) => ["operator", "admin", "owner"].includes(org?.role ?? "");
+
 /**
  * May spend CoverageMap units (look a Site up again, check an address): hub administrators; on the paid plan also the
  * customer's admins and owners with a real membership (a customer listed only through the SOC does not count). The hub
