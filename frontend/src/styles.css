@@ -822,9 +822,9 @@ body:has(.drag-ghost) { cursor: grabbing; user-select: none; }
 .talk-panel { position: absolute; left: 6px; bottom: 6px; z-index: 5; width: min(340px, calc(100% - 12px)); max-height: calc(100% - 12px); overflow-y: auto;
   display: flex; flex-direction: column; gap: 6px; padding: 8px; border-radius: 8px; background: rgb(0 0 0 / .55); backdrop-filter: blur(6px);
   color: #fff; font-size: 12px; text-align: left; }
-/* phone: under the tile, the picture stays whole; solid, full width, bigger touch targets */
+/* under the tile (desktop and phone): the picture stays whole; solid, full width, bigger touch targets */
 .talk-panel.docked { position: static; width: auto; max-height: none; margin: 6px; border-radius: 8px; background: var(--panel-2); backdrop-filter: none;
-  color: var(--text); font-size: 14px; border: 1px solid var(--border); }
+  color: var(--text); font-size: 13px; border: 1px solid var(--border); }
 .talk-panel.docked .ghost { color: var(--text); }
 .talk-panel.docked select, .talk-panel.docked input, .talk-panel.docked textarea { background: var(--panel); color: var(--text); border-color: var(--border); }
 .talk-panel.docked input::placeholder, .talk-panel.docked textarea::placeholder { color: var(--muted); }
