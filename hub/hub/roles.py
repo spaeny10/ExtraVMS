@@ -1,7 +1,7 @@
 """Who may do what through the proxy. Roles nest: viewer < operator < admin < owner.
 
 viewer   watch: every GET, the live WebSocket, WHEP signaling, media, playback, frames
-operator act: PTZ / relay / presets, talk-down (play / stop a message on a speaker), naming people and vehicles, feedback and synopsis edits, locks,
+operator act: PTZ / relay / presets, talk-down (play / stop a message on a speaker, Describe & warn), naming people and vehicles, feedback and synopsis edits, locks,
          Ask and clip chat, reprocess, briefings on demand
 admin    configure: cameras, speakers and their message library, zones, retention, topology, remote AI, backups, site rules, SD card recovery
 owner    everything an admin can, plus org members and billing (hub-side only)
@@ -24,7 +24,7 @@ RULES: list[tuple[set[str], re.Pattern, str]] = [
     ({"POST"}, re.compile(r"^/api/footage/verify$"), "viewer"),
     ({"PUT"}, re.compile(r"^/api/cameras/[^/]+/ptz/config$"), "admin"),                # return-home timer etc.: configuration
     ({"POST", "PUT", "DELETE"}, re.compile(r"^/api/cameras/[^/]+/(ptz|relay)(/|$)"), "operator"),
-    ({"POST"}, re.compile(r"^/api/speakers/[^/]+/(play|stop)$"), "operator"),            # talk-down on a bound camera's live view
+    ({"POST"}, re.compile(r"^/api/speakers/[^/]+/(play|stop|describe)$"), "operator"),   # talk-down on a bound camera's live view; Describe & warn
     ({"PUT", "POST", "DELETE"}, re.compile(r"^/api/(speakers|talkdown)(/|$)"), "admin"),  # speakers, Check, the message library
     ({"POST", "PUT", "DELETE"}, re.compile(r"^/api/identities(/|$)"), "operator"),
     ({"PUT", "POST", "DELETE"}, re.compile(r"^/api/events/\d+/(feedback|synopsis|synopsis/generate|synopsis/revert|reprocess|identity|lock|watch)(/|$)"), "operator"),

@@ -73,7 +73,7 @@ export function LiveTile({ c, hd, port, active, onUnsupported, bar, phone, onSwi
           onUnsupported={onUnsupported} videoRef={videoRef} iceServers={iceServers} muted={!sound} onAudio={setHasAudio}>
           {!ptzOn && <RegionOverlay cam={regionKey ?? c.id} videoRef={videoRef} editing={painting} onDone={() => setPainting(false)} camera={c} fallbackAspect={aspect} site={site} />}
           {ptz?.available && <PtzOverlay cam={c.id} videoRef={videoRef} active={ptzOn} onDone={() => setPtzOn(false)} fallbackAspect={aspect} site={site} />}
-          {talking && !!speakers?.length && <TalkdownPanel speakers={speakers} site={site} onClose={() => setTalking(false)} />}
+          {talking && !!speakers?.length && <TalkdownPanel speakers={speakers} site={site} cameraId={c.id} onClose={() => setTalking(false)} />}
         </LivePlayer>
       </ZoomScope>
       <div className="tile-bar">

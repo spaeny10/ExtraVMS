@@ -10,7 +10,7 @@ it). GET_PARAMETER keeps the session alive; TEARDOWN ends it.
 One playback per speaker: a new one REPLACES the one playing (the operator's latest message wins; the old session is
 torn down before the new one connects, since a speaker takes one backchannel at a time). Messages are cut at MAX_S.
 Playback runs in a worker thread per speaker; nothing here blocks the event loop. Every play is logged (talkdown_log
-and the server log): who, which message, which speaker, how it ended.
+and the server log): who, which message (and the words of a spoken text), which speaker, how it ended.
 
 Messages: a library under data_dir/talkdown/ (uploaded mp3/wav/m4a/ogg of at most 2 MB, or a text the server's
 text-to-speech engine speaks), or a one-off upload or typed text. ffmpeg converts everything to 8 kHz mono G.711.
@@ -479,14 +479,14 @@ class Talkdown:
             else:
                 old = None
             job = Job(sid, speaker["name"], msg, by)
-            job.log_id = db.execute_insert("INSERT INTO talkdown_log (ts, speaker_id, message, by, result) VALUES (?,?,?,?,?)",
-                                           [job.requested_at, sid, msg.name, by, "playing"])
+            job.log_id = db.execute_insert("INSERT INTO talkdown_log (ts, speaker_id, message, text, by, result) VALUES (?,?,?,?,?,?)",
+                                           [job.requested_at, sid, msg.name, msg.text, by, "playing"])
             log.info("talk-down: %r on %s (%s) by %s%s", msg.name, sid, speaker["name"], by, f", replacing {old.message.name!r}" if old else "")
             self._jobs[sid] = job
             job.thread = threading.Thread(target=self._run, args=(job, dict(speaker), old), daemon=True, name=f"talkdown-{sid}")
             job.thread.start()
         return {"speaker_id": sid, "speaker": speaker["name"], "camera_ids": speaker.get("camera_ids") or [], "message": msg.name,
-                "message_id": msg.message_id, "replaced": old.message.name if old else None, "status": self.status(sid)}
+                "message_id": msg.message_id, "text": msg.text, "replaced": old.message.name if old else None, "status": self.status(sid)}
 
     def stop(self, speaker_id: str) -> bool:
         with self._lock:

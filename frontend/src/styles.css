@@ -836,6 +836,10 @@ body:has(.drag-ghost) { cursor: grabbing; user-select: none; }
 .talk-dim { color: rgb(255 255 255 / .7); }
 .talk-error { color: #fca5a5; }
 .talk-status { display: flex; flex-direction: column; gap: 2px; }
+.talk-warn { display: flex; flex-direction: column; gap: 5px; padding-top: 5px; border-top: 1px solid rgb(255 255 255 / .2); }
+.talk-panel textarea { background: rgb(255 255 255 / .12); color: #fff; border: 1px solid transparent; border-radius: 6px; padding: 4px 6px;
+  font: inherit; resize: vertical; min-height: 54px; }
+.talk-panel textarea::placeholder { color: rgb(255 255 255 / .6); }
 /* Settings -> Cameras -> Speakers */
 .speakers { margin-top: 22px; }
 .speakers .toolbar { align-items: center; }

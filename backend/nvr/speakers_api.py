@@ -1,6 +1,7 @@
-"""Talk-down routes (talkdown.py): IP speakers, the message library, play / stop / status.
+"""Talk-down routes (talkdown.py): IP speakers, the message library, play / stop / status, Describe & warn
+(talkdown_describe.py).
 
-Roles through the hub (hub/hub/roles.py): play and stop need operator, everything else that writes needs admin.
+Roles through the hub (hub/hub/roles.py): play, stop and describe need operator, everything else that writes needs admin.
 Checked here too for a tunneled or direct request (the site's own page has no sign-in: the LAN is the trust
 boundary). A speaker's password is never returned; omitted on PUT = kept, as for cameras.
 """
@@ -18,7 +19,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field, model_validator
 
-from . import hub_agent, talkdown
+from . import hub_agent, talkdown, talkdown_describe
 from .db import db
 
 router = APIRouter()
@@ -207,6 +208,29 @@ async def stop(speaker_id: str, request: Request):
     if stopped:
         talkdown.log.info("talk-down on %s stopped by %s", speaker_id, by)
     return {"stopped": stopped, "status": talkdown.manager.status(speaker_id)}
+
+
+class DescribeIn(BaseModel):
+    camera_id: str = Field(pattern=ID_RX)
+    template: Literal["leave", "police", "monitored", "custom"] = "leave"   # talkdown_describe.TEMPLATES
+
+
+@router.post("/api/speakers/{speaker_id}/describe")
+async def describe(speaker_id: str, body: DescribeIn, request: Request):
+    """Describe & warn: how to address the person on the camera's current picture, and the picked template as an editable
+    message. Never plays anything: the operator plays the reviewed text through /play. The camera must be on this
+    server; the speaker may be on another one (a hub camera group): its id keys the rate limit and the log."""
+    by = require(request, "operator")
+    if not re.match(ID_RX, speaker_id):
+        raise HTTPException(404, "unknown speaker")
+    check_cameras([body.camera_id])
+    if talkdown_describe.rate_limited(speaker_id, body.camera_id):
+        raise HTTPException(429, f"one description every {talkdown_describe.RATE_S:.0f} s: try again in a moment")
+    t0 = time.time()
+    out = await talkdown_describe.describe(body.camera_id, body.template)
+    talkdown.log.info("talk-down describe of %s for %s by %s: %s people, %s in %.1f s%s", body.camera_id, speaker_id, by,
+                      out["people"], out["model"] or "no model", time.time() - t0, f" ({out['error']})" if out["error"] else "")
+    return out
 
 
 @router.get("/api/speakers/{speaker_id}/status")

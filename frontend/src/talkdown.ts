@@ -3,8 +3,9 @@
  * has, which speakers a choice in the panel addresses ("All speakers" = every one bound to the camera), the live status
  * line, and the checks on a one-off file before it is sent. On the hub a camera's speakers may be on several servers
  * (a Site's camera groups): each speaker carries its own server, and messages are per server (matched by name).
+ * Describe & warn: the state of the reviewed message (warnReducer) between Qwen's answer and Play.
  */
-import type { SiteApi, SpeakerStatus, TalkdownLibrary, TalkdownMessage } from "./api";
+import type { DescribeAnswer, SiteApi, SpeakerStatus, TalkdownLibrary, TalkdownMessage } from "./api";
 
 /** A speaker as a live tile knows it: GET /api/speakers on the server's own UI, the heartbeat summary on the hub. */
 export type TalkSpeaker = {
@@ -111,3 +112,70 @@ export function fileToBase64(file: Blob): Promise<string> {
     r.readAsDataURL(file);
   });
 }
+
+// ---------------------------------------------------------------- Describe & warn
+
+/** At most one Describe & warn this often from a panel (the server refuses faster ones too). */
+export const DESCRIBE_EVERY_MS = 3000;
+
+/** The message: "<phrase>: <template text>", or the template text alone (capitalised) without a phrase; the same rule
+ *  as the server's talkdown_describe.fill, so picking another template or person here gives what the server would. */
+export function fillTemplate(body: string, phrase: string | null): string {
+  if (phrase) return `${phrase}: ${body}`;
+  return body.charAt(0).toUpperCase() + body.slice(1);
+}
+
+/** idle (the button) → looking (waiting for Qwen) → ready (template, person, the editable text) → Play or Cancel → idle. */
+export type Warn =
+  | { stage: "idle" }
+  | { stage: "looking" }
+  | { stage: "ready"; answer: DescribeAnswer; template: string; phrase: string | null; text: string; edited: boolean };
+export type WarnAction =
+  | { type: "look" } | { type: "answer"; answer: DescribeAnswer } | { type: "failed" } | { type: "close" }
+  | { type: "template"; id: string } | { type: "pick"; phrase: string | null } | { type: "edit"; text: string };
+export const WARN_IDLE: Warn = { stage: "idle" };
+
+/** Picking a template or a person refills the text (an explicit choice: it replaces edits); typing marks it edited.
+ *  An answer that arrives after Cancel is dropped. */
+export function warnReducer(s: Warn, a: WarnAction): Warn {
+  switch (a.type) {
+    case "look":
+      return { stage: "looking" };
+    case "answer":
+      return s.stage === "looking"
+        ? { stage: "ready", answer: a.answer, template: a.answer.template, phrase: a.answer.phrase, text: a.answer.text, edited: false }
+        : s;
+    case "failed":
+    case "close":
+      return WARN_IDLE;
+    case "template":
+    case "pick": {
+      if (s.stage !== "ready") return s;
+      const template = a.type === "template" ? a.id : s.template;
+      const phrase = a.type === "pick" ? a.phrase : s.phrase;
+      const body = s.answer.templates.find((t) => t.id === template)?.text ?? "";
+      return { ...s, template, phrase, text: fillTemplate(body, phrase), edited: false };
+    }
+    case "edit":
+      return s.stage === "ready" ? { ...s, text: a.text, edited: true } : s;
+  }
+}
+
+/** What Qwen saw, in a few words: "Nobody visible right now", "1 person", "3 people (Qwen isn't sure)", or the error. */
+export function describeNote(a: DescribeAnswer): string {
+  if (a.people === null) return a.error ?? "The camera could not be described";
+  if (a.people === 0) return "Nobody visible right now";
+  const n = a.people === 1 ? "1 person" : `${a.people} people`;
+  return a.confidence === "low" ? `${n} (Qwen isn't sure)` : n;
+}
+
+/** The people to address when several are in view: everyone (the group phrase) and each one Qwen described (at most 3). */
+export function warnChoices(a: DescribeAnswer): { label: string; phrase: string }[] {
+  if (!a.people || a.people < 2) return [];
+  const each = a.options.map((o) => ({ label: o.phrase.replace(/^You /, ""), phrase: o.phrase }));
+  return [{ label: "Everyone", phrase: a.group_phrase ?? "You there" }, ...each];
+}
+
+/** "as of 3:21:05 PM": when the picture Qwen looked at was taken. */
+export const asOf = (ts: number): string =>
+  `as of ${new Date(ts * 1000).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", second: "2-digit" })}`;

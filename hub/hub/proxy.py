@@ -23,9 +23,12 @@ from .roles import allows, required_role
 log = logging.getLogger("hub.proxy")
 router = APIRouter()
 
-# talk-down plays are audited with what was played where (the site's answer names the speaker and the message)
+# talk-down plays are audited with what was played where (the site's answer names the speaker, the message and the
+# words of a spoken text); a Describe & warn is audited lightly (which speaker, which camera), never what it said
 TALKDOWN_PLAY = re.compile(r"^/api/speakers/[^/]+/play$")
+TALKDOWN_DESCRIBE = re.compile(r"^/api/speakers/([^/]+)/describe$")
 TALKDOWN_ANSWER_MAX = 8192
+TALKDOWN_TEXT_MAX = 300
 
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding",
        "upgrade", "cookie", "authorization", "host", "content-length"}
@@ -93,6 +96,7 @@ async def proxy_api(site_id: str, path: str, request: Request):
     # allow-listed headers only, never an active content type, always nosniff + a sandboxing CSP (security.py)
     status, resp_headers = s.status, security.filter_proxy_headers(s.headers, site_id)
     answer = bytearray() if TALKDOWN_PLAY.match(api_path) and request.method == "POST" else None
+    described = _describe(api_path, body, conn) if request.method == "POST" else None
 
     async def body_iter():
         try:
@@ -110,7 +114,7 @@ async def proxy_api(site_id: str, path: str, request: Request):
         finally:
             conn.finish(s)
             if request.method != "GET":
-                _audit(u, site, request, status, time.time() - t0, _talkdown(answer, status, conn) if answer is not None else None)
+                _audit(u, site, request, status, time.time() - t0, _talkdown(answer, status, conn) if answer is not None else described)
 
     return StreamingResponse(body_iter(), status_code=status, headers=resp_headers, media_type=resp_headers.get("content-type"))
 
@@ -128,10 +132,28 @@ def _talkdown(answer: bytearray, status: int, conn) -> dict | None:
         return None
     loc = getattr(conn, "location", None) or {}
     speaker, message = str(a.get("speaker") or a["speaker_id"])[:80], str(a.get("message") or "?")[:120]
-    return {"action": f"talk-down: {message} on {speaker}",
-            "detail": {"talkdown": {"speaker_id": str(a["speaker_id"])[:40], "speaker": speaker, "message": message,
-                                    "message_id": a.get("message_id"), "camera_ids": [str(c)[:40] for c in (a.get("camera_ids") or [])][:64],
-                                    "replaced": a.get("replaced"), "location_id": loc.get("id"), "location_name": loc.get("name")}}}
+    detail = {"speaker_id": str(a["speaker_id"])[:40], "speaker": speaker, "message": message,
+              "message_id": a.get("message_id"), "camera_ids": [str(c)[:40] for c in (a.get("camera_ids") or [])][:64],
+              "replaced": a.get("replaced"), "location_id": loc.get("id"), "location_name": loc.get("name")}
+    if a.get("text"):
+        detail["text"] = str(a["text"])[:TALKDOWN_TEXT_MAX]   # the exact words spoken (a typed text, Describe & warn)
+    return {"action": f"talk-down: {message} on {speaker}", "detail": {"talkdown": detail}}
+
+
+def _describe(api_path: str, body: bytes | None, conn) -> dict | None:
+    """{action, detail} for a Describe & warn: the speaker and the camera looked at (None = not a describe)."""
+    m = TALKDOWN_DESCRIBE.match(api_path)
+    if not m:
+        return None
+    try:
+        b = json.loads(body or b"{}")
+    except ValueError:
+        b = None
+    camera = str(b.get("camera_id") or "")[:40] if isinstance(b, dict) else ""
+    loc = getattr(conn, "location", None) or {}
+    return {"action": "talk-down describe",
+            "detail": {"talkdown_describe": {"speaker_id": m.group(1)[:40], "camera_id": camera or None,
+                                             "location_id": loc.get("id"), "location_name": loc.get("name")}}}
 
 
 def _audit(u: dict, site: dict, request: Request, status: int, dt: float, special: dict | None = None) -> None:

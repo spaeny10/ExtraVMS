@@ -339,6 +339,7 @@ MIGRATIONS = [
     ("cameras", "streams_checked_at", "REAL"),   # last ONVIF stream check; NULL = never (streams.StreamChecker probes it)
     ("cameras", "event_source", "TEXT NOT NULL DEFAULT 'auto'"),   # auto | metadata | onvif_events: what opens events (ruleevents.py)
     ("cameras", "motion_events", "INTEGER NOT NULL DEFAULT 0"),    # ONVIF events mode: motion topics open events (YOLO must confirm)
+    ("talkdown_log", "text", "TEXT"),             # the words spoken (a typed text, Describe & warn, a library text); NULL = audio
 ]
 JSON_FIELDS = ("path", "rules", "detections", "synopsis_json", "synopsis_original", "feedback", "anomaly_json", "areas", "policy", "migrated_from")
 

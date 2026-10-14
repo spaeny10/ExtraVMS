@@ -7,20 +7,25 @@
  * On the hub a camera's speakers may be on other servers than the camera (a Site's camera groups): each speaker brings
  * its own server's client, and play / stop / status / the message library go to the speaker's server, not the camera's.
  * Messages are per server: with speakers on several servers the list holds those every one of them has (by name).
+ * Describe & warn (with text-to-speech): Qwen looks at this camera's current picture (on the camera's server) and says
+ * how to address the person ("You in the red shirt by the white truck"); the operator picks a template, checks and edits
+ * the text, and plays it like typed text. Nothing plays until they press Play.
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useReducer, useRef, useState } from "react";
 import { api, type PlayRequest, type SiteApi, type SpeakerStatus, type TalkdownLibrary } from "./api";
-import { ALL, type TalkSpeaker, clientsOf, defaultChoice, fileToBase64, isActive, messageOn, playOutcome, playableMessages, serversOf, speakerKey, statusText, targets,
-  uploadProblem } from "./talkdown";
+import { ALL, DESCRIBE_EVERY_MS, type TalkSpeaker, WARN_IDLE, asOf, clientsOf, defaultChoice, describeNote, fileToBase64, isActive, messageOn, playOutcome,
+  playableMessages, serversOf, speakerKey, statusText, targets, uploadProblem, warnChoices, warnReducer } from "./talkdown";
 import { errorText, toast } from "./ui";
 
 const POLL_MS = 1000;
 
-export function TalkdownPanel({ speakers, site = api, onClose }: {
+export function TalkdownPanel({ speakers, site = api, cameraId, onClose }: {
   speakers: TalkSpeaker[];
   /** the camera's server (default: this server); its writes go through the hub on the hub. A speaker that brings its
    *  own server's client (`site` on the speaker: the hub) is reached through that instead. */
   site?: SiteApi;
+  /** the camera the panel is on (on `site`): what Describe & warn looks at; absent = no Describe & warn */
+  cameraId?: string;
   onClose: () => void;
 }) {
   // per server ("" = `site`): its message library, or why it couldn't be read
@@ -31,6 +36,8 @@ export function TalkdownPanel({ speakers, site = api, onClose }: {
   const [msg, setMsg] = useState<{ server: string; id: number } | null>(null);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
+  const [warn, dispatch] = useReducer(warnReducer, WARN_IDLE);
+  const [coolUntil, setCoolUntil] = useState(0);
   const [status, setStatus] = useState<{ at: number; by: Record<string, SpeakerStatus> }>({ at: Date.now(), by: {} });
   const fileRef = useRef<HTMLInputElement>(null);
   const keys = speakers.map(speakerKey).join(",");
@@ -60,6 +67,11 @@ export function TalkdownPanel({ speakers, site = api, onClose }: {
     return () => { alive = false; clearInterval(t); };
   }, [site, keys, serverList]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (choice !== ALL && !speakers.some((s) => speakerKey(s) === choice)) setChoice(defaultChoice(speakers)); }, [choice, speakers]);
+  useEffect(() => {   // Describe & warn is offered again DESCRIBE_EVERY_MS after the last one
+    if (coolUntil <= Date.now()) return;
+    const t = setTimeout(() => setCoolUntil(0), coolUntil - Date.now());
+    return () => clearTimeout(t);
+  }, [coolUntil]);
 
   const tg = targets(choice, speakers);
   const tgServers = serversOf(tg);
@@ -116,6 +128,25 @@ export function TalkdownPanel({ speakers, site = api, onClose }: {
     e.preventDefault();
     if (text.trim() && await play({ text: text.trim() })) setText("");
   };
+  const cooling = coolUntil > Date.now();
+  /** Qwen describes the camera's current picture (the camera's server; the speaker id keys its rate limit). Never plays. */
+  const describe = async () => {
+    if (!cameraId || !tg.length || cooling) return;
+    const template = warn.stage === "ready" ? warn.template : undefined;
+    dispatch({ type: "look" });
+    setCoolUntil(Date.now() + DESCRIBE_EVERY_MS);
+    try {
+      dispatch({ type: "answer", answer: await site.describeSpeaker(tg[0].id, { camera_id: cameraId, template }) });
+    } catch (e) {
+      dispatch({ type: "failed" });
+      toast.error(e);
+    }
+  };
+  /** The reviewed text, spoken on the chosen speaker(s) like typed text: what is logged and audited is exactly this. */
+  const playWarn = async () => {
+    if (warn.stage === "ready" && warn.text.trim() && await play({ text: warn.text.trim() })) dispatch({ type: "close" });
+  };
+  const choices = warn.stage === "ready" ? warnChoices(warn.answer) : [];
 
   const halt = (e: React.SyntheticEvent) => e.stopPropagation();   // not a paint stroke, zoom or PTZ drag on the picture
   return (
@@ -163,6 +194,42 @@ export function TalkdownPanel({ speakers, site = api, onClose }: {
           <button className="small" disabled={busy || !text.trim()}>Say</button>
         </form>
       )}
+      {tts && cameraId && (warn.stage === "idle" ? (
+        <div className="talk-actions">
+          <button className="small" disabled={busy || cooling} onClick={describe}
+            title="Qwen looks at this camera now and suggests how to address the person; you check the text before anything plays">👁 Describe &amp; warn</button>
+        </div>
+      ) : warn.stage === "looking" ? (
+        <div className="talk-dim" aria-live="polite">Looking at the camera…</div>
+      ) : (
+        <div className="talk-warn" aria-label="Describe and warn">
+          <div className={warn.answer.people === null ? "talk-error" : "talk-dim"} aria-live="polite">
+            {describeNote(warn.answer)}{warn.answer.frame_ts ? ` · ${asOf(warn.answer.frame_ts)}` : ""}
+            {!warn.answer.people && " · the general message is below"}
+          </div>
+          {!!choices.length && (
+            <div className="talk-msgs" role="listbox" aria-label="Who to address">
+              {choices.map((c) => (
+                <button key={c.phrase} role="option" aria-selected={c.phrase === warn.phrase} className={`talk-msg ${c.phrase === warn.phrase ? "on" : ""}`}
+                  onClick={() => dispatch({ type: "pick", phrase: c.phrase })}>{c.label}</button>
+              ))}
+            </div>
+          )}
+          <select value={warn.template} aria-label="Template" onChange={(e) => dispatch({ type: "template", id: e.target.value })}>
+            {warn.answer.templates.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </select>
+          <textarea value={warn.text} rows={3} maxLength={500} aria-label="Message to speak" placeholder="Type what to say…"
+            onChange={(e) => dispatch({ type: "edit", text: e.target.value })} />
+          <div className="talk-dim">Check the description before playing{warn.answer.filtered ? " (some details were left out)" : ""}.</div>
+          <div className="talk-actions">
+            <button className="small" disabled={busy || !warn.text.trim()} onClick={playWarn}
+              title={tg.length > 1 ? `Speak this on ${tg.length} speakers` : "Speak this"}>▶ Play</button>
+            <button className="ghost small" disabled={busy} onClick={() => dispatch({ type: "close" })}>Cancel</button>
+            <span className="spacer" />
+            <button className="ghost small" disabled={busy || cooling} onClick={describe} title="Describe the camera's picture again">Look again</button>
+          </div>
+        </div>
+      ))}
       <div className="talk-status" aria-live="polite">
         {tg.map((s) => {
           const st = status.by[speakerKey(s)];

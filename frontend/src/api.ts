@@ -168,7 +168,20 @@ export type TalkdownLibrary = { messages: TalkdownMessage[]; tts: { available: b
 export type AudioUpload = { filename: string; data_b64: string };
 /** What to play: a library message, a text to speak, or a one-off file. */
 export type PlayRequest = { message_id: number } | { text: string } | { upload: AudioUpload };
-export type PlayAnswer = { speaker_id: string; speaker: string; camera_ids: string[]; message: string; message_id: number | null; replaced: string | null; status: SpeakerStatus };
+export type PlayAnswer = { speaker_id: string; speaker: string; camera_ids: string[]; message: string; message_id: number | null; text?: string | null; replaced: string | null; status: SpeakerStatus };
+/** Describe & warn (backend talkdown_describe.py): how to address the person on the camera's current picture. `phrase` is
+ *  "You in the red shirt by the white truck" (null: nothing usable, the template alone); a template's `text` follows it. */
+export type DescribeOption = { description: string; position: string; phrase: string };
+export type DescribeTemplate = { id: string; name: string; text: string };
+export type DescribeAnswer = {
+  /** null: unknown (no picture, or Qwen unavailable: `error` says which) */
+  people: number | null; options: DescribeOption[]; phrase: string | null;
+  /** several people: "You by the gate" / "You there" */
+  group_phrase: string | null; confidence: "low" | "medium" | "high" | null;
+  /** some words were left out (sensitive: never spoken) */
+  filtered: boolean;
+  text: string; template: string; templates: DescribeTemplate[]; frame_ts: number | null; model: string | null; error: string | null;
+};
 
 /** An ONVIF device found by POST /api/cameras/scan (backend onvif_soap.scan_subnet). */
 export type ScannedDevice = {
@@ -626,7 +639,7 @@ export function makeApi(base: string, opts: ApiOptions = {}) {
   ptzSetHome: (cam: string, token: string | null) => req<PtzInfo>(`/api/cameras/${cam}/ptz/home-preset`, json("POST", { token })),
   ptzConfig: (cam: string, cfg: Partial<Pick<PtzConfig, "return_home_min" | "relay_label" | "input_label">>) => req<PtzInfo>(`/api/cameras/${cam}/ptz/config`, json("PUT", cfg)),
   relay: (cam: string, on: boolean) => req<{ state: boolean; mode: string }>(`/api/cameras/${cam}/relay`, json("POST", { on })),
-  // talk-down (talkdown.py): speakers (admin), play / stop (operator), the message library (admin)
+  // talk-down (talkdown.py): speakers (admin), play / stop / describe (operator), the message library (admin)
   speakers: () => req<Speaker[]>("/api/speakers"),
   saveSpeaker: (s: Omit<Speaker, "check" | "checked_at" | "status"> & { password?: string }) => req<Speaker>(`/api/speakers/${s.id}`, json("PUT", s)),
   deleteSpeaker: (id: string) => req(`/api/speakers/${id}`, { method: "DELETE" }),
@@ -634,6 +647,8 @@ export function makeApi(base: string, opts: ApiOptions = {}) {
   playSpeaker: (id: string, what: PlayRequest) => req<PlayAnswer>(`/api/speakers/${id}/play`, json("POST", what)),
   /** keepalive: a Stop still goes out when the tab closes */
   stopSpeaker: (id: string) => req<{ stopped: boolean; status: SpeakerStatus }>(`/api/speakers/${id}/stop`, { method: "POST", keepalive: true }),
+  /** Describe & warn (operator): never plays; the reviewed text goes through playSpeaker */
+  describeSpeaker: (id: string, b: { camera_id: string; template?: string }) => req<DescribeAnswer>(`/api/speakers/${id}/describe`, json("POST", b)),
   speakerStatus: (id: string) => req<SpeakerStatus>(`/api/speakers/${id}/status`),
   talkdownMessages: () => req<TalkdownLibrary>("/api/talkdown/messages"),
   addTalkdownMessage: (m: { name: string; text: string } | { name: string; upload: AudioUpload }) => req<TalkdownMessage>("/api/talkdown/messages", json("POST", m)),

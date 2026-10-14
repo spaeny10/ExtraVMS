@@ -35,6 +35,9 @@ def test_role_table_reads_right():
     assert required_role("POST", "/api/talkdown/messages") == "admin" and required_role("DELETE", "/api/talkdown/messages/3") == "admin"
     assert required_role("POST", "/api/cameras/cam7/to-speaker") == "admin"
     assert required_role("GET", "/api/speakers/spk1/status") == "viewer"
+    # Describe & warn: Qwen describes who is on the camera, the operator plays the reviewed text (the same act as play)
+    assert required_role("POST", "/api/speakers/spk1/describe") == "operator"
+    assert required_role("PUT", "/api/speakers/spk1/describe") == "admin" and required_role("POST", "/api/speakers/spk1/describe/x") == "admin"
     assert allows("owner", "admin") and allows("operator", "viewer") and not allows("viewer", "operator")
 
 
