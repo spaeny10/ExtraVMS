@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { SpeakerStatus } from "./api";
-import { ALL, defaultChoice, isActive, playOutcome, speakersByCamera, statusText, targets, uploadProblem } from "./talkdown";
+import type { SpeakerStatus, TalkdownLibrary, TalkdownMessage } from "./api";
+import { ALL, clientsOf, defaultChoice, isActive, messageOn, playOutcome, playableMessages, serversOf, speakerKey, speakersByCamera, statusText, targets,
+  uploadProblem } from "./talkdown";
 
 const idle: SpeakerStatus = { state: "idle", message: null, by: null, requested_at: null, started_at: null, elapsed_s: null, duration_s: null, last: null };
 const playing = (elapsed: number, duration: number | null = 6): SpeakerStatus =>
@@ -69,5 +70,47 @@ describe("playing on one or all speakers", () => {
     expect(uploadProblem("leave.exe", 10)).toBe("Choose an mp3, wav, m4a, ogg file");
     expect(uploadProblem("noext", 10)).toBe("Choose an mp3, wav, m4a, ogg file");
     expect(uploadProblem("empty.wav", 0)).toBe("The file is empty");
+  });
+});
+
+describe("speakers on several servers (the hub: a Site's camera groups)", () => {
+  const hub = [
+    { id: "spk1", name: "Back wall (Alpha)", server: "s_a" },
+    { id: "spk1", name: "Lot (Bravo)", server: "s_b" },
+    { id: "spk2", name: "Gate (Alpha)", server: "s_a" },
+  ];
+  it("a speaker is server/id on the hub (ids are unique per server only), its id on a server", () => {
+    expect(hub.map(speakerKey)).toEqual(["s_a/spk1", "s_b/spk1", "s_a/spk2"]);
+    expect(speakerKey({ id: "spk1" })).toBe("spk1");
+    expect(defaultChoice([hub[1]])).toBe("s_b/spk1");
+    expect(targets("s_b/spk1", hub).map((s) => s.name)).toEqual(["Lot (Bravo)"]);
+    expect(targets("spk1", hub)).toEqual([]);
+    expect(targets(ALL, hub)).toHaveLength(3);
+    expect(serversOf(hub)).toEqual(["s_a", "s_b"]);
+    expect(serversOf([{ id: "x", name: "x" }])).toEqual([""]);
+  });
+  it("each speaker's calls go to its own server, never the camera's", () => {
+    const camera = "camera-server", a = "client-a", b = "client-b";
+    const to = clientsOf([{ server: "s_a", site: a }, { server: "s_b", site: b }, { server: "s_a", site: a }], camera);
+    expect([to("s_a"), to("s_b")]).toEqual([a, b]);
+    expect(to("s_x")).toBe(camera);
+    // the server's own UI: speakers name no server, everything goes through the panel's site
+    expect(clientsOf([{}, {}], camera)("")).toBe(camera);
+  });
+  it("messages are per server: the first one's list, kept where every other target server has the same name", () => {
+    const m = (id: number, name: string, available = true): TalkdownMessage => ({ id, name, kind: "tts", text: name, duration_s: null, created_at: 0, available });
+    const lib = (messages: TalkdownMessage[]): TalkdownLibrary => ({ messages, tts: { available: true, engine: "x" }, max_s: 120, max_upload: 1, types: [".wav"] });
+    const libs = {
+      s_a: lib([m(1, "Leave now"), m(2, "Police called"), m(3, "Private", false), m(4, "Gate only")]),
+      s_b: lib([m(7, "police called "), m(8, "Leave now"), m(9, "Private")]),
+    };
+    expect(playableMessages(libs, ["s_a"]).map((x) => x.id)).toEqual([1, 2, 4]);
+    expect(playableMessages(libs, ["s_a", "s_b"]).map((x) => x.id)).toEqual([1, 2]);
+    expect(playableMessages(libs, ["s_b", "s_a"]).map((x) => x.id)).toEqual([7, 8]);
+    expect(playableMessages(libs, ["s_a", "s_c"])).toEqual([]);    // that server's library isn't loaded (yet)
+    expect(playableMessages(libs, [])).toEqual([]);
+    expect(messageOn(libs.s_b, { name: "Police Called" })).toBe(7);
+    expect(messageOn(libs.s_a, { name: "Private" })).toBeNull();   // not available there
+    expect(messageOn(undefined, { name: "Leave now" })).toBeNull();
   });
 });

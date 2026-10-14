@@ -19,9 +19,11 @@
  * layout holds which cameras show and in what order, their streams, the grid's columns and the activity column. Tiles
  * reorder by dragging the ⠿ grip in their bar (desktop); the phone picks a layout only. The logic is liveLayout.ts.
  *
- * Talk-down: a camera with speakers bound to it (its server's heartbeat summary lists them) gets the 🔊 Talk-down button
- * and panel on its live tile, for operators and up (SOC operators too, here and in the SOC incident view that embeds
- * this grid). Play and Stop go through the hub (audited there); the panel reads its status from the server.
+ * Talk-down: a camera with speakers bound to it gets the 🔊 Talk-down button and panel on its live tile, for operators
+ * and up (SOC operators too, here and in the SOC incident view that embeds this grid). A speaker is bound to cameras of
+ * its own server (its heartbeat summary lists them) and/or to the Site's camera groups on the hub, which may hold
+ * cameras of other servers (site/cameraGroups.ts: the union). Play and Stop go to the speaker's own server through the
+ * hub (audited there), whatever server the camera is on; the panel reads its status from that server.
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { Camera as ServerCam, NvrEvent } from "@site/api";
@@ -32,14 +34,15 @@ import { useIceServers } from "@site/dashboard/ice";
 import { camKey, splitKey, type DashboardSource } from "@site/dashboard/source";
 import type { FleetEvent } from "@site/dashboard/types";
 import { regionFetchKey, regionPass, useRegionResults, useRegions } from "@site/region";
-import { speakersByCamera, type TalkSpeaker } from "@site/talkdown";
+import type { TalkSpeaker } from "@site/talkdown";
 import { Icon, confirmDialog, promptDialog, swipeHandlers, toast, useIsPhone } from "@site/ui";
-import { type Camera as RegistryCam, type Fleet, type Org, type Server, type Site, type SiteLayout, api } from "./api";
+import { type Camera as RegistryCam, type Fleet, type Org, type Server, type Site, type SiteCameraGroup, type SiteLayout, api } from "./api";
 import { type EventRef, applyLiveEvent, cameraNameFor, mergePool, regionFeed, removeLiveEvent, siteRegionKeys, tagServer } from "./eventOpen";
 import { HubEventDetail } from "./HubEventDetail";
 import { canTalkDown } from "./access";
 import { useDirect, useDirectVersion } from "./direct";
 import { makeHubSource, mediaApi, siteApi } from "./hubSource";
+import { talkByCamera } from "./site/cameraGroups";
 import { COLUMN_CHOICES, EMPTY_LAYOUT, type LayoutAction, type LiveFocus, type LiveLayout, type Quality, applyFocus, arrange, coerceLayout, isDirty, isVisible,
   layoutCols, layoutReducer, loadActivityPref, loadLayout, loadLayoutId, saveActivityPref, saveLayout, saveLayoutId, tileLabel, toSavedConfig,
   wrapIndex } from "./liveLayout";
@@ -158,9 +161,10 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
   const activity = useSiteActivity(site, servers, source, !hideActivity, showFeed, !isPhone && !feedAll ? expanded : null);
   const activeOf = (key: string) => activity.recent?.find((e) => camKey(e.site_id, e.camera_id) === key && (e.status === "open" || e.status === "pending"));
 
-  // talk-down: per server, camera -> its bound speakers (from the 15 s Site poll's heartbeat summaries)
+  // talk-down: camera key -> its speakers, direct (the 15 s Site poll's heartbeat summaries) and through camera groups
   const mayTalk = canTalkDown(org);
-  const talk = useMemo(() => Object.fromEntries(servers.map((s) => [s.id, speakersByCamera(s.summary?.speakers ?? [])])), [servers]);
+  const groups = useCameraGroups(site.id, mayTalk);
+  const talk = useMemo(() => talkByCamera(servers, groups, siteApi), [servers, groups]);
 
   // above every early return below: hooks run in the same order every render
   const fit = useExpandFit(gridRef, !isPhone && !!expanded && shown.some((t) => t.key === expanded));
@@ -168,7 +172,7 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
   if (tiles.length === 0) return <p className="muted">{Object.keys(full).length || registry.length ? "No cameras at this site yet." : "Loading cameras…"}</p>;
 
   const tileProps = { source, multi, q, dispatch, hdUnsupported, onUnsupported: () => setHdUnsupported(true), activeOf,
-    talkOf: (t: Tile) => (mayTalk ? talk[t.server.id]?.[t.id] : undefined) };
+    talkOf: (t: Tile) => (mayTalk ? talk[t.key] : undefined) };
   const feed = showFeed ? <SiteActivity site={site} servers={servers} tiles={tiles} multi={multi} activity={activity} onShowAll={() => setFeedAll(true)} /> : null;
   if (isPhone) {
     // the phone shows one camera at a time: a layout only sets which cameras are in the strip and their order
@@ -246,6 +250,21 @@ type NamedLayouts = ReturnType<typeof useNamedLayouts>;
  * re-read on every visit, so one saved, renamed or deleted there shows here) and which one is picked (this browser,
  * per Site; 0 = "All cameras"). `list` is null until the hub answers (or when it can't).
  */
+/** The Site's camera groups with their bound speakers (re-read every minute: they change in Settings); [] until read,
+ *  and on a hub that has none (only direct bindings then). */
+function useCameraGroups(siteId: string, enabled: boolean): SiteCameraGroup[] {
+  const [groups, setGroups] = useState<SiteCameraGroup[]>([]);
+  useEffect(() => {
+    if (!enabled) return;
+    let alive = true;
+    const pull = () => api.cameraGroups(siteId).then((r) => { if (alive) setGroups(r.groups); }).catch(() => {});
+    pull();
+    const t = setInterval(pull, 60000);
+    return () => { alive = false; clearInterval(t); };
+  }, [siteId, enabled]);
+  return groups;
+}
+
 function useNamedLayouts(siteId: string, enabled: boolean) {
   const [list, setList] = useState<NamedLayout[] | null>(null);
   const [layoutId, setLayoutIdState] = useState(() => (enabled ? loadLayoutId(siteId) : 0));

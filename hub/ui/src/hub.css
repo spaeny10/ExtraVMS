@@ -215,6 +215,15 @@
 .checklist-preview { margin-top: 10px; padding: 8px 10px; border: 1px dashed var(--border); border-radius: 8px; }
 .checklist-preview ul { list-style: none; padding: 0; margin: 6px 0 0; display: flex; flex-direction: column; gap: 4px; }
 .checklist-preview label { gap: 6px; }
+/* Settings → Cameras: camera groups and talk-down speakers (site/CamerasBox.tsx) */
+.cam-groups { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; }
+.cam-group { padding: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); }
+.cam-group > .row { gap: 8px; flex-wrap: wrap; }
+.cam-group-edit { margin-top: 8px; display: flex; flex-direction: column; gap: 8px; }
+.cam-group-server { border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; margin: 0; min-width: 0; }
+.cam-group-server legend { padding: 0 4px; font-weight: 600; }
+.cam-checks { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.cam-checks label { display: inline-flex; align-items: center; gap: 4px; }
 @media (max-width: 700px) {
   .contact-row { grid-template-columns: 22px 1fr; }
   .contact-row .drag-handle { display: none; }

@@ -32,7 +32,7 @@ export const CUSTOMER_TABS = ["sites", "servers", "members", "invites", "ai", "a
 export type CustomerTab = (typeof CUSTOMER_TABS)[number];
 
 /** Site → Settings sub-tabs. General is the Site's own form; the others configure SOC monitoring of the Site. */
-export const SETTINGS_SECTIONS = ["general", "monitoring", "contacts", "procedures"] as const;
+export const SETTINGS_SECTIONS = ["general", "cameras", "monitoring", "contacts", "procedures"] as const;
 export type SettingsSection = (typeof SETTINGS_SECTIONS)[number];
 /** The SOC area: the operator queue (and one incident, for pop-outs and phones), the supervisor view, reports. */
 export type SocTab = "queue" | "incident" | "supervisor" | "reports";

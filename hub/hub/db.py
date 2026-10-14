@@ -296,6 +296,21 @@ site_layouts = Table("site_layouts", metadata,
                      Column("name", String(60), nullable=False), Column("config", sa.JSON, nullable=False),
                      Column("created_at", Float, nullable=False), Column("updated_at", Float, nullable=False))
 
+# ---- Named camera groups of a Site (camera_groups.py): shared by everyone who sees the Site, edited by its admins.
+# `cameras` holds "<server>/<camera>" keys of any of the Site's servers. A talk-down speaker (server_id, speaker_id: the
+# server's own id, from its heartbeat summary) bound to a group talks on every camera in it (site_speaker_groups).
+site_camera_groups = Table("site_camera_groups", metadata,
+                           Column("id", Integer, primary_key=True, autoincrement=True),
+                           Column("location_id", String(24), nullable=False, index=True), Column("org_id", String(24), nullable=False),
+                           Column("name", String(60), nullable=False), Column("cameras", sa.JSON, nullable=False),
+                           Column("created_at", Float, nullable=False), Column("updated_at", Float, nullable=False),
+                           Column("created_by", String(200), nullable=True))
+site_speaker_groups = Table("site_speaker_groups", metadata,
+                            Column("id", Integer, primary_key=True, autoincrement=True),
+                            Column("location_id", String(24), nullable=False, index=True), Column("server_id", String(24), nullable=False),
+                            Column("speaker_id", String(64), nullable=False), Column("group_id", Integer, nullable=False, index=True),
+                            sa.UniqueConstraint("server_id", "speaker_id", "group_id", name="uq_site_speaker_group"))
+
 _engine: Engine | None = None
 
 

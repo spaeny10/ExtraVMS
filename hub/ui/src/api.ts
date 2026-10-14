@@ -377,6 +377,14 @@ export const api = {
   createSiteLayout: (id: string, b: { name: string; config: unknown }) => req<SiteLayout>(`/api/locations/${id}/layouts`, json("POST", b)),
   updateSiteLayout: (id: string, lid: number, b: { name: string; config: unknown }) => req<SiteLayout>(`/api/locations/${id}/layouts/${lid}`, json("PUT", b)),
   deleteSiteLayout: (id: string, lid: number) => req<{ ok: boolean }>(`/api/locations/${id}/layouts/${lid}`, { method: "DELETE" }),
+  // a Site's camera groups (hub camera_groups.py): everyone who sees the Site lists them, its admins edit them
+  cameraGroups: (id: string) => req<{ groups: SiteCameraGroup[]; can_edit: boolean }>(`/api/locations/${id}/camera-groups`),
+  createCameraGroup: (id: string, b: { name: string; cameras: string[] }) => req<SiteCameraGroup>(`/api/locations/${id}/camera-groups`, json("POST", b)),
+  updateCameraGroup: (id: string, gid: number, b: { name?: string; cameras?: string[] }) => req<SiteCameraGroup>(`/api/locations/${id}/camera-groups/${gid}`, json("PUT", b)),
+  deleteCameraGroup: (id: string, gid: number) => req<{ ok: boolean }>(`/api/locations/${id}/camera-groups/${gid}`, { method: "DELETE" }),
+  siteSpeakers: (id: string) => req<{ speakers: SiteSpeaker[]; by_camera: Record<string, unknown[]>; can_edit: boolean }>(`/api/locations/${id}/speakers`),
+  setSpeakerGroups: (id: string, server: string, speaker: string, groupIds: number[]) =>
+    req<SiteSpeaker>(`/api/locations/${id}/speakers/${encodeURIComponent(server)}/${encodeURIComponent(speaker)}/groups`, json("PUT", { group_ids: groupIds })),
   ack: (id: number) => req(`/api/alerts/${id}/ack`, { method: "POST" }),
   audit: (org: string, site?: string) => req<AuditRow[]>(`/api/audit?${qs({ org, site })}`),
   usage: (org: string, days = 30) => req<Usage>(`/api/orgs/${org}/usage?${qs({ days })}`),
@@ -483,6 +491,18 @@ export type SiteAskSources = {
 /** A named layout saved on the hub; `config` holds both pages' fields (liveLayout.ts LiveLayout for Live, the
  *  Timeline's {visible, solo, order}; timelineLink.timelineConfig), each page reading its own tolerantly. */
 export type SiteLayout = { id: number; name: string; config: unknown; created_at: number; updated_at: number };
+/** A Site's named camera group (hub camera_groups.py): cameras of any of its servers ("<server>/<camera>"), and the
+ *  talk-down speakers bound to it (by their server and their id there). Not a dashboard's CameraGroup. */
+export type SiteCameraGroup = {
+  id: number; name: string; cameras: string[]; speakers: { server_id: string; speaker_id: string }[];
+  created_at: number; updated_at: number; created_by: string | null;
+};
+/** A talk-down speaker of the Site (its server's heartbeat summary): its direct cameras (ids on its server, set on the
+ *  server's own Settings), the groups it is bound to on the hub, and `cameras`, every camera key it talks on. */
+export type SiteSpeaker = {
+  server_id: string; server_name: string; id: string; name: string; camera_ids: string[]; online?: boolean | null; playing?: string | null;
+  group_ids: number[]; cameras: string[];
+};
 export type SiteAskThread = { id: number; title: string; created_at: number; updated_at: number; messages: number };
 export type SiteAskMessage = { id: number; thread_id: number; role: "user" | "assistant"; content: string; sources: SiteAskSources | null; model: string | null; created_at: number; duration_ms: number | null };
 export type SiteAskThreadFull = Omit<SiteAskThread, "messages"> & { location_id: string; messages: SiteAskMessage[] };

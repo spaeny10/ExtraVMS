@@ -19,6 +19,7 @@ from pydantic import BaseModel, EmailStr, Field
 from . import __version__, alerts, auth, backups, cameras, dashboards, db, digest, direct, fleet_actions, proxy, push, soc_api, turn, vlm_proxy
 from . import fleet as fleet_mod
 from . import find as find_mod
+from . import camera_groups as groups_mod
 from . import layouts as layouts_mod
 from . import site_ask
 from . import central_cameras, coverage, geocode, hosts, security, soc, soc_reports
@@ -1006,6 +1007,7 @@ async def delete_location(location_id: str, move_to: str | None = None, u: dict 
         find_mod.drop_views(c, location_id)
         site_ask.drop_location(c, location_id)   # everyone's Ask conversations about this place
         layouts_mod.drop_location(c, location_id)   # everyone's saved layouts of it
+        groups_mod.drop_location(c, location_id)   # its camera groups and the speakers bound to them
         c.execute(sa.delete(db.site_coverage).where(db.site_coverage.c.location_id == location_id))   # describes this place only
         c.execute(sa.delete(db.locations).where(db.locations.c.id == location_id))
     for srv in servers:
@@ -1276,6 +1278,127 @@ async def delete_site_layout(location_id: str, layout_id: int, u: dict = Depends
         raise HTTPException(404, "no such layout")
     layouts_mod.delete(row)
     return {"ok": True}
+
+
+# ---- a Site's camera groups (camera_groups.py): shared by everyone who sees the Site, edited by its admins; talk-down
+# speakers (from the servers' heartbeat summaries) can be bound to groups as well as to their own server's cameras
+
+class CameraGroupIn(BaseModel):
+    name: str = Field(min_length=1, max_length=groups_mod.NAME_LEN)
+    cameras: list[str] = Field(default_factory=list, max_length=groups_mod.MAX_KEYS)
+
+
+class CameraGroupPatch(BaseModel):
+    name: str | None = Field(None, min_length=1, max_length=groups_mod.NAME_LEN)
+    cameras: list[str] | None = Field(None, max_length=groups_mod.MAX_KEYS)
+
+
+class SpeakerGroupsIn(BaseModel):
+    group_ids: list[int] = Field(max_length=groups_mod.MAX_GROUPS)
+
+
+def _site_admin(u: dict, location_id: str) -> dict:
+    """The Site, for one of its admins (customer admin and up, hub administrators, SOC supervisors of a monitored
+    customer: auth.membership), as for the Site's own settings (update_location)."""
+    loc, _ = auth.location_access(u, location_id)
+    auth.require_role(u, loc["org_id"], "admin")
+    return loc
+
+
+def _group_error(e: ValueError) -> HTTPException:
+    if isinstance(e, groups_mod.NameTaken):
+        return HTTPException(409, str(e))
+    return HTTPException(400, str(e))
+
+
+def _few(keys: list[str], n: int = 20) -> list[str]:
+    return keys[:n] + ([f"... {len(keys) - n} more"] if len(keys) > n else [])
+
+
+@app.get("/api/locations/{location_id}/camera-groups")
+async def list_camera_groups(location_id: str, u: dict = Depends(user)):
+    """The Site's camera groups by name: {groups: [{id, name, cameras: ["<server>/<camera>"], speakers: [{server_id,
+    speaker_id}], created_at, updated_at, created_by}], can_edit}."""
+    loc, role = auth.location_access(u, location_id)
+    return {"groups": groups_mod.list_for(loc["id"]), "can_edit": allows(role, "admin")}
+
+
+@app.post("/api/locations/{location_id}/camera-groups")
+async def create_camera_group(location_id: str, body: CameraGroupIn, u: dict = Depends(user)):
+    loc = _site_admin(u, location_id)
+    try:
+        g = groups_mod.create(u, loc, body.name, body.cameras)
+    except groups_mod.TooMany as e:
+        raise HTTPException(409, str(e))
+    except ValueError as e:
+        raise _group_error(e)
+    _audit(u, loc["org_id"], None, f"camera group created: {g['name']} ({loc['name']})",
+           {"location_id": loc["id"], "group_id": g["id"], "cameras": _few(g["cameras"])})
+    return g
+
+
+@app.put("/api/locations/{location_id}/camera-groups/{group_id}")
+async def update_camera_group(location_id: str, group_id: int, body: CameraGroupPatch, u: dict = Depends(user)):
+    """Rename and/or replace the members (a field left out is kept). Bound speakers follow the new members at once."""
+    loc = _site_admin(u, location_id)
+    row = groups_mod.get(loc["id"], group_id)
+    if not row:
+        raise HTTPException(404, "no such camera group")
+    try:
+        g, change = groups_mod.update(row, body.name, body.cameras)
+    except ValueError as e:
+        raise _group_error(e)
+    if change["renamed_from"] or change["added"] or change["removed"]:
+        _audit(u, loc["org_id"], None, f"camera group updated: {g['name']} ({loc['name']})",
+               {"location_id": loc["id"], "group_id": g["id"], "renamed_from": change["renamed_from"],
+                "added": _few(change["added"]), "removed": _few(change["removed"]), "cameras": len(g["cameras"])})
+    return g
+
+
+@app.delete("/api/locations/{location_id}/camera-groups/{group_id}")
+async def delete_camera_group(location_id: str, group_id: int, u: dict = Depends(user)):
+    loc = _site_admin(u, location_id)
+    row = groups_mod.get(loc["id"], group_id)
+    if not row:
+        raise HTTPException(404, "no such camera group")
+    unbound = groups_mod.delete(row)
+    _audit(u, loc["org_id"], None, f"camera group deleted: {row['name']} ({loc['name']})",
+           {"location_id": loc["id"], "group_id": row["id"], "cameras": len(row["cameras"] or []), "speakers_unbound": unbound})
+    return {"ok": True}
+
+
+@app.get("/api/locations/{location_id}/speakers")
+async def list_site_speakers(location_id: str, u: dict = Depends(user)):
+    """The Site's talk-down speakers (from its servers' heartbeat summaries: no address or credentials), each with its
+    server, its direct cameras (set on the server's own Settings), the groups it is bound to here and `cameras`, every
+    camera key it talks on; `by_camera`: camera key -> its speakers (the union of both kinds of binding)."""
+    loc, role = auth.location_access(u, location_id)
+    return {**groups_mod.site_speakers(loc["id"]), "can_edit": allows(role, "admin")}
+
+
+@app.put("/api/locations/{location_id}/speakers/{server_id}/{speaker_id}/groups")
+async def set_site_speaker_groups(location_id: str, server_id: str, speaker_id: str, body: SpeakerGroupsIn, u: dict = Depends(user)):
+    """Bind a speaker to exactly these camera groups of the Site ([] = none; its direct cameras are the server's)."""
+    loc = _site_admin(u, location_id)
+    srv = groups_mod.site_servers(loc["id"]).get(server_id)
+    if not srv:
+        raise HTTPException(404, "that server isn't in this site")
+    sp = next((s for s in groups_mod.summary_speakers({server_id: srv}) if s["id"] == speaker_id), None)
+    if sp is None and body.group_ids:
+        # clearing is always allowed (a speaker removed on its server may leave bindings behind); binding needs a speaker
+        raise HTTPException(404, "no such speaker on that server (it reports its speakers in its heartbeat)")
+    try:
+        added, removed = groups_mod.set_speaker_groups(loc["id"], server_id, speaker_id, body.group_ids)
+    except LookupError as e:
+        raise HTTPException(400, str(e))
+    if added or removed:
+        names = {g["id"]: g["name"] for g in groups_mod.list_for(loc["id"])}
+        _audit(u, loc["org_id"], server_id, f"speaker groups set: {sp['name'] if sp else speaker_id} ({loc['name']})",
+               {"location_id": loc["id"], "speaker_id": speaker_id, "groups": [names.get(g, g) for g in body.group_ids],
+                "added": [names.get(g, g) for g in added], "removed": [names.get(g, g) for g in removed]})
+    out = groups_mod.site_speakers(loc["id"])
+    return next((s for s in out["speakers"] if s["server_id"] == server_id and s["id"] == speaker_id),
+                {"server_id": server_id, "id": speaker_id, "group_ids": body.group_ids})
 
 
 @app.post("/api/locations/{location_id}/ask")
