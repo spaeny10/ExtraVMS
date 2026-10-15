@@ -6,11 +6,12 @@
 import type { Camera } from "./api";
 import { profileSize } from "./cameraStreams";
 
-export type CameraTab = "general" | "connection" | "recording" | "detection" | "journeys" | "ptz" | "rules";
+export type CameraTab = "general" | "connection" | "device" | "recording" | "detection" | "journeys" | "ptz" | "rules";
 
 export const CAMERA_TABS: { id: CameraTab; label: string }[] = [
   { id: "general", label: "General" },
   { id: "connection", label: "Connection" },
+  { id: "device", label: "Camera" },   // the camera's own settings over ONVIF (DeviceSettings.tsx): they save on the camera at once
   { id: "recording", label: "Recording" },
   { id: "detection", label: "Detection" },
   { id: "journeys", label: "Journeys" },

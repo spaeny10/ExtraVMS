@@ -129,12 +129,22 @@ class MetadataReader(threading.Thread):
         self._deltas: collections.deque[float] = collections.deque(maxlen=CLOCK_WINDOW)
         self._since_update = 0
         self.clock_offset: float | None = None  # seconds to add to camera time to get PC time
+        self._reset = False   # reset_clock(): start the offset afresh on the next frame
         # the camera's stream has no metadata track (its DESCRIBE lists video/audio only): its detections can only come
         # from its ONVIF events (ruleevents.py, auto mode), so the reader checks again every NO_TRACK_RETRY_S (after
         # the quick looks of NO_TRACK_QUICK_S)
         self.no_track = False
 
+    def reset_clock(self) -> None:
+        """The camera's clock was just set (camdevice.py): forget the offsets measured against its old time (the low
+        percentile would keep the old one until the window rolled over). Applied by the reader thread on its next frame."""
+        self._reset = True
+
     def _retime(self, raw_ts: float) -> float:
+        if self._reset:
+            self._reset = False
+            self._deltas.clear()
+            self.clock_offset = None
         self._deltas.append(time.time() - raw_ts)
         self._since_update += 1
         if self.clock_offset is None or self._since_update >= 20 or len(self._deltas) < 50:

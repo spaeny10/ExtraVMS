@@ -103,6 +103,7 @@ class Onvif:
         self.clock_offset = dt.timedelta(0)
         self.services: dict[str, str] = {}
         self.cam = cam    # the camera row, for port-forward address rewriting (None = use URLs as given)
+        self.last_raw = b""   # the last reply as received (camdevice: the prefixes a rule's Type QName names)
 
     @classmethod
     def for_camera(cls, cam: dict, timeout: float = 10) -> "Onvif":
@@ -129,7 +130,7 @@ class Onvif:
         hdr = (self._security() if auth else "") + header
         data = ENVELOPE.format(header=hdr, body=body).encode()
         url = rewrite(url, self.cam)   # a camera-reported address, in port-forward mode (unchanged otherwise)
-        req =urllib.request.Request(url, data, {"Content-Type": "application/soap+xml; charset=utf-8"})
+        req = urllib.request.Request(url, data, {"Content-Type": "application/soap+xml; charset=utf-8"})
         try:
             with urllib.request.urlopen(req, timeout=timeout or self.timeout) as resp:
                 raw = resp.read()
@@ -137,6 +138,7 @@ class Onvif:
             raise OnvifError(f"HTTP {e.code}: {self._fault(e.read()) or e.reason}") from None
         except (urllib.error.URLError, socket.timeout, ConnectionError) as e:
             raise OnvifError(f"connection failed: {e}") from None
+        self.last_raw = raw
         root = ET.fromstring(raw)
         fault = self._fault(raw)
         if fault:

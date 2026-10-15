@@ -21,6 +21,7 @@ import { TalkdownPanel } from "./TalkdownPanel";
 import { speakersByCamera, type TalkSpeaker } from "./talkdown";
 import { SpeakersSection } from "./Speakers";
 import { CameraDialog, StreamsLine, blankCamera, zoneSummary } from "./CameraDialog";
+import { FixClocksDialog } from "./DeviceSettings";
 import type { CameraDraft } from "./cameraEdit";
 
 /* ------------------------------------------------------------------ Live */
@@ -314,6 +315,7 @@ function SdCell({ camera, onChecked }: { camera: Camera; onChecked: () => void }
 export function CamerasView({ cameras, port, reload }: { cameras: Camera[]; port: number; reload: () => void }) {
   const [edit, setEdit] = useState<CameraDraft | null>(null);
   const [zoneCam, setZoneCam] = useState<Camera | null>(null);
+  const [fixClocks, setFixClocks] = useState(false);
   const [sitePolicy, setSitePolicy] = useState<RetentionPolicy | null>(null);
   useEffect(() => {
     if (edit && !sitePolicy) api.retentionPolicy().then((r) => setSitePolicy(r.policy)).catch(() => {});
@@ -322,6 +324,8 @@ export function CamerasView({ cameras, port, reload }: { cameras: Camera[]; port
     <div className="view">
       <div className="toolbar">
         <button onClick={() => setEdit({ ...blankCamera, id: `cam${cameras.length + 1}` })}>Add camera</button>
+        <button className="ghost" disabled={!cameras.length} onClick={() => setFixClocks(true)}
+          title="Set the NTP server and time zone of several cameras at once (ONVIF)">Fix clocks…</button>
       </div>
       <table className="table">
         <thead>
@@ -366,6 +370,7 @@ export function CamerasView({ cameras, port, reload }: { cameras: Camera[]; port
         <CameraDialog key={edit.id} draft={edit} cameras={cameras} sitePolicy={sitePolicy} reload={reload}
           onClose={() => setEdit(null)} onEditZones={(c) => { setEdit(null); setZoneCam(c); }} />
       )}
+      {fixClocks && <FixClocksDialog cameras={cameras} onClose={() => { setFixClocks(false); reload(); }} />}
       <SpeakersSection cameras={cameras} />
       {zoneCam && <ZoneEditor camera={zoneCam} onClose={() => setZoneCam(null)} onSaved={reload} />}
     </div>

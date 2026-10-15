@@ -46,6 +46,15 @@ def test_role_table_reads_right():
     assert required_role("PUT", "/api/talkdown/voice") == "admin" and required_role("POST", "/api/talkdown/voice") == "admin"
     assert required_role("PUT", "/api/talkdown/preview") == "admin" and required_role("POST", "/api/talkdown/preview/x") == "admin"
     assert required_role("GET", "/api/talkdown/messages") == "viewer" and required_role("GET", "/api/talkdown/voicesx") == "viewer"
+    # a camera's own settings over ONVIF: reading them is an operator's, changing them (clock, encoders, reboot) configuration
+    assert required_role("GET", "/api/cameras/cam1/device") == "operator" and required_role("GET", "/api/cameras/device/time") == "operator"
+    for method, path in (("PUT", "/api/cameras/cam1/device/time"), ("POST", "/api/cameras/cam1/device/time/sync-now"),
+                         ("PUT", "/api/cameras/cam1/device/video/VideoEncoder_1"), ("PUT", "/api/cameras/cam1/device/audio/a0"),
+                         ("PUT", "/api/cameras/cam1/device/imaging/VideoSource_1"), ("PUT", "/api/cameras/cam1/device/analytics"),
+                         ("POST", "/api/cameras/cam1/device/reboot"), ("POST", "/api/cameras/device/time")):
+        assert required_role(method, path) == "admin", (method, path)
+    assert required_role("GET", "/api/cameras") == "viewer" and required_role("GET", "/api/cameras/cam1/sd") == "viewer"
+    assert required_role("GET", "/api/cameras/cam1/devicex") == "viewer"
     assert allows("owner", "admin") and allows("operator", "viewer") and not allows("viewer", "operator")
 
 

@@ -1043,6 +1043,19 @@ body:has(.drag-ghost) { cursor: grabbing; user-select: none; }
 .hint-more { margin-top: 4px; padding: 6px 10px; border-left: 2px solid var(--border); color: var(--text); }
 /* a tab or block whose changes save on their own, not with the dialog's Save */
 .saves-now { margin: 0 0 4px; padding: 6px 10px; border-radius: 8px; background: var(--panel-2); color: var(--muted); }
+/* Camera tab (CameraDevice.tsx): one card per section / stream, each with its own Apply */
+.device-head { align-items: center; margin-bottom: 4px; }
+.device-card { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; margin-bottom: 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); }
+.device-card > .row { flex-wrap: wrap; align-items: flex-end; }
+.device-card .field { min-width: 120px; }
+.device-card p { margin: 0; }
+.device-rules { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 4px; }
+.device-rules li { align-items: center; }
+.badge.clock-badge { text-transform: none; }
+.badge.clock-badge.ok { background: color-mix(in srgb, var(--ok) 22%, transparent); color: var(--ok); }
+.badge.clock-badge.bad { background: color-mix(in srgb, var(--bad) 20%, transparent); color: var(--bad); }
+.modal.fix-clocks { width: min(900px, 100%); }
+.modal.fix-clocks .table td { vertical-align: top; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 @media (max-width: 700px) {
   .modal.cam-modal { width: 100%; height: 100dvh; border-radius: 0; border: 0; }

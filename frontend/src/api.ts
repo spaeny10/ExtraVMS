@@ -3,6 +3,7 @@ import type { DashboardConfig } from "./dashboard/types";
 import type { ActionPlanCore, ActionResult } from "./ActionCard";
 import type { CardRange, RestoredSpan, SdStatus } from "./sdcard";
 import type { CameraStreams } from "./cameraStreams";
+import type { AnalyticsRule, AudioEncoder, CameraDevice, CameraTime, ClockResult, ImagingSource, TimeBody, TimeDefaults, VideoEncoder } from "./cameraDevice";
 import type { CatalogVoice, Spoken, VoiceEngines, VoiceSetting } from "./talkdownVoice";
 /** include = detect only here; exclude = mask out; area = just a name for a place (never filters);
  * ppe = people who stay in it must wear the required items (backend/nvr/ppe.py; never filters) */
@@ -135,6 +136,8 @@ export type Camera = {
     /** the camera's stream has no metadata track / the reader is off (set to ONVIF events) */
     metadata_missing?: boolean;
     metadata_off?: boolean;
+    /** seconds to add to the camera's metadata time to get this server's (the metadata reader's measure; null = none yet) */
+    clock_offset?: number | null;
   };
 };
 
@@ -703,6 +706,25 @@ export function makeApi(base: string, opts: ApiOptions = {}) {
   /** the camera's own recording (SD card); `refresh` asks the camera again */
   /** ask the camera now which streams it serves (admin); re-plans SD live view */
   checkStreams: (camera: string) => req<CameraStreams>(`/api/cameras/${camera}/streams/check`, { method: "POST" }),
+  // ---- the camera's own settings over ONVIF (backend device_api.py): reading needs operator, every write admin; each
+  // write goes to the camera at once and answers with what it reads back
+  cameraDevice: (camera: string, zone?: string | null) => req<CameraDevice>(`/api/cameras/${camera}/device${zone ? `?${qs({ zone })}` : ""}`),
+  cameraTimeDefaults: () => req<TimeDefaults>("/api/cameras/device/time"),
+  setCameraTime: (camera: string, body: TimeBody) => req<CameraTime>(`/api/cameras/${camera}/device/time`, json("PUT", body)),
+  /** set the camera's clock from this server's (a camera that can't reach NTP); one on NTP goes back on NTP after */
+  syncCameraTime: (camera: string) => req<CameraTime>(`/api/cameras/${camera}/device/time/sync-now`, { method: "POST" }),
+  /** "Fix clocks…": several cameras at once; camera_ids null = every enabled camera */
+  fixClocks: (body: TimeBody & { camera_ids: string[] | null; remember?: boolean }) =>
+    req<{ results: ClockResult[] }>("/api/cameras/device/time", json("POST", body)),
+  setVideoEncoder: (camera: string, token: string, body: Record<string, string | number>) =>
+    req<VideoEncoder>(`/api/cameras/${camera}/device/video/${encodeURIComponent(token)}`, json("PUT", body)),
+  setAudioEncoder: (camera: string, token: string, body: Record<string, string | number>) =>
+    req<AudioEncoder>(`/api/cameras/${camera}/device/audio/${encodeURIComponent(token)}`, json("PUT", body)),
+  setImaging: (camera: string, source: string, body: Record<string, string | number>) =>
+    req<ImagingSource>(`/api/cameras/${camera}/device/imaging/${encodeURIComponent(source)}`, json("PUT", body)),
+  setAnalyticsRule: (camera: string, body: { configuration: string; rule: string; enabled: boolean }) =>
+    req<AnalyticsRule>(`/api/cameras/${camera}/device/analytics`, json("PUT", body)),
+  rebootCamera: (camera: string) => req<{ ok: boolean; message: string }>(`/api/cameras/${camera}/device/reboot`, { method: "POST" }),
   cameraSd: (camera: string, refresh = false) => req<SdStatus & { camera_id: string }>(`/api/cameras/${camera}/sd${refresh ? "?refresh=true" : ""}`),
   sdGaps: (camera?: string, hours?: number) => req<SdGaps>(`/api/sd/gaps?${qs({ camera, hours })}`),
   /** admin: put [from, to) back from the camera's SD card (replays at real time) */

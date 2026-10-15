@@ -6,6 +6,7 @@ import { BASE, api, type Camera, type EventSource, type RetentionPolicy, type Sc
 import { NeighborsEditor } from "./Neighbors";
 import { PolicyForm } from "./RetentionPanel";
 import { PtzSettings } from "./PtzControl";
+import { CameraDevicePanel } from "./DeviceSettings";
 import { confirmDialog, errorText, toast, useIsPhone } from "./ui";
 import { detectionsText, streamsText, streamsTitle, suggestText } from "./cameraStreams";
 import { CAMERA_TABS, cameraWebUrl, dirtyTabs, headerSummary, openingTab, visibleTabs, type CameraDraft, type CameraTab } from "./cameraEdit";
@@ -203,6 +204,10 @@ export function CameraDialog({ draft, cameras, sitePolicy, reload, onClose, onEd
               </details>
             )}
           </>)}
+
+          {panel("device", saved
+            ? <CameraDevicePanel camera={saved} active={shown === "device"} />
+            : <p className="muted small">Save the camera first; its clock, encoders and other settings are then read from it over ONVIF.</p>)}
 
           {panel("recording", <>
             <Field label="Record continuously" hint="Sub stream saves cellular data; HD live view still pulls the main stream while someone watches."

@@ -28,7 +28,7 @@ from pydantic import BaseModel, Field, model_validator
 from . import assistant, backup, baseline, cells, footage, frames, health, identities, journeys, keep, mediamtx, policy, ptz, retention, streams, zones
 from . import synopsis as vlm
 from . import advisor, ai_serve, detector, direct, hub_agent, lan_guard, sdbackfill, site_actions, siteconfig
-from . import camweb, speakers_api, talkdown
+from . import camweb, device_api, speakers_api, talkdown
 from . import vlmroute
 from . import summary as summary_mod
 from .config import ROOT, settings
@@ -223,6 +223,7 @@ app = FastAPI(title="Axiom Vision", lifespan=lifespan)
 app.include_router(ai_serve.router)   # this site's Qwen for the fleet, tunnel-only (see ai_serve.py)
 app.include_router(speakers_api.router)   # IP speakers and talk-down (talkdown.py)
 app.include_router(camweb.router)   # camera web pages through the hub, tunnel-only (see camweb.py)
+app.include_router(device_api.router)   # camera settings over ONVIF: clock, encoders, imaging, rules, reboot (camdevice.py)
 
 
 DIRECT_WRITES = re.compile(r"^/api/whep/")   # WebRTC session lifecycle: the only non-GET a direct browser may send

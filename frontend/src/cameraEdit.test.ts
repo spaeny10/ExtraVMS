@@ -69,7 +69,7 @@ test("every tab named in FIELD_TAB is a visible tab", () => {
 
 test("visibleTabs and openingTab", () => {
   expect(visibleTabs(false)).not.toContain("ptz");
-  expect(visibleTabs(true)).toEqual(["general", "connection", "recording", "detection", "journeys", "ptz", "rules"]);
+  expect(visibleTabs(true)).toEqual(["general", "connection", "device", "recording", "detection", "journeys", "ptz", "rules"]);
   expect(openingTab(null, false, visibleTabs(false))).toBe("general");
   expect(openingTab("recording", false, visibleTabs(false))).toBe("recording");
   // a new camera always opens on General; a remembered PTZ tab on a camera without PTZ falls back to General

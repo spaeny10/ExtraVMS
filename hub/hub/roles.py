@@ -1,10 +1,10 @@
 """Who may do what through the proxy. Roles nest: viewer < operator < admin < owner.
 
-viewer   watch: every GET (but the talk-down voice), the live WebSocket, WHEP signaling, media, playback, frames
+viewer   watch: every GET (but the talk-down voice and a camera's own settings), the live WebSocket, WHEP signaling, media, playback, frames
 operator act: PTZ / relay / presets, talk-down (play / stop a message on a speaker, Describe & warn, the voice and its
          preview), naming people and vehicles, feedback and synopsis edits, locks, Ask and clip chat, reprocess, briefings on demand
-admin    configure: cameras, speakers and their message library, the talk-down voice, zones, retention, topology, remote AI,
-         backups, site rules, SD card recovery
+admin    configure: cameras (and their own settings over ONVIF: clock, encoders, imaging, rules, reboot), speakers and
+         their message library, the talk-down voice, zones, retention, topology, remote AI, backups, site rules, SD card recovery
 owner    everything an admin can, plus org members and billing (hub-side only)
 Unknown non-GET routes need admin, so a new site endpoint is never accidentally open to viewers.
 """
@@ -18,6 +18,9 @@ RANK = {r: i for i, r in enumerate(ROLES)}
 # (methods, path regex, minimum role) — first match wins
 RULES: list[tuple[set[str], re.Pattern, str]] = [
     ({"GET", "HEAD"}, re.compile(r"^/api/talkdown/voices?$"), "operator"),   # the talk-down voice and the installed voices
+    # a camera's own settings over ONVIF (its NTP servers, firmware, encoders): operator to read; every write is admin
+    # under the /api/cameras rule below (camera time, encoders, imaging, analytics rules, reboot, "Fix clocks")
+    ({"GET", "HEAD"}, re.compile(r"^/api/cameras/([^/]+/)?device(/|$)"), "operator"),
     ({"GET", "HEAD"}, re.compile(r".*"), "viewer"),
     ({"POST"}, re.compile(r"^/api/whep/"), "viewer"),
     ({"POST"}, re.compile(r"^/api/(assistant/ask|assistant/plan|assistant/retrieve|assistant/warm|remote/warm|query/parse)$"), "viewer"),
