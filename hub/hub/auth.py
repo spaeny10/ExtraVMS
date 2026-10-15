@@ -15,7 +15,13 @@ from . import db, soc
 from .config import settings
 from .roles import RANK, allows
 
-COOKIE = "hub_session"
+LEGACY_COOKIE = "hub_session"
+# Over HTTPS the session cookie carries the __Host- prefix: browsers then accept it only Secure, host-only and on
+# Path=/, so no other page under the domain (a camera's own web page on <label>.cam.<domain>, camweb.py) can plant or
+# overwrite it ("cookie tossing" — a forced sign-in into another account, or a sign-out). The prefix needs Secure,
+# so a plain-HTTP dev hub keeps the plain name. The old name is no longer accepted: a tossed old-style cookie means
+# nothing (everyone signed in once more when this shipped, 2026-10-15).
+COOKIE = "__Host-hub_session" if settings.cookie_secure else LEGACY_COOKIE
 _ph = PasswordHasher()
 _failures: dict[str, deque] = defaultdict(deque)   # login rate limit: key -> timestamps
 FAIL_LIMIT, FAIL_WINDOW_S = 10, 15 * 60
@@ -287,10 +293,14 @@ def new_session(u: dict, request: Request) -> str:
 
 def set_cookie(resp: Response, sid: str) -> None:
     resp.set_cookie(COOKIE, sid, max_age=settings.session_days * 86400, httponly=True, secure=settings.cookie_secure, samesite="lax", path="/")
+    if COOKIE != LEGACY_COOKIE:
+        resp.delete_cookie(LEGACY_COOKIE, path="/")   # tidy the browser: the old name is never read again
 
 
 def clear_cookie(resp: Response) -> None:
-    resp.delete_cookie(COOKIE, path="/")
+    resp.delete_cookie(COOKIE, path="/", secure=settings.cookie_secure, httponly=True, samesite="lax")
+    if COOKIE != LEGACY_COOKIE:
+        resp.delete_cookie(LEGACY_COOKIE, path="/")
 
 
 def session_of(request: Request) -> dict | None:
