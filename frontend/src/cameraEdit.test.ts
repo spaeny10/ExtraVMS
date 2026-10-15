@@ -1,7 +1,7 @@
 import { expect, test } from "vitest";
 import type { Camera } from "./api";
 import type { CameraStreams, StreamProfile } from "./cameraStreams";
-import { FIELD_TAB, changedFields, dirtyTabs, headerSummary, openingTab, visibleTabs, type CameraDraft } from "./cameraEdit";
+import { FIELD_TAB, cameraWebUrl, changedFields, dirtyTabs, headerSummary, openingTab, visibleTabs, type CameraDraft } from "./cameraEdit";
 
 const cam: Camera = {
   id: "cam1", name: "Side Yard", host: "10.0.0.5", onvif_port: 80, rtsp_port: 554, username: "admin", main_path: "/main",
@@ -76,4 +76,22 @@ test("visibleTabs and openingTab", () => {
   expect(openingTab("recording", true, visibleTabs(false))).toBe("general");
   expect(openingTab("ptz", false, visibleTabs(false))).toBe("general");
   expect(openingTab("ptz", false, visibleTabs(true))).toBe("ptz");
+});
+
+test("cameraWebUrl: the camera's own page on the LAN", () => {
+  expect(cameraWebUrl(cam)).toBe("http://10.0.0.5/");
+  expect(cameraWebUrl({ ...cam, web_port: 8080 })).toBe("http://10.0.0.5:8080/");
+  expect(cameraWebUrl({ ...cam, web_scheme: "https" })).toBe("https://10.0.0.5/");
+  expect(cameraWebUrl({ ...cam, web_scheme: "https", web_port: 443 })).toBe("https://10.0.0.5/");
+  expect(cameraWebUrl({ ...cam, web_scheme: "https", web_port: 80 })).toBe("https://10.0.0.5:80/");
+  expect(cameraWebUrl({ ...cam, host: "fe80::1" })).toBe("http://[fe80::1]/");
+  expect(cameraWebUrl({ ...cam, host: "" })).toBeNull();
+  expect(cameraWebUrl({ ...cam, host: "evil.com/x@" })).toBeNull();
+});
+
+test("web page fields are edited on the Connection tab", () => {
+  expect([FIELD_TAB.web_scheme, FIELD_TAB.web_port, FIELD_TAB.public_web_port]).toEqual(["connection", "connection", "connection"]);
+  // an unset scheme and http are the same (no unsaved-changes dot)
+  expect(changedFields({ ...cam, web_scheme: null }, { ...cam, web_scheme: "http" })).toEqual([]);
+  expect(changedFields(cam, { ...cam, web_port: 8080 })).toEqual(["web_port"]);
 });

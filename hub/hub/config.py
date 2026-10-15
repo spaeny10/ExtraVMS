@@ -46,6 +46,17 @@ class Settings(BaseSettings):
     # Direct-on-LAN: lifetime of the media token a browser presents straight to a server on its LAN (hub/direct.py)
     direct_token_ttl_s: int = 900
 
+    # Camera web pages (camweb.py): each camera's own page at https://<label>.<camweb_domain>/ through its server's tunnel
+    camweb_domain: str = ""                   # e.g. cam.axiomvision.ai (wildcard DNS to the hub); empty = "cam." + the public URL's parent domain
+    camweb_salt: str = ""                     # mixed into the labels; empty = a random one kept in kv (camweb:salt)
+    camweb_idle_s: int = 1800                 # a session ends after this long without a request ...
+    camweb_max_s: int = 7200                  # ... and this long after it was opened, whatever happens
+    camweb_key_ttl_s: int = 60                # the one-time key in the link the hub opens
+    camweb_first_byte_s: float = 120.0        # a camera may take minutes to answer an upload (firmware)
+    camweb_max_body_mb: int = 512             # largest upload (camera firmware is tens of MB)
+    camweb_parallel: int = 12                 # requests at once per server (more wait); the tunnel allows max_streams_per_site
+    camweb_ws_per_server: int = 4             # camera page WebSockets at once per server
+
     # Shared AI: an OpenAI-compatible vLLM the hub fronts for every site whose organization has ai_shared
     vllm_url: str = ""                        # e.g. http://vllm:8000/v1 (a vLLM/Ollama the hub can reach directly)
     vllm_site: str = ""                       # or: the site id whose local Qwen serves the fleet, reached down its tunnel

@@ -21,7 +21,7 @@ from . import fleet as fleet_mod
 from . import find as find_mod
 from . import camera_groups as groups_mod
 from . import layouts as layouts_mod
-from . import site_ask, talkdown_voice
+from . import camweb, site_ask, talkdown_voice
 from . import central_cameras, coverage, geocode, hosts, security, soc, soc_reports
 from fastapi.responses import StreamingResponse
 from .agents import registry
@@ -68,6 +68,7 @@ async def _sweeper() -> None:
             alerts.expire_event_alerts()
             db.run(sa.delete(db.sessions).where(db.sessions.c.expires_at < time.time()))
             db.run(sa.delete(db.claims).where(db.claims.c.expires_at < time.time() - 3600))
+            camweb.sweep()   # camera web pages past their idle or hard limit
         except Exception:
             log.exception("sweeper")
         await asyncio.sleep(30)
@@ -2380,6 +2381,7 @@ async def site_turn(site_id: str, request: Request):
 app.include_router(vlm_proxy.router)
 app.include_router(soc_api.router)   # SOC: staff, monitoring/arming, contacts, procedures
 app.include_router(proxy.router)
+app.include_router(camweb.router)   # camera web pages: sessions, Caddy's on-demand TLS ask
 
 
 # ---------------------------------------------------------------- hub pages
@@ -2401,3 +2403,8 @@ async def ui(full_path: str):
     if not index.exists():
         return JSONResponse({"detail": "hub UI not built (run npm run build in hub/ui)"}, status_code=503)
     return FileResponse(index, headers={"Cache-Control": "no-cache"})
+
+
+# Camera names (<label>.cam.axiomvision.ai) are served by camweb before anything else, and camera pages can't call the
+# hub. Added last, so it is the outermost middleware: the hub's CSRF check and security headers never see those requests.
+app.add_middleware(camweb.CamwebMiddleware)

@@ -20,6 +20,18 @@ export function canCheckCoverage(me: Me, org: Org | undefined): boolean {
   return real && (org.role === "admin" || org.role === "owner");
 }
 
+/**
+ * May open a camera's own web page (hub camweb.py): hub administrators, and the customer's admins and owners with a real
+ * membership (a customer listed only through the SOC does not count: SOC supervisors are widened to admin for monitoring,
+ * not for camera settings). The hub enforces the same, per Site; this only decides whether to offer the action.
+ */
+export function canOpenCameraWeb(me: Me, org: Org | undefined): boolean {
+  if (me.user.is_super) return true;
+  if (!org) return false;
+  const real = org.member === true || (org.member === undefined && !org.soc);
+  return real && (org.role === "admin" || org.role === "owner");
+}
+
 /** The user's SOC role. Hub administrators count as supervisors (the hub's soc_level does the same). */
 export const socRole = (me: Me): SocRole | null => (me.user.is_super ? "supervisor" : me.user.soc_role ?? null);
 export const isSocUser = (me: Me) => socRole(me) !== null;

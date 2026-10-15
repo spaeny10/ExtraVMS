@@ -106,6 +106,11 @@ export type Camera = {
   public_onvif_port?: number | null;
   /** port-forward mode: the outside port of the camera's ONVIF replay (SD card recovery); empty = as the camera reports it (555) */
   public_replay_port?: number | null;
+  /** the camera's own web page (opened straight on the LAN, or from the hub through the tunnel): http or https, its port
+   *  (empty = 80 / 443) and the outside port in port-forward mode (empty = the outside ONVIF port when the page is on it) */
+  web_scheme?: "http" | "https" | null;
+  web_port?: number | null;
+  public_web_port?: number | null;
   /** which stream is recorded 24/7: "sub" saves cellular data (HD live view then pulls <id>_hd on demand) */
   record_stream?: "main" | "sub";
   /** what the camera serves (ONVIF check) and what SD live view plays (backend streams.view) */

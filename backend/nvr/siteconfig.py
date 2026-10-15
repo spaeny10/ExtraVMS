@@ -56,7 +56,7 @@ def _check_cameras(cams, remap_ids: bool = False) -> None:
 CAMERA_COLS = ("name", "host", "onvif_port", "rtsp_port", "username", "main_path", "sub_path", "enabled", "zones",
                "retention_days", "scene_notes", "retention_policy", "synopsis_labels", "policies",
                "public_host", "public_rtsp_port", "public_onvif_port", "public_replay_port", "record_stream",
-               "event_source", "motion_events")
+               "event_source", "motion_events", "web_scheme", "web_port", "public_web_port")
 
 
 # talk-down speakers (talkdown.py): everything but the password and the last check

@@ -63,12 +63,47 @@ def is_tunnel(scope) -> bool:
 
 
 def as_tunnel(app):
-    """`app` as the tunnel calls it (every HTTP scope marked); tests use it to stand in for the hub bridge."""
+    """`app` as the tunnel calls it (every HTTP and WebSocket scope marked); tests use it to stand in for the hub bridge."""
     async def wrapped(scope, receive, send):
-        if scope.get("type") == "http":
+        if scope.get("type") in ("http", "websocket"):
             scope = mark_tunnel(dict(scope))
         await app(scope, receive, send)
     return wrapped
+
+
+# A WebSocket through the tunnel (camera web pages, camweb.py): a `req` with "ws": true; the site answers `res` 101 (or
+# a refusal status) and both directions then carry messages as body chunks, each a flag byte and up to CHUNK - 1 bytes:
+# bit 0 = binary (else UTF-8 text), bit 1 = more of this message follows. `end` from either side closes it. The hub
+# (hub/hub/agents.py) has the same two helpers.
+WS_BINARY, WS_MORE = 1, 2
+
+
+def ws_pieces(data: bytes | str) -> list[bytes]:
+    binary = isinstance(data, (bytes, bytearray, memoryview))
+    raw = bytes(data) if binary else data.encode()
+    flag = WS_BINARY if binary else 0
+    parts = [raw[i:i + CHUNK - 1] for i in range(0, len(raw), CHUNK - 1)] or [b""]
+    return [bytes([flag | (WS_MORE if i < len(parts) - 1 else 0)]) + p for i, p in enumerate(parts)]
+
+
+class WsAssembler:
+    """Body chunks back into messages: feed() returns (binary, payload) once a message is whole, else None."""
+
+    def __init__(self, limit: int = 16 * 1024 * 1024) -> None:
+        self.buf = bytearray()
+        self.limit = limit
+
+    def feed(self, data: bytes) -> tuple[bool, bytes] | None:
+        if not data:
+            return None
+        self.buf += data[1:]
+        if len(self.buf) > self.limit:
+            raise ValueError("WebSocket message too large")
+        if data[0] & WS_MORE:
+            return None
+        out = bytes(self.buf)
+        self.buf.clear()
+        return bool(data[0] & WS_BINARY), out
 
 
 def check_hub_url(url: str) -> None:
@@ -266,7 +301,9 @@ class HubAgent:
         async with conn as ws:
             self._ws = ws
             hello = {"t": "hello", "proto": PROTO, "site_version": __version__, "now": time.time(),
-                     "site_id": self.site_id, "hostname": socket.gethostname(), "caps": ["events", "turn", "vlm", *(["direct"] if settings.direct_enabled else [])]}
+                     "site_id": self.site_id, "hostname": socket.gethostname(),
+                     # camweb: camera web pages (/api/camweb/<camera>) and WebSockets through the tunnel ("ws" requests)
+                     "caps": ["events", "turn", "vlm", "camweb", *(["direct"] if settings.direct_enabled else [])]}
             try:
                 hello["cameras"] = [{"id": c["id"], "name": c["name"]} for c in db.cameras(enabled_only=True)]
             except sqlite3.Error:
@@ -355,7 +392,8 @@ class HubAgent:
             self.streams[m["id"]] = s
             if not m.get("body"):
                 s.push(None)
-            task = asyncio.create_task(self._serve(m, s), name=f"hub-req-{m['id']}")
+            serve = self._serve_ws if m.get("ws") else self._serve
+            task = asyncio.create_task(serve(m, s), name=f"hub-req-{m['id']}")
             task.add_done_callback(lambda _t, sid=m["id"]: self.streams.pop(sid, None))
         elif t == "end":
             s = self.streams.get(m["id"])
@@ -431,6 +469,76 @@ class HubAgent:
                 await self._send({"t": "end", "id": s.id})
             elif not s.aborted:
                 await self._send({"t": "abort", "id": s.id, "reason": "error"})
+
+    async def _serve_ws(self, req: dict, s: Stream) -> None:
+        """A WebSocket from the hub (see WS_BINARY above) against our own app, in-process, as a marked websocket scope."""
+        headers = [(k.lower().encode(), str(v).encode()) for k, v in (req.get("headers") or {}).items()]
+        if not any(k == b"host" for k, _ in headers):
+            headers.append((b"host", b"hub"))
+        protocols = [p.strip() for p in str((req.get("headers") or {}).get("sec-websocket-protocol") or "").split(",") if p.strip()]
+        scope = {"type": "websocket", "asgi": {"version": "3.0", "spec_version": "2.3"}, "http_version": "1.1", "scheme": "ws",
+                 "path": req["path"], "raw_path": req["path"].encode(), "query_string": (req.get("query") or "").encode(),
+                 "root_path": "", "headers": headers, "client": IN_PROCESS_CLIENT, "server": ("hub", 0),
+                 "subprotocols": protocols, "state": {}}
+        mark_tunnel(scope)
+        state = {"connected": False, "accepted": False, "closed": False}
+        asm = WsAssembler()
+
+        async def receive():
+            if not state["connected"]:
+                state["connected"] = True
+                return {"type": "websocket.connect"}
+            while True:
+                data = await s.read()
+                if data is None:
+                    return {"type": "websocket.disconnect", "code": 1000}
+                try:
+                    got = asm.feed(data)
+                except ValueError:
+                    return {"type": "websocket.disconnect", "code": 1009}
+                if got is not None:
+                    binary, payload = got
+                    return {"type": "websocket.receive", "bytes": payload} if binary else \
+                        {"type": "websocket.receive", "text": payload.decode("utf-8", "replace")}
+
+        async def send(msg):
+            if s.aborted:
+                raise asyncio.CancelledError
+            t = msg["type"]
+            if t == "websocket.accept":
+                state["accepted"] = True
+                hdrs = {k.decode(): v.decode() for k, v in msg.get("headers") or []}
+                if msg.get("subprotocol"):
+                    hdrs["sec-websocket-protocol"] = msg["subprotocol"]
+                await self._send({"t": "res", "id": s.id, "status": 101, "headers": hdrs})
+            elif t == "websocket.send" and state["accepted"] and not state["closed"]:
+                data = msg["bytes"] if msg.get("bytes") is not None else (msg.get("text") or "")
+                for piece in ws_pieces(data):
+                    await s.take_credit(len(piece))
+                    if s.aborted:
+                        raise asyncio.CancelledError
+                    await self._send_bytes(chunk(s.id, piece))
+            elif t == "websocket.close" and not state["closed"]:
+                state["closed"] = True
+                if not state["accepted"]:   # refused before the handshake: the hub refuses the browser's
+                    await self._send({"t": "res", "id": s.id, "status": 403, "headers": {}})
+                await self._send({"t": "end", "id": s.id})
+
+        try:
+            await self.app(scope, receive, send)
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            log.exception("hub websocket %s failed", req["path"])
+        finally:
+            if not state["closed"] and not s.aborted:
+                state["closed"] = True
+                try:
+                    if not state["accepted"]:
+                        await self._send({"t": "res", "id": s.id, "status": 500, "headers": {}})
+                    await self._send({"t": "end", "id": s.id})
+                except Exception:
+                    pass
 
     # ---- background loops while connected
     async def _heartbeat_loop(self, every: float) -> None:

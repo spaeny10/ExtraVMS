@@ -343,6 +343,11 @@ MIGRATIONS = [
     ("talkdown_log", "tts", "TEXT"),              # who spoke a text: "piper:<voice>", "sapi", "espeak-ng" (tts.py)
     ("talkdown_messages", "voice", "TEXT"),       # a text's own Piper voice; NULL = the Site's (tts.SETTING)
     ("talkdown_messages", "speed", "REAL"),       # a text's own speed 0.7-1.3; NULL = the Site's
+    # the camera's own web page (camweb.py; the server UI links to it on the LAN): http | https, its port (NULL = 80 /
+    # 443) and, in port-forward mode, the outside port (NULL = the outside ONVIF port when the page is on the ONVIF port)
+    ("cameras", "web_scheme", "TEXT"),
+    ("cameras", "web_port", "INTEGER"),
+    ("cameras", "public_web_port", "INTEGER"),
 ]
 JSON_FIELDS = ("path", "rules", "detections", "synopsis_json", "synopsis_original", "feedback", "anomaly_json", "areas", "policy", "migrated_from")
 
@@ -655,7 +660,7 @@ class Database:
         cols = ["id", "name", "host", "onvif_port", "rtsp_port", "username", "password",
                 "main_path", "sub_path", "enabled", "zones", "retention_days", "scene_notes", "retention_policy",
                 "synopsis_labels", "policies", "public_host", "public_rtsp_port", "public_onvif_port", "public_replay_port", "record_stream",
-                "event_source", "motion_events"]
+                "event_source", "motion_events", "web_scheme", "web_port", "public_web_port"]
         data = {**cam, "zones": json.dumps(cam.get("zones", []))}
         if "event_source" in data:
             data["event_source"] = data["event_source"] if data["event_source"] in ("auto", "metadata", "onvif_events") else "auto"

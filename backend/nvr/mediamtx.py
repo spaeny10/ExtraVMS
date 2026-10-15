@@ -58,12 +58,14 @@ def camera_problem(cam: dict, partial: bool = False) -> str | None:
     ph = cam.get("public_host")
     if ph not in (None, "") and not (isinstance(ph, str) and valid_host(ph)):
         return f"camera {cid}: outside address {str(ph)[:60]!r} is not an IP address or hostname"
-    for k in ("public_rtsp_port", "public_onvif_port", "public_replay_port"):
+    for k in ("public_rtsp_port", "public_onvif_port", "public_replay_port", "web_port", "public_web_port"):
         v = cam.get(k)
         if v is not None and (isinstance(v, bool) or not isinstance(v, int) or not 1 <= v <= 65535):
             return f"camera {cid}: {k} must be a port number 1-65535 (or empty)"
     if cam.get("record_stream") not in (None, "main", "sub"):
         return f"camera {cid}: record_stream must be main or sub"
+    if cam.get("web_scheme") not in (None, "http", "https"):
+        return f"camera {cid}: web_scheme must be http or https"
     return None
 
 

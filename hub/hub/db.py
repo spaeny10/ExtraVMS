@@ -318,6 +318,21 @@ site_talkdown_voice = Table("site_talkdown_voice", metadata,
                             Column("speed", Float, nullable=False, default=1.0), Column("chime", Boolean, nullable=False, default=False),
                             Column("updated_at", Float, nullable=False), Column("updated_by", String(200), nullable=True))
 
+# ---- Camera web pages (camweb.py): one row per "Open camera web page". The link carries a one-time key (key_hash, gone
+# once used); entering it mints the session token the camera's host cookie holds (token_hash). Ended rows are kept a week.
+cam_web_sessions = Table("cam_web_sessions", metadata,
+                         Column("id", String(24), primary_key=True),
+                         Column("token_hash", String(64), nullable=True, index=True),
+                         Column("key_hash", String(64), nullable=True, index=True), Column("key_expires_at", Float, nullable=True),
+                         Column("server_id", String(24), nullable=False), Column("camera_id", String(64), nullable=False),
+                         Column("location_id", String(24), nullable=True), Column("org_id", String(24), nullable=False, index=True),
+                         Column("user_id", String(24), nullable=False, index=True), Column("user_email", String(200), nullable=True),
+                         Column("label", String(16), nullable=False),
+                         Column("created_at", Float, nullable=False), Column("expires_at", Float, nullable=False),
+                         Column("entered_at", Float, nullable=True), Column("last_seen_at", Float, nullable=True),
+                         Column("closed_at", Float, nullable=True), Column("close_reason", String(16), nullable=True),
+                         Column("ip", String(64), nullable=True))
+
 _engine: Engine | None = None
 
 

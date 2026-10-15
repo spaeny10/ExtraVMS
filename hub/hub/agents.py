@@ -67,17 +67,35 @@ class AgentConn:
 
     async def request(self, method: str, path: str, query: str, headers: dict, body: bytes | None) -> Stream:
         """Send a request; the returned Stream yields the response (head then chunks)."""
+        s = await self.open(method, path, query, headers, body=body is not None)
+        if body is not None:
+            await self.send_body(s, body)
+            await self.send({"t": "end", "id": s.id})
+        return s
+
+    async def open(self, method: str, path: str, query: str, headers: dict, body: bool = True, ws: bool = False) -> Stream:
+        """Start a request whose body the caller streams (send_body, then an `end` frame), or a WebSocket (`ws`: the
+        site answers 101, then messages flow as ws_pieces both ways; sites whose hello caps list "camweb")."""
         if len(self.streams) >= settings.max_streams_per_site:
             raise TooManyStreams()
         s = Stream(self.next_id())
         self.streams[s.id] = s
-        await self.send({"t": "req", "id": s.id, "method": method, "path": path, "query": query, "headers": headers, "body": body is not None})
-        if body is not None:
-            for piece in split(body):
-                await s.take_credit(len(piece))
-                await self.send_bytes(chunk(s.id, piece))
-            await self.send({"t": "end", "id": s.id})
+        frame = {"t": "req", "id": s.id, "method": method, "path": path, "query": query, "headers": headers, "body": body}
+        if ws:
+            frame["ws"] = True
+        await self.send(frame)
         return s
+
+    async def send_body(self, s: Stream, data: bytes) -> None:
+        """Request body (or WebSocket) bytes under the stream's credit window; stops quietly once it is aborted."""
+        for piece in split(data):
+            await s.take_credit(len(piece))
+            if s.aborted:
+                return
+            await self.send_bytes(chunk(s.id, piece))
+
+    def caps(self) -> list:
+        return list(self.hello.get("caps") or [])
 
     async def call(self, method: str, path: str, query: str = "", headers: dict | None = None, body: bytes | None = None,
                    timeout: float = 15.0) -> tuple[int, bytes]:
@@ -120,6 +138,40 @@ class AgentConn:
 
 class TooManyStreams(Exception):
     pass
+
+
+# A WebSocket through the tunnel (camera web pages, camweb.py): each body chunk is one flag byte and up to CHUNK - 1
+# bytes of a message; bit 0 = binary (else UTF-8 text), bit 1 = more of this message follows. The site's agent
+# (backend/nvr/hub_agent.py) has the same two helpers.
+WS_BINARY, WS_MORE = 1, 2
+
+
+def ws_pieces(data: bytes | str) -> list[bytes]:
+    binary = isinstance(data, (bytes, bytearray, memoryview))
+    raw = bytes(data) if binary else data.encode()
+    flag = WS_BINARY if binary else 0
+    parts = [raw[i:i + CHUNK - 1] for i in range(0, len(raw), CHUNK - 1)] or [b""]
+    return [bytes([flag | (WS_MORE if i < len(parts) - 1 else 0)]) + p for i, p in enumerate(parts)]
+
+
+class WsAssembler:
+    """Body chunks back into messages: feed() returns (binary, payload) once a message is whole, else None."""
+
+    def __init__(self, limit: int = 16 * 1024 * 1024) -> None:
+        self.buf = bytearray()
+        self.limit = limit
+
+    def feed(self, data: bytes) -> tuple[bool, bytes] | None:
+        if not data:
+            return None
+        self.buf += data[1:]
+        if len(self.buf) > self.limit:
+            raise ValueError("WebSocket message too large")
+        if data[0] & WS_MORE:
+            return None
+        out = bytes(self.buf)
+        self.buf.clear()
+        return bool(data[0] & WS_BINARY), out
 
 
 def _location_of(site: dict | None) -> dict | None:

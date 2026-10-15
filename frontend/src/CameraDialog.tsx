@@ -2,13 +2,13 @@
    up the camera, and Save / Cancel always at the bottom. Which tab a field is on, the header and the opening tab are pure
    helpers in cameraEdit.ts. Sub-editors that save on their own (neighbors, PTZ, the zone editor) keep their own buttons. */
 import { cloneElement, isValidElement, useEffect, useId, useRef, useState } from "react";
-import { api, type Camera, type EventSource, type RetentionPolicy, type ScannedDevice, type Speaker, type Zone } from "./api";
+import { BASE, api, type Camera, type EventSource, type RetentionPolicy, type ScannedDevice, type Speaker, type Zone } from "./api";
 import { NeighborsEditor } from "./Neighbors";
 import { PolicyForm } from "./RetentionPanel";
 import { PtzSettings } from "./PtzControl";
 import { confirmDialog, errorText, toast, useIsPhone } from "./ui";
 import { detectionsText, streamsText, streamsTitle, suggestText } from "./cameraStreams";
-import { CAMERA_TABS, dirtyTabs, headerSummary, openingTab, visibleTabs, type CameraDraft, type CameraTab } from "./cameraEdit";
+import { CAMERA_TABS, cameraWebUrl, dirtyTabs, headerSummary, openingTab, visibleTabs, type CameraDraft, type CameraTab } from "./cameraEdit";
 
 export const blankCamera: CameraDraft = {
   id: "", name: "", host: "", onvif_port: 80, rtsp_port: 554, username: "admin", main_path: "/main",
@@ -145,6 +145,7 @@ export function CameraDialog({ draft, cameras, sitePolicy, reload, onClose, onEd
                 onUse={(d) => setEdit({ ...edit, host: d.address, onvif_port: d.port, name: edit.name || [d.manufacturer, d.model].filter(Boolean).join(" ") })} />
             )}
             <Field label="Host / IP"><input value={edit.host} onChange={(e) => setEdit({ ...edit, host: e.target.value })} /></Field>
+            <WebPageLink camera={edit} />
             <div className="row">
               <Field label="ONVIF port"><input type="number" value={edit.onvif_port} onChange={(e) => setEdit({ ...edit, onvif_port: +e.target.value })} /></Field>
               <Field label="RTSP port"><input type="number" value={edit.rtsp_port} onChange={(e) => setEdit({ ...edit, rtsp_port: +e.target.value })} /></Field>
@@ -163,6 +164,19 @@ export function CameraDialog({ draft, cameras, sitePolicy, reload, onClose, onEd
                   onPaths={(p) => { setEdit({ ...edit, ...p }); setInitial((i) => ({ ...i, ...p })); }} />
               : <Hint text="The camera is asked which streams it serves when it is saved."
                   more="The camera is asked which streams it serves when it is saved. Without a low-resolution stream, SD live view plays the main stream." />}
+            <details className="field" open={Boolean(initial.web_port || initial.web_scheme === "https")}>
+              <summary>Advanced: Camera web page</summary>
+              <div className="row">
+                <Field label="Web page"><select value={edit.web_scheme ?? "http"} onChange={(e) => setEdit({ ...edit, web_scheme: e.target.value as "http" | "https" })}>
+                  <option value="http">http</option>
+                  <option value="https">https (a self-signed certificate is fine)</option>
+                </select></Field>
+                <Field label="Web port"><input type="number" value={edit.web_port ?? ""} placeholder={edit.web_scheme === "https" ? "443" : "80"}
+                  onChange={(e) => setEdit({ ...edit, web_port: e.target.value ? +e.target.value : null })} /></Field>
+              </div>
+              <Hint text="Where the camera's own settings page answers; most cameras use http on port 80."
+                more="Where the camera's own settings page answers; most cameras use http on port 80. On this network the link above opens it directly. From the hub (Site › Settings › Cameras) it opens through this server's connection to the hub, without port forwarding; you log in with the camera's own login." />
+            </details>
             <details className="field" open={Boolean(initial.public_host)}>
               <summary>Advanced: Port forwarding (outside address)</summary>
               <Field label="Outside address"><input value={edit.public_host ?? ""} placeholder="the site router's public IP or name"
@@ -174,6 +188,9 @@ export function CameraDialog({ draft, cameras, sitePolicy, reload, onClose, onEd
                   onChange={(e) => setEdit({ ...edit, public_rtsp_port: e.target.value ? +e.target.value : null })} /></Field>
                 <Field label="Outside replay port (SD card)"><input type="number" value={edit.public_replay_port ?? ""} placeholder="555"
                   onChange={(e) => setEdit({ ...edit, public_replay_port: e.target.value ? +e.target.value : null })} /></Field>
+                <Field label="Outside web port"><input type="number" value={edit.public_web_port ?? ""}
+                  placeholder={(edit.web_port ?? 80) === edit.onvif_port ? String(edit.public_onvif_port ?? edit.onvif_port) : String(edit.web_port ?? 80)}
+                  onChange={(e) => setEdit({ ...edit, public_web_port: e.target.value ? +e.target.value : null })} /></Field>
               </div>
               <Hint text="Only for a camera reached through the site router's port forwards; leave empty on the same network or over a VPN."
                 more="For a camera reached through the site router's port forwards. This server connects to the outside address and ports, and the addresses the camera reports (events, PTZ, streams) are rewritten to them. Host / IP and the ports above stay the camera's own. Leave empty on the same network or over a VPN." />
@@ -360,6 +377,17 @@ function Hint({ id, text, more }: { id?: string; text: React.ReactNode; more?: R
 }
 
 /** A labelled field; with `hint`, the hint (and `more` behind "?") describes the control. */
+/**
+ * "Open camera web page ↗" straight to the camera on this network. Through the hub (the page served under /s/<server>/)
+ * a LAN address would not open, so it says where the hub opens it instead.
+ */
+function WebPageLink({ camera }: { camera: CameraDraft }) {
+  if (BASE) return <p className="muted small">Open the camera's own web page from the hub: Site › Settings › Cameras › Camera web pages.</p>;
+  const url = cameraWebUrl(camera);
+  if (!url) return null;
+  return <p className="small"><a href={url} target="_blank" rel="noopener noreferrer">Open camera web page ↗</a> <span className="muted">(on this network)</span></p>;
+}
+
 function Field({ label, hint, more, children }: { label: string; hint?: React.ReactNode; more?: React.ReactNode; children: React.ReactNode }) {
   const id = useId();
   if (!hint) {

@@ -180,6 +180,13 @@ export type Camera = {
   server_id: string; server_name: string; camera_id: string; name: string; enabled: boolean; stream_ready: boolean; problems: string[] | null;
   bitrate_mbps: number | null; ptz: unknown; last_seen_at: number | null; missing_since: number | null; online: boolean; server_online?: boolean;
 };
+/** A camera's own web page opened from the hub (hub camweb.py): the session behind https://<host>/ in another tab. */
+export type CameraWebSession = {
+  id: string; server_id: string; server_name: string | null; camera_id: string; camera_name: string; location_id: string | null;
+  location_name: string | null; host: string; created_at: number; entered_at: number | null; last_seen_at: number | null; expires_at: number;
+};
+/** POST .../web-session: `url` carries a one-time key (valid a minute, single use) that the new tab opens. */
+export type CameraWebOpen = { id: string; url: string; host: string; expires_at: number; server_id: string; camera_id: string; camera_name: string };
 /**
  * `sites` is the flat list of the customer's visible servers (Home's dashboard, the Sites page's event lookup and many
  * hub tests read it, and it is the only list that includes retired servers); `locations` are the Sites with their
@@ -385,6 +392,11 @@ export const api = {
   createCameraGroup: (id: string, b: { name: string; cameras: string[] }) => req<SiteCameraGroup>(`/api/locations/${id}/camera-groups`, json("POST", b)),
   updateCameraGroup: (id: string, gid: number, b: { name?: string; cameras?: string[] }) => req<SiteCameraGroup>(`/api/locations/${id}/camera-groups/${gid}`, json("PUT", b)),
   deleteCameraGroup: (id: string, gid: number) => req<{ ok: boolean }>(`/api/locations/${id}/camera-groups/${gid}`, { method: "DELETE" }),
+  // a camera's own web page through its server's tunnel (hub camweb.py): Site admins and hub administrators
+  openCameraWeb: (server: string, camera: string) =>
+    req<CameraWebOpen>(`/api/servers/${encodeURIComponent(server)}/cameras/${encodeURIComponent(camera)}/web-session`, { method: "POST" }),
+  cameraWebSessions: () => req<CameraWebSession[]>("/api/camweb/sessions"),
+  closeCameraWeb: (id: string) => req<{ ok: boolean }>(`/api/camweb/sessions/${encodeURIComponent(id)}/close`, { method: "POST" }),
   siteSpeakers: (id: string) => req<{ speakers: SiteSpeaker[]; by_camera: Record<string, unknown[]>; can_edit: boolean }>(`/api/locations/${id}/speakers`),
   setSpeakerGroups: (id: string, server: string, speaker: string, groupIds: number[]) =>
     req<SiteSpeaker>(`/api/locations/${id}/speakers/${encodeURIComponent(server)}/${encodeURIComponent(speaker)}/groups`, json("PUT", { group_ids: groupIds })),

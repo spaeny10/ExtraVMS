@@ -28,7 +28,7 @@ from pydantic import BaseModel, Field, model_validator
 from . import assistant, backup, baseline, cells, footage, frames, health, identities, journeys, keep, mediamtx, policy, ptz, retention, streams, zones
 from . import synopsis as vlm
 from . import advisor, ai_serve, detector, direct, hub_agent, lan_guard, sdbackfill, site_actions, siteconfig
-from . import speakers_api, talkdown
+from . import camweb, speakers_api, talkdown
 from . import vlmroute
 from . import summary as summary_mod
 from .config import ROOT, settings
@@ -222,11 +222,12 @@ async def _serve_https(server) -> None:
 app = FastAPI(title="Axiom Vision", lifespan=lifespan)
 app.include_router(ai_serve.router)   # this site's Qwen for the fleet, tunnel-only (see ai_serve.py)
 app.include_router(speakers_api.router)   # IP speakers and talk-down (talkdown.py)
+app.include_router(camweb.router)   # camera web pages through the hub, tunnel-only (see camweb.py)
 
 
 DIRECT_WRITES = re.compile(r"^/api/whep/")   # WebRTC session lifecycle: the only non-GET a direct browser may send
 # what the hub's proxy refuses (hub/hub/proxy.py) is refused on a direct connection too
-DIRECT_HIDDEN = re.compile(r"^/api/(hub$|turn$|ai/|config/history|config/handoff$)")
+DIRECT_HIDDEN = re.compile(r"^/api/(hub$|turn$|ai/|config/history|config/handoff$|camweb/)")
 DIRECT_OPEN = ("/api/direct/probe", "/api/direct/handshake")   # answer the hub origin without a token
 
 
@@ -562,9 +563,9 @@ async def hub_configure(body: HubIn):
 PUBLIC_CAMERA_FIELDS = ("id", "name", "host", "onvif_port", "rtsp_port", "username", "main_path",
                         "sub_path", "enabled", "zones", "retention_days", "scene_notes", "retention_policy",
                         "synopsis_labels", "policies", "ptz_config", "public_host", "public_rtsp_port", "public_onvif_port", "public_replay_port",
-                        "record_stream", "event_source", "motion_events")
+                        "record_stream", "event_source", "motion_events", "web_scheme", "web_port", "public_web_port")
 CAMERA_KEPT_FIELDS = ("public_host", "public_rtsp_port", "public_onvif_port", "public_replay_port", "record_stream",
-                      "event_source", "motion_events")   # omitted on PUT = unchanged
+                      "event_source", "motion_events", "web_scheme", "web_port", "public_web_port")   # omitted on PUT = unchanged
 
 
 def public_camera(c: dict) -> dict:
@@ -608,6 +609,12 @@ class CameraIn(BaseModel):
     public_rtsp_port: int | None = None
     public_onvif_port: int | None = None
     public_replay_port: int | None = None    # the camera's ONVIF replay (SD card) RTSP port outside; empty = as reported (555)
+    # the camera's own web page (opened from the hub through the tunnel, camweb.py, or straight from the server UI on
+    # the LAN): its scheme and port (empty = 80, or 443 for https), and the outside port in port-forward mode (empty =
+    # the outside ONVIF port when the page is on the ONVIF port, else the web port). Omitted on update = keep.
+    web_scheme: Literal["http", "https"] = "http"
+    web_port: int | None = None
+    public_web_port: int | None = None
     # "sub": record the sub stream 24/7 instead of the main one (cellular sites); HD live pulls main on demand
     record_stream: Literal["main", "sub"] = "main"
     # what opens events (ruleevents.py): "auto" = the camera's object metadata, or its ONVIF detection events
@@ -620,7 +627,7 @@ class CameraIn(BaseModel):
     def _empty_is_none(cls, data):
         if isinstance(data, dict):   # a cleared form field arrives as "" (or 0 for a port)
             data = {**data}
-            for k in ("public_host", "public_rtsp_port", "public_onvif_port", "public_replay_port"):
+            for k in ("public_host", "public_rtsp_port", "public_onvif_port", "public_replay_port", "web_port", "public_web_port"):
                 if k in data and data[k] in ("", 0):
                     data[k] = None
         return data
@@ -630,7 +637,8 @@ class CameraIn(BaseModel):
         # main_path / sub_path are appended to rtsp://user:pass@host:port: "@evil:554/x" would send the camera
         # password to another host. Same rules as a config import (mediamtx.camera_problem).
         problem = mediamtx.camera_problem(self.model_dump(include={"id", "host", "main_path", "sub_path", "rtsp_port", "onvif_port",
-                                                                   "public_host", "public_rtsp_port", "public_onvif_port", "public_replay_port", "record_stream"}))
+                                                                   "public_host", "public_rtsp_port", "public_onvif_port", "public_replay_port", "record_stream",
+                                                                   "web_scheme", "web_port", "public_web_port"}))
         if problem:
             raise ValueError(problem)
         return self

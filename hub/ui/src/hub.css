@@ -220,6 +220,10 @@
 .cam-group { padding: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); }
 .cam-group > .row { gap: 8px; flex-wrap: wrap; }
 .cam-group-edit { margin-top: 8px; display: flex; flex-direction: column; gap: 8px; }
+/* Site › Settings › Cameras › Camera web pages (site/CameraWebCard.tsx) */
+.cam-web-server { margin-top: 8px; }
+.cam-web-list { list-style: none; padding: 0; margin: 4px 0 0; display: flex; flex-direction: column; gap: 4px; }
+.cam-web-list > li { gap: 8px; flex-wrap: wrap; padding: 4px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); }
 .cam-group-server { border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; margin: 0; min-width: 0; }
 .cam-group-server legend { padding: 0 4px; font-weight: 600; }
 .cam-checks { display: flex; flex-wrap: wrap; gap: 4px 14px; }

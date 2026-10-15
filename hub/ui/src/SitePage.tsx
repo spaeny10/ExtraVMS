@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Icon, confirmDialog, promptDialog, toast } from "@site/ui";
 import { type Camera, type Me, type Org, type Server, type Site, type SiteCoverage, ago, api, fmtTime } from "./api";
-import { canCheckCoverage, canEditMonitoring, isAdmin, isSocUser, ofTotal } from "./access";
+import { canCheckCoverage, canEditMonitoring, canOpenCameraWeb, isAdmin, isSocUser, ofTotal } from "./access";
 import { Breadcrumbs } from "./Breadcrumbs";
 import { DirectChips } from "./DirectChip";
 import { SETTINGS_SECTIONS, SITE_TABS, type SettingsSection, type SiteTab, consoleHref, go, navigate, serverHref, settingsHref, siteHref } from "./nav";
@@ -17,6 +17,7 @@ import { COVERAGE_ANCHOR, CoverageCard } from "./site/CoverageCard";
 import { bestCarrier, chipText } from "./coverage";
 import { datacenterLine, instanceFor, siteBandwidth, unenrolledInstances, uploadLine } from "./central";
 import { CamerasBox } from "./site/CamerasBox";
+import { CameraWebCard } from "./site/CameraWebCard";
 import { ContactsBox } from "./site/ContactsBox";
 import { MonitoringBox } from "./site/MonitoringBox";
 import { ProceduresBox } from "./site/ProceduresBox";
@@ -203,7 +204,8 @@ const SECTION_LABEL: Record<SettingsSection, string> = { general: "General", cam
 
 /**
  * Settings sub-tabs. Cameras (camera groups, talk-down speakers) is shown to everyone, edited by the Site's admins (the
- * hub says who: can_edit). Monitoring is shown to everyone (read-only: is the SOC watching now, and until when); its
+ * hub says who: can_edit); its Camera web pages card (open a camera's own settings page) only to the Site's admins and hub
+ * administrators (canOpenCameraWeb). Monitoring is shown to everyone (read-only: is the SOC watching now, and until when); its
  * editor, Contacts and Procedures are for customer admins and SOC supervisors (canEditMonitoring). Arm/disarm now is
  * for customer operators and up, and SOC staff. A section someone may not open falls back to General.
  */
@@ -223,7 +225,7 @@ function SettingsSections({ site, org, me, section, admin, onChanged, cov, setCo
         ))}
       </div>
       {cur === "general" ? <SettingsTab site={site} admin={admin} onChanged={onChanged} me={me} org={org} cov={cov} setCov={setCov} />
-        : cur === "cameras" ? <CamerasBox key={site.id} site={site} />
+        : cur === "cameras" ? <><CamerasBox key={site.id} site={site} />{canOpenCameraWeb(me, org) && <CameraWebCard key={`web-${site.id}`} site={site} />}</>
         : cur === "monitoring" ? <MonitoringBox key={site.id} site={site} canEdit={editor} canArm={canArm} />
         : cur === "contacts" ? <ContactsBox key={site.id} site={site} />
         : <ProceduresBox key={site.id} site={site} />}

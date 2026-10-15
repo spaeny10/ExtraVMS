@@ -23,6 +23,7 @@ services:
       - caddy_config:/config
     environment:
       HUB_DOMAIN: ${HUB_DOMAIN:-hub.axiomvision.ai}
+      HUB_CAMWEB_DOMAIN: ${HUB_CAMWEB_DOMAIN:-cam.axiomvision.ai}   # camera web pages: *.<this> (wildcard DNS to this host)
     depends_on: [hub]
     logging: *logging
 
@@ -35,6 +36,7 @@ services:
       HUB_SECRET: ${HUB_SECRET:?set HUB_SECRET in hub/.env}
       HUB_PUBLIC_URL: ${HUB_PUBLIC_URL:-https://hub.axiomvision.ai}
       HUB_COOKIE_SECURE: "1"
+      HUB_CAMWEB_DOMAIN: ${HUB_CAMWEB_DOMAIN:-cam.axiomvision.ai}   # camera web pages (camweb.py); the same name Caddy serves
       # X-Forwarded-For/-Proto are trusted from the compose network only (Caddy; port 8000 is never published)
       HUB_FORWARDED_ALLOW_IPS: ${HUB_FORWARDED_ALLOW_IPS:-172.16.0.0/12,192.168.0.0/16,10.0.0.0/8}
       HUB_TURN_HOST: ${HUB_DOMAIN:-hub.axiomvision.ai}

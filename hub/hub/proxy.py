@@ -47,8 +47,9 @@ async def proxy_api(site_id: str, path: str, request: Request):
     api_path = "/api/" + path
     if api_path == "/api/hub":
         raise HTTPException(403, "the hub link is managed here, not through the site")
-    if api_path.startswith(("/api/ai/", "/api/config/history")) or api_path == "/api/config/handoff":
-        # hub-internal only: the fleet AI relay (vlm_proxy), camera credential handoff and history copy (fleet_actions)
+    if api_path.startswith(("/api/ai/", "/api/config/history", "/api/camweb/")) or api_path == "/api/config/handoff":
+        # hub-internal only: the fleet AI relay (vlm_proxy), camera credential handoff and history copy (fleet_actions),
+        # camera web pages (camweb.py: only on a camera's own name, with a session)
         raise HTTPException(404, "not available through the hub")
     needed = required_role(request.method, api_path)
     if not allows(role, needed):

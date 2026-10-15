@@ -37,6 +37,7 @@ export const FIELD_TAB: Partial<Record<keyof CameraDraft, CameraTab>> = {
   host: "connection", onvif_port: "connection", rtsp_port: "connection", username: "connection", password: "connection",
   main_path: "connection", sub_path: "connection",
   public_host: "connection", public_onvif_port: "connection", public_rtsp_port: "connection", public_replay_port: "connection",
+  web_scheme: "connection", web_port: "connection", public_web_port: "connection",
   record_stream: "recording", retention_days: "recording", retention_policy: "recording",
   event_source: "detection", motion_events: "detection", synopsis_labels: "detection", zones: "detection",
   policies: "rules",
@@ -50,6 +51,7 @@ function norm(k: keyof CameraDraft, v: unknown): unknown {
     case "enabled": case "motion_events": return Boolean(v);
     case "record_stream": return v ?? "main";
     case "event_source": return v ?? "auto";
+    case "web_scheme": return v || "http";
     case "synopsis_labels": return [...((v as string[] | null | undefined) ?? ["person"])].sort();
     case "policies": case "zones": return v ?? [];
     default: return v ?? null;
@@ -92,4 +94,17 @@ export function headerSummary(c: Camera | null | undefined): SummaryPart[] {
   }
   if (c.status?.ptz?.available) parts.push({ text: "PTZ" });
   return parts;
+}
+
+/**
+ * The camera's own web page on the LAN: http(s)://<host>[:<web_port>]/ (the default port left out; an IPv6 address in
+ * brackets). Null when the address isn't usable yet. Through the hub the page opens at the camera's own hub name instead
+ * (Site › Settings › Cameras), so the server UI shows this link only when served by the server itself (no /s/<id> prefix).
+ */
+export function cameraWebUrl(c: Pick<Camera, "host" | "web_scheme" | "web_port">): string | null {
+  const host = (c.host || "").trim();
+  if (!host || /[\s/@?#]/.test(host)) return null;
+  const scheme = c.web_scheme === "https" ? "https" : "http";
+  const port = c.web_port && c.web_port !== (scheme === "https" ? 443 : 80) ? `:${c.web_port}` : "";
+  return `${scheme}://${host.includes(":") && !host.startsWith("[") ? `[${host}]` : host}${port}/`;
 }

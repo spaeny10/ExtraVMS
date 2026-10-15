@@ -5,6 +5,9 @@ big-endian stream id followed by bytes. The hub issues HTTP requests to the site
 the site answers with `res` + body chunks + `end`. Either side may `abort` a stream. Flow control is a
 credit window per stream: a sender may have at most WINDOW unacknowledged bytes in flight; the receiver
 returns `credit` frames as it drains, so a slow phone never balloons memory at the hub or the site.
+A `req` with "ws": true is a WebSocket (sites whose hello caps list "camweb"): `res` 101 accepts it, then both
+directions carry messages as chunks of one flag byte (bit 0 binary, bit 1 more follows) and the payload; `end` closes
+it. The framing helpers live in nvr.hub_agent and hub.agents, not here, so a site update never needs this package.
 
 Frame types
   site -> hub : hello, heartbeat, event, res, end, abort, credit, rotated, pong, ping

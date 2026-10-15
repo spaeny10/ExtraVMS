@@ -1,6 +1,29 @@
+{
+	# Camera web pages (hub camweb.py): a certificate per camera name, issued the first time it is opened. Caddy asks
+	# the hub first, which answers 200 only for the name of an existing camera, so nothing else gets a certificate.
+	on_demand_tls {
+		ask http://hub:8000/api/camweb/tls-ok
+	}
+}
+
 {$HUB_DOMAIN} {
 	encode zstd gzip
 	# long-lived site tunnels and browser sockets: don't time them out
+	reverse_proxy hub:8000 {
+		transport http {
+			read_timeout 0
+			write_timeout 0
+		}
+	}
+}
+
+# Each camera's own page at https://<label>.{$HUB_CAMWEB_DOMAIN}/ (DNS: *.cam.axiomvision.ai -> this host). The hub
+# handles every request on these names itself (sessions, the camera's server tunnel); the Host header is passed as is.
+# No compression here: camera pages are passed through byte for byte.
+*.{$HUB_CAMWEB_DOMAIN} {
+	tls {
+		on_demand
+	}
 	reverse_proxy hub:8000 {
 		transport http {
 			read_timeout 0

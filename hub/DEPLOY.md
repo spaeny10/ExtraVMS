@@ -112,6 +112,22 @@ An update past this point changes the following; check these on the server befor
   (their ids are rehashed on first use); push subscriptions to anything but the browser push services are refused,
   and any such stored row is dropped instead of sent to.
 
+## Camera web pages
+Site admins (and hub administrators) open a camera's own settings page from **Site → Settings → Cameras → Camera web
+pages**: it opens in a new tab at `https://<label>.cam.axiomvision.ai/`, through the camera's server tunnel (hub
+camweb.py, server nvr/camweb.py). Setting it up once:
+- **DNS**: `A *.cam → <server IPv4>` (and `AAAA *.cam → <server IPv6>`) at the registrar. `HUB_CAMWEB_DOMAIN`
+  (default `cam.axiomvision.ai`) names it for both Caddy and the hub.
+- **Caddy**: the Caddyfile has a global `on_demand_tls { ask http://hub:8000/api/camweb/tls-ok }` and a
+  `*.{$HUB_CAMWEB_DOMAIN}` site with `tls { on_demand }`: a certificate per camera name, issued the first time it is
+  opened (HTTP-01 on port 80 or TLS-ALPN on 443), and only for names the hub says are cameras. After pulling, rebuild the
+  hub first (the ask endpoint must exist), then check and reload Caddy:
+  `docker compose -f hub/docker-compose.yml exec caddy caddy validate --config /etc/caddy/Caddyfile` and
+  `docker compose -f hub/docker-compose.yml up -d caddy` (the new environment variable recreates the container).
+- **Servers** need this version (their hello lists `camweb`); an older one answers "update the server first".
+- Let's Encrypt allows 50 new certificates per registered domain per week; each camera's name is stable, so a camera
+  costs one certificate (renewed by Caddy) the first time anyone opens it. Caddy falls back to ZeroSSL when it is hit.
+
 ## Users and invites
 - Reset a password from the server (prompts twice; signs the user out everywhere):
   `docker compose -f hub/docker-compose.yml exec hub python -m hub setpassword you@example.com`.
@@ -136,3 +152,4 @@ An update past this point changes the following; check these on the server befor
 | Live video from a phone off Wi-Fi | tile plays; `chrome://webrtc-internals` shows a `relay` candidate (TURN) |
 | Shared AI | Customer → AI & relay says "served by the GPU at <site>"; lite sites write synopses |
 | No inbound ports at sites | the router forwards nothing; `ss -tlnp` on a site shows 8080 bound to the LAN only |
+| Camera web pages | `docker compose -f hub/docker-compose.yml exec caddy wget -qO- 'http://hub:8000/api/camweb/tls-ok?domain=cnotacamera1.cam.axiomvision.ai'` → "404 Not Found" (the ask answers); Site → Settings → Cameras → Open camera web page shows the camera's login with a padlock; the customer's Audit lists "camera web page opened / entered" |
