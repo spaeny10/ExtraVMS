@@ -314,6 +314,11 @@ def test_camera_problem_rules():
     from nvr.api import CameraIn
     c = CameraIn(**{**CAM, "zones": [], "web_port": "", "public_web_port": 0})
     assert c.web_port is None and c.public_web_port is None and c.web_scheme == "http"
+    # a camera saved before web_scheme existed reads back null; the zones editor sends the whole row back: not a 422,
+    # and "not sent" (so a PUT keeps what is stored)
+    for empty in (None, ""):
+        c = CameraIn(**{**CAM, "zones": [], "web_scheme": empty})
+        assert c.web_scheme == "http" and "web_scheme" not in c.model_fields_set
 
 
 if __name__ == "__main__":

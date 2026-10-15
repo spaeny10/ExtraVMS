@@ -631,6 +631,10 @@ class CameraIn(BaseModel):
             for k in ("public_host", "public_rtsp_port", "public_onvif_port", "public_replay_port", "web_port", "public_web_port"):
                 if k in data and data[k] in ("", 0):
                     data[k] = None
+            # a camera saved before web_scheme existed reads back null, and the zones editor and other clients send the
+            # whole row back: null / "" = not sent (keep what is stored; nothing stored = http), not a 422
+            if data.get("web_scheme") in (None, ""):
+                data.pop("web_scheme", None)
         return data
 
     @model_validator(mode="after")
