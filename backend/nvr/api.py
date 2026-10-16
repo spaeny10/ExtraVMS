@@ -2560,6 +2560,27 @@ async def ws(sock: WebSocket):
 
 # ---------------------------------------------------------------- live view signaling
 
+LIVE_CODECS_TTL_S = 30
+_live_codecs: tuple[float, dict] | None = None
+
+
+@app.get("/api/live/codecs")
+async def live_codecs():
+    """The video codec of every live-view path (<id>, <id>_sub, <id>_hd where the camera has one): {path: {video:
+    "H264" | "H265" | null, ready}}, so the browser can rule out a stream it can't decode before it connects (no HEVC
+    over WebRTC: HD greyed out, an H.265 SD relay explained instead of a black tile). Paths not being pulled are
+    guessed from what they relay or the camera's profiles (mediamtx.live_codecs). Cached 30 s: every tile asks."""
+    global _live_codecs
+    if _live_codecs and time.time() - _live_codecs[0] < LIVE_CODECS_TTL_S:
+        return _live_codecs[1]
+    status: dict = {}
+    with contextlib.suppress(httpx.HTTPError):
+        status = await mediamtx.path_status()
+    out = mediamtx.live_codecs(db.cameras(enabled_only=True), status)
+    _live_codecs = (time.time(), out)
+    return out
+
+
 WHEP_PATH = re.compile(r"[a-z0-9_]{1,40}")
 # MediaMTX names a WHEP session by a random UUID (its answer's Location: /<path>/whep/<uuid>)
 WHEP_SESSION = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")

@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { NO_PICTURE_TEXT } from "../../liveFallback";
-import { LivePlayer } from "../../LivePlayer";
+import { HD_H265_TITLE, canPlayLive, pathCodec } from "../../codecs";
+import { LivePlayer, hdPathClass } from "../../LivePlayer";
+import { useLiveCodecs } from "../../LiveQuality";
 import { Icon } from "../../ui";
 import { useStill } from "../../useStill";
-import { livePath } from "../../Views";
-import { useBudget } from "../Dashboard";
+import { livePath } from "../../cameraStreams";
+import { pathQuality } from "../../whepTiming";
+import { useBudget } from "../budget";
 import { useIceServers } from "../ice";
 import type { DashboardSource } from "../source";
 import type { Widget } from "../types";
@@ -22,6 +25,8 @@ export function cameraTitle(w: Widget<"camera">, source: DashboardSource): strin
 /**
  * One live camera from any site. Streams count against the page budget (MAX_LIVE): tiles beyond it, or
  * scrolled out of view, show a still frame with a Play button instead of holding a WebRTC session.
+ * SD / HD is the widget's own setting (no Auto here: a dashboard tile's size is the layout's, chosen when it was built);
+ * a switch is seamless (LivePlayer), and HD this browser can't play is greyed out (the server's codec list).
  */
 export function CameraWidget({ widget: w, source, editing, big, onProps }: {
   widget: Widget<"camera">; source: DashboardSource; editing: boolean; big: boolean; onProps: (p: Partial<Widget<"camera">["props"]>) => void;
@@ -30,6 +35,7 @@ export function CameraWidget({ widget: w, source, editing, big, onProps }: {
   const cam = source.cameras().find((c) => c.site === site && c.id === camera);
   const api = site ? source.siteApi(site) : null;
   const ice = useIceServers(source, site);
+  const codecs = useLiveCodecs(api);
   const budget = useBudget();
   const box = useRef<HTMLDivElement>(null);
   const [hdOk, setHdOk] = useState(true);
@@ -53,15 +59,20 @@ export function CameraWidget({ widget: w, source, editing, big, onProps }: {
 
   if (!site || !camera) return <div className="dash-empty muted small">Choose a camera in ⚙ settings.</div>;
   if (!cam) return <div className="dash-empty muted small">Camera {camera} is not on any site you can see.</div>;
-  const hd = quality === "hd" && hdOk;
+  const ref = { id: camera, record_stream: cam.recordStream };
+  const hdPlayable = canPlayLive(pathCodec(codecs, livePath(ref, true)));
+  const hd = quality === "hd" && hdOk && hdPlayable;
   // SD is <id>_sub; HD is <id>, or <id>_hd on a camera that records its sub stream
-  const path = livePath({ id: camera, record_stream: cam.recordStream }, hd);
+  const path = livePath(ref, hd);
   const setQ = (q: "sd" | "hd") => { setQuality(q); if (editing) onProps({ quality: q }); };
+  const hdTitle = !hdPlayable ? HD_H265_TITLE : !hdOk ? "This browser can't decode the HD stream" : "Stream quality";
   return (
     <div ref={box} className={`dash-cam ${big ? "big" : ""}`}>
       {playing && cam.online ? (
-        <LivePlayer key={`${site}-${path}`} path={path} port={source.port} base={api!.base} iceServers={ice} className={hd ? "hd" : ""}
-          onUnsupported={hd ? () => setHdOk(false) : undefined} muted={!sound} onAudio={setHasAudio} />
+        // keyed by camera only: SD ↔ HD switches inside the player; a switch that fails goes back to what plays
+        <LivePlayer key={`${site}-${camera}`} path={path} port={source.port} base={api!.base} iceServers={ice} pathClass={hdPathClass}
+          onUnsupported={(p) => { if (pathQuality(p) === "hd") setHdOk(false); }} onSwitchFailed={(p) => setQuality(pathQuality(p) === "hd" ? "sd" : "hd")}
+          muted={!sound} onAudio={setHasAudio} />
       ) : (
         <div className="player dash-still">
           {cam.online
@@ -78,9 +89,9 @@ export function CameraWidget({ widget: w, source, editing, big, onProps }: {
         {!playing && cam.online && <span className="muted small">{editing ? "paused while editing" : "paused · still frame"}</span>}
         <span className="spacer" />
         {playing && hasAudio && <button className={`ghost small ${sound ? "on" : ""}`} title={sound ? "Mute" : "Listen"} onClick={() => setSound((s) => !s)}>{sound ? "🔊" : "🔇"}</button>}
-        <div className="segmented small-seg" title={hdOk ? "Stream quality" : "This browser can't decode the HD stream"}>
+        <div className="segmented small-seg" title={hdTitle}>
           <button className={!hd ? "active" : ""} onClick={() => setQ("sd")}>SD</button>
-          <button className={hd ? "active" : ""} disabled={!hdOk} onClick={() => setQ("hd")}>HD</button>
+          <button className={hd ? "active" : ""} disabled={!hdOk || !hdPlayable} title={hdOk && hdPlayable ? undefined : hdTitle} onClick={() => setQ("hd")}>HD</button>
         </div>
       </div>
     </div>

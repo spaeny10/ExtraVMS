@@ -2,7 +2,9 @@ import { useEffect, useState } from "react";
 import { BASE, api, bandwidthText, type AiSettings, fmtTime, frameUrl, type Bandwidth, type BaselineCamera, type FootageStatus, type RemoteStatus, type Camera, type FeedbackStats, type HubStatus, type NvrEvent, type RetentionPolicy, type SiteApi, type SystemInfo } from "./api";
 import { EventCard } from "./Events";
 import { EventDetail } from "./EventDetail";
-import { LivePlayer } from "./LivePlayer";
+import { LivePlayer, hdPathClass } from "./LivePlayer";
+import { QualityButtons, type QualityMode, useLiveQuality } from "./LiveQuality";
+import { LiveBudgetProvider } from "./dashboard/budget";
 import { ZoneEditor } from "./ZoneEditor";
 import { RetentionPanel } from "./RetentionPanel";
 import { Advisor } from "./Advisor";
@@ -16,7 +18,7 @@ import { useRef } from "react";
 import { yoloFallbackText, yoloState } from "./yoloStatus";
 import { vlmSub, vlmValue } from "./vlmStatus";
 import { sdStatusText } from "./sdcard";
-import { detectionsText } from "./cameraStreams";
+import { detectionsText, livePath } from "./cameraStreams";
 import { TalkdownPanel } from "./TalkdownPanel";
 import { speakersByCamera, type TalkSpeaker } from "./talkdown";
 import { SpeakersSection } from "./Speakers";
@@ -28,25 +30,26 @@ import type { CameraDraft } from "./cameraEdit";
 
 type Quality = "sd" | "hd";
 
+/** The viewer's own SD/HD picks (localStorage liveQuality): a camera without one is on Auto. */
 function loadQuality(): Record<string, Quality> {
   try {
-    return JSON.parse(localStorage.getItem("liveQuality") ?? "{}");
+    const raw = JSON.parse(localStorage.getItem("liveQuality") ?? "{}");
+    return Object.fromEntries(Object.entries(raw ?? {}).filter(([, v]) => v === "sd" || v === "hd")) as Record<string, Quality>;
   } catch {
     return {};
   }
 }
 
-/** The MediaMTX path for live view. SD is always <id>_sub. HD is <id> (the recorded main stream), except on a
- *  camera recording its sub stream (record_stream "sub"), where <id>_hd pulls the main stream on demand. */
-export function livePath(c: Pick<Camera, "id" | "record_stream">, hd: boolean): string {
-  if (!hd) return `${c.id}_sub`;
-  return c.record_stream === "sub" ? `${c.id}_hd` : c.id;
-}
+export { livePath };   // moved to cameraStreams.ts; kept here for existing importers
 
 /** One live camera: the WHEP player with the paint-a-region overlay and the tile bar; with `speakers` bound to the camera,
- *  the 🔊 Talk-down button and its panel over the picture (TalkdownPanel.tsx). */
-export function LiveTile({ c, hd, port, active, onUnsupported, bar, phone, onSwipe, iceServers, site = api, regionKey, speakers }: {
-  c: Camera; hd: boolean; port: number; active?: NvrEvent; onUnsupported?: () => void; bar: React.ReactNode; phone?: boolean; onSwipe?: (dir: -1 | 1) => void;
+ *  the 🔊 Talk-down button and its panel over the picture (TalkdownPanel.tsx). `quality` is the tile's mode (Auto, or
+ *  the viewer's SD / HD: LiveQuality.tsx); `bar` gets the tile's Auto · SD · HD control to place. */
+export function LiveTile({ c, quality, onQuality, focused = false, port, active, bar, phone, onSwipe, iceServers, site = api, regionKey, speakers }: {
+  c: Camera; quality: QualityMode; onQuality: (m: QualityMode) => void;
+  /** the tile is the one expanded: Auto may pick HD whatever its width */
+  focused?: boolean;
+  port: number; active?: NvrEvent; bar: (qualityControl: React.ReactNode) => React.ReactNode; phone?: boolean; onSwipe?: (dir: -1 | 1) => void;
   iceServers?: RTCIceServer[];
   /** the camera's server (the hub's combined Live); default: this server */
   site?: SiteApi;
@@ -56,28 +59,41 @@ export function LiveTile({ c, hd, port, active, onUnsupported, bar, phone, onSwi
   speakers?: TalkSpeaker[];
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const box = useRef<HTMLDivElement | null>(null);
   const [painting, setPainting] = useState(false);
   const [talking, setTalking] = useState(false);
   const [ptzOn, setPtzOn] = useState(false);
+  const lq = useLiveQuality({ cam: c, site, mode: quality, focused, tileKey: regionKey ?? c.id, box, hold: painting || ptzOn });
+  const hd = lq.hd;
   const [hasAudio, setHasAudio] = useState(false);
   const [sound, setSound] = useState(false);
   const ptz = c.status?.ptz;
   const aspect = hd ? 2592 / 1520 : 4 / 3;
   return (
-    <div className={`tile ${active ? "alerting" : ""} ${painting ? "painting" : ""} ${ptzOn ? "ptz" : ""}`}
+    <div ref={box} className={`tile ${active ? "alerting" : ""} ${painting ? "painting" : ""} ${ptzOn ? "ptz" : ""}`}
       {...(phone && onSwipe && !painting && !ptzOn && !talking ? swipeHandlers(onSwipe) : {})}>
       {/* digital zoom: kept across SD/HD and a fallback to recordings, back to 1× on another camera; off in PTZ mode,
           whose drag / click-to-center / wheel steer the camera and map to the unzoomed picture */}
       <ZoomScope resetKey={c.id} disabled={ptzOn}>
-        <LivePlayer key={`${c.id}-${hd ? "hd" : "sd"}`} path={livePath(c, hd)} camera={c.id} port={port} showSize className={hd ? "hd" : ""}
-          site={site === api ? undefined : site}
-          onUnsupported={onUnsupported} videoRef={videoRef} iceServers={iceServers} muted={!sound} onAudio={setHasAudio}>
-          {!ptzOn && <RegionOverlay cam={regionKey ?? c.id} videoRef={videoRef} editing={painting} onDone={() => setPainting(false)} camera={c} fallbackAspect={aspect} site={site} />}
-          {ptz?.available && <PtzOverlay cam={c.id} videoRef={videoRef} active={ptzOn} onDone={() => setPtzOn(false)} fallbackAspect={aspect} site={site} />}
-        </LivePlayer>
+        {lq.sdNote ? (
+          // an SD stream this browser can't decode: say so instead of a black box that keeps connecting
+          <div className="player">
+            <div className="player-state player-note" role="status">
+              <span>{lq.sdNote}{lq.sdRetry && <> <button type="button" className="linkish" onClick={lq.sdRetry}>Try again</button></>}</span>
+            </div>
+          </div>
+        ) : (
+          // keyed by camera only: SD ↔ HD switches inside the player, the old picture staying until the new one shows
+          <LivePlayer key={c.id} path={livePath(c, hd)} camera={c.id} port={port} showSize pathClass={hdPathClass}
+            site={site === api ? undefined : site} onUnsupported={lq.onUnsupported} onStats={lq.onStats} onSwitchFailed={lq.onSwitchFailed}
+            videoRef={videoRef} iceServers={iceServers} muted={!sound} onAudio={setHasAudio}>
+            {!ptzOn && <RegionOverlay cam={regionKey ?? c.id} videoRef={videoRef} editing={painting} onDone={() => setPainting(false)} camera={c} fallbackAspect={aspect} site={site} />}
+            {ptz?.available && <PtzOverlay cam={c.id} videoRef={videoRef} active={ptzOn} onDone={() => setPtzOn(false)} fallbackAspect={aspect} site={site} />}
+          </LivePlayer>
+        )}
       </ZoomScope>
       <div className="tile-bar">
-        {bar}
+        {bar(<QualityButtons mode={quality} hd={hd} hdBlocked={lq.hdBlocked} onPick={(m) => { lq.clicked(); onQuality(m); }} />)}
         <PtzBadge cam={c.id} ptz={ptz} site={site} />
         {!painting && <RegionBadge cam={regionKey ?? c.id} onEdit={() => setPainting(true)} />}
         {hasAudio && <button className={`ghost small ${sound ? "on" : ""}`} title={sound ? "Mute" : "Listen"} onClick={() => setSound((s) => !s)}>{sound ? "🔊" : "🔇"}</button>}
@@ -171,9 +187,9 @@ export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: n
   const feed = pool.filter((e) => !scoped || (regionMap[e.camera_id] && regionPass(e, regionMap[e.camera_id])));
   const [feedShown, showMore] = useFeedCount(paintedKey);   // back to 12 when the painted cameras change, not per stroke
   const [open, setOpen] = useState<number | null>(null);
-  // SD = H.264 sub stream (light, plays everywhere); HD = the recorded H.265 main stream.
+  // SD = the sub stream (light); HD = the recorded main stream. A camera the viewer never picked for is on Auto
+  // (LiveQuality.tsx); a pick is kept in this browser until changed back to Auto.
   const [quality, setQualityState] = useState<Record<string, Quality>>(loadQuality);
-  const [hdUnsupported, setHdUnsupported] = useState(false);
   const setQuality = (next: Record<string, Quality>) => {
     setQualityState(next);
     try {
@@ -182,10 +198,16 @@ export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: n
       /* private mode */
     }
   };
-  const q = (id: string): Quality => (hdUnsupported ? "sd" : quality[id] ?? "sd");
-  const setAll = (v: Quality) => setQuality(Object.fromEntries(cameras.map((c) => [c.id, v])));
+  const q = (id: string): QualityMode => quality[id] ?? "auto";
+  const pick = (id: string, m: QualityMode) => {
+    const rest = { ...quality };
+    delete rest[id];
+    setQuality(m === "auto" ? rest : { ...rest, [id]: m });
+  };
+  const setAll = (m: QualityMode) => setQuality(m === "auto" ? {} : Object.fromEntries(cameras.map((c) => [c.id, m])));
+  const allAuto = cameras.every((c) => q(c.id) === "auto");
   const allHd = cameras.length > 0 && cameras.every((c) => q(c.id) === "hd");
-  const allSd = cameras.every((c) => q(c.id) === "sd");
+  const allSd = cameras.length > 0 && cameras.every((c) => q(c.id) === "sd");
   const name = (id: string) => cameras.find((c) => c.id === id)?.name ?? id;
   const shown = focus ? cameras.filter((c) => c.id === focus) : cameras;
   const cols = focus ? 1 : Math.min(4, Math.ceil(Math.sqrt(Math.max(1, cameras.length))));
@@ -200,88 +222,88 @@ export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: n
   if (isPhone && cameras.length > 0) {
     const idx = Math.min(phoneCam, cameras.length - 1);
     const c = cameras[idx];
-    const hd = q(c.id) === "hd";
     const active = recent.find((e) => e.camera_id === c.id && (e.status === "open" || e.status === "pending"));
     const go = (dir: -1 | 1) => setPhoneCam((i) => (i + dir + cameras.length) % cameras.length);
     return (
-      <div className="live-phone">
-        <LiveTile c={c} hd={hd} port={port} active={active} phone onSwipe={go} iceServers={iceServers} speakers={talk[c.id]} onUnsupported={hd ? () => setHdUnsupported(true) : undefined} bar={<>
-          <span className={`dot ${c.status?.stream_ready ? "ok" : "bad"}`} />
-          <span>{c.name}</span>
-          {active && <span className={`label-chip ${active.camera_class}`}>{active.camera_class}</span>}
-          <span className="spacer" />
-          <div className="segmented small-seg">
-            <button className={!hd ? "active" : ""} onClick={() => setQuality({ ...quality, [c.id]: "sd" })}>SD</button>
-            <button className={hd ? "active" : ""} disabled={hdUnsupported} onClick={() => setQuality({ ...quality, [c.id]: "hd" })}>HD</button>
+      <LiveBudgetProvider>
+        <div className="live-phone">
+          <LiveTile key={c.id} c={c} quality={q(c.id)} onQuality={(m) => pick(c.id, m)} port={port} active={active} phone onSwipe={go} iceServers={iceServers}
+            speakers={talk[c.id]} bar={(qc) => <>
+            <span className={`dot ${c.status?.stream_ready ? "ok" : "bad"}`} />
+            <span>{c.name}</span>
+            {active && <span className={`label-chip ${active.camera_class}`}>{active.camera_class}</span>}
+            <span className="spacer" />
+            {qc}
+          </>} />
+          {cameras.length > 1 && (
+            <div className="live-strip" role="tablist">
+              {cameras.map((x, i) => (
+                <button key={x.id} role="tab" aria-selected={i === idx} className={`live-strip-item ${i === idx ? "active" : ""}`} onClick={() => setPhoneCam(i)}>
+                  <img src={`${frameUrl(x.id, Date.now() / 1000 - 15, 320)}&r=${stripTick}`} alt="" />
+                  <span><span className={`dot ${x.status?.stream_ready ? "ok" : "bad"}`} /> {x.name}</span>
+                </button>
+              ))}
+            </div>
+          )}
+          <p className="muted small center">Swipe the picture or tap a thumbnail to switch cameras.</p>
+          <aside className="live-feed">
+            <h3>Latest activity</h3>
+            <RegionNote cameras={cameras} />
+            {recent.length === 0 && <p className="muted">Nothing yet.</p>}
+            {recent.length > 0 && feed.length === 0 && <p className="muted">Nothing recent on that camera passed through the painted region.</p>}
+            {feed.slice(0, feedShown).map((e) => <EventCard key={e.id} e={e} cameraName={name(e.camera_id)} onOpen={() => setOpen(e.id)} />)}
+            <FeedMore shown={feedShown} total={feed.length} onMore={showMore} />
+          </aside>
+          {open !== null && <EventDetail id={open} cameraName={name} onClose={() => setOpen(null)} />}
+        </div>
+      </LiveBudgetProvider>
+    );
+  }
+  return (
+    <LiveBudgetProvider>
+      <div className="live-layout">
+        <div className="live-main">
+          <div className="toolbar live-toolbar">
+            <span className="muted small">Stream</span>
+            <div className="segmented">
+              <button className={allAuto ? "active" : ""} onClick={() => setAll("auto")}
+                title="Each camera picks: HD while its tile is large and the link is clean (two at a time), else SD">Auto</button>
+              <button className={allSd ? "active" : ""} onClick={() => setAll("sd")} title="Sub stream: low bandwidth">All SD</button>
+              <button className={allHd ? "active" : ""} onClick={() => setAll("hd")}
+                title="Full-resolution main stream (a camera whose HD this browser can't play stays on SD)">All HD</button>
+            </div>
           </div>
-        </>} />
-        {cameras.length > 1 && (
-          <div className="live-strip" role="tablist">
-            {cameras.map((x, i) => (
-              <button key={x.id} role="tab" aria-selected={i === idx} className={`live-strip-item ${i === idx ? "active" : ""}`} onClick={() => setPhoneCam(i)}>
-                <img src={`${frameUrl(x.id, Date.now() / 1000 - 15, 320)}&r=${stripTick}`} alt="" />
-                <span><span className={`dot ${x.status?.stream_ready ? "ok" : "bad"}`} /> {x.name}</span>
-              </button>
-            ))}
+          <div className="live-grid" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
+            {shown.map((c) => {
+              const active = recent.find((e) => e.camera_id === c.id && (e.status === "open" || e.status === "pending"));
+              return (
+                <LiveTile key={c.id} c={c} quality={q(c.id)} onQuality={(m) => pick(c.id, m)} focused={focus === c.id} port={port} active={active}
+                  iceServers={iceServers} speakers={talk[c.id]} bar={(qc) => <>
+                  <span className={`dot ${c.status?.stream_ready ? "ok" : "bad"}`} title={c.status?.stream_ready ? "Recording" : "Offline"} />
+                  <span>{c.name}</span>
+                  {active && <span className={`label-chip ${active.camera_class}`}>{active.camera_class}</span>}
+                  <span className="spacer" />
+                  {qc}
+                  <button className="ghost small" onClick={() => setFocus(focus ? null : c.id)}>{focus ? "Grid" : "Expand"}</button>
+                </>} />
+              );
+            })}
+            {cameras.length === 0 && <div className="empty">No cameras yet. Add one under Cameras.</div>}
           </div>
-        )}
-        <p className="muted small center">Swipe the picture or tap a thumbnail to switch cameras.</p>
+        </div>
         <aside className="live-feed">
           <h3>Latest activity</h3>
           <RegionNote cameras={cameras} />
           {recent.length === 0 && <p className="muted">Nothing yet.</p>}
           {recent.length > 0 && feed.length === 0 && <p className="muted">Nothing recent on that camera passed through the painted region.</p>}
-          {feed.slice(0, feedShown).map((e) => <EventCard key={e.id} e={e} cameraName={name(e.camera_id)} onOpen={() => setOpen(e.id)} />)}
+          {feed.slice(0, feedShown).map((e) => (
+            <EventCard key={e.id} e={e} cameraName={name(e.camera_id)} onOpen={() => setOpen(e.id)} />
+          ))}
           <FeedMore shown={feedShown} total={feed.length} onMore={showMore} />
         </aside>
         {open !== null && <EventDetail id={open} cameraName={name} onClose={() => setOpen(null)} />}
       </div>
-    );
-  }
-  return (
-    <div className="live-layout">
-      <div className="live-main">
-        <div className="toolbar live-toolbar">
-          <span className="muted small">Stream</span>
-          <div className="segmented">
-            <button className={allSd ? "active" : ""} onClick={() => setAll("sd")} title="H.264 sub stream: low bandwidth, plays in any browser">All SD</button>
-            <button className={allHd ? "active" : ""} disabled={hdUnsupported} onClick={() => setAll("hd")} title="Full-resolution H.265 main stream">All HD</button>
-          </div>
-          {hdUnsupported && <span className="muted small">This browser can't play the H.265 main stream, so live view is using SD. Chrome or Edge on Windows with a GPU can play it.</span>}
-        </div>
-        <div className="live-grid" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
-          {shown.map((c) => {
-            const active = recent.find((e) => e.camera_id === c.id && (e.status === "open" || e.status === "pending"));
-            const hd = q(c.id) === "hd";
-            return (
-              <LiveTile key={c.id} c={c} hd={hd} port={port} active={active} iceServers={iceServers} speakers={talk[c.id]} onUnsupported={hd ? () => setHdUnsupported(true) : undefined} bar={<>
-                <span className={`dot ${c.status?.stream_ready ? "ok" : "bad"}`} title={c.status?.stream_ready ? "Recording" : "Offline"} />
-                <span>{c.name}</span>
-                {active && <span className={`label-chip ${active.camera_class}`}>{active.camera_class}</span>}
-                <span className="spacer" />
-                <div className="segmented small-seg" title="Stream quality for this camera">
-                  <button className={!hd ? "active" : ""} onClick={() => setQuality({ ...quality, [c.id]: "sd" })}>SD</button>
-                  <button className={hd ? "active" : ""} disabled={hdUnsupported} onClick={() => setQuality({ ...quality, [c.id]: "hd" })}>HD</button>
-                </div>
-                <button className="ghost small" onClick={() => setFocus(focus ? null : c.id)}>{focus ? "Grid" : "Expand"}</button>
-              </>} />
-            );
-          })}
-          {cameras.length === 0 && <div className="empty">No cameras yet. Add one under Cameras.</div>}
-        </div>
-      </div>
-      <aside className="live-feed">
-        <h3>Latest activity</h3>
-        <RegionNote cameras={cameras} />
-        {recent.length === 0 && <p className="muted">Nothing yet.</p>}
-        {recent.length > 0 && feed.length === 0 && <p className="muted">Nothing recent on that camera passed through the painted region.</p>}
-        {feed.slice(0, feedShown).map((e) => (
-          <EventCard key={e.id} e={e} cameraName={name(e.camera_id)} onOpen={() => setOpen(e.id)} />
-        ))}
-        <FeedMore shown={feedShown} total={feed.length} onMore={showMore} />
-      </aside>
-      {open !== null && <EventDetail id={open} cameraName={name} onClose={() => setOpen(null)} />}
-    </div>
+    </LiveBudgetProvider>
   );
 }
 

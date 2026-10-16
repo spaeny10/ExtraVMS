@@ -19,6 +19,10 @@
  * layout holds which cameras show and in what order, their streams, the grid's columns and the activity column. Tiles
  * reorder by dragging the ⠿ grip in their bar (desktop); the phone picks a layout only. The logic is liveLayout.ts.
  *
+ * Streams: a tile is on Auto unless the viewer picked SD or HD for it (on the tile, All SD / All HD, or a saved layout
+ * holding a pick): Auto goes HD on a large or expanded tile with a clean link, two at a time (LiveQuality.tsx), and
+ * HD a browser can't play is greyed out per camera, from the server's codec list.
+ *
  * Talk-down: a camera with speakers bound to it gets the 🔊 Talk-down button and panel on its live tile, for operators
  * and up (SOC operators too, here and in the SOC incident view that embeds this grid). A speaker is bound to cameras of
  * its own server (its heartbeat summary lists them) and/or to the Site's camera groups on the hub, which may hold
@@ -29,6 +33,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, u
 import type { Camera as ServerCam, NvrEvent } from "@site/api";
 import { EventCard } from "@site/Events";
 import { FeedMore, LiveTile, RegionChips, useFeedCount } from "@site/Views";
+import { QualityButtons } from "@site/LiveQuality";
 import { LiveBudgetProvider, useBudget } from "@site/dashboard/Dashboard";
 import { useIceServers } from "@site/dashboard/ice";
 import { camKey, splitKey, type DashboardSource } from "@site/dashboard/source";
@@ -46,9 +51,9 @@ import { canTalkDown } from "./access";
 import { useDirect, useDirectVersion } from "./direct";
 import { makeHubSource, mediaApi, siteApi } from "./hubSource";
 import { talkByCamera } from "./site/cameraGroups";
-import { COLUMN_CHOICES, EMPTY_LAYOUT, type LayoutAction, type LiveFocus, type LiveLayout, type Quality, applyFocus, arrange, coerceLayout, isDirty, isVisible,
-  layoutCols, layoutReducer, loadActivityPref, loadLayout, loadLayoutId, saveActivityPref, saveLayout, saveLayoutId, tileLabel, toSavedConfig,
-  wrapIndex } from "./liveLayout";
+import { COLUMN_CHOICES, EMPTY_LAYOUT, type LayoutAction, type LiveFocus, type LiveLayout, type QualityMode, applyFocus, arrange, coerceLayout, isDirty,
+  isVisible, layoutCols, layoutReducer, loadActivityPref, loadLayout, loadLayoutId, saveActivityPref, saveLayout, saveLayoutId, tileLabel, tileQuality,
+  toSavedConfig, wrapIndex } from "./liveLayout";
 
 /** live: full camera record from the server · loading: server online, cameras not fetched yet · unreachable: the
  *  server is online at the hub but its camera list failed (busy tunnel, restarting) · offline: the server is offline */
@@ -149,8 +154,7 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
   };
   const drag = useTileDrag((key, onto) => dispatch({ type: "drop", key, onto, all: allKeys }));
 
-  const [hdUnsupported, setHdUnsupported] = useState(false);
-  const q = (key: string): Quality => (hdUnsupported ? "sd" : layout.quality[key] ?? "sd");
+  const q = (key: string): QualityMode => tileQuality(layout, key);
   const [expanded, setExpanded] = useState<string | null>(null);
   // Expand narrows the activity column to that camera too, until the viewer asks for everything again
   const [feedAll, setFeedAll] = useState(false);
@@ -174,7 +178,7 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
   if (servers.length === 0) return <p className="muted">This site has no servers yet.</p>;
   if (tiles.length === 0) return <p className="muted">{Object.keys(full).length || registry.length ? "No cameras at this site yet." : "Loading cameras…"}</p>;
 
-  const tileProps = { source, multi, q, dispatch, hdUnsupported, onUnsupported: () => setHdUnsupported(true), activeOf,
+  const tileProps = { source, multi, q, dispatch, activeOf,
     talkOf: (t: Tile) => (mayTalk ? talk[t.key] : undefined) };
   const feed = showFeed ? <SiteActivity site={site} servers={servers} tiles={tiles} multi={multi} activity={activity} onShowAll={() => setFeedAll(true)} /> : null;
   if (isPhone) {
@@ -193,8 +197,9 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
   const grid = focused ? [focused] : shown;
   const draggable = !compact && grid.length > 1;
   const liveKeys = shown.filter((t) => t.state === "live").map((t) => t.key);
+  const allAuto = liveKeys.every((k) => q(k) === "auto");
   const allHd = liveKeys.length > 0 && liveKeys.every((k) => q(k) === "hd");
-  const allSd = liveKeys.every((k) => q(k) === "sd");
+  const allSd = liveKeys.length > 0 && liveKeys.every((k) => q(k) === "sd");
   return (
     <LiveBudgetProvider>
       <div className={`live-layout ${showFeed ? "" : "site-live-solo"} ${compact ? "site-live-compact" : ""}`}>
@@ -205,10 +210,12 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
             {named.enabled && <LayoutPicker named={named} dirty={dirty} onPick={pickLayout} onRevert={revert} current={() => toSavedConfig(allKeys, layout)} />}
             <span className="muted small">Stream</span>
             <div className="segmented">
-              <button className={allSd ? "active" : ""} onClick={() => dispatch({ type: "allQuality", keys: liveKeys, quality: "sd" })} title="H.264 sub stream: low bandwidth, plays in any browser">All SD</button>
-              <button className={allHd ? "active" : ""} disabled={hdUnsupported} onClick={() => dispatch({ type: "allQuality", keys: liveKeys, quality: "hd" })} title="Full-resolution H.265 main stream">All HD</button>
+              <button className={allAuto ? "active" : ""} onClick={() => dispatch({ type: "allQuality", keys: liveKeys, quality: "auto" })}
+                title="Each camera picks: HD while its tile is large and the link is clean (two at a time), else SD">Auto</button>
+              <button className={allSd ? "active" : ""} onClick={() => dispatch({ type: "allQuality", keys: liveKeys, quality: "sd" })} title="Sub stream: low bandwidth">All SD</button>
+              <button className={allHd ? "active" : ""} onClick={() => dispatch({ type: "allQuality", keys: liveKeys, quality: "hd" })}
+                title="Full-resolution main stream (a camera whose HD this browser can't play stays on SD)">All HD</button>
             </div>
-            {hdUnsupported && <span className="muted small">This browser can't play the H.265 main stream, so live view is using SD.</span>}
             <span className="spacer" />
             <select className="site-live-cols" value={layout.cols ?? 0} title="Grid columns" aria-label="Grid columns"
               onChange={(e) => dispatch({ type: "cols", cols: Number(e.target.value) || null })}>
@@ -226,9 +233,10 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
           </div>}
           <div ref={gridRef} className={`live-grid ${focused ? "expanded" : ""}`}
             style={{ gridTemplateColumns: `repeat(${focused ? 1 : layoutCols(layout, grid.length)}, minmax(0, 1fr))`,
-              ...(focused && fit ? { "--expand-h": `${fit}px`, "--expand-ar": q(focused.key) === "hd" ? 2592 / 1520 : 4 / 3 } as React.CSSProperties : {}) }}>
+              // an expanded tile on Auto goes HD (unless its HD can't play here): size the box for that
+              ...(focused && fit ? { "--expand-h": `${fit}px`, "--expand-ar": q(focused.key) === "sd" ? 4 / 3 : 2592 / 1520 } as React.CSSProperties : {}) }}>
             {grid.map((t) => (
-              <SiteTile key={t.key} t={t} {...tileProps}
+              <SiteTile key={t.key} t={t} {...tileProps} focused={!!focused}
                 drag={draggable ? { onGrip: (e) => drag.start(t.key, tileLabel(t.server.name, t.name, multi), e), dragging: drag.dragKey === t.key,
                   dropTarget: drag.dropKey === t.key } : undefined}
                 extra={<button className="ghost small" onClick={() => setExpanded(focused ? null : t.key)}>{focused ? "Grid" : "Expand"}</button>} />
@@ -588,8 +596,7 @@ function SiteActivity({ site, servers, tiles, multi, activity: a, onShowAll }: {
 }
 
 type TileCommon = {
-  source: DashboardSource; multi: boolean; q: (key: string) => Quality; dispatch: React.Dispatch<LayoutAction>;
-  hdUnsupported: boolean; onUnsupported: () => void;
+  source: DashboardSource; multi: boolean; q: (key: string) => QualityMode; dispatch: React.Dispatch<LayoutAction>;
   /** the camera's event in progress (open or pending), as LiveView marks a tile alerting */
   activeOf: (key: string) => NvrEvent | undefined;
   /** the speakers this viewer may talk through on the tile's camera (none: no Talk-down button) */
@@ -664,8 +671,10 @@ const STATE_TEXT: Record<Exclude<TileState, "live">, string> = { offline: "Serve
 /** A grid tile's part in a drag (useTileDrag): its grip, and whether it is the one dragged or the one under the pointer. */
 type TileDrag = { onGrip: (e: React.PointerEvent) => void; dragging: boolean; dropTarget: boolean };
 
-function SiteTile({ t, source, multi, q, dispatch, hdUnsupported, onUnsupported, activeOf, talkOf, extra, phone, onSwipe, drag }: TileCommon & {
+function SiteTile({ t, source, multi, q, dispatch, activeOf, talkOf, extra, phone, onSwipe, drag, focused = false }: TileCommon & {
   t: Tile; extra?: React.ReactNode; phone?: boolean; onSwipe?: (dir: -1 | 1) => void; drag?: TileDrag;
+  /** the tile is the expanded one */
+  focused?: boolean;
 }) {
   const box = useRef<HTMLDivElement>(null);
   const budget = useBudgetSlot(t.key, box);
@@ -673,31 +682,25 @@ function SiteTile({ t, source, multi, q, dispatch, hdUnsupported, onUnsupported,
   const ice = useIceServers(source, t.server.id);
   useDirect(t.server);  // re-render when this server's media route changes (the tile reconnects on the new client)
   const site = mediaApi(t.server.id);
-  const hd = q(t.key) === "hd";
+  const mode = q(t.key);
+  const pick = (m: QualityMode) => dispatch({ type: "quality", key: t.key, quality: m });
   const playing = t.state === "live" && (phone || budget.playing(t.key)) && ice !== undefined;
   // every 10 s while paused, every 60 s after a still failed to load
   const still = useStill(!playing && t.state === "live");
   const label = tileLabel(t.server.name, t.name, multi);
   const active = activeOf(t.key);
-  const qualityButtons = (
-    <div className="segmented small-seg" title="Stream quality for this camera">
-      <button className={!hd ? "active" : ""} onClick={() => dispatch({ type: "quality", key: t.key, quality: "sd" })}>SD</button>
-      <button className={hd ? "active" : ""} disabled={hdUnsupported} onClick={() => dispatch({ type: "quality", key: t.key, quality: "hd" })}>HD</button>
-    </div>
-  );
   const grip = drag && <span className="sync-grip" title="Drag to reorder" onPointerDown={drag.onGrip}>⠿</span>;
   return (
     <div ref={box} className={`site-live-cell ${drag?.dragging ? "dragging" : ""} ${drag?.dropTarget ? "drop-target" : ""}`} data-live-key={t.key}>
       {playing && t.cam ? (
-        <LiveTile c={t.cam} hd={hd} port={source.port} iceServers={ice} site={site} regionKey={t.key} phone={phone} onSwipe={onSwipe} active={active}
-          speakers={talkOf(t)}
-          onUnsupported={hd ? onUnsupported : undefined} bar={<>
+        <LiveTile c={t.cam} quality={mode} onQuality={pick} focused={focused} port={source.port} iceServers={ice} site={site} regionKey={t.key} phone={phone}
+          onSwipe={onSwipe} active={active} speakers={talkOf(t)} bar={(qc) => <>
             {grip}
             <span className={`dot ${t.streamReady ? "ok" : "bad"}`} title={t.streamReady ? "Recording" : "No stream"} />
             <span>{label}</span>
             {active && <span className={`label-chip ${active.camera_class}`}>{active.camera_class}</span>}
             <span className="spacer" />
-            {qualityButtons}
+            {qc}
             {extra}
           </>} />
       ) : (
@@ -718,7 +721,7 @@ function SiteTile({ t, source, multi, q, dispatch, hdUnsupported, onUnsupported,
             {t.state === "live" && <span className="muted small">paused · still frame</span>}
             {t.state !== "live" && t.state !== "loading" && <span className="muted small">{t.state === "offline" ? "offline" : "unreachable"}</span>}
             <span className="spacer" />
-            {t.state === "live" && qualityButtons}
+            {t.state === "live" && <QualityButtons mode={mode} hd={mode === "hd"} onPick={pick} live={false} />}
             {extra}
           </div>
         </div>

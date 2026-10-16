@@ -73,6 +73,12 @@ async def gather(state) -> dict:
     except Exception:
         ctx["tracks"] = {}
     try:
+        from . import streams
+        # what SD live view (<id>_sub) plays, from the camera's profiles: its sub stream, or the main stream relayed
+        ctx["sd"] = {c["id"]: {"encoding": (pl := streams.plan(c))["encoding"], "relay": pl["sub_path"] is None} for c in ctx["cameras"]}
+    except Exception:
+        ctx["sd"] = {}
+    try:
         ctx["retention"] = retention.stats()
     except Exception:
         ctx["retention"] = None
@@ -365,8 +371,28 @@ def check_framerate(ctx: dict) -> list[Finding]:
 
 
 def check_codecs(ctx: dict) -> list[Finding]:
+    from .mediamtx import codec_name
     out = []
     for c in ctx["cameras"]:
+        # SD live view carrying H.265 (an H.265 sub stream, or no sub stream and an H.265 main relayed): most browsers
+        # can't decode it over WebRTC, so the SD tile can only say so. Read from <id>_sub's tracks while it is pulled,
+        # else from the camera's profiles. A warning: the camera's sub stream is changed on the camera.
+        sd = (ctx.get("sd") or {}).get(c["id"]) or {}
+        sub_codecs = {codec_name(t) for t in ctx["tracks"].get(f"{c['id']}_sub") or []} - {None}
+        if (sub_codecs or {codec_name(sd.get("encoding"))}) == {"H265"}:
+            relay = bool(sd.get("relay"))
+            out.append(Finding(
+                key=f"sd_h265:{c['id']}", area="cameras", impact="medium", camera_id=c["id"], camera=c["name"],
+                title=f"{c['name']}'s SD live stream is H.265",
+                why=("The camera offers no separate sub stream, so SD live view relays its H.265 main stream." if relay
+                     else "The sub stream that SD live view plays is H.265.")
+                    + " Most browsers can't play H.265 over WebRTC (Chrome or Edge on Windows with a GPU can), so the tile shows a message instead of the picture.",
+                effect="SD live view plays in every browser, phones included.",
+                steps=([f"Camera web page ({c['host']}) → Video: enable the sub (secondary) stream, codec H.264.",
+                        "Settings → Cameras → this camera → Streams: Check, so SD picks the new stream up."] if relay
+                       else [f"Settings → Cameras → {c['name']} → Camera: set the sub stream's codec to H.264 (or on the camera's web page, {c['host']} → Video → sub stream).",
+                             "The stream reconnects on its own."]),
+                fingerprint="relay" if relay else "sub"))
         tracks = ctx["tracks"].get(c["id"]) or []
         if not tracks:
             continue
@@ -385,8 +411,6 @@ def check_codecs(ctx: dict) -> list[Finding]:
                                effect="Listen-only audio on its live tile.",
                                steps=[f"Camera web page ({c['host']}) → Audio → encoding G.711 (µ-law or A-law).", "The stream reconnects on its own."],
                                fingerprint="aac"))
-        if f"{c['id']}_sub" in ctx["tracks"] and not ctx["tracks"][f"{c['id']}_sub"] and ctx["health"].get(c["id"], {}).get("sub_bitrate_mbps") is None:
-            pass  # sub stream only pulled while watched: silence is normal
     return out
 
 

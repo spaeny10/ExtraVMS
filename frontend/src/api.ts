@@ -5,6 +5,7 @@ import type { CardRange, RestoredSpan, SdStatus } from "./sdcard";
 import type { CameraStreams } from "./cameraStreams";
 import type { AnalyticsRule, AudioEncoder, CameraDevice, CameraTime, ClockResult, ImagingSource, TimeBody, TimeDefaults, VideoEncoder } from "./cameraDevice";
 import type { CatalogVoice, Spoken, VoiceEngines, VoiceSetting } from "./talkdownVoice";
+import type { LiveCodecs } from "./codecs";
 /** include = detect only here; exclude = mask out; area = just a name for a place (never filters);
  * ppe = people who stay in it must wear the required items (backend/nvr/ppe.py; never filters) */
 export type ZoneType = "include" | "exclude" | "area" | "ppe";
@@ -672,6 +673,9 @@ export function makeApi(base: string, opts: ApiOptions = {}) {
   parseQuery: (q: string) => req<ParsedQuery>(`/api/query/parse?${qs({ q })}`),
   hub: () => req<HubStatus>("/api/hub"),
   turn: () => req<{ iceServers: RTCIceServer[] }>("/api/turn"),
+  /** every live path's video codec (codecs.ts decides what this browser can play before connecting); through the hub,
+   *  not the direct client: it is a REST read */
+  liveCodecs: () => req<LiveCodecs>("/api/live/codecs"),
   setHub: (b: { hub_url?: string; unenrol?: boolean }) => req<HubStatus>("/api/hub", json("PUT", b)),
   // PTZ / relay (ptz.py). Move and stop use keepalive so a Stop still goes out when the tab closes mid-drag.
   ptz: (cam: string) => req<PtzInfo>(`/api/cameras/${cam}/ptz`),

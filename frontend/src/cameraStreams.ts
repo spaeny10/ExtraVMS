@@ -81,6 +81,14 @@ export function stillWidth(cssWidth: number, dpr = 1): number {
   return STILL_WIDTHS.find((w) => w >= want) ?? STILL_WIDTHS[STILL_WIDTHS.length - 1];
 }
 
+/** The MediaMTX path for live view. SD is always <id>_sub. HD is <id> (the recorded main stream), except on a
+ *  camera recording its sub stream (record_stream "sub"), where <id>_hd pulls the main stream on demand.
+ *  (Here rather than in Views.tsx, which re-exports it, so LiveQuality.tsx can use it without a cycle.) */
+export function livePath(c: { id: string; record_stream?: string | null }, hd: boolean): string {
+  if (!hd) return `${c.id}_sub`;
+  return c.record_stream === "sub" ? `${c.id}_hd` : c.id;
+}
+
 /** The camera whose recording a MediaMTX live path shows: <id>, <id>_sub and <id>_hd are all <id>. */
 export function cameraOfPath(path: string): string {
   return path.replace(/_(sub|hd)$/, "");

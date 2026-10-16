@@ -184,6 +184,60 @@ def camera_paths(cam: dict) -> list[str]:
     return [cam["id"]] if streams.sub_source(cam) is None else [cam["id"], f"{cam['id']}_sub"]
 
 
+def live_paths(cam: dict) -> dict[str, tuple[str, str | None]]:
+    """The live-view paths build_config gives a camera: {path: (stream, relayed path)}. stream: which of the camera's
+    streams the path carries ("main" or "sub"); relayed path: the local path it relays (None = pulled from the camera)."""
+    from . import streams
+    cid, sub = cam["id"], streams.sub_source(cam)
+    if sub is not None and not PATH_RE.fullmatch(sub):
+        sub = None   # as build_config: an unsafe reported path is never pulled, the main stream is relayed instead
+    if records_sub(cam):
+        if sub is None:   # one stream, recorded; SD and HD both relay it
+            return {cid: ("main", None), f"{cid}_sub": ("main", cid), f"{cid}_hd": ("main", cid)}
+        return {cid: ("sub", None), f"{cid}_sub": ("sub", cid), f"{cid}_hd": ("main", None)}
+    return {cid: ("main", None), f"{cid}_sub": ("sub", None) if sub is not None else ("main", cid)}
+
+
+def codec_name(raw) -> str | None:
+    """"H264" / "H265" from a MediaMTX track ("H264", or {"codec": "H265"} in newer versions) or an ONVIF profile
+    encoding ("H.264", "H.265"); None for anything else (audio, MJPEG, unknown)."""
+    if isinstance(raw, dict):
+        raw = raw.get("codec")
+    s = str(raw or "").upper().replace(".", "").replace("-", "")
+    return {"H264": "H264", "AVC": "H264", "H265": "H265", "HEVC": "H265"}.get(s)
+
+
+def _track_video(p: dict | None) -> str | None:
+    for t in (p or {}).get("tracks") or []:
+        if c := codec_name(t):
+            return c
+    return None
+
+
+def live_codecs(cameras: list[dict], status: dict[str, dict]) -> dict[str, dict]:
+    """What each live-view path carries, for the browser to decide before connecting (a browser without HEVC can't
+    play an H.265 path over WebRTC): {path: {video: "H264" | "H265" | None, ready}}. A ready path (`status`:
+    path_status()) says it from its tracks. One not pulled yet (on-demand <id>_sub / <id>_hd) is guessed: a relay
+    from the path it relays, if that one is ready; else from the camera's ONVIF profiles (streams.plan); None when
+    neither knows."""
+    from . import streams
+    out: dict[str, dict] = {}
+    for cam in cameras:
+        if camera_problem(cam, partial=True):
+            continue   # left out of MediaMTX (build_config)
+        plan = streams.plan(cam)
+        main = codec_name((plan.get("main") or {}).get("encoding")) or (codec_name(plan["encoding"]) if plan["sub_path"] is None else None)
+        known = {"main": main, "sub": codec_name(plan["encoding"]) if plan["sub_path"] is not None else main}
+        for path, (stream, relays) in live_paths(cam).items():
+            p = status.get(path) or {}
+            ready = bool(p.get("ready"))
+            video = _track_video(p) if ready else None
+            if video is None and relays and (status.get(relays) or {}).get("ready"):
+                video = _track_video(status[relays])
+            out[path] = {"video": video or known[stream], "ready": ready}
+    return out
+
+
 def build_config(cameras: list[dict]) -> dict:
     from . import streams
     rec_root = settings.recordings_dir.as_posix()

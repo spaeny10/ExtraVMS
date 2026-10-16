@@ -9,6 +9,9 @@ import time
 from pathlib import Path
 
 os.environ["NVR_DATA_DIR"] = tempfile.mkdtemp(prefix="nvr-advisor-test-")  # never the real DB
+# ...nor the running server's recordings or runtime folder (check_codecs reads nvr.mediamtx)
+os.environ["NVR_RECORDINGS_DIR"] = tempfile.mkdtemp(prefix="nvr-advisor-rec-")
+os.environ["NVR_RUNTIME_DIR"] = tempfile.mkdtemp(prefix="nvr-advisor-runtime-")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nvr import advisor  # noqa: E402
@@ -107,6 +110,23 @@ def test_quiet_system_has_nothing_to_say():
     fs = advisor.run_checks(quiet)
     assert fs == [], keys(fs)
     assert "within their comfortable ranges" in advisor.plain_summary([], 2)
+
+
+def test_h265_sd_live_stream_is_a_warning():
+    """SD live view on H.265 (sub stream, or an H.265 main relayed): a warning with steps, never an apply action."""
+    sd = {"cam1": {"encoding": "H.265", "relay": True}, "cam2": {"encoding": "H.265", "relay": False}}
+    fs = {f.key: f for f in advisor.run_checks(ctx(sd=sd))}
+    relay, sub = fs["sd_h265:cam1"], fs["sd_h265:cam2"]
+    assert relay.impact == sub.impact == "medium" and relay.apply is None and sub.apply is None
+    assert "relays its H.265 main" in relay.why and relay.fingerprint == "relay"
+    assert "sub stream" in sub.why and sub.fingerprint == "sub" and "H.264" in sub.steps[0]
+    # the pulled <id>_sub's tracks win over the profiles: H.264 there -> no card; H.265 there (dict tracks) -> a card
+    fs = keys(advisor.run_checks(ctx(sd=sd, tracks={"cam1": ["H265"], "cam1_sub": ["H264"], "cam2_sub": [{"codec": "H265"}]})))
+    assert "sd_h265:cam1" not in fs and "sd_h265:cam2" in fs
+    # H.264 or unknown SD: nothing
+    fs = keys(advisor.run_checks(ctx(sd={"cam1": {"encoding": "H.264", "relay": False}, "cam2": {"encoding": None, "relay": False}})))
+    assert not any(k.startswith("sd_h265:") for k in fs)
+    assert not any(k.startswith("sd_h265:") for k in keys(advisor.run_checks(ctx())))   # no profile facts at all
 
 
 def test_storage_short_and_alert():

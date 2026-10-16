@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { EMPTY_LAYOUT, type LiveLayout, applyFocus, arrange, coerceLayout, gridCols, isDirty, isVisible, layoutCols, layoutIdStorageKey, layoutReducer,
-  layoutStorageKey, parseLayout, shownKeys, tileLabel, toSavedConfig, wrapIndex } from "./liveLayout";
+  layoutStorageKey, parseLayout, shownKeys, tileLabel, tileQuality, toSavedConfig, wrapIndex } from "./liveLayout";
 
 describe("gridCols", () => {
   it("is square-ish and at most 4 wide, like the server's LiveView", () => {
@@ -38,6 +38,13 @@ describe("layoutReducer", () => {
     const one = layoutReducer(EMPTY_LAYOUT, { type: "quality", key: "b/1", quality: "hd" });
     expect(one.quality).toEqual({ "b/1": "hd" });
     expect(layoutReducer(one, { type: "allQuality", keys: ["a/1", "b/1"], quality: "sd" }).quality).toEqual({ "a/1": "sd", "b/1": "sd" });
+  });
+  it("Auto forgets the pick: a tile without one is on Auto", () => {
+    const two = layoutReducer(EMPTY_LAYOUT, { type: "allQuality", keys: ["a/1", "b/1"], quality: "hd" });
+    const one = layoutReducer(two, { type: "quality", key: "a/1", quality: "auto" });
+    expect(one.quality).toEqual({ "b/1": "hd" });
+    expect([tileQuality(one, "a/1"), tileQuality(one, "b/1")]).toEqual(["auto", "hd"]);
+    expect(layoutReducer(one, { type: "allQuality", keys: ["a/1", "b/1"], quality: "auto" }).quality).toEqual({});
   });
   it("moves a camera before another, or to the end", () => {
     const m = layoutReducer(EMPTY_LAYOUT, { type: "move", key: "b/2", before: "a/1", all });
@@ -129,8 +136,9 @@ describe("named layouts", () => {
     expect(isDirty(all, { ...saved, order: ["b/2", "a/1", "b/1", "a/2"] }, saved)).toBe(false);
     // a camera the Site no longer has doesn't make it dirty
     expect(isDirty(["a/1", "a/2", "b/1"], { ...saved, visible: ["a/1"] }, saved)).toBe(false);
-    // a quality set to its default doesn't either
-    expect(isDirty(all, { ...saved, quality: { "b/2": "hd", "a/1": "sd" } }, saved)).toBe(false);
+    // a tile set back to Auto (its default) doesn't either; an SD pick does (SD is a choice now, not the default)
+    expect(isDirty(all, layoutReducer(saved, { type: "quality", key: "a/1", quality: "auto" }), saved)).toBe(false);
+    expect(isDirty(all, { ...saved, quality: { "b/2": "hd", "a/1": "sd" } }, saved)).toBe(true);
     for (const a of [
       { type: "toggle", key: "a/2", all },
       { type: "drop", key: "a/1", onto: "b/2", all },

@@ -2,8 +2,9 @@
  * A dashboard: the grid of widgets for one config and one source. Handles the widget chrome (title, edit
  * controls), the live-stream budget shared by camera tiles, and the hero (one widget full width) view.
  */
-import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { Icon } from "../ui";
+import { BudgetCtx, useBudgetProvider } from "./budget";
 import { DashboardGrid } from "./GridView";
 import { WIDGET_DEFS } from "./palette";
 import type { DashboardSource } from "./source";
@@ -15,25 +16,8 @@ import { CameraWidget, cameraTitle } from "./widgets/CameraWidget";
 import { EventsWidget } from "./widgets/EventsWidget";
 import { HealthWidget } from "./widgets/HealthWidget";
 
-export const MAX_LIVE = 9;
-
-/** Which camera tiles may hold a live stream: the first MAX_LIVE visible ones, or any the viewer pressed Play on. */
-export type Budget = { playing: (id: string) => boolean; visible: (id: string, on: boolean) => void; force: (id: string) => void };
-const BudgetCtx = createContext<Budget>({ playing: () => true, visible: () => {}, force: () => {} });
-export const useBudget = () => useContext(BudgetCtx);
-
-export function useBudgetProvider(): Budget {
-  const [order, setOrder] = useState<string[]>([]);
-  const visible = useCallback((id: string, on: boolean) => setOrder((o) => (on ? (o.includes(id) ? o : [...o, id]) : o.filter((x) => x !== id))), []);
-  const force = useCallback((id: string) => setOrder((o) => [id, ...o.filter((x) => x !== id)]), []);
-  const playing = useCallback((id: string) => { const i = order.indexOf(id); return i >= 0 && i < MAX_LIVE; }, [order]);
-  return useMemo(() => ({ playing, visible, force }), [playing, visible, force]);
-}
-
-/** The live-stream budget for any grid of live tiles outside a Dashboard (e.g. the hub's combined Live). */
-export function LiveBudgetProvider({ children }: { children: ReactNode }) {
-  return <BudgetCtx.Provider value={useBudgetProvider()}>{children}</BudgetCtx.Provider>;
-}
+// the budget (MAX_LIVE streams, MAX_HD of them in HD) lives in ./budget so Views.tsx can share it; re-exported for existing importers
+export { LiveBudgetProvider, MAX_HD, MAX_LIVE, useBudget, useBudgetProvider, type Budget } from "./budget";
 
 export type DashboardProps = {
   source: DashboardSource; config: DashboardConfig; editing: boolean;

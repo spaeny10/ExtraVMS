@@ -14,10 +14,13 @@
  */
 
 export type Quality = "sd" | "hd";
+/** A tile's stream: the viewer's SD / HD, or "auto" (no quality stored: the tile picks, frontend LiveQuality.tsx). */
+export type QualityMode = Quality | "auto";
 /**
  * What the viewer arranged for one Site. `visible: null` = every camera (so cameras added later show up);
  * `order: null` = server order, then each server's camera order. Keys not in `order` follow in that default order.
- * `cols: null` = Auto (gridCols); `activity` = the "Latest activity" column shows.
+ * `cols: null` = Auto (gridCols); `activity` = the "Latest activity" column shows. `quality` holds the viewer's own SD / HD
+ * picks (a click on the tile or All SD / All HD, or what a saved layout holds); a camera without one is on Auto.
  * The names follow the Timeline's LayoutConfig {visible, solo, order}; a saved Live layout stores this shape.
  * The working arrangement is stored in localStorage under `siteLive.<siteId>`.
  */
@@ -63,8 +66,9 @@ export const layoutCols = (layout: LiveLayout, n: number) => layout.cols ?? grid
 
 export type LayoutAction =
   | { type: "toggle"; key: string; all: string[] }
-  | { type: "quality"; key: string; quality: Quality }
-  | { type: "allQuality"; keys: string[]; quality: Quality }
+  /** "auto" forgets the tile's pick */
+  | { type: "quality"; key: string; quality: QualityMode }
+  | { type: "allQuality"; keys: string[]; quality: QualityMode }
   /** move `key` to just before `before` (null = to the end), in the arranged order of `all` */
   | { type: "move"; key: string; before: string | null; all: string[] }
   /** a tile dropped on another takes its place (the Timeline's tile drag): from before it lands after, and vice versa */
@@ -75,6 +79,18 @@ export type LayoutAction =
   | { type: "load"; layout: LiveLayout }
   | { type: "reset" };
 
+function withQuality(cur: Record<string, Quality>, keys: string[], q: QualityMode): Record<string, Quality> {
+  const next = { ...cur };
+  for (const k of keys) {
+    if (q === "auto") delete next[k];
+    else next[k] = q;
+  }
+  return next;
+}
+
+/** A tile's stream under this layout: its stored pick, else Auto. */
+export const tileQuality = (layout: LiveLayout, key: string): QualityMode => layout.quality[key] ?? "auto";
+
 export function layoutReducer(layout: LiveLayout, a: LayoutAction): LiveLayout {
   switch (a.type) {
     case "toggle": {
@@ -84,9 +100,9 @@ export function layoutReducer(layout: LiveLayout, a: LayoutAction): LiveLayout {
       return { ...layout, visible: a.all.every((k) => next.includes(k)) ? null : next };
     }
     case "quality":
-      return { ...layout, quality: { ...layout.quality, [a.key]: a.quality } };
+      return { ...layout, quality: withQuality(layout.quality, [a.key], a.quality) };
     case "allQuality":
-      return { ...layout, quality: { ...layout.quality, ...Object.fromEntries(a.keys.map((k) => [k, a.quality])) } };
+      return { ...layout, quality: withQuality(layout.quality, a.keys, a.quality) };
     case "move": {
       if (a.key === a.before) return layout;
       const rest = arrange(a.all, layout).filter((k) => k !== a.key);
@@ -131,7 +147,7 @@ export function toSavedConfig(all: string[], layout: LiveLayout): LiveLayout {
  */
 function signature(all: string[], layout: LiveLayout, withActivity: boolean) {
   const shown = shownKeys(all, layout);
-  return JSON.stringify({ shown, quality: shown.map((k) => layout.quality[k] ?? "sd"), cols: layout.cols, activity: withActivity ? layout.activity : null });
+  return JSON.stringify({ shown, quality: shown.map((k) => tileQuality(layout, k)), cols: layout.cols, activity: withActivity ? layout.activity : null });
 }
 
 /**
