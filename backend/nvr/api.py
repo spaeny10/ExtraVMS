@@ -2627,6 +2627,8 @@ async def whep_close(path: str, session: str):
                                headers=mediamtx.reader_auth_header())
     except httpx.HTTPError:
         return Response(status_code=502)   # MediaMTX not answering: it drops the session itself when the peer goes
+    if r.status_code == 404:
+        return Response(status_code=204)   # already gone (the peer's close got there first): hanging up is idempotent
     return Response(status_code=r.status_code if r.status_code < 500 else 502)
 
 

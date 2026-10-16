@@ -111,8 +111,9 @@ def test_hang_up_proxied_to_mediamtx_with_the_reader_password():
     r = call(mtx, "DELETE", f"/api/whep/cam1_sub/{SESSION}", headers={"Origin": "http://localhost:8080"})
     assert r.status_code == 200
     assert mtx.seen == [("DELETE", f"/cam1_sub/whep/{SESSION}", mediamtx.reader_auth_header()["Authorization"])]
-    # through the hub tunnel too; MediaMTX's 404 (session already gone) is passed on, its 5xx becomes 502
-    assert call(FakeMediaMTX(delete_status=404), "DELETE", f"/api/whep/cam1/{SESSION}", tunnel=True).status_code == 404
+    # through the hub tunnel too; MediaMTX's 404 (session already gone: the peer's close got there first) is a
+    # successful hang-up, its 5xx becomes 502
+    assert call(FakeMediaMTX(delete_status=404), "DELETE", f"/api/whep/cam1/{SESSION}", tunnel=True).status_code == 204
     assert call(FakeMediaMTX(delete_status=500), "DELETE", f"/api/whep/cam1/{SESSION}").status_code == 502
 
 

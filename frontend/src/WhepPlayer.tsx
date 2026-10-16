@@ -138,9 +138,10 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
     };
     const hangUp = () => {
       endAttempt();
-      pc?.close();
+      // DELETE first: closing the connection ends the session on MediaMTX too, and a DELETE behind it finds nothing
       if (sessionUrl) endSession(sessionUrl);
       sessionUrl = null;
+      pc?.close();
     };
     const gotFrame = (t: WhepTiming) => {
       if (t !== timing || !t.mark("firstFrame")) return;
