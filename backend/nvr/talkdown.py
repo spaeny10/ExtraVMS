@@ -25,6 +25,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import math
 import random
 import re
 import select
@@ -59,6 +60,12 @@ AUDIO_EXT = (".mp3", ".wav", ".m4a", ".ogg")
 KEEPALIVE_S = 20                   # GET_PARAMETER at least this often (sooner when the session timeout is shorter)
 TAIL_S = 0.4                       # the speaker's jitter buffer still holds the last packets when the sending ends
 CHECK_EVERY_S = 600                # background DESCRIBE of each speaker (online / offline on the hub)
+# the wake-up lead-in (settings.talkdown_wake_ms before every message): a speaker whose amplifier sleeps after a quiet
+# spell (the Tonmind CS20) wakes on signal, so the words would start late or lose their first syllable. A faint low
+# tone, about -40 dBFS, faded in and out, is enough for its signal detection and hardly audible.
+WAKE_HZ = 200
+WAKE_PEAK = 330                    # of 32767
+WAKE_FADE_S = 0.05
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 DEFAULT_MESSAGES = (
     ("Leave now", "You are on private property and being recorded. Leave now."),
@@ -129,6 +136,43 @@ def packets(audio: bytes, pt: int, ssrc: int, seq0: int, ts0: int, silence: int 
         n = i // FRAME_BYTES
         out.append(rtp_packet(frame, pt, seq0 + n, ts0 + n * FRAME_BYTES, ssrc, marker=n == 0))
     return out
+
+
+def lin2ulaw(s: int) -> int:
+    """One 16-bit sample as G.711 mu-law, exactly as the Sun reference (and audioop, gone in Python 3.13): the 14-bit
+    value, clip 8159, bias 0x21."""
+    s >>= 2
+    if s < 0:
+        mask, s = 0x7F, -s
+    else:
+        mask = 0xFF
+    s = min(s, 8159) + 0x21
+    seg = max(0, s.bit_length() - 6)
+    if seg >= 8:
+        return 0x7F ^ mask
+    return ((seg << 4) | ((s >> (seg + 1)) & 0x0F)) ^ mask
+
+
+def lin2alaw(s: int) -> int:
+    """One 16-bit sample as G.711 A-law (the ITU-T reference on the 13-bit value, even bits inverted)."""
+    s >>= 3
+    if s >= 0:
+        mask = 0xD5
+    else:
+        mask, s = 0x55, -s - 1
+    seg = max(0, s.bit_length() - 5)
+    if seg >= 8:
+        return 0x7F ^ mask
+    return ((seg << 4) | ((s >> (1 if seg < 2 else seg)) & 0x0F)) ^ mask
+
+
+def wake_tone(codec: str, ms: int) -> bytes:
+    """`ms` of the faint wake-up tone in the speaker's G.711 law (b"" for 0)."""
+    n = max(0, int(RATE * ms / 1000))
+    enc = lin2ulaw if codec == "PCMU" else lin2alaw
+    fade = max(1, int(RATE * WAKE_FADE_S))
+    return bytes(enc(round(WAKE_PEAK * min(1.0, i / fade, (n - 1 - i) / fade) * math.sin(2 * math.pi * WAKE_HZ * i / RATE)))
+                 for i in range(n))
 
 
 def interleaved(channel: int, pkt: bytes) -> bytes:
@@ -539,7 +583,8 @@ class Talkdown:
             if not codec:
                 raise TalkdownError("the speaker's backchannel offers no G.711 (PCMU / PCMA)")
             name, pt = codec
-            audio = self._audio(job.message, name)[:MAX_S * RATE]
+            # the wake-up tone first, so a speaker whose amplifier slept is awake when the words come
+            audio = (wake_tone(name, settings.talkdown_wake_ms) + self._audio(job.message, name))[:MAX_S * RATE]
             job.duration_s = round(len(audio) / RATE, 1)
             if job.stop.is_set():
                 raise _Stopped()

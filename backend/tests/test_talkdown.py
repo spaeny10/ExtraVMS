@@ -23,6 +23,7 @@ from pathlib import Path
 
 os.environ.setdefault("NVR_ALLOWED_HOSTS", "site")  # the test client's Host (lan_guard Host allow-list)
 os.environ["NVR_DATA_DIR"] = tempfile.mkdtemp(prefix="nvr-talkdown-test-")  # never the real DB
+os.environ["NVR_TALKDOWN_WAKE_MS"] = "0"   # exact packet counts below; test_wake_tone_* turns it on
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import httpx  # noqa: E402
@@ -265,6 +266,41 @@ def test_play_sequence_against_the_fake_speaker():
     row = db.one("SELECT * FROM talkdown_log ORDER BY id DESC LIMIT 1")
     assert row["speaker_id"] == "spk1" and row["message"] == "Leave now" and row["by"] == "op@example" and row["result"] == "played"
     assert db.speaker("spk1")["check"]["ok"] is True   # it answered: online
+
+
+def test_g711_encoders_match_the_reference():
+    # silence is each law's silence byte; full scale and its sign; values from the ITU-T G.711 tables
+    assert talkdown.lin2ulaw(0) == 0xFF and talkdown.lin2alaw(0) == 0xD5
+    assert talkdown.lin2ulaw(32767) == 0x80 and talkdown.lin2ulaw(-32768) == 0x00
+    assert talkdown.lin2alaw(32767) == 0xAA and talkdown.lin2alaw(-32768) == 0x2A
+    try:
+        import audioop   # noqa: PLC0415 - gone in Python 3.13; compare where it still exists
+    except ImportError:
+        return
+    for s in range(-32768, 32768, 7):
+        b = s.to_bytes(2, "little", signed=True)
+        assert talkdown.lin2ulaw(s) == audioop.lin2ulaw(b, 2)[0], s
+        assert talkdown.lin2alaw(s) == audioop.lin2alaw(b, 2)[0], s
+
+
+def test_wake_tone_is_faint_and_goes_first():
+    assert talkdown.wake_tone("PCMU", 0) == b""
+    tone_u = talkdown.wake_tone("PCMU", 500)
+    assert len(tone_u) == 4000 and tone_u[0] == 0xFF and tone_u[-1] == 0xFF   # faded in and out from silence
+    level = lambda b: ~b & 0x7F   # noqa: E731 - a mu-law byte's magnitude code (segment and step): larger = louder
+    assert len(set(tone_u)) > 4 and max(map(level, tone_u)) <= level(talkdown.lin2ulaw(talkdown.WAKE_PEAK + 8))   # a tone, never loud
+    assert talkdown.wake_tone("PCMA", 100)[0] == 0xD5
+    fake = FakeSpeaker()
+    db.upsert_speaker(fake.speaker("spkw"))
+    talkdown.settings.talkdown_wake_ms = 200
+    try:
+        talkdown.manager.play(db.speaker("spkw"), talkdown.Message("Leave now", g711=tone(0.1)), "t")
+        talkdown.manager.wait("spkw")
+    finally:
+        talkdown.settings.talkdown_wake_ms = 0
+    pkts = [x["pkt"][12:] for x in fake.rtp]
+    assert len(pkts) == 15   # 0.2 s of tone, then the 0.1 s message
+    assert b"".join(pkts[:10]) == talkdown.wake_tone("PCMU", 200) and all(p == b"\x7f" * 160 for p in pkts[10:])
 
 
 def test_pcma_preference_sends_payload_type_8():

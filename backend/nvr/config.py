@@ -157,6 +157,9 @@ class Settings(BaseSettings):
     tts_voices_dir: Path | None = None      # default: data_dir/voices
     tts_piper_bin: str = ""                 # an external piper binary; default `piper` on PATH (used without the package)
     tts_piper_model: str = ""               # one more voice anywhere on disk (an .onnx with its .onnx.json beside it)
+    # NVR_TALKDOWN_WAKE_MS: a faint tone this long before every message, so a speaker whose amplifier sleeps after a
+    # quiet spell is awake when the words start (talkdown.wake_tone). 0 = off.
+    talkdown_wake_ms: int = 500
 
     # API
     host: str = "0.0.0.0"
