@@ -19,6 +19,9 @@ dependencies = [
   "cryptography>=42",
   "tzdata",            # zoneinfo's IANA database on hosts without one (Windows, slim images): SOC arming windows
   "timezonefinder>=6.5",   # a Site's time zone from its coordinates, offline (geocode.tz_for)
+  "dnspython>=2.6",    # Direct-on-LAN name server (lan_dns.py); already installed with email-validator
+  "acme==5.8.0",       # Let's Encrypt for Direct-on-LAN certificates (lan_certs.py): certbot's ACME client (JWS, nonces, polling)
+  "josepy==2.2.0",     # its JOSE keys (the ACME account key)
   "tunnelproto",
 ]
 

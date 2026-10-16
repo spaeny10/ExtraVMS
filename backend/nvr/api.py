@@ -27,7 +27,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from . import assistant, backup, baseline, cells, footage, frames, health, identities, journeys, keep, mediamtx, policy, ptz, retention, streams, zones
 from . import synopsis as vlm
-from . import advisor, ai_serve, detector, direct, hub_agent, lan_guard, sdbackfill, site_actions, siteconfig
+from . import advisor, ai_serve, detector, direct, hub_agent, lan_cert, lan_guard, sdbackfill, site_actions, siteconfig
 from . import camweb, device_api, speakers_api, talkdown
 from . import vlmroute
 from . import summary as summary_mod
@@ -189,7 +189,9 @@ def _live_clock_offset(camera_id: str) -> tuple[float | None, int] | None:
 def _https_server():
     """The same app on settings.https_port over TLS (self-signed, data_dir/tls) for Direct-on-LAN: a hub page is
     HTTPS, so it may only fetch from this server over HTTPS. lifespan="off": MediaMTX, ingest and the rest are
-    already started by the main server's lifespan; this listener only adds a socket in the same event loop."""
+    already started by the main server's lifespan; this listener only adds a socket in the same event loop.
+    A browser asking for one of this server's LAN names (SNI <a-b-c-d>.<label>.lan.axiomvision.ai) gets the Let's
+    Encrypt certificate instead (lan_cert.sni_callback), read again whenever it is renewed: no restart."""
     import uvicorn
 
     class QuietServer(uvicorn.Server):
@@ -208,6 +210,8 @@ def _https_server():
     # 127.0.0.1, which let a local process rewrite scope["client"]
     cfg = uvicorn.Config(app, host=settings.host, port=settings.https_port, ssl_certfile=str(cert), ssl_keyfile=str(key),
                          lifespan="off", log_level="info", log_config=None, proxy_headers=False)   # logging: main server
+    cfg.load()   # builds cfg.ssl now (serve() skips a loaded config), so the callback can go on it; any uvicorn version
+    cfg.ssl.sni_callback = lan_cert.sni_callback
     return QuietServer(cfg)
 
 

@@ -7,6 +7,8 @@
    python -m hub geocode [--force]                   locate Sites that have an address but no coordinates (1 request/s)
    python -m hub coverage purge                      delete all stored CoverageMap data and usage (when unsubscribing)
    python -m hub coverage usage                      CoverageMap units used this month against the budget
+   python -m hub dns                                 the authoritative DNS server for HUB_LAN_ZONE (lan_dns.py; its own
+                                                     container in docker-compose.yml)
    python -m hub central-networks CI_ID [--subnet S]... [--public-ip IP]... [--host NAME]... [--camera-limit N|none]
                                                      show (no options) or set a central instance's Site networks (replaces
                                                      all three lists; the running hub sends its host the firewall within
@@ -47,6 +49,7 @@ def main() -> None:
     cn.add_argument("--public-ip", action="append", default=None, help="a router's public IP to open before any camera uses it")
     cn.add_argument("--host", action="append", default=None, help="a router's dynamic DNS name to open before any camera uses it")
     cn.add_argument("--camera-limit", help="the most cameras the instance may have (1-500), or none")
+    sub.add_parser("dns", help="serve the Direct-on-LAN names (HUB_LAN_ZONE) on HUB_LAN_DNS_PORT, UDP and TCP")
     co = sub.add_parser("createorg")
     co.add_argument("name")
     co.add_argument("slug")
@@ -147,6 +150,12 @@ def main() -> None:
                                           "legacy": "as before automatic camera addresses (set the Site networks once to start them)"}[state])
         if isinstance(ci.get("camera_network"), dict) and ci["camera_network"].get("sync_error"):
             print(f"  last sync failed:   {ci['camera_network']['sync_error']}")
+        return
+    if args.cmd == "dns":
+        import asyncio
+
+        from . import lan_dns
+        asyncio.run(lan_dns.serve_forever())
         return
     if args.cmd == "createorg":
         import time

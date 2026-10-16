@@ -23,6 +23,7 @@ import hmac
 import json
 import time
 
+from . import lan_dns
 from .config import settings
 
 DEFAULT_TTL_S = 900
@@ -81,9 +82,15 @@ def verify(token: str, token_hash: str, site_id: str | None = None, now: float |
     return payload
 
 
-def info(summary: dict | None) -> dict:
+def info(summary: dict | None, server_id: str | None = None, now: float | None = None) -> dict:
     """What the server last reported about reaching it directly (heartbeat `summary.direct`), sanitized: only
-    http(s) URLs, so an odd value from a server can never become e.g. a javascript: link in the UI."""
+    http(s) URLs, so an odd value from a server can never become e.g. a javascript: link in the UI.
+
+    `cert` is "le" when the server serves a Let's Encrypt certificate for its LAN names (lan_certs.py): then
+    `lan_name_suffix` is <label>.<lan zone>, recomputed here from `server_id` (a server can't point the UI at
+    another server's names), and the UI connects to https://<a-b-c-d>.<suffix>:<port> instead of the bare
+    address. Anything else, an expired certificate or a name that isn't this server's own is "self" (today's
+    self-signed certificate)."""
     d = (summary or {}).get("direct") if isinstance(summary, dict) else None
     d = d if isinstance(d, dict) else {}
     urls = []
@@ -93,7 +100,13 @@ def info(summary: dict | None) -> dict:
         if isinstance(u, dict) and isinstance(u.get("url"), str) and u["url"].lower().startswith(("https://", "http://")):
             urls.append({"url": u["url"], **({"local": True} if u.get("local") else {})})
     fp = d.get("fingerprint")
-    return {"available": bool(urls), "urls": urls, "fingerprint": fp if isinstance(fp, str) and fp else None}
+    na = d.get("not_after")
+    na = float(na) if isinstance(na, (int, float)) and not isinstance(na, bool) else None
+    want = lan_dns.name_for(server_id)
+    le = bool(want and d.get("cert") == "le" and isinstance(d.get("lan_name_suffix"), str)
+              and d["lan_name_suffix"].lower() == want and na and na > (now if now is not None else time.time()))
+    return {"available": bool(urls), "urls": urls, "fingerprint": fp if isinstance(fp, str) and fp else None,
+            "cert": "le" if le else "self", "lan_name_suffix": want if le else None, "not_after": na}
 
 
 def rate_limited(uid: str, server_id: str, now: float | None = None) -> bool:

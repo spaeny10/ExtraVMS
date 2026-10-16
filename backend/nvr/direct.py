@@ -13,7 +13,7 @@ refused until the hub mints new ones (the UI then falls back to the hub). Tokens
 are never logged or echoed.
 
 Also here: the allowed CORS origins, the self-signed certificate for the LAN HTTPS port, and the `direct`
-block of the heartbeat summary.
+block of the heartbeat summary (with the trusted LAN certificate's fields from lan_cert.py, when there is one).
 """
 from __future__ import annotations
 
@@ -259,9 +259,12 @@ def fingerprint() -> str | None:
 def summary() -> dict | None:
     """Heartbeat `direct` block: where a LAN browser can reach this server, and the certificate's fingerprint.
     LAN entries are plain URL strings; the localhost hint is an object flagged local (only useful to a browser on
-    this machine itself)."""
+    this machine itself). `cert` "le" + `lan_name_suffix` + `not_after`: a Let's Encrypt certificate for
+    *.<lan_name_suffix> is installed (lan_cert.py), so the hub UI uses https://<a-b-c-d>.<suffix>:<port> for the
+    private addresses instead; "self" = only the self-signed one."""
     if not settings.direct_enabled:
         return None
+    from . import lan_cert
     urls: list = [f"https://{ip}:{settings.https_port}" for ip in local_ipv4s()]
     urls.append({"url": f"http://localhost:{settings.port}", "local": True})
-    return {"urls": urls, "fingerprint": fingerprint()}
+    return {"urls": urls, "fingerprint": fingerprint(), **lan_cert.summary_fields()}

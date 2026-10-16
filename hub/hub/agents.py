@@ -20,7 +20,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from tunnelproto import CHUNK, WINDOW, Stream, chunk, decode, encode, split
 
-from . import alerts, cameras, central_cameras, db, hosts, soc, stills, talkdown_voice, turn
+from . import alerts, cameras, central_cameras, db, hosts, lan_certs, soc, stills, talkdown_voice, turn
 from .config import settings
 
 log = logging.getLogger("hub.agents")
@@ -385,6 +385,9 @@ class AgentRegistry:
             elif t == "still":
                 if conn.site:
                     _still(conn, frame)
+            elif t == "lan_csr":
+                if conn.site:   # a certificate for its Direct-on-LAN names (lan_certs.py); answered with a lan_cert frame
+                    await lan_certs.on_csr(conn, frame)
             elif t == "res":
                 s = conn.streams.get(frame["id"])
                 if s is not None:
@@ -440,7 +443,8 @@ class AgentRegistry:
                    "heartbeat_s": settings.heartbeat_s, "now": time.time(), "max_streams": settings.max_streams_per_site,
                    "turn": cred,
                    "stills": True,   # send each camera's latest picture (stills.py); older agents ignore it
-                   "vlm": self.vlm_config(org, conn.token, conn.site_id)}
+                   "vlm": self.vlm_config(org, conn.token, conn.site_id),
+                   **lan_certs.welcome(conn)}   # {"lan_cert": {"name"}}: this server may ask for its LAN certificate
         await conn.send(welcome)
         alerts.close(conn.site, "offline")
         log.info("site %s (%s) connected from %s", conn.site_id, conn.site["name"], conn.ip)

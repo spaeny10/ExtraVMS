@@ -134,6 +134,12 @@ STILL_LAG_S = 1.0             # the recording trails live by about a second (1 s
 STILL_STALE_S = 120.0         # a newest frame older than this: the camera isn't recording now, nothing new to send
 STILL_EVENT_GAP_S = 10.0
 
+# A Let's Encrypt certificate for this server's Direct-on-LAN names (lan_cert.py), from hubs whose welcome offers
+# {"lan_cert": {"name"}}: checked at welcome and every LAN_CERT_CHECK_S; a CSR at most every LAN_CERT_MIN_ASK_S (a
+# flapping tunnel must not send one per reconnect) and never before the hub's retry_after (kept in hub_lan_retry_at).
+LAN_CERT_CHECK_S = 3600.0
+LAN_CERT_MIN_ASK_S = 900.0
+
 
 def still_jpeg(camera_id: str, now: float) -> tuple[bytes, float] | None:
     """(jpeg, frame epoch) of the camera's newest recorded keyframe at STILL_WIDTH, re-encoded smaller when over
@@ -194,6 +200,8 @@ class HubAgent:
         self._still_ts: dict[str, float] = {}        # camera -> the frame time of that still (unchanged: not resent)
         self._opened: dict[int, None] = {}           # event ids already seen open (insertion order, capped)
         self._still_tasks: set[asyncio.Task] = set()
+        self._lan_name: str | None = None             # this hub's welcome offered a LAN certificate for *.<this>
+        self._lan_asked_at = 0.0
 
     # ---- status for the UI
     def hub_url(self) -> str:
@@ -248,7 +256,7 @@ class HubAgent:
             db.set_setting("hub_url", url)
             self._known_url = url
         if unenrol:
-            for k in ("hub_token", "hub_site_id", "hub_vlm", "hub_turn", "hub_claim"):
+            for k in ("hub_token", "hub_site_id", "hub_vlm", "hub_turn", "hub_claim", "hub_lan_retry_at"):
                 db.set_setting(k, None)
             self._known_token = None
             self.enrolled, self.site_id, self.org = False, None, None
@@ -345,7 +353,8 @@ class HubAgent:
                      "site_id": self.site_id, "hostname": socket.gethostname(),
                      # camweb: camera web pages (/api/camweb/<camera>) and WebSockets through the tunnel ("ws" requests);
                      # talk: live talk-down from the browser's microphone (WebSocket /api/speakers/<id>/talk)
-                     "caps": ["events", "turn", "vlm", "camweb", "talk", *(["direct"] if settings.direct_enabled else [])]}
+                     # lan_cert: asks for a trusted certificate for its Direct-on-LAN names (lan_cert.py)
+                     "caps": ["events", "turn", "vlm", "camweb", "talk", *(["direct", "lan_cert"] if settings.direct_enabled else [])]}
             try:
                 hello["cameras"] = [{"id": c["id"], "name": c["name"]} for c in db.cameras(enabled_only=True)]
             except sqlite3.Error:
@@ -392,10 +401,14 @@ class HubAgent:
             self.location, self.location_id = m.get("location"), m.get("location_id")
             hb = float(m.get("heartbeat_s") or HEARTBEAT_S)
             self._hub_stills = bool(m.get("stills"))
+            lc = m.get("lan_cert")
+            self._lan_name = str(lc["name"]).lower() if isinstance(lc, dict) and isinstance(lc.get("name"), str) and lc["name"] else None
             self._tasks = [asyncio.create_task(self._heartbeat_loop(hb), name="hub-heartbeat"),
                            asyncio.create_task(self._event_loop(), name="hub-events"),
                            asyncio.create_task(self._ping_loop(), name="hub-ping"),
                            asyncio.create_task(self._still_loop(), name="hub-stills")]
+            if self._lan_name:
+                self._tasks.append(asyncio.create_task(self._lan_cert_loop(), name="hub-lan-cert"))
             if "vlm" in m:
                 self._apply_vlm(m["vlm"])
             try:
@@ -431,6 +444,8 @@ class HubAgent:
             self._apply_vlm(m.get("vlm"))
         elif t == "turn":
             self._apply_turn(m.get("turn"))
+        elif t == "lan_cert":
+            await self._on_lan_cert(m)
         elif t == "req":
             s = Stream(m["id"])
             s.headers = {k.lower(): v for k, v in (m.get("headers") or {}).items()}
@@ -688,6 +703,56 @@ class HubAgent:
         task = asyncio.create_task(self.send_still(cam), name=f"hub-still-{cam}")
         self._still_tasks.add(task)
         task.add_done_callback(self._still_tasks.discard)
+
+    # ---- the trusted LAN certificate (lan_cert.py)
+    async def _lan_cert_loop(self) -> None:
+        while True:
+            try:
+                await self.lan_cert_check()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.warning("hub: LAN certificate check failed: %s", e)
+            await asyncio.sleep(LAN_CERT_CHECK_S)
+
+    async def lan_cert_check(self, now: float | None = None) -> bool:
+        """Send a CSR when the certificate is missing or due and the hub's limits allow; True when one went."""
+        from . import lan_cert
+        now = time.time() if now is None else now
+        name = self._lan_name
+        if not name or not lan_cert.needs(name, now) or now - self._lan_asked_at < LAN_CERT_MIN_ASK_S:
+            return False
+        try:
+            retry_at = float(db.get_setting("hub_lan_retry_at") or 0)
+        except (sqlite3.Error, TypeError, ValueError):
+            retry_at = 0.0
+        if now < retry_at:
+            return False
+        csr = await asyncio.to_thread(lan_cert.csr, name)
+        self._lan_asked_at = now
+        await self._send({"t": "lan_csr", "csr": csr})
+        log.info("hub: asked for a LAN certificate for *.%s", name)
+        return True
+
+    async def _on_lan_cert(self, m: dict) -> None:
+        """The hub's answer to a CSR: the chain (install it), "pending" (it follows), or "later" / "refused" with
+        retry_after seconds (no CSR before then, at least 10 minutes)."""
+        from . import lan_cert
+        status = m.get("status")
+        if status == "issued" and self._lan_name and isinstance(m.get("fullchain"), str):
+            try:
+                await asyncio.to_thread(lan_cert.install, m["fullchain"], self._lan_name)
+                db.set_setting("hub_lan_retry_at", None)
+            except (ValueError, OSError) as e:
+                log.warning("hub: the LAN certificate from the hub was not installed: %s", e)
+        elif status in ("later", "refused"):
+            try:
+                wait = max(600.0, float(m.get("retry_after") or 0))
+            except (TypeError, ValueError):
+                wait = 3600.0
+            db.set_setting("hub_lan_retry_at", time.time() + wait)
+            if status == "refused":
+                log.warning("hub: the LAN certificate request was refused: %s", str(m.get("reason") or "")[:200])
 
     async def _ping_loop(self) -> None:
         while True:

@@ -1,4 +1,5 @@
-# Production hub: Caddy (80/443, Let's Encrypt) -> hub -> Postgres, plus coturn. Only the hub opens ports; sites open nothing.
+# Production hub: Caddy (80/443, Let's Encrypt) -> hub -> Postgres, plus coturn and the LAN-names DNS (53). Only the hub
+# opens ports; sites open nothing.
 #   cp hub/.env.example hub/.env   (set HUB_DOMAIN, HUB_PUBLIC_URL, HUB_SECRET, POSTGRES_PASSWORD, HUB_TURN_SECRET, HUB_VLLM_SITE)
 #   docker compose -f hub/docker-compose.yml up -d --build
 #   docker compose -f hub/docker-compose.yml exec hub python -m hub createsuper you@example.com
@@ -66,9 +67,35 @@ services:
       HUB_COVERAGEMAP_REFRESH_DAYS: ${HUB_COVERAGEMAP_REFRESH_DAYS:-30}
       HUB_COVERAGEMAP_MONTHLY_UNITS: ${HUB_COVERAGEMAP_MONTHLY_UNITS:-400}
       HUB_COVERAGEMAP_DATASETS: ${HUB_COVERAGEMAP_DATASETS:-summary,fcc-coverage,speed-tests}
+      # Direct-on-LAN with trusted certificates (DEPLOY.md "Direct-on-LAN names and certificates"): names under
+      # HUB_LAN_ZONE (answered by the dns service below) and a Let's Encrypt certificate per server once HUB_LAN_CERTS=1
+      HUB_LAN_ZONE: ${HUB_LAN_ZONE:-lan.axiomvision.ai}
+      HUB_LAN_CERTS: ${HUB_LAN_CERTS:-0}
+      HUB_LAN_ACME_DIRECTORY: ${HUB_LAN_ACME_DIRECTORY:-https://acme-v02.api.letsencrypt.org/directory}
+      HUB_LAN_ACME_EMAIL: ${HUB_LAN_ACME_EMAIL:-}
+      HUB_LAN_CERT_WEEKLY_CAP: ${HUB_LAN_CERT_WEEKLY_CAP:-30}
     depends_on:
       postgres: { condition: service_healthy }
     expose: ["8000"]
+    logging: *logging
+
+  # Authoritative DNS for HUB_LAN_ZONE (`python -m hub dns`, hub/hub/lan_dns.py): <a-b-c-d>.<server>.lan.axiomvision.ai
+  # -> that private address, and the DNS-01 TXT values of running certificate orders. Never recursive. A container of
+  # its own so that a port 53 the host can't give (e.g. systemd-resolved's stub listener: set HUB_DNS_BIND to the
+  # public IPv4) only stops this service, never the hub. Open 53/udp and 53/tcp in the firewall.
+  dns:
+    build: { context: .., dockerfile: hub/Dockerfile }
+    restart: unless-stopped
+    command: ["python", "-m", "hub", "dns"]
+    environment:
+      HUB_DATABASE_URL: postgresql+psycopg://hub:${POSTGRES_PASSWORD:-change-me}@postgres:5432/hub
+      HUB_LAN_ZONE: ${HUB_LAN_ZONE:-lan.axiomvision.ai}
+      HUB_LAN_DNS_NS: ${HUB_LAN_DNS_NS:-ns1.axiomvision.ai}
+      HUB_LAN_DNS_PORT: "5353"
+      HUB_LAN_DNS_RATE: ${HUB_LAN_DNS_RATE:-20}
+    ports: ["${HUB_DNS_BIND:-0.0.0.0}:53:5353/udp", "${HUB_DNS_BIND:-0.0.0.0}:53:5353/tcp"]
+    depends_on:
+      postgres: { condition: service_healthy }
     logging: *logging
 
   postgres:

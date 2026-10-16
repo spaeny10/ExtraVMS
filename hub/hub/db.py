@@ -340,6 +340,25 @@ cam_web_sessions = Table("cam_web_sessions", metadata,
                          Column("closed_at", Float, nullable=True), Column("close_reason", String(16), nullable=True),
                          Column("ip", String(64), nullable=True))
 
+# ---- Trusted HTTPS for Direct-on-LAN (lan_certs.py): each server's Let's Encrypt certificate for *.<label>.<lan_zone>
+# (the chain is public; its key never leaves the server), every order (the weekly cap and the failure brake count them)
+# and the DNS-01 TXT values `python -m hub dns` (lan_dns.py) serves while an order is being validated.
+lan_certs = Table("lan_certs", metadata,
+                  Column("server_id", String(24), primary_key=True),
+                  Column("key_sha256", String(64), nullable=True),   # sha256 of the certified public key (SubjectPublicKeyInfo DER)
+                  Column("fullchain", Text, nullable=True), Column("not_before", Float, nullable=True),
+                  Column("not_after", Float, nullable=True), Column("issued_at", Float, nullable=True),
+                  Column("next_order_at", Float, nullable=True),     # no new order for this server before this
+                  Column("failures", Integer, nullable=False, default=0), Column("last_error", String(300), nullable=True),
+                  Column("updated_at", Float, nullable=False))
+lan_cert_orders = Table("lan_cert_orders", metadata,
+                        Column("id", Integer, primary_key=True, autoincrement=True),
+                        Column("server_id", String(24), nullable=False), Column("at", Float, nullable=False, index=True),
+                        Column("ok", Boolean, nullable=True))   # None while running
+lan_challenges = Table("lan_challenges", metadata,
+                       Column("name", String(253), primary_key=True), Column("value", String(128), primary_key=True),
+                       Column("expires_at", Float, nullable=False))
+
 _engine: Engine | None = None
 
 

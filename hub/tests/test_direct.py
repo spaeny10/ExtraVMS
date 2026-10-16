@@ -49,11 +49,27 @@ def test_round_trip_expiry_tamper_and_wrong_site():
 
 
 def test_info_sanitises_urls():
-    assert direct.info(None) == {"available": False, "urls": [], "fingerprint": None}
+    assert direct.info(None) == {"available": False, "urls": [], "fingerprint": None, "cert": "self", "lan_name_suffix": None,
+                                 "not_after": None}
     got = direct.info({"direct": {"urls": [{"url": "https://192.168.1.5:8443"}, {"url": "javascript:alert(1)"}, "x",
                                            {"url": "http://localhost:8080", "local": True}], "fingerprint": "ab12"}})
-    assert got == {"available": True, "fingerprint": "ab12",
+    assert got == {"available": True, "fingerprint": "ab12", "cert": "self", "lan_name_suffix": None, "not_after": None,
                    "urls": [{"url": "https://192.168.1.5:8443"}, {"url": "http://localhost:8080", "local": True}]}
+
+
+def test_info_lan_certificate():
+    """cert "le" only for this server's own LAN name and an unexpired certificate; the suffix is the hub's own."""
+    now = 1_800_000_000.0
+    d = {"urls": ["https://192.168.1.5:8443"], "fingerprint": "ab", "cert": "le", "lan_name_suffix": "s-direct.lan.axiomvision.ai",
+         "not_after": now + 86400}
+    got = direct.info({"direct": d}, "s_direct", now=now)
+    assert (got["cert"], got["lan_name_suffix"], got["not_after"]) == ("le", "s-direct.lan.axiomvision.ai", now + 86400)
+    assert direct.info({"direct": {**d, "lan_name_suffix": "S-DIRECT.lan.axiomvision.ai"}}, "s_direct", now=now)["cert"] == "le"
+    for bad in ({"lan_name_suffix": "s-other.lan.axiomvision.ai"}, {"lan_name_suffix": "evil.example"}, {"not_after": now - 1},
+                {"not_after": None}, {"cert": "self"}, {"lan_name_suffix": None}, {"not_after": True}):
+        got = direct.info({"direct": {**d, **bad}}, "s_direct", now=now)
+        assert (got["cert"], got["lan_name_suffix"]) == ("self", None), bad
+    assert direct.info({"direct": d}, None, now=now)["cert"] == "self"   # no server id: no name to trust
 
 
 def test_route_and_card(client, superuser):
@@ -75,18 +91,20 @@ def test_route_and_card(client, superuser):
     j = r.json()
     assert j["available"] is False and j["urls"] == [] and j["fingerprint"] is None and j["role"] == "viewer"
     card = root.get(f"/api/fleet?org={oid}").json()["orgs"][0]["sites"][0]
-    assert card["direct"] == {"available": False, "urls": [], "fingerprint": None}
+    assert card["direct"] == {"available": False, "urls": [], "fingerprint": None, "cert": "self", "lan_name_suffix": None,
+                             "not_after": None}
 
     rep = {"urls": [{"url": "https://192.168.105.105:8443"}, {"url": "http://localhost:8080", "local": True}], "fingerprint": "deadbeef"}
     db.run(sa.update(db.sites).where(db.sites.c.id == s["id"]).values(summary={"version": "1", "direct": rep}))
     j = viewer.post(f"/api/servers/{s['id']}/direct-token").json()
-    assert set(j) == {"token", "exp", "role", "available", "urls", "fingerprint"}
+    assert set(j) == {"token", "exp", "role", "available", "urls", "fingerprint", "cert", "lan_name_suffix", "not_after"}
     assert j["available"] is True and j["urls"] == rep["urls"] and j["fingerprint"] == "deadbeef"
     p = direct.verify(j["token"], s["token_hash"], site_id=s["id"])
     assert p and p["email"] == "viewer@direct.example" and p["role"] == "viewer" and p["exp"] == j["exp"]
     assert abs(j["exp"] - (time.time() + 900)) < 5
     card = root.get(f"/api/fleet?org={oid}").json()["orgs"][0]["sites"][0]
-    assert card["direct"] == {"available": True, "urls": rep["urls"], "fingerprint": "deadbeef"}
+    assert card["direct"] == {"available": True, "urls": rep["urls"], "fingerprint": "deadbeef", "cert": "self", "lan_name_suffix": None,
+                              "not_after": None}
 
     # minting is lightly rate-limited per user and server
     for _ in range(direct.MINT_LIMIT):

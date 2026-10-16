@@ -45,6 +45,19 @@ class Settings(BaseSettings):
 
     # Direct-on-LAN: lifetime of the media token a browser presents straight to a server on its LAN (hub/direct.py)
     direct_token_ttl_s: int = 900
+    # ... and trusted HTTPS for it (lan_dns.py, lan_certs.py): <a-b-c-d>.<server label>.<lan_zone> -> that private IPv4,
+    # answered by `python -m hub dns` (the zone is delegated to it: NS lan -> lan_dns_ns at the registrar), and a Let's
+    # Encrypt wildcard certificate per server for *.<label>.<lan_zone> (DNS-01), its key made on the server
+    lan_zone: str = "lan.axiomvision.ai"      # empty = no names, no certificates
+    lan_dns_ns: str = "ns1.axiomvision.ai"    # the zone's name server (A record at the registrar -> this host)
+    lan_dns_host: str = "0.0.0.0"
+    lan_dns_port: int = 5353                  # unprivileged inside the container; docker-compose.yml publishes 53/udp+tcp to it
+    lan_dns_rate: float = 20.0                # queries per second per source address (bursts of twice that); the rest are dropped
+    lan_certs: bool = False                   # order certificates (turn on once `dig` shows the delegation works)
+    lan_acme_directory: str = "https://acme-v02.api.letsencrypt.org/directory"   # staging: acme-staging-v02.api...
+    lan_acme_email: str = ""                  # ACME account contact; empty = none
+    lan_cert_weekly_cap: int = 30             # certificates per 7 days, all servers (LE allows 50 per registered domain,
+                                              # shared with the camera web pages' certificates on cam.axiomvision.ai)
 
     # Camera web pages (camweb.py): each camera's own page at https://<label>.<camweb_domain>/ through its server's tunnel
     camweb_domain: str = ""                   # e.g. cam.axiomvision.ai (wildcard DNS to the hub); empty = "cam." + the public URL's parent domain

@@ -5,7 +5,8 @@ anywhere. The shared AI runs on a site's GPU and is reached through that site's 
 
 ## 1. Server
 - Hetzner Cloud → CX23/CPX21 (2 vCPU, 4 GB) is enough; a CCX23 (4 dedicated vCPU, 16 GB) is what runs hub.axiomvision.ai. Ubuntu 24.04 or newer, your SSH key only. Ashburn is closest to US sites.
-- Hetzner Firewall on the server: inbound 22/tcp (your IP), 80/tcp, 443/tcp, 3478/tcp, 3478/udp, 49152-49252/udp.
+- Hetzner Firewall on the server: inbound 22/tcp (your IP), 80/tcp, 443/tcp, 3478/tcp, 3478/udp, 49152-49252/udp,
+  53/udp and 53/tcp (the Direct-on-LAN names, see "Direct-on-LAN names and certificates").
 - Turn on Backups (20 % of the server price) so the volume with Postgres is snapshotted.
 
 ## 2. DNS
@@ -127,6 +128,52 @@ camweb.py, server nvr/camweb.py). Setting it up once:
 - **Servers** need this version (their hello lists `camweb`); an older one answers "update the server first".
 - Let's Encrypt allows 50 new certificates per registered domain per week; each camera's name is stable, so a camera
   costs one certificate (renewed by Caddy) the first time anyone opens it. Caddy falls back to ZeroSSL when it is hit.
+
+## Direct-on-LAN names and certificates
+A browser on a server's own LAN plays media straight from it (Direct · LAN, hub/ui/src/direct.ts). With only the
+server's self-signed certificate the user has to accept it once per server and Chrome shows "Not secure". Instead each
+server can hold a Let's Encrypt certificate for its own names:
+
+- **Names**: `<a-b-c-d>.<label>.lan.axiomvision.ai` → A `a.b.c.d`, e.g. `192-168-1-5.s-d6d429b617ca.lan.axiomvision.ai`
+  → 192.168.1.5. `<label>` is the server id with `_` → `-` (`s_d6d429b617ca` → `s-d6d429b617ca`; ids never contain `-`,
+  so it maps back). Only private addresses are answered (10/8, 172.16/12, 192.168/16, 100.64/10) and only for enrolled,
+  non-retired servers; everything else under the zone is NXDOMAIN, other zones REFUSED. The `dns` service
+  (`python -m hub dns`, hub/hub/lan_dns.py) is authoritative only, never recursive; 20 queries/s per source address
+  (`HUB_LAN_DNS_RATE`), more are dropped. Server ids appear in public Certificate Transparency logs this way (they
+  are not secrets: the device token is).
+- **Certificates**: `*.<label>.lan.axiomvision.ai`, one per server, so every LAN address it gets (DHCP) is covered. The
+  server makes the key and sends a CSR through its tunnel; the hub checks it names exactly that server's wildcard,
+  orders it from Let's Encrypt with DNS-01 (the TXT is served by the `dns` service), and sends the chain back
+  (hub/hub/lan_certs.py, server backend/nvr/lan_cert.py: `data_dir/tls/lan.crt` + `lan.key`). The server serves it on
+  8443 for those names (SNI) and swaps in a renewed one without a restart; by IP address it still serves the
+  self-signed one. The ACME account key lives in the hub database (kv `lan_acme:account`).
+- **Renewal and limits**: renewed when less than min(30 days, a third of the lifetime) is left, by the server's hourly
+  check. One order per server at a time; after an order no new one for that server for 2 days (a server that lost
+  its key waits); failures back off 1 h, 2 h, 4 h … 24 h; 10 failed orders in an hour pause all orders for the hour;
+  at most `HUB_LAN_CERT_WEEKLY_CAP` (30) certificates per 7 days over all servers (the hub logs "weekly cap" when it
+  is reached). Let's Encrypt allows 50 new certificates per registered domain per week and the camera web pages'
+  certificates (`*.cam.axiomvision.ai`) count against the same 50; a large initial rollout fills over a few weeks.
+- **Fallback**: a customer router with DNS rebinding protection (many consumer routers, Pi-hole, some ISPs' DNS) drops
+  answers that point at private addresses. The name then doesn't resolve, the probe fails and the browser keeps using
+  the hub tunnel, exactly as off the LAN. Fix per site by allowing `lan.axiomvision.ai` in the router's rebind
+  exceptions. Servers without a certificate keep the self-signed behaviour (accept prompt).
+
+Setting it up once:
+1. Namecheap → Advanced DNS for axiomvision.ai: `NS lan → ns1.axiomvision.ai` and `A ns1 → <hub server IPv4>`
+   (178.156.211.145).
+2. Firewall: inbound 53/udp and 53/tcp in the Hetzner firewall and in ufw (`ufw allow 53/udp && ufw allow 53/tcp`).
+3. `hub/.env`: `HUB_DNS_BIND=178.156.211.145`. Ubuntu's systemd-resolved already listens on 127.0.0.53:53 and
+   127.0.0.54:53, so publishing on 0.0.0.0:53 fails with "address already in use"; binding the public address
+   doesn't. (If it fails anyway, only the `dns` container stops; the hub keeps running.)
+4. `docker compose -f hub/docker-compose.yml up -d --build`, then check from anywhere:
+   `dig +short 192-168-1-5.<label>.lan.axiomvision.ai` → `192.168.1.5`, `dig lan.axiomvision.ai SOA` → `ns1.axiomvision.ai.`,
+   `dig @178.156.211.145 google.com` → REFUSED.
+5. Then turn ordering on: `HUB_LAN_CERTS=1` in `hub/.env` (optionally `HUB_LAN_ACME_EMAIL=you@...` for expiry mail)
+   and `docker compose -f hub/docker-compose.yml up -d hub`. Servers need this version (their hello lists `lan_cert`);
+   within a minute of reconnecting a server's heartbeat reports `direct.cert: "le"` and the hub UI uses the names.
+   A dry run against Let's Encrypt staging (`HUB_LAN_ACME_DIRECTORY=https://acme-staging-v02.api.letsencrypt.org/directory`)
+   gives certificates browsers don't trust; after switching back, delete `data_dir/tls/lan.crt` on those servers so they
+   ask again.
 
 ## Users and invites
 - Reset a password from the server (prompts twice; signs the user out everywhere):

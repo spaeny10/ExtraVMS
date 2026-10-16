@@ -22,7 +22,7 @@ from . import find as find_mod
 from . import camera_groups as groups_mod
 from . import layouts as layouts_mod
 from . import camweb, site_ask, talkdown_voice, viewing
-from . import central_cameras, coverage, geocode, hosts, security, soc, soc_reports, stills, telemetry
+from . import central_cameras, coverage, geocode, hosts, lan_certs, security, soc, soc_reports, stills, telemetry
 from fastapi.responses import StreamingResponse
 from .agents import registry
 from .config import settings
@@ -70,6 +70,7 @@ async def _sweeper() -> None:
             db.run(sa.delete(db.claims).where(db.claims.c.expires_at < time.time() - 3600))
             camweb.sweep()   # camera web pages past their idle or hard limit
             stills.purge_old()   # last pictures older than 30 days
+            lan_certs.sweep()   # DNS-01 values an interrupted order left, order rows past the weekly window
         except Exception:
             log.exception("sweeper")
         await asyncio.sleep(30)
@@ -708,7 +709,7 @@ async def direct_token(site_id: str, u: dict = Depends(user)):
     if direct.rate_limited(u["id"], site_id):
         raise HTTPException(429, "too many direct-access tokens; try again shortly")
     token = direct.mint(site, u, role)
-    return {"token": token, "exp": direct.payload_of(token)["exp"], "role": role, **direct.info(site.get("summary"))}
+    return {"token": token, "exp": direct.payload_of(token)["exp"], "role": role, **direct.info(site.get("summary"), site["id"])}
 
 
 class RetireIn(BaseModel):
@@ -741,6 +742,7 @@ async def revoke_site(site_id: str, u: dict = Depends(user)):
     with db.engine().begin() as c:
         c.execute(sa.delete(db.alerts).where(db.alerts.c.site_id == site_id))
         c.execute(sa.delete(db.config_backups).where(db.config_backups.c.site_id == site_id))
+        c.execute(sa.delete(db.lan_certs).where(db.lan_certs.c.server_id == site_id))
         cameras.delete_server(site_id, c)
         for g in c.execute(sa.select(db.camera_groups).where(db.camera_groups.c.org_id == site["org_id"])).mappings().all():
             members = [m for m in (g["members"] or []) if m.get("site_id") != site_id]
@@ -763,7 +765,7 @@ def _site_card(s: dict, ctx: dict | None = None) -> dict:
             "cameras_total": cams_total, "cameras_online": cams_online,
             "central": ctx.get("central", {}).get(s["id"]),   # a central recording instance: {mode, quota_gb, used_gb, ...}
             "stills": ctx.get("stills", {}).get(s["id"], {}),   # camera -> ts of its latest picture kept here (stills.py)
-            "direct": direct.info(summ)}   # Direct-on-LAN: lets the UI know whether to ask for a token at all
+            "direct": direct.info(summ, s["id"])}   # Direct-on-LAN: lets the UI know whether to ask for a token at all
 
 
 def _card_ctx(servers: list[dict]) -> dict:

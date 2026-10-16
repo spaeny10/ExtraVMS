@@ -134,7 +134,13 @@ export type CentralBody = { host_id?: string | null; mode: CentralMode; subnet?:
  * `urls`: candidate base URLs of the server itself (`local` = only works from a browser on that machine, e.g.
  * http://localhost:8080); `fingerprint`: its self-signed certificate's SHA-256, for the "accept the certificate" prompt.
  */
-export type DirectInfo = { available: boolean; urls: { url: string; local?: boolean }[]; fingerprint: string | null };
+export type DirectInfo = {
+  available: boolean; urls: { url: string; local?: boolean }[]; fingerprint: string | null;
+  /** "le": the server holds a Let's Encrypt certificate for *.<lan_name_suffix> (hub lan_certs.py), so its private
+   *  addresses are reached as https://<a-b-c-d>.<lan_name_suffix>:<port> with no certificate to accept; "self" (or
+   *  absent, older hubs): only its self-signed certificate. not_after: that certificate's end, unix seconds. */
+  cert?: "le" | "self"; lan_name_suffix?: string | null; not_after?: number | null;
+};
 // (direct.candidates also accepts bare URL strings in `urls`: that is how the server's own heartbeat lists LAN URLs)
 /** POST /api/servers/{id}/direct-token: a short-lived token the server accepts for read-only + WHEP requests. */
 export type DirectToken = DirectInfo & { token: string; exp: number; role: string };

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DirectInfo, DirectToken } from "./api";
-import { REMINT_LEAD_S, candidates, check, classifyProbeError, decide, directEntry, handshake, isLoopback, noteServer, probe, resetDirect, resolve,
+import { REMINT_LEAD_S, candidates, certOfferPending, check, classifyProbeError, decide, directEntry, handshake, isLanName, isLoopback, isPrivateIPv4,
+  lanNameUrl, lanSuffix, noteServer, probe, resetDirect, resolve,
   setDirectDeps, type DirectEntry, type ResolveDeps } from "./direct";
 import { hybridApi, mediaApi, siteApi } from "./hubSource";
 
@@ -149,5 +150,61 @@ describe("module cache and mediaApi", () => {
     expect(c.frameUrl("c", 1, 320)).toContain("direct=a");
     t = "b";
     expect(c.frameUrl("c", 1, 320)).toContain("direct=b");
+  });
+});
+
+describe("trusted LAN names (servers with a Let's Encrypt certificate)", () => {
+  const SUFFIX = "s-d6d429b617ca.lan.axiomvision.ai";
+  const le = (urls: { url: string; local?: boolean }[], over: Partial<DirectInfo> = {}): DirectInfo =>
+    ({ ...info(urls), cert: "le", lan_name_suffix: SUFFIX, not_after: 2_000_000_000, ...over });
+  const NAMED = `https://192-168-1-10.${SUFFIX}:8443`;
+
+  it("knows the private ranges the hub's DNS answers for", () => {
+    for (const ip of ["10.0.0.1", "172.16.0.1", "172.31.255.255", "192.168.1.5", "100.64.0.1", "100.127.1.1"]) expect(isPrivateIPv4(ip)).toBe(true);
+    for (const ip of ["8.8.8.8", "172.32.0.1", "100.128.0.1", "127.0.0.1", "169.254.1.1", "192.169.1.1", "300.1.1.1", "fe80::1", "nvr.local"])
+      expect(isPrivateIPv4(ip)).toBe(false);
+  });
+  it("turns each private https address into its name, keeping the port; local and other URLs stay as they are", () => {
+    const got = candidates(le([{ url: LOCAL, local: true }, { url: LAN }, { url: "https://10.0.0.5:8443/" }, { url: "https://203.0.113.9:8443" },
+      { url: "http://192.168.1.10:8080" }]), "https:");
+    expect(got).toEqual([LOCAL, NAMED, `https://10-0-0-5.${SUFFIX}:8443`, "https://203.0.113.9:8443"]);
+    expect(lanNameUrl("https://192.168.1.10", SUFFIX)).toBe(`https://192-168-1-10.${SUFFIX}`);
+    expect(lanNameUrl("https://8.8.8.8:8443", SUFFIX)).toBeNull();
+  });
+  it("servers without a trusted certificate keep the bare addresses exactly as before", () => {
+    const urls = [{ url: LOCAL, local: true }, { url: LAN }];
+    const before = candidates(info(urls), "https:");
+    expect(candidates(le(urls, { cert: "self" }), "https:")).toEqual(before);
+    expect(candidates(le(urls, { lan_name_suffix: null }), "https:")).toEqual(before);
+    expect(candidates(le(urls, { lan_name_suffix: "evil.example/path" }), "https:")).toEqual(before);   // not a DNS name
+    expect(candidates(le(urls, { cert: undefined, lan_name_suffix: undefined }), "https:")).toEqual(before);   // an older hub
+    expect(lanSuffix(le(urls, { lan_name_suffix: SUFFIX.toUpperCase() }))).toBe(SUFFIX);
+  });
+  it("goes direct through the name with the same probe, mint and handshake", async () => {
+    const f = fakeFetch({ [`${NAMED}/api/direct/probe`]: 204, [`${NAMED}/api/direct/handshake`]: { json: { ok: true } } });
+    const d = deps(f);
+    const e = await resolve("srv", le([{ url: LAN }]), d, null, "https:");
+    expect(e).toMatchObject({ state: "direct", base: NAMED, token: "tok1" });
+    expect(d.mint).toHaveBeenCalledWith("srv");
+    expect(String((f as unknown as { mock: { calls: unknown[][] } }).mock.calls[0][0])).toBe(`${NAMED}/api/direct/probe`);
+  });
+  it("never offers a certificate for a name: a failed name (rebind protection) means the hub", async () => {
+    const d = deps(fakeFetch({ [NAMED]: "type" }));
+    const e = await resolve("srv", le([{ url: LAN }]), d, null, "https:");
+    expect(e).toMatchObject({ state: "hub", certUrl: null });
+    expect(d.mint).not.toHaveBeenCalled();
+    // a self-signed server in the same situation still gets the offer
+    expect((await resolve("srv", info([{ url: LAN }]), deps(fakeFetch({ [LAN]: "type" })), null, "https:")).state).toBe("cert");
+    expect(isLanName(NAMED, SUFFIX) && !isLanName(LAN, SUFFIX) && !isLanName(NAMED, null)).toBe(true);
+  });
+  it("certOfferPending counts servers still waiting for an accepted certificate", async () => {
+    resetDirect();
+    setDirectDeps({ fetch: fakeFetch({ [LAN]: "type", [NAMED]: "type" }), now: () => 1_000_000, probeTimeoutMs: 20 });
+    noteServer({ id: "self1", direct: info([{ url: LAN }]) });
+    noteServer({ id: "le1", direct: le([{ url: LAN }]) });
+    await Promise.all([check("self1"), check("le1")]);
+    expect(certOfferPending("self1")).toBe(true);
+    expect(certOfferPending("le1")).toBe(false);
+    resetDirect();
   });
 });

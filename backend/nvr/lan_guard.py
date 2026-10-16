@@ -5,8 +5,9 @@ not, though: any web page it opens can send requests to this server (CSRF) or po
 the server's address (DNS rebinding) and then read the answers. The middleware in api.py uses these checks:
 
 * Host allow-list (`host_allowed`): localhost, this machine's hostname(s) and local IP addresses,
-  settings.webrtc_public_hosts and NVR_ALLOWED_HOSTS. A rebinding page's requests carry its own host name and
-  are refused (421), so it never gets to read anything.
+  settings.webrtc_public_hosts, NVR_ALLOWED_HOSTS and this server's own Direct-on-LAN names
+  (<a-b-c-d>.<its label>.lan.axiomvision.ai, while it holds the certificate for them: lan_cert.is_own_name).
+  A rebinding page's requests carry its own host name and are refused (421), so it never gets to read anything.
 * `from_other_site`: a state-changing request must come from this server's own pages (Origin / Referer
   same-origin; failing those, Sec-Fetch-Site same-origin or none). Scripts and tools that send none of these
   headers (curl, the installer) still work.
@@ -22,7 +23,7 @@ import socket
 import time
 import urllib.parse
 
-from . import direct
+from . import direct, lan_cert
 from .config import settings
 
 SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
@@ -87,6 +88,8 @@ def host_allowed(host_header: str | None) -> bool:
     except ValueError:
         pass
     if name in allowed_hosts():
+        return True
+    if lan_cert.is_own_name(name):   # another server's label (or any other name under the zone) is not ours
         return True
     if time.monotonic() - _cache["at"] > MISS_REFRESH_S:   # maybe the address just changed
         return name in allowed_hosts(refresh=True)

@@ -5,6 +5,10 @@
  * Per server, from its card's `direct` (hub/hub/direct.py info):
  *   1. candidates(): the server's own base URLs, `local` ones (http://localhost:8080, only works on that machine) first.
  *      Plain-http LAN addresses are dropped on an https hub page: the browser blocks them as mixed content anyway.
+ *      A server whose `cert` is "le" holds a Let's Encrypt certificate for *.<lan_name_suffix>: each of its private
+ *      IPv4 https URLs becomes https://<a-b-c-d>.<lan_name_suffix>:<port> (the hub's DNS answers that name with a.b.c.d,
+ *      hub lan_dns.py), which the browser trusts. If the customer's router drops private answers (DNS rebinding
+ *      protection) the name doesn't resolve, the probe fails and the server stays on the hub, as off the LAN.
  *   2. probe() every candidate in parallel: GET <url>/api/direct/probe (CORS, 1.5 s). A browser off the LAN times out.
  *   3. The first candidate (in order) that answered: mint a token at the hub (POST /api/servers/{id}/direct-token),
  *      then GET <url>/api/direct/handshake?token= (sets the server's `direct` cookie, proves the token is accepted).
@@ -12,7 +16,8 @@
  *      cookie is cross-site, which a browser may block as third-party).
  *   4. Nothing answered but an https LAN URL failed fast with a TypeError: that is what an untrusted self-signed
  *      certificate looks like (we can't tell it apart from "refused" precisely) → "cert": the UI offers to open the
- *      probe URL in a tab so the user can accept the certificate once; returning to this window re-probes.
+ *      probe URL in a tab so the user can accept the certificate once; returning to this window re-probes. Never for
+ *      a trusted LAN name (there is nothing to accept: a failure there is a name that didn't resolve).
  *   5. Otherwise → "hub" (everything stays on the tunnel).
  * The answer is re-checked every RECHECK_MS (a laptop leaves the LAN), on window focus once it is FOCUS_RECHECK_MS
  * old (always when "cert"), and when the network comes back; the token is re-minted REMINT_LEAD_S before it expires.
@@ -49,6 +54,39 @@ export type DirectEntry = {
 
 const trimSlash = (u: string) => u.replace(/\/+$/, "");
 
+/** The addresses the hub's LAN-name DNS answers for (hub lan_dns.py PRIVATE): 10/8, 172.16/12, 192.168/16, 100.64/10. */
+export function isPrivateIPv4(host: string): boolean {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (!m) return false;
+  const [a, b, c, d] = m.slice(1).map(Number);
+  if ([a, b, c, d].some((n) => n > 255)) return false;
+  return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+}
+
+const SUFFIX_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*(?:\.[a-z0-9]+(?:-[a-z0-9]+)*)+$/;
+/** The server's trusted LAN-name suffix (<label>.lan.axiomvision.ai) when it reports a Let's Encrypt certificate. */
+export function lanSuffix(info: DirectInfo | null | undefined): string | null {
+  const s = info?.cert === "le" && typeof info.lan_name_suffix === "string" ? info.lan_name_suffix.toLowerCase() : "";
+  return SUFFIX_RE.test(s) ? s : null;
+}
+
+/** https://192.168.1.5:8443 -> https://192-168-1-5.<suffix>:8443; null when the URL isn't https to a private IPv4. */
+export function lanNameUrl(url: string, suffix: string): string | null {
+  try {
+    const u = new URL(url);
+    if (u.protocol !== "https:" || !isPrivateIPv4(u.hostname)) return null;
+    return `https://${u.hostname.replace(/\./g, "-")}.${suffix}${u.port ? `:${u.port}` : ""}`;
+  } catch {
+    return null;
+  }
+}
+
+/** Is this one of the server's trusted LAN names (no certificate to accept)? */
+export function isLanName(url: string, suffix: string | null): boolean {
+  if (!suffix) return false;
+  try { return new URL(url).hostname.toLowerCase().endsWith(`.${suffix}`); } catch { return false; }
+}
+
 /** Is this URL's host only reachable from the machine itself (and so allowed over http from an https page)? */
 export function isLoopback(url: string): boolean {
   try {
@@ -70,7 +108,10 @@ export function candidates(info: DirectInfo | null | undefined, pageProtocol: st
   const rows = (info.urls as (string | { url: string; local?: boolean })[])
     .map((u) => (typeof u === "string" ? { url: u } : u))
     .filter((u) => u && typeof u.url === "string" && /^https?:\/\//i.test(u.url));
-  const ordered = [...rows.filter((u) => u.local), ...rows.filter((u) => !u.local)].map((u) => trimSlash(u.url));
+  const suffix = lanSuffix(info);
+  const ordered = [...rows.filter((u) => u.local), ...rows.filter((u) => !u.local)]
+    .map((u) => trimSlash(u.url))
+    .map((u) => (suffix ? lanNameUrl(u, suffix) ?? u : u));
   const secure = pageProtocol === "https:";
   return [...new Set(ordered)].filter((u) => !secure || u.toLowerCase().startsWith("https://") || isLoopback(u));
 }
@@ -149,7 +190,10 @@ export async function resolve(server: string, info: DirectInfo | null | undefine
   const fingerprint = info?.fingerprint ?? null;
   const urls = candidates(info, pageProtocol);
   if (!urls.length) return entry("hub", { fingerprint }, deps.now());
-  const results = await Promise.all(urls.map((u) => probe(u, deps.fetch, deps.probeTimeoutMs)));
+  const suffix = lanSuffix(info);
+  // a trusted LAN name that fails didn't resolve (router rebind protection) or isn't on this network: nothing to accept
+  const results = (await Promise.all(urls.map((u) => probe(u, deps.fetch, deps.probeTimeoutMs))))
+    .map((r, i): ProbeResult => (r === "maybe-cert" && isLanName(urls[i], suffix) ? "unreachable" : r));
   const { ok, cert } = decide(urls, results);
   if (!ok) return entry(cert ? "cert" : "hub", { certUrl: cert, fingerprint }, deps.now());
   const nowS = deps.now() / 1000;
@@ -271,6 +315,12 @@ if (typeof window !== "undefined") {
 const dismissKey = (server: string) => `direct.dismissed.${server}`;
 export function certOfferDismissed(server: string): boolean {
   try { return localStorage.getItem(dismissKey(server)) === "1"; } catch { return false; }
+}
+/** Does this server still ask the user to accept its self-signed certificate (state "cert", offer not dismissed)?
+ *  Servers with a trusted LAN certificate never do. For counts such as "2 servers need a one-time step". */
+export function certOfferPending(server: Pick<Server, "id" | "direct"> | string): boolean {
+  const id = typeof server === "string" ? server : server.id;
+  return directStateOf(server) === "cert" && !certOfferDismissed(id);
 }
 export function dismissCertOffer(server: string): void {
   try { localStorage.setItem(dismissKey(server), "1"); } catch { /* private mode: offered again next visit */ }

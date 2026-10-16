@@ -11,6 +11,9 @@ os.environ["HUB_COOKIE_SECURE"] = "0"
 os.environ["HUB_PUBLIC_URL"] = "http://testserver"
 os.environ["HUB_SOC_LOOPS"] = "0"   # no background escalation racing the tests: they call soc.escalate_once(now)
 os.environ["HUB_GEOCODE_BACKFILL"] = "0"   # no geocoder calls from tests (test_geocode drives geocode.backfill with a fake transport)
+# never Let's Encrypt from tests: an unreachable directory unless a test points at its own fake ACME server
+os.environ["HUB_LAN_ACME_DIRECTORY"] = "http://127.0.0.1:9/no-acme-in-tests"
+os.environ["HUB_LAN_CERTS"] = "0"
 os.environ["NVR_DATA_DIR"] = str(Path(TMP, "site"))   # for tests that import the site package
 # ...and the rest of the site's folders and its MediaMTX: never the live server's (recordings, runtime config, index)
 os.environ["NVR_RECORDINGS_DIR"] = str(Path(TMP, "site-recordings"))
