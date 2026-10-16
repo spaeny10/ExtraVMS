@@ -1,10 +1,11 @@
 """Live-view timing from the hub UI's players (frontend whepTiming.ts): how long a live tile takes to show its first
 frame, by route (through the hub's /s/<id> proxy, or Direct-on-LAN) and by stage of the WHEP connection.
 
-In memory only: the last KEEP samples per server, gone on restart; no database, nothing per user is kept (the user
-only counts toward a rate limit). A sample is one connection attempt that showed its first frame, or one that ended
+The timing is in memory only: the last KEEP samples per server, gone on restart; no database, nothing per user is
+kept in the samples (the user only counts toward a rate limit; the audit's viewing rows are viewing.py's). A sample is one connection attempt that showed its first frame, or one that ended
 without ever showing one. The "end" report of an attempt that did show a frame carries its viewing time, which isn't
-stored yet (the audit's viewing sessions will use it).
+kept here: the audit's viewing sessions add it up (viewing.py), and Direct-on-LAN views get their audit row from these
+reports alone.
 
 The beacon is a same-origin POST with the session cookie (navigator.sendBeacon, or fetch keepalive). The hub's CSRF
 check (auth.csrf_check: a foreign Origin is refused) applies to it as to any POST; on top of that the route takes only

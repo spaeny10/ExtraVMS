@@ -111,6 +111,8 @@ def test_hello_and_heartbeats_sync_the_registry(client, superuser):
             await _settle(ws)
             assert not [a for a in _open_alerts(s["id"]) if a["kind"] == "event_high"]
             evt = heard.get_nowait()
+            while evt["type"] == "server_status":   # the heartbeats above changed which cameras stream (test_stills.py)
+                evt = heard.get_nowait()
             assert evt["site_id"] == s["id"] and evt["location_name"] == "Gatehouse"
 
             # cam1 comes back and cam2 is enabled again

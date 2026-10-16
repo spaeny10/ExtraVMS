@@ -7,7 +7,7 @@ import { makeApi, type SiteApi } from "@site/api";
 import type { DashboardSource, SourceCamera, SourceSite } from "@site/dashboard/source";
 import type { CameraGroup } from "@site/dashboard/types";
 import { timelineHash } from "@site/nav";
-import { api, subscribeFleet, type Fleet, type Org, type Server } from "./api";
+import { api, lastPictureText, stillUrl, subscribeFleet, type Fleet, type Org, type Server } from "./api";
 import { directEntry } from "./direct";
 import { KIND_LABEL } from "./labels";
 import { siteHref } from "./nav";
@@ -85,10 +85,15 @@ export function liveLink(siteOf: SiteOf, server: string): string {
 
 export function makeHubSource(org: Org, fleet: Fleet | null, groups: CameraGroup[]): DashboardSource {
   const sites = fleetServers(fleet, org);
-  const cameras: SourceCamera[] = sites.flatMap((s) => (s.summary?.cameras ?? []).map((c) => ({
-    site: s.id, siteName: s.name, id: c.id, name: c.name, streamReady: !!c.stream_ready, online: s.online, ptz: !!c.ptz,
-    recordStream: c.record_stream,
-  })));
+  const cameras: SourceCamera[] = sites.flatMap((s) => (s.summary?.cameras ?? []).map((c) => {
+    const ts = s.stills?.[c.id];
+    return {
+      site: s.id, siteName: s.name, id: c.id, name: c.name, streamReady: !!c.stream_ready, online: s.online, ptz: !!c.ptz,
+      recordStream: c.record_stream,
+      // the hub's latest picture, for the tile while the server is offline
+      lastPicture: ts ? { url: stillUrl(s.id, c.id, ts)!, label: lastPictureText(ts) } : null,
+    };
+  }));
   const siteRows: SourceSite[] = sites.map((s) => ({
     id: s.id, name: s.name, location: s.location, online: s.online,
     cameras: s.summary?.cameras?.length ?? 0, camerasUp: (s.summary?.cameras ?? []).filter((c) => c.stream_ready).length,
@@ -102,7 +107,8 @@ export function makeHubSource(org: Org, fleet: Fleet | null, groups: CameraGroup
     siteApi,
     iceServers: (site) => siteApi(site).turn().then((t) => t.iceServers ?? []),
     events: (p) => api.fleetEvents(org.id, p),
-    subscribe: (onMessage) => subscribeFleet(org.id, onMessage),
+    // server_status is for the hub's own pages (useFleetRefresh); dashboard widgets know events and online/offline
+    subscribe: (onMessage) => subscribeFleet(org.id, (m) => { if (m.type !== "server_status") onMessage(m); }),
     eventHref: (e) => eventLink(siteOf, e),
     liveHref: (server) => liveLink(siteOf, server),
     port: 8189,

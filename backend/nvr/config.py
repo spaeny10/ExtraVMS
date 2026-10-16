@@ -178,6 +178,10 @@ class Settings(BaseSettings):
     # server presents it instead of a claim code and enrolls itself into the hub Site the token is bound to.
     # Ignored once enrolled; never logged.
     hub_enroll_token: str = ""
+    # NVR_HUB_STILL_INTERVAL: seconds between the latest pictures (640 px JPEG) of each enabled camera sent to the hub,
+    # which keeps only the newest per camera for its lists and offline tiles; an event opening sends one too. 0 = off.
+    # 5 min: about 3 GB a month for 6 cameras (~44 KB each), which a cellular site can carry; 60 s would be ~15 GB.
+    hub_still_interval: int = 300
     # NVR_INSTANCE_NAME: a display name shown on Settings -> System, e.g. "Main Street · Central" for a central
     # recording instance. No other effect.
     instance_name: str = ""

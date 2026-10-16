@@ -10,6 +10,7 @@ import { go, navigate, settingsHref, siteHref } from "./nav";
 import { SiteMap } from "./map/LazyMap";
 import { PIN_COLOUR, type PinStatus, cityState, hasPoint, pinColour, pinStatus } from "./place";
 import { ServerCard } from "./servers";
+import { useFleetRefresh } from "./fleetRefresh";
 
 export function SitesPage({ org, me }: { org: Org; me: Me }) {
   const [fleet, setFleet] = useState<Fleet | null>(null);
@@ -18,7 +19,8 @@ export function SitesPage({ org, me }: { org: Org; me: Me }) {
   const setMapView = (v: boolean) => { setMapViewState(v); try { localStorage.setItem("hub.sites.map", v ? "1" : "0"); } catch { /* private mode */ } };
   const [events, setEvents] = useState<{ site_id: string; start_ts: number }[]>([]);
   const load = useCallback(() => api.fleet(org.id, showRetired).then(setFleet).catch((e) => toast.error(e)), [org.id, showRetired]);
-  useEffect(() => { load(); const t = setInterval(load, 15000); return () => clearInterval(t); }, [load]);
+  useEffect(() => { load(); }, [load]);
+  useFleetRefresh(load, { orgs: [org.id] });   // a server coming, going or its cameras changing: pushed, not polled
   // "last event" fans out to every server, so it refreshes slower than the status cards; mapped to Sites at render
   // time so a server moved between Sites counts for its new one
   useEffect(() => {

@@ -6,8 +6,10 @@
  * PTZ and painted regions still go through the hub.
  *
  * Streams share the page budget (MAX_LIVE, as on dashboards): tiles past it show a still with a Play button.
- * A server that is offline (or goes offline mid-view, seen on the Site's 15 s poll) shows its cameras from the hub's
- * registry as dark "Server offline" tiles: frames come through the tunnel, so there is no still to show.
+ * A server that is offline (or goes offline mid-view: the hub pushes it, SitePage useFleetRefresh) shows its cameras from
+ * the hub's registry as "Server offline" tiles with the latest picture the hub keeps of each ("Last picture 14:05",
+ * hub stills.py), since the server's own stills come through the tunnel; dark when there is none. That hub picture is
+ * also each live tile's poster until the server's own still arrives.
  *
  * "Latest activity" mirrors the server UI's LiveView: event cards that open the event viewer in place (HubEventDetail),
  * filtered by a region painted on a tile (only that camera's events whose path crossed it), and tiles with an event
@@ -44,7 +46,8 @@ import { useResync } from "@site/resync";
 import type { TalkSpeaker } from "@site/talkdown";
 import { Icon, confirmDialog, promptDialog, swipeHandlers, toast, useIsPhone } from "@site/ui";
 import { useStill } from "@site/useStill";
-import { type Camera as RegistryCam, type Fleet, type Org, type Server, type Site, type SiteCameraGroup, type SiteLayout, api } from "./api";
+import { type Camera as RegistryCam, type Fleet, type Org, type Server, type Site, type SiteCameraGroup, type SiteLayout, api, lastPictureText,
+  stillUrl } from "./api";
 import { type EventRef, applyLiveEvent, cameraNameFor, mergePool, regionFeed, removeLiveEvent, siteRegionKeys, tagServer } from "./eventOpen";
 import { HubEventDetail } from "./HubEventDetail";
 import { canTalkDown } from "./access";
@@ -58,7 +61,9 @@ import { COLUMN_CHOICES, EMPTY_LAYOUT, type LayoutAction, type LiveFocus, type L
 /** live: full camera record from the server · loading: server online, cameras not fetched yet · unreachable: the
  *  server is online at the hub but its camera list failed (busy tunnel, restarting) · offline: the server is offline */
 type TileState = "live" | "loading" | "unreachable" | "offline";
-type Tile = { key: string; server: Server; id: string; name: string; state: TileState; cam: ServerCam | null; streamReady: boolean };
+type Tile = { key: string; server: Server; id: string; name: string; state: TileState; cam: ServerCam | null; streamReady: boolean;
+  /** when the hub's latest picture of the camera was taken (stillUrl), null = none */
+  stillTs: number | null };
 
 /** The hub source over just this Site's servers: the tiles' ICE cache and the fleet socket, as on a dashboard. */
 function siteFleet(org: Org, site: Site): Fleet {
@@ -85,8 +90,8 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
   const servers = useMemo(() => site.servers.filter((s) => !s.retired_at), [site.servers]);
   const multi = servers.length > 1;
   useDirectVersion(servers);  // re-render (feed snapshots, phone strip) when a server's media route changes
-  // the Site object is replaced on every 15 s poll; a source rebuilt each time would make EventsWidget refetch and
-  // re-open its socket. One source per Site, reading the latest servers through a ref, avoids that.
+  // the Site object is replaced on every refresh (SitePage useSite); a source rebuilt each time would make EventsWidget
+  // refetch and re-open its socket. One source per Site, reading the latest servers through a ref, avoids that.
   const siteRef = useRef(site);
   siteRef.current = site;
   const source = useMemo<DashboardSource>(() => {
@@ -116,13 +121,15 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
   const tiles = useMemo<Tile[]>(() => servers.flatMap((s): Tile[] => {
     const f = full[s.id];
     if (s.online && f && f !== "error") {
-      return f.map((c) => ({ key: camKey(s.id, c.id), server: s, id: c.id, name: c.name, state: "live", cam: c, streamReady: !!c.status?.stream_ready }));
+      return f.map((c) => ({ key: camKey(s.id, c.id), server: s, id: c.id, name: c.name, state: "live", cam: c, streamReady: !!c.status?.stream_ready,
+        stillTs: s.stills?.[c.id] ?? null }));
     }
     const state: TileState = !s.online ? "offline" : f === "error" ? "unreachable" : "loading";
     const reg = registry.filter((r) => r.server_id === s.id && r.enabled && !r.missing_since);
     // a server that just dropped may not be in the registry fetch yet: keep showing the cameras we already know
-    const known = reg.length ? reg.map((r) => ({ id: r.camera_id, name: r.name })) : Array.isArray(f) ? f.map((c) => ({ id: c.id, name: c.name })) : [];
-    return known.map((c) => ({ key: camKey(s.id, c.id), server: s, id: c.id, name: c.name, state, cam: null, streamReady: false }));
+    const known = reg.length ? reg.map((r) => ({ id: r.camera_id, name: r.name, still: r.still_ts })) : Array.isArray(f) ? f.map((c) => ({ id: c.id, name: c.name, still: null })) : [];
+    return known.map((c) => ({ key: camKey(s.id, c.id), server: s, id: c.id, name: c.name, state, cam: null, streamReady: false,
+      stillTs: s.stills?.[c.id] ?? c.still ?? null }));
   }), [servers, full, registry]);
 
   // the working arrangement (this browser, per Site); under "All cameras" the activity column follows the viewer's
@@ -168,7 +175,7 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
   const activity = useSiteActivity(site, servers, source, !hideActivity, showFeed, !isPhone && !feedAll ? expanded : null);
   const activeOf = (key: string) => activity.recent?.find((e) => camKey(e.site_id, e.camera_id) === key && (e.status === "open" || e.status === "pending"));
 
-  // talk-down: camera key -> its speakers, direct (the 15 s Site poll's heartbeat summaries) and through camera groups
+  // talk-down: camera key -> its speakers, direct (the Site's heartbeat summaries) and through camera groups
   const mayTalk = canTalkDown(org);
   const groups = useCameraGroups(site.id, mayTalk);
   const talk = useMemo(() => talkByCamera(servers, groups, siteApi), [servers, groups]);
@@ -685,15 +692,18 @@ function SiteTile({ t, source, multi, q, dispatch, activeOf, talkOf, extra, phon
   const mode = q(t.key);
   const pick = (m: QualityMode) => dispatch({ type: "quality", key: t.key, quality: m });
   const playing = t.state === "live" && (phone || budget.playing(t.key)) && ice !== undefined;
-  // every 10 s while paused, every 60 s after a still failed to load
+  // every 10 s while paused, every 60 s after a still failed to load (the server's own, through the tunnel)
   const still = useStill(!playing && t.state === "live");
+  // the hub's latest picture: the live tile's poster until the server's still arrives, and the picture of a tile whose
+  // server is offline or not answering
+  const hubStill = stillUrl(t.server.id, t.id, t.stillTs);
   const label = tileLabel(t.server.name, t.name, multi);
   const active = activeOf(t.key);
   const grip = drag && <span className="sync-grip" title="Drag to reorder" onPointerDown={drag.onGrip}>⠿</span>;
   return (
     <div ref={box} className={`site-live-cell ${drag?.dragging ? "dragging" : ""} ${drag?.dropTarget ? "drop-target" : ""}`} data-live-key={t.key}>
       {playing && t.cam ? (
-        <LiveTile c={t.cam} quality={mode} onQuality={pick} focused={focused} port={source.port} iceServers={ice} site={site} regionKey={t.key} phone={phone}
+        <LiveTile c={t.cam} quality={mode} onQuality={pick} focused={focused} port={source.port} iceServers={ice} site={site} regionKey={t.key} phone={phone} poster={hubStill}
           onSwipe={onSwipe} active={active} speakers={talkOf(t)} bar={(qc) => <>
             {grip}
             <span className={`dot ${t.streamReady ? "ok" : "bad"}`} title={t.streamReady ? "Recording" : "No stream"} />
@@ -708,7 +718,9 @@ function SiteTile({ t, source, multi, q, dispatch, activeOf, talkOf, extra, phon
           <div className="player dash-still">
             {t.state === "live"
               ? <img src={site.frameUrl(t.id, still.ts, 640)} alt="" onLoad={still.onLoad} onError={still.onError} style={still.failed ? { visibility: "hidden" } : undefined} />
-              : <div className="player-state">{STATE_TEXT[t.state]}</div>}
+              : hubStill && t.stillTs
+                ? <><img src={hubStill} alt="" /><div className="player-badge stale" role="status">{STATE_TEXT[t.state]} · {lastPictureText(t.stillTs)}</div></>
+                : <div className="player-state">{STATE_TEXT[t.state]}</div>}
             {t.state === "live" && still.failed && <div className="player-state">{NO_PICTURE_TEXT}</div>}
             {t.state === "live" && (
               <button className="dash-play" onClick={() => budget.force(t.key)} title="Play live (another tile pauses if the page is at its limit)"><Icon name="play" size={22} /></button>
@@ -757,7 +769,9 @@ function PhoneLive({ tiles, activity, picker, ...common }: TileCommon & { tiles:
           <div className="live-strip" role="tablist">
             {tiles.map((x, j) => (
               <button key={x.key} role="tab" aria-selected={j === i} className={`live-strip-item ${j === i ? "active" : ""}`} onClick={() => setIdx(j)}>
-                {x.state !== "live" ? <div className="site-live-strip-off">offline</div> : <>
+                {x.state !== "live" ? (x.stillTs
+                  ? <img className="site-live-strip-stale" src={stillUrl(x.server.id, x.id, x.stillTs)!} alt="" title={`Offline · ${lastPictureText(x.stillTs)}`} />
+                  : <div className="site-live-strip-off">offline</div>) : <>
                   {stillDue(tick, failedAt[x.key]) && (
                     <img src={`${mediaApi(x.server.id).frameUrl(x.id, Date.now() / 1000 - 15, 320)}&r=${tick}`} alt=""
                       onLoad={() => stillFailed(x.key, false)} onError={() => stillFailed(x.key, true)} style={x.key in failedAt ? { display: "none" } : undefined} />

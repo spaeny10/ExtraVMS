@@ -45,7 +45,7 @@ export { livePath };   // moved to cameraStreams.ts; kept here for existing impo
 /** One live camera: the WHEP player with the paint-a-region overlay and the tile bar; with `speakers` bound to the camera,
  *  the 🔊 Talk-down button and its panel over the picture (TalkdownPanel.tsx). `quality` is the tile's mode (Auto, or
  *  the viewer's SD / HD: LiveQuality.tsx); `bar` gets the tile's Auto · SD · HD control to place. */
-export function LiveTile({ c, quality, onQuality, focused = false, port, active, bar, phone, onSwipe, iceServers, site = api, regionKey, speakers }: {
+export function LiveTile({ c, quality, onQuality, focused = false, port, active, bar, phone, onSwipe, iceServers, site = api, regionKey, speakers, poster }: {
   c: Camera; quality: QualityMode; onQuality: (m: QualityMode) => void;
   /** the tile is the one expanded: Auto may pick HD whatever its width */
   focused?: boolean;
@@ -57,6 +57,8 @@ export function LiveTile({ c, quality, onQuality, focused = false, port, active,
   regionKey?: string;
   /** speakers bound to this camera that the viewer may talk through (none: no Talk-down button) */
   speakers?: TalkSpeaker[];
+  /** a picture to show until the live one starts, before the server's own still arrives (the hub's cached still) */
+  poster?: string | null;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const box = useRef<HTMLDivElement | null>(null);
@@ -86,7 +88,7 @@ export function LiveTile({ c, quality, onQuality, focused = false, port, active,
           // keyed by camera only: SD ↔ HD switches inside the player, the old picture staying until the new one shows
           <LivePlayer key={c.id} path={livePath(c, hd)} camera={c.id} port={port} showSize pathClass={hdPathClass}
             site={site === api ? undefined : site} onUnsupported={lq.onUnsupported} onStats={lq.onStats} onSwitchFailed={lq.onSwitchFailed}
-            videoRef={videoRef} iceServers={iceServers} muted={!sound} onAudio={setHasAudio}>
+            videoRef={videoRef} iceServers={iceServers} muted={!sound} onAudio={setHasAudio} posterFallback={poster}>
             {!ptzOn && <RegionOverlay cam={regionKey ?? c.id} videoRef={videoRef} editing={painting} onDone={() => setPainting(false)} camera={c} fallbackAspect={aspect} site={site} />}
             {ptz?.available && <PtzOverlay cam={c.id} videoRef={videoRef} active={ptzOn} onDone={() => setPtzOn(false)} fallbackAspect={aspect} site={site} />}
           </LivePlayer>

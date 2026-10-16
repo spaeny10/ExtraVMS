@@ -7,7 +7,9 @@ import type { CameraGroup, Dashboard, DashboardConfig, DashboardList, FleetEvent
 export type { CameraGroup, Dashboard, DashboardConfig, DashboardList, FleetEvent, FleetEvents, Widget, WidgetProps, DashboardWidgetType } from "@site/dashboard/types";
 /** /api/fleet/ws. `site_id` on the wire is the server id (the hub kept the name; see the tenancy plan's Naming). */
 type LocationTag = { location_id?: string | null; location_name?: string | null };
-export type FleetMessage = ({ type: "event"; event: NvrEvent; site_id: string; site_name: string } | { type: "event_removed"; id: number; site_id: string; site_name: string } | { type: "site_online" | "site_offline"; site_id: string; site_name: string }) & LocationTag;
+export type FleetMessage = ({ type: "event"; event: NvrEvent; site_id: string; site_name: string } | { type: "event_removed"; id: number; site_id: string; site_name: string } | { type: "site_online" | "site_offline"; site_id: string; site_name: string }
+  /** which of the server's cameras stream changed (hub agents.py; newer hubs) */
+  | { type: "server_status"; site_id: string; site_name: string; cameras_up: number; cameras_total: number }) & LocationTag;
 
 /**
  * `soc_role`: the hub-level SOC role (like is_super, not per customer); null/absent = not SOC staff.
@@ -56,6 +58,8 @@ export type Server = {
   direct?: DirectInfo;
   /** A central recording instance (hub hosts.py): its storage quota and what it uses, from its host's heartbeat. */
   central?: CentralUsage | null;
+  /** camera id -> when the latest picture the hub keeps of it was taken (hub stills.py; newer hubs): stillUrl */
+  stills?: Record<string, number>;
 };
 export type CentralUsage = { id: string; mode: CentralMode; quota_gb: number; used_gb: number | null; site_number: number | null; state: string };
 
@@ -186,6 +190,8 @@ export type PlaceBody = { lat?: number | null; lon?: number | null; address_part
 export type Camera = {
   server_id: string; server_name: string; camera_id: string; name: string; enabled: boolean; stream_ready: boolean; problems: string[] | null;
   bitrate_mbps: number | null; ptz: unknown; last_seen_at: number | null; missing_since: number | null; online: boolean; server_online?: boolean;
+  /** when the hub's latest picture of the camera was taken (stillUrl); null/absent = none */
+  still_ts?: number | null;
 };
 /** A camera's own web page opened from the hub (hub camweb.py): the session behind https://<host>/ in another tab. */
 export type CameraWebSession = {
@@ -499,19 +505,45 @@ export const api = {
   setProcedures: (loc: string, rows: Procedure[]) => req<Procedure[]>(`/api/locations/${loc}/procedures`, json("PUT", { procedures: rows })),
 };
 
-/** Live events from every site of the org (and site online/offline); reconnects with backoff. */
+type FleetSocket = { ws: WebSocket | null; up: boolean; timer?: ReturnType<typeof setTimeout>;
+  listeners: Set<{ onMessage: (m: FleetMessage) => void; onStatus?: (up: boolean) => void }> };
+const fleetSockets = new Map<string, FleetSocket>();
+
+/**
+ * Live events from every site of the org, site online/offline and server_status; reconnects with backoff. One socket
+ * per org for the whole page, however many components listen (a Site page refreshing on status and its Live tab's
+ * activity column); it closes with the last listener. A listener joining an open socket hears onStatus(true) at once.
+ */
 export function subscribeFleet(org: string, onMessage: (m: FleetMessage) => void, onStatus?: (up: boolean) => void): () => void {
-  let ws: WebSocket | null = null;
-  let closed = false;
-  let retry = 1000;
-  const connect = () => {
-    ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/fleet/ws?org=${encodeURIComponent(org)}`);
-    ws.onmessage = (m) => onMessage(JSON.parse(m.data));
-    ws.onopen = () => { retry = 1000; onStatus?.(true); };
-    ws.onclose = () => { onStatus?.(false); if (!closed) setTimeout(connect, (retry = Math.min(retry * 2, 15000))); };
+  let sock = fleetSockets.get(org);
+  if (!sock) {
+    const s: FleetSocket = { ws: null, up: false, listeners: new Set() };
+    let retry = 1000;
+    const connect = () => {
+      const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/fleet/ws?org=${encodeURIComponent(org)}`);
+      s.ws = ws;
+      ws.onmessage = (m) => { const msg = JSON.parse(m.data) as FleetMessage; s.listeners.forEach((l) => l.onMessage(msg)); };
+      ws.onopen = () => { retry = 1000; s.up = true; s.listeners.forEach((l) => l.onStatus?.(true)); };
+      ws.onclose = () => {
+        s.up = false;
+        s.listeners.forEach((l) => l.onStatus?.(false));
+        if (fleetSockets.get(org) === s) s.timer = setTimeout(connect, (retry = Math.min(retry * 2, 15000)));
+      };
+    };
+    fleetSockets.set(org, s);
+    connect();
+    sock = s;
+  }
+  const s = sock;
+  const l = { onMessage, onStatus };
+  s.listeners.add(l);
+  if (s.up) onStatus?.(true);
+  return () => {
+    if (!s.listeners.delete(l) || s.listeners.size) return;
+    fleetSockets.delete(org);
+    clearTimeout(s.timer);
+    s.ws?.close();
   };
-  connect();
-  return () => { closed = true; ws?.close(); };
 }
 
 // ---- a Site's Ask tab (hub/hub/site_ask.py)
@@ -618,6 +650,19 @@ export async function fleetAsk(org: string, message: string, onChunk: (c: Record
     let nl: number;
     while ((nl = buf.indexOf("\n")) >= 0) { const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1); if (line) onChunk(JSON.parse(line)); }
   }
+}
+
+/** The hub's latest picture of a camera (hub stills.py), or null when it keeps none. `ts` (when it was taken) is in the
+ *  URL, so a newer picture is a new URL and the browser's 30 s cache never shows an older one. */
+export function stillUrl(server: string, camera: string, ts: number | null | undefined): string | null {
+  return ts ? `/api/servers/${encodeURIComponent(server)}/cameras/${encodeURIComponent(camera)}/still?v=${Math.round(ts)}` : null;
+}
+
+/** "Last picture 14:05" on a tile showing the hub's still (with the day when it isn't today). */
+export function lastPictureText(ts: number, now = Date.now() / 1000): string {
+  const d = new Date(ts * 1000);
+  const hm = d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  return new Date(now * 1000).toDateString() === d.toDateString() ? `Last picture ${hm}` : `Last picture ${d.toLocaleDateString(undefined, { month: "short", day: "numeric" })} ${hm}`;
 }
 
 export const fmtTime = (ts: number) =>

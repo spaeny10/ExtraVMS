@@ -4,7 +4,7 @@
  * servers (SiteFind: search and filters), Ask one answer for the whole Site in private conversations (site/SiteAsk,
  * /sites/:id/ask/:thread), Alerts the customer-wide page scoped to this Site (AlertsPage's SiteAlerts).
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Icon, confirmDialog, promptDialog, toast } from "@site/ui";
 import { type Camera, type Me, type Org, type Server, type Site, type SiteCoverage, ago, api, fmtTime } from "./api";
 import { canCheckCoverage, canEditMonitoring, canOpenCameraWeb, isAdmin, isSocUser, ofTotal } from "./access";
@@ -28,6 +28,7 @@ import { SiteTimeline } from "./SiteTimeline";
 import { SiteFind } from "./SiteFind";
 import { SiteAsk } from "./site/SiteAsk";
 import { SiteAlerts } from "./AlertsPage";
+import { useFleetRefresh } from "./fleetRefresh";
 import { useTabStrip } from "./tabStrip";
 import { type PlaceForm, cityState, fmtCoord, hasPoint, placePatch } from "./place";
 
@@ -35,13 +36,18 @@ const TAB_LABEL: Record<SiteTab, [string, string]> = {
   live: ["Live", "live"], timeline: ["Timeline", "timeline"], find: ["Find", "find"], ask: ["Ask", "sparkle"], alerts: ["Alerts", "alert"], servers: ["Servers", "grid"], settings: ["Settings", "settings"],
 };
 
-/** The Site with its servers (retired ones included, marked), refreshed every 15 s like the Sites list. */
-export function useSite(siteId: string) {
+/** The Site with its servers (retired ones included, marked), read again when the hub says one of them came, went or
+ *  changed which cameras stream (useFleetRefresh, like the Sites list), and every 2 minutes. */
+export function useSite(siteId: string, orgId?: string) {
   const [site, setSite] = useState<Site | null>(null);
   const [error, setError] = useState<string | null>(null);
   const reload = useCallback(() => api.location(siteId, true).then((s) => { setSite(s); setError(null); })
     .catch((e: Error) => setError(e.message.startsWith("404") ? "This site doesn't exist (any more)." : e.message.startsWith("403") ? "You don't have access to this site." : e.message)), [siteId]);
-  useEffect(() => { setSite(null); reload(); const t = setInterval(reload, 15000); return () => clearInterval(t); }, [reload]);
+  useEffect(() => { setSite(null); reload(); }, [reload]);
+  const servers = useRef<Set<string>>(new Set());
+  servers.current = new Set(site?.servers.map((s) => s.id));
+  // this Site's servers, and any server joining it (a message names the server's Site)
+  useFleetRefresh(reload, { orgs: [site?.org_id ?? orgId ?? ""], filter: (m) => m.location_id === siteId || servers.current.has(m.site_id) });
   return { site, error, reload };
 }
 
@@ -66,7 +72,7 @@ function useCoverage(site: Site | null, me: Me) {
 export function SitePage({ org, me, siteId, tab, section = "general", serverId, threadId, onOrg }: {
   org: Org; me: Me; siteId: string; tab: string; section?: SettingsSection; serverId?: string; threadId?: string; onOrg: (id: string) => void;
 }) {
-  const { site, error, reload } = useSite(siteId);
+  const { site, error, reload } = useSite(siteId, org.id);
   const { cov, setCov } = useCoverage(site, me);
   // phones: the seven tabs scroll sideways, the current one kept in view (tabStrip.ts, hub.css .scroll-tabs)
   const strip = useTabStrip(tab);

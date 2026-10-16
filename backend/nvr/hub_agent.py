@@ -1,9 +1,9 @@
 """Site side of the fleet hub: one outbound WebSocket to the hub, nothing inbound.
 
 The agent keeps a connection to `settings.hub_url` (wss://hub.axiomvision.ai/agent). Over it the site sends a
-heartbeat every 30 s (summary.site_summary) and every live event message (the same payloads /api/ws gets),
-and the hub sends HTTP requests which are answered by calling this process's own ASGI app in-process:
-no loopback socket, streaming bodies (Ask NDJSON, fMP4 playback) flow chunk by chunk under the credit window
+heartbeat every 30 s (summary.site_summary), every live event message (the same payloads /api/ws gets) and each
+camera's latest picture (send_still, to hubs that ask for them), and the hub sends HTTP requests which are answered
+by calling this process's own ASGI app in-process: no loopback socket, streaming bodies (Ask NDJSON, fMP4 playback) flow chunk by chunk under the credit window
 of tunnelproto, and a hub-side abort cancels the request task.
 
 Enrollment: an unenrolled site connects with `Authorization: Claim <code>` and shows the code on Settings →
@@ -16,6 +16,7 @@ answers `enrolled` at once; a token the hub refuses (HTTP 401/403) falls back to
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import logging
 import random
@@ -123,16 +124,51 @@ def _fingerprint(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()[:16]
 
 
+# The hub keeps the latest picture of each camera (its lists, a live tile's poster, every tile of a server that is
+# offline): {"t": "still", "cam", "ts" (when the frame was taken), "jpeg" (base64)}, every settings.hub_still_interval
+# seconds per enabled camera, spread over the interval, and when an event opens (at most one per camera per
+# STILL_EVENT_GAP_S). Only to a hub whose welcome says "stills" (an older hub would drop them after the upload).
+STILL_WIDTH = 640
+STILL_MAX = 150 * 1024        # bytes of JPEG; the hub refuses more than 256 KB
+STILL_LAG_S = 1.0             # the recording trails live by about a second (1 s fMP4 parts)
+STILL_STALE_S = 120.0         # a newest frame older than this: the camera isn't recording now, nothing new to send
+STILL_EVENT_GAP_S = 10.0
+
+
+def still_jpeg(camera_id: str, now: float) -> tuple[bytes, float] | None:
+    """(jpeg, frame epoch) of the camera's newest recorded keyframe at STILL_WIDTH, re-encoded smaller when over
+    STILL_MAX; None when there is no recent frame. Blocking (PyAV decode): run it in an executor."""
+    from . import frames   # PyAV + OpenCV: not needed by the rest of the agent
+    got = frames.preview_jpeg(camera_id, now - STILL_LAG_S, STILL_WIDTH, False)
+    if not got:
+        return None
+    data, ts, _live = got
+    if now - ts > STILL_STALE_S:
+        return None
+    if len(data) > STILL_MAX:
+        import cv2
+        import numpy as np
+        img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+        for quality in (50, 35):
+            ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, quality]) if img is not None else (False, None)
+            if ok and len(buf) <= STILL_MAX:
+                return buf.tobytes(), ts
+        return None
+    return data, ts
+
+
 def new_claim() -> dict:
     code = "".join(secrets.choice(CLAIM_ALPHABET) for _ in range(8))
     return {"code": f"{code[:4]}-{code[4:]}", "expires": time.time() + CLAIM_TTL_S}
 
 
 class HubAgent:
-    def __init__(self, app, state, summary_fn: Callable[..., Any] | None = None) -> None:
+    def __init__(self, app, state, summary_fn: Callable[..., Any] | None = None,
+                 still_fn: Callable[[str, float], tuple[bytes, float] | None] | None = None) -> None:
         self.app = app
         self.state = state
         self.summary_fn = summary_fn
+        self.still_fn = still_fn or still_jpeg   # tests pass a fake
         self.connected = False
         # the device token and hub address as last read: while the database fails (2026-10-10, a dying SSD) the agent
         # still reconnects with them, so the heartbeat carrying storage_failing reaches the hub
@@ -153,6 +189,11 @@ class HubAgent:
         self._tasks: list[asyncio.Task] = []
         self._send_lock = asyncio.Lock()
         self._last_summary_at = time.time()
+        self._hub_stills = False                     # this hub's welcome asked for stills
+        self._still_sent: dict[str, float] = {}      # camera -> when its last still went (the event debounce)
+        self._still_ts: dict[str, float] = {}        # camera -> the frame time of that still (unchanged: not resent)
+        self._opened: dict[int, None] = {}           # event ids already seen open (insertion order, capped)
+        self._still_tasks: set[asyncio.Task] = set()
 
     # ---- status for the UI
     def hub_url(self) -> str:
@@ -316,9 +357,10 @@ class HubAgent:
                 self._ws = None
                 self._parked_code = None
                 self.connected = False
-                for t in self._tasks:
+                for t in [*self._tasks, *self._still_tasks]:
                     t.cancel()
                 self._tasks.clear()
+                self._still_tasks.clear()
                 for s in list(self.streams.values()):
                     await s.abort("disconnected")
                 self.streams.clear()
@@ -348,9 +390,11 @@ class HubAgent:
             self.site_id, self.org = m.get("site_id", self.site_id), m.get("org")
             self.location, self.location_id = m.get("location"), m.get("location_id")
             hb = float(m.get("heartbeat_s") or HEARTBEAT_S)
+            self._hub_stills = bool(m.get("stills"))
             self._tasks = [asyncio.create_task(self._heartbeat_loop(hb), name="hub-heartbeat"),
                            asyncio.create_task(self._event_loop(), name="hub-events"),
-                           asyncio.create_task(self._ping_loop(), name="hub-ping")]
+                           asyncio.create_task(self._ping_loop(), name="hub-ping"),
+                           asyncio.create_task(self._still_loop(), name="hub-stills")]
             if "vlm" in m:
                 self._apply_vlm(m["vlm"])
             try:
@@ -580,8 +624,69 @@ class HubAgent:
             while True:
                 msg = await q.get()
                 await self._send({"t": "event", "msg": msg})
+                self._still_on_event(msg)
         finally:
             subs.discard(q)
+
+    # ---- the latest picture of each camera, for the hub (see STILL_WIDTH above)
+    def _stills_on(self) -> bool:
+        return self._hub_stills and settings.hub_still_interval > 0
+
+    async def send_still(self, camera_id: str) -> bool:
+        """Encode and send one camera's still; False when skipped (no recent frame, unchanged, too big, an error).
+        A camera that fails is skipped quietly: the next one or the next round still goes."""
+        if not self._stills_on():
+            return False
+        now = time.time()
+        self._still_sent[camera_id] = now
+        try:
+            pipeline = getattr(self.state, "pipeline", None)
+            got = await asyncio.get_running_loop().run_in_executor(getattr(pipeline, "decode", None), self.still_fn, camera_id, now)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.debug("hub still %s failed: %s", camera_id, e)
+            return False
+        if not got:
+            return False
+        data, ts = got
+        if len(data) > STILL_MAX or self._still_ts.get(camera_id) == ts:
+            return False
+        await self._send({"t": "still", "cam": camera_id, "ts": round(ts, 3), "jpeg": base64.b64encode(data).decode()})
+        self._still_ts[camera_id] = ts
+        return True
+
+    async def _still_loop(self) -> None:
+        """Every enabled camera once per settings.hub_still_interval, spread over it (one burst of a dozen pictures
+        would hold up live video on a slow uplink)."""
+        while self._stills_on():
+            try:
+                cams = [c["id"] for c in db.cameras(enabled_only=True)]
+            except sqlite3.Error:
+                cams = []   # database failing: try again next round
+            every = float(settings.hub_still_interval)
+            if not cams:
+                await asyncio.sleep(every)
+                continue
+            for cid in cams:
+                await self.send_still(cid)
+                await asyncio.sleep(every / len(cams))
+
+    def _still_on_event(self, msg: dict) -> None:
+        """An event opened: a fresh still of its camera (unless one went in the last STILL_EVENT_GAP_S)."""
+        e = msg.get("event") if isinstance(msg, dict) and msg.get("type") == "event" else None
+        if not isinstance(e, dict) or e.get("status") != "open" or e.get("id") in self._opened or not self._stills_on():
+            return
+        self._opened[e.get("id")] = None
+        while len(self._opened) > 256:
+            self._opened.pop(next(iter(self._opened)))
+        cam = e.get("camera_id")
+        if not cam or time.time() - self._still_sent.get(cam, 0.0) < STILL_EVENT_GAP_S:
+            return
+        self._still_sent[cam] = time.time()   # before the task runs: a burst of events makes one still
+        task = asyncio.create_task(self.send_still(cam), name=f"hub-still-{cam}")
+        self._still_tasks.add(task)
+        task.add_done_callback(self._still_tasks.discard)
 
     async def _ping_loop(self) -> None:
         while True:

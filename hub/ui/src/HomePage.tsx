@@ -12,6 +12,7 @@ import { emptyDashboard, newWidgetId, type AnyWidget, type CameraGroup, type Das
 import { confirmDialog, promptDialog, toast } from "@site/ui";
 import { api, type Fleet, type Me, type Org } from "./api";
 import { makeHubSource } from "./hubSource";
+import { useFleetRefresh } from "./fleetRefresh";
 
 type Current = { id: string | null; name: string; shared: boolean; canEdit: boolean; config: DashboardConfig };
 
@@ -26,14 +27,13 @@ export function HomePage({ org, me }: { org: Org; me: Me }) {
   const admin = me.user.is_super || org.role === "admin" || org.role === "owner";
   const lastKey = `dashLast:${org.id}`;
 
-  // fleet snapshot (cameras, sites) and groups
+  // fleet snapshot (cameras, sites) and groups; the snapshot is read again when the hub says a server changed
+  const loadFleet = useCallback(() => api.fleet(org.id).then(setFleet).catch(() => {}), [org.id]);
   useEffect(() => {
-    const load = () => api.fleet(org.id).then(setFleet).catch(() => {});
-    load();
-    const t = setInterval(load, 15000);
+    loadFleet();
     api.groups(org.id).then(setGroups).catch(() => setGroups([]));
-    return () => clearInterval(t);
-  }, [org.id]);
+  }, [org.id, loadFleet]);
+  useFleetRefresh(loadFleet, { orgs: [org.id] });
   const source = useMemo(() => makeHubSource(org, fleet, groups), [org, fleet, groups]);
 
   const open = useCallback(async (id: string | null, l: DashboardList) => {

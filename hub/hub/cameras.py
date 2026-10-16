@@ -3,8 +3,9 @@
 Servers say which cameras they have in `hello` ({id, name}) and in every heartbeat summary (status fields:
 stream_ready, problems, bitrate, ptz...). sync() upserts those; a camera that drops out of a full list gets
 `missing_since` but is never deleted while its server exists (dashboards and groups keep pointing at it, and it
-comes back cleanly if re-added). Newer agents also send `disabled: [{id, name}]`; those rows get enabled=false and
-alerts ignore them. Everything is read with .get so old agents work unchanged.
+comes back cleanly if re-added); its latest picture (stills.py) is deleted then, and when it is disabled. Newer agents
+also send `disabled: [{id, name}]`; those rows get enabled=false and alerts ignore them. Everything is read with .get
+so old agents work unchanged.
 """
 from __future__ import annotations
 
@@ -12,7 +13,7 @@ import time
 
 import sqlalchemy as sa
 
-from . import db
+from . import db, stills
 
 STATUS = ("stream_ready", "problems", "bitrate_mbps", "ptz", "metadata", "onvif_events")
 
@@ -59,11 +60,14 @@ def sync(server: dict, cams: list | None, full: bool = True, disabled: list | No
             put(cid, d, True)
         for cid, d in off:
             put(cid, d, False)
+        # a disabled camera's last picture stays on its server only
+        stills.drop(c, server["id"], [cid for cid, _ in off if (have.get(cid) or {}).get("enabled") is not False])
         if full:
             seen = {cid for cid, _ in listed} | {cid for cid, _ in off}
             gone = [cid for cid, r in have.items() if cid not in seen and not r.get("missing_since")]
             if gone:
                 c.execute(sa.update(t).where(t.c.server_id == server["id"], t.c.camera_id.in_(gone)).values(missing_since=now))
+                stills.drop(c, server["id"], gone)   # removed from the server: its picture goes too
 
 
 def _q():
@@ -97,11 +101,15 @@ def relocate(server_id: str, location_id: str | None, conn=None) -> None:
 
 
 def delete_server(server_id: str, conn=None) -> None:
+    """The server's cameras and their stills."""
     stmt = sa.delete(db.cameras).where(db.cameras.c.server_id == server_id)
     if conn is not None:
         conn.execute(stmt)
+        stills.drop(conn, server_id)
     else:
-        db.run(stmt)
+        with db.engine().begin() as c:
+            c.execute(stmt)
+            stills.drop(c, server_id)
 
 
 def counts(server_ids: list[str], online_ids: set[str]) -> dict[str, tuple[int, int]]:

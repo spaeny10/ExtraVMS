@@ -77,7 +77,10 @@ export function CameraWidget({ widget: w, source, editing, big, onProps }: {
         <div className="player dash-still">
           {cam.online
             ? <img src={api!.frameUrl(camera, still.ts, 640)} alt="" onLoad={still.onLoad} onError={still.onError} style={still.failed ? { visibility: "hidden" } : undefined} />
-            : <div className="player-state">{cam.siteName} is offline</div>}
+            : cam.lastPicture
+              // the server is offline: the hub's latest picture of the camera, with when it was taken
+              ? <><img src={cam.lastPicture.url} alt="" /><div className="player-badge stale" role="status">{cam.siteName} is offline · {cam.lastPicture.label}</div></>
+              : <div className="player-state">{cam.siteName} is offline</div>}
           {cam.online && still.failed && <div className="player-state">{NO_PICTURE_TEXT}</div>}
           {cam.online && !editing && (
             <button className="dash-play" onClick={() => budget.force(w.id)} title="Play live (another tile pauses if the page is at its limit)"><Icon name="play" size={22} /></button>

@@ -82,6 +82,8 @@ Granting: there is no screen for this yet. A hub administrator runs `python -m h
 
 The hub checks the role on every request, including video and API calls it tunnels to a server: the server receives the signed user and role and applies the same table, and anything the hub does not recognize as read-only needs admin, so a new server feature is never accidentally open to viewers. Direct-on-LAN playback uses a short-lived token minted by the hub that carries the same role.
 
+The hub itself keeps the latest picture of each camera (replaced every 5 minutes and when an event opens, deleted with the camera or its server, or after 30 days), shown to whoever may watch that camera, also while its server is offline.
+
 Two paths do not go through the hub:
 
 - **The server's own web page on its LAN** (http://server:8080) has no sign-in. Anyone who can reach that address on the local network has full control of that server. Treat the LAN as the boundary, or keep that port off networks you do not trust.

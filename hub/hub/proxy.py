@@ -15,7 +15,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 
-from . import auth, central_cameras, db, security
+from . import auth, central_cameras, db, security, viewing
 from .agents import TooManyStreams, registry
 from .config import settings
 from .roles import allows, required_role
@@ -28,7 +28,8 @@ router = APIRouter()
 TALKDOWN_PLAY = re.compile(r"^/api/speakers/[^/]+/play$")
 TALKDOWN_DESCRIBE = re.compile(r"^/api/speakers/([^/]+)/describe$")
 TALKDOWN_ANSWER_MAX = 8192
-# a live view hanging up (WhepPlayer teardown): not audited, every tile closing would write a row (the offer already does)
+# a live view hanging up (WhepPlayer teardown): not audited, every tile closing would write a row (the offer already
+# does). The offers themselves (retries included) make one row per viewing session of a camera (viewing.py).
 WHEP_HANGUP = re.compile(r"^/api/whep/[^/]+/[^/]+$")
 TALKDOWN_TEXT_MAX = 300
 
@@ -118,7 +119,11 @@ async def proxy_api(site_id: str, path: str, request: Request):
                 await conn.send({"t": "credit", "id": s.id, "bytes": len(c)})
         finally:
             conn.finish(s)
-            if request.method != "GET" and not (request.method == "DELETE" and WHEP_HANGUP.match(api_path)):
+            offer = viewing.WHEP_OFFER.match(api_path) if request.method == "POST" else None
+            if offer:
+                viewing.offer(u, site, offer.group(1), request.url.path, status, request.client.host if request.client else None,
+                              round((time.time() - t0) * 1000))
+            elif request.method != "GET" and not (request.method == "DELETE" and WHEP_HANGUP.match(api_path)):
                 _audit(u, site, request, status, time.time() - t0, _talkdown(answer, status, conn) if answer is not None else described)
 
     return StreamingResponse(body_iter(), status_code=status, headers=resp_headers, media_type=resp_headers.get("content-type"))

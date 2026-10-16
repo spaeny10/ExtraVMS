@@ -73,7 +73,7 @@ export function IncidentView({ me, detail, incident, now, actions, cmd, popout =
     if (c.type === "goDetails" && sel) setDrawer(sel);
   });
 
-  const { site } = useSite(incident.location_id);
+  const { site } = useSite(incident.location_id, incident.org_id);
   useDirectVersion(site?.servers ?? []);  // the thumbnails' media route follows each server's Direct-on-LAN state
   const org = incidentOrg(me, incident);
   // the incident's cameras first: from its events once the detail is in, from the queue row's camera list until then

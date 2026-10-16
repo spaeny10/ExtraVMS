@@ -8,6 +8,7 @@ Glossary (code name -> what the UI calls it):
                   every `site_id` in tables, the agent protocol (welcome.site_id, x-hub-site), dashboards and camera
                   group JSON means a server id.
   cameras         Camera: the hub's registry of (server_id, camera_id), synced from hello/heartbeats (cameras.py).
+  camera_stills   The latest picture of each registry camera, sent by its server (stills.py).
   incidents       SOC incident: one or more events at a monitored Site that the SOC handles (soc.py);
                   location_contacts and location_procedures are a Site's call list and SOP checklists.
 Access: a membership's role plus `all_sites` (sees every Site of the customer) or, when false, only the Sites in
@@ -92,6 +93,12 @@ cameras = Table("cameras", metadata,
                 Column("first_seen_at", Float, nullable=False), Column("last_seen_at", Float, nullable=True),
                 Column("missing_since", Float, nullable=True),   # gone from the server's list (rows are never deleted while the server exists)
                 Column("source", String(16), nullable=True))     # hello | heartbeat | summary (backfill)
+# the latest picture of each camera (stills.py): one row per registry camera, replaced every minute or so by its
+# server's agent, deleted with the camera (gone from its server's list, or disabled) and with the server
+camera_stills = Table("camera_stills", metadata,
+                      Column("server_id", String(24), primary_key=True), Column("camera_id", String(64), primary_key=True),
+                      Column("ts", Float, nullable=False),   # when the frame was taken (the server's clock)
+                      Column("jpeg", sa.LargeBinary, nullable=False), Column("received_at", Float, nullable=False))
 claims = Table("claims", metadata,
                Column("code", String(16), primary_key=True), Column("hint", sa.JSON, nullable=True),
                Column("agent_ip", String(64), nullable=True), Column("first_seen_at", Float, nullable=False),

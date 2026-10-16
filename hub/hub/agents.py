@@ -6,6 +6,8 @@ with `Authorization: Enroll <token>`: a valid single-use token makes it a server
 `enrolled` frame); an unknown, used or expired one is refused at the handshake (403). An enrolled site connects with
 `Authorization: Bearer <device token>` and gets `welcome`. Requests from the proxy become `req` streams
 (odd ids); the site answers `res` + binary chunks + `end`, paced by the tunnelproto credit window.
+A heartbeat whose cameras stream differently from the last one is pushed to /api/fleet/ws as `server_status` (the
+pages refetch on it instead of polling); `still` frames carry each camera's latest picture (stills.py).
 """
 from __future__ import annotations
 
@@ -18,10 +20,12 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from tunnelproto import CHUNK, WINDOW, Stream, chunk, decode, encode, split
 
-from . import alerts, cameras, central_cameras, db, hosts, soc, talkdown_voice, turn
+from . import alerts, cameras, central_cameras, db, hosts, soc, stills, talkdown_voice, turn
 from .config import settings
 
 log = logging.getLogger("hub.agents")
+
+STILL_MIN_GAP_S = 5.0   # a camera's stills are stored at most this often (the agent sends one every 5 min, plus events)
 
 
 class AgentConn:
@@ -41,6 +45,7 @@ class AgentConn:
         self.subscribers: set[asyncio.Queue] = set()   # browsers on /s/{id}/api/ws
         self.closed = asyncio.Event()
         self.location: dict | None = _location_of(site)   # the Site (locations row) this server belongs to
+        self.still_at: dict[str, float] = {}               # camera -> when its last still was taken in
 
     def tag(self) -> dict:
         """What org-wide messages say about where they came from: the server and its Site."""
@@ -208,6 +213,32 @@ def _soc(conn: "AgentConn", fn, arg) -> None:
         log.exception("soc feed for %s", conn.site_id)
 
 
+def camera_status(summary: dict | None) -> tuple[frozenset, int] | None:
+    """(ids of the cameras streaming, cameras listed) from a heartbeat summary; None when it lists no cameras."""
+    cams = (summary or {}).get("cameras")
+    if not isinstance(cams, list):
+        return None
+    up = frozenset(str(c.get("id")) for c in cams if isinstance(c, dict) and c.get("stream_ready"))
+    return up, sum(1 for c in cams if isinstance(c, dict))
+
+
+def _still(conn: "AgentConn", frame: dict) -> None:
+    """A camera's latest picture (stills.py); a refused one is dropped, trouble never breaks the tunnel."""
+    cam = frame.get("cam")
+    now = time.time()
+    if not isinstance(cam, str) or now - conn.still_at.get(cam, 0.0) < STILL_MIN_GAP_S:
+        return
+    try:
+        if stills.accept(conn.site_id, frame):
+            conn.still_at[cam] = now
+            if len(conn.still_at) > 1000:   # ids the server made up: a bounded memory, not a map of every one
+                conn.still_at.clear()
+        else:
+            log.debug("site %s: still for %r refused", conn.site_id, cam)
+    except Exception:
+        log.exception("still from %s", conn.site_id)
+
+
 def _talkdown_voice(conn: "AgentConn") -> None:
     """The server reports another talk-down voice than its Site's: push the Site's (talkdown_voice.py); never breaks the tunnel."""
     try:
@@ -327,6 +358,7 @@ class AgentRegistry:
                     # data: keep the last known cameras for the site card and camera alerts, with its problems on top
                     summary = {**prev, **summary, "minimal": True}
                 conn.summary = summary
+                before, after = camera_status(prev), camera_status(summary)
                 if conn.site:
                     skew = float(frame.get("now") or time.time()) - time.time()
                     db.run(sa.update(db.sites).where(db.sites.c.id == conn.site_id).values(
@@ -339,6 +371,10 @@ class AgentRegistry:
                     _soc(conn, soc.on_attention, conn.summary.get("attention"))
                     _talkdown_voice(conn)
                     await self._refresh_turn(conn)
+                    if after is not None and after != before:
+                        # site and server pages refetch on this instead of polling (hub/ui useFleetRefresh)
+                        self.broadcast_org(conn.site["org_id"], {"type": "server_status", "cameras_up": len(after[0]),
+                                                                 "cameras_total": after[1], **conn.tag()})
             elif t == "event":
                 msg = frame.get("msg") or {}
                 conn.broadcast(msg)
@@ -346,6 +382,9 @@ class AgentRegistry:
                     alerts.on_event(conn.site, msg)
                     _soc(conn, soc.on_event, msg)
                     self.broadcast_org(conn.site["org_id"], {**msg, **conn.tag()})
+            elif t == "still":
+                if conn.site:
+                    _still(conn, frame)
             elif t == "res":
                 s = conn.streams.get(frame["id"])
                 if s is not None:
@@ -400,6 +439,7 @@ class AgentRegistry:
                    "location_id": (conn.location or {}).get("id"),  # for the server UI's link back to /sites/<id>/servers
                    "heartbeat_s": settings.heartbeat_s, "now": time.time(), "max_streams": settings.max_streams_per_site,
                    "turn": cred,
+                   "stills": True,   # send each camera's latest picture (stills.py); older agents ignore it
                    "vlm": self.vlm_config(org, conn.token, conn.site_id)}
         await conn.send(welcome)
         alerts.close(conn.site, "offline")

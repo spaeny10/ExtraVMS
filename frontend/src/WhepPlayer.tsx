@@ -47,7 +47,7 @@ function usePoster(site: SiteApi, camera: string | null, box: React.RefObject<HT
   return { url: failed ? null : url, loaded: loaded && !failed, onLoad: () => setLoaded(true), onError: () => setFailed(true) };
 }
 
-export function WhepPlayer({ path, port, className, onUnsupported, showSize = false, videoRef, children, iceServers, onFallback, base, site: given, muted = true, onAudio, onState, camera, poster = true, onFirstFrame, onStats }: {
+export function WhepPlayer({ path, port, className, onUnsupported, showSize = false, videoRef, children, iceServers, onFallback, base, site: given, muted = true, onAudio, onState, camera, poster = true, posterFallback, onFirstFrame, onStats }: {
   path: string; port: number; className?: string; onUnsupported?: () => void; showSize?: boolean;
   /** the attempt's first video frame was presented: how long each stage took (whepTiming.ts) */
   onFirstFrame?: (timing: WhepTimingSnapshot) => void;
@@ -57,6 +57,9 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
   camera?: string;
   /** show the camera's latest still while connecting (default on) */
   poster?: boolean;
+  /** a picture to show under that still until the first frame, e.g. the fleet hub's cached one (it needs no tunnel, so
+   *  it is there before the server's own still arrives); only while `poster` is on */
+  posterFallback?: string | null;
   /** told whenever the connection state changes (the Timeline's live tiles report it as their status) */
   onState?: (s: WhepState) => void;
   /** sound off (default); unmuting must follow a click, browsers block autoplaying audio */
@@ -105,6 +108,10 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
   useEffect(() => { setFrame(false); setStillGone(false); }, [path]);
   const showStill = Boolean(still.url) && !stillGone && !(frame && !still.loaded);
   const stillVisible = showStill && still.loaded && !frame;
+  const [underStill, setUnderStill] = useState<"loading" | "loaded" | "failed">("loading");
+  useEffect(() => { setUnderStill("loading"); }, [posterFallback]);
+  const underShown = poster && Boolean(posterFallback) && underStill !== "failed" && !frame;
+  const pictureUp = stillVisible || (underShown && underStill === "loaded");
 
   useEffect(() => {
     let pc: RTCPeerConnection | null = null;
@@ -300,12 +307,17 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
           }}
         />
       </ZoomFrame>
-      {/* the still shows only until the first frame, while the picture is still at 1x: it needs no zoom layer */}
+      {/* the still shows only until the first frame, while the picture is still at 1x: it needs no zoom layer; the
+          fallback lies under it (the server's own still fades in over it) and goes with the first frame too */}
+      {underShown && (
+        <img className="player-poster shown" src={posterFallback!} alt="" draggable={false}
+          onLoad={() => setUnderStill("loaded")} onError={() => setUnderStill("failed")} />
+      )}
       {showStill && (
         <img className={`player-poster ${stillVisible ? "shown" : ""}`} src={still.url!} alt="" draggable={false}
           onLoad={still.onLoad} onError={still.onError} onTransitionEnd={() => { if (frame) setStillGone(true); }} />
       )}
-      {stillVisible
+      {pictureUp
         ? <div className="player-badge" role="status">{state === "error" ? "Reconnecting…" : "Connecting…"}</div>
         : state !== "playing" && <div className="player-state">{state === "connecting" ? "Connecting…" : "Reconnecting…"}</div>}
       {showSize && size && state === "playing" && <div className="player-size">{size}</div>}

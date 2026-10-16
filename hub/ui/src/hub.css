@@ -162,6 +162,8 @@
 .site-live-phone-pick select { flex: 1; min-width: 0; }
 .site-live-down .player { background: #111; }
 .site-live-strip-off { aspect-ratio: 16 / 9; display: grid; place-items: center; background: #111; color: #aaa; font-size: 11px; }
+/* a phone strip thumbnail of an offline server's camera: the hub's last picture, dimmed */
+.site-live-strip-stale { filter: grayscale(.6) brightness(.75); }
 /* Sites list: the customer-wide Find and Alerts as small ghost buttons (links, so middle-click opens a tab) */
 .sites-links { gap: 6px; margin: -4px 0 12px; }
 .link-btn { display: inline-block; font-size: 12px; padding: 3px 9px; border: 1px solid var(--border); border-radius: 8px; color: var(--text); text-decoration: none; }

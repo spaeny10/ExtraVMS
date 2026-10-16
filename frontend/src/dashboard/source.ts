@@ -12,7 +12,9 @@ export { camKey, splitKey } from "../playback";
 export type SourceCamera = { site: string; siteName: string; id: string; name: string; streamReady: boolean; online: boolean; ptz?: boolean;
   server?: string; serverName?: string; siteId?: string; locationName?: string;
   /** which stream the camera records ("sub": HD live is the on-demand <id>_hd path, Views.tsx livePath); absent = main */
-  recordStream?: "main" | "sub" };
+  recordStream?: "main" | "sub";
+  /** the fleet hub's latest picture of the camera ("Last picture 14:05"), shown while its server is offline */
+  lastPicture?: { url: string; label: string } | null };
 /** A physical Site and the servers in it, for grouping pickers (Site → Server → cameras). */
 export type SourceSiteGroup = { id: string; name: string; servers: string[] };
 export type SourceSite = { id: string; name: string; location?: string; online: boolean; camerasUp: number; cameras: number; diskFreeGb?: number | null; openAlerts: number; version?: string | null;

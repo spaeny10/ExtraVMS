@@ -40,6 +40,8 @@ type LivePlayerProps = {
   /** the camera's server client; wins over `base` (the hub's direct client carries a token a bare base can't) */
   site?: SiteApi;
   muted?: boolean; onAudio?: (has: boolean) => void;
+  /** WhepPlayer's posterFallback: a picture shown while the stream on screen first connects (the hub's cached still) */
+  posterFallback?: string | null;
   /** passed to the WebRTC player (WhepPlayer): the first frame's timing, and link quality every 2 s of the stream on screen */
   onFirstFrame?: (timing: WhepTimingSnapshot) => void; onStats?: (sample: WhepStatsSample) => void;
   /** a switch to this path failed: the old path still plays */
@@ -97,7 +99,7 @@ export function LivePlayer({ path, className, pathClass, videoRef, children, mut
 /** One path's picture: WebRTC, else the recording, else "No recording" (see LivePlayer). A stream connecting `hidden`
  *  for a switch never falls back: it fails instead (onFail), and the stream on screen stays. */
 function LiveStream({ path, camera, port, className, onUnsupported, showSize, iceServers, videoRef, children, base, site, muted, onAudio, onState,
-  onFirstFrame, onStats, hidden, poster, onFail }: Omit<LivePlayerProps, "pathClass" | "onSwitchFailed"> & { hidden: boolean; poster: boolean; onFail: () => void }) {
+  onFirstFrame, onStats, hidden, poster, posterFallback, onFail }: Omit<LivePlayerProps, "pathClass" | "onSwitchFailed"> & { hidden: boolean; poster: boolean; onFail: () => void }) {
   // webrtc → (repeated failures) → recording → (its chunk is a 404) → none → (30 s) → webrtc
   const [mode, setMode] = useState<"webrtc" | "recording" | "none">("webrtc");
   useEffect(() => {
@@ -109,6 +111,7 @@ function LiveStream({ path, camera, port, className, onUnsupported, showSize, ic
   if (mode === "webrtc") {
     // camera: the still shown while connecting comes from this camera's recording
     return <WhepPlayer path={path} camera={camera} port={port} className={className} showSize={showSize && !hidden} base={base} site={site} poster={poster}
+      posterFallback={poster ? posterFallback : undefined}
       onUnsupported={hidden || onUnsupported ? () => { if (hidden) onFail(); onUnsupported?.(path); } : undefined}
       iceServers={iceServers} videoRef={videoRef} muted={muted} onAudio={onAudio} onState={onState} onFirstFrame={onFirstFrame} onStats={onStats}
       onFallback={() => { if (hidden) onFail(); else { onState?.("playing"); setMode("recording"); } }}>{children}</WhepPlayer>;

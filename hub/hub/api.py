@@ -21,8 +21,8 @@ from . import fleet as fleet_mod
 from . import find as find_mod
 from . import camera_groups as groups_mod
 from . import layouts as layouts_mod
-from . import camweb, site_ask, talkdown_voice
-from . import central_cameras, coverage, geocode, hosts, security, soc, soc_reports, telemetry
+from . import camweb, site_ask, talkdown_voice, viewing
+from . import central_cameras, coverage, geocode, hosts, security, soc, soc_reports, stills, telemetry
 from fastapi.responses import StreamingResponse
 from .agents import registry
 from .config import settings
@@ -69,6 +69,7 @@ async def _sweeper() -> None:
             db.run(sa.delete(db.sessions).where(db.sessions.c.expires_at < time.time()))
             db.run(sa.delete(db.claims).where(db.claims.c.expires_at < time.time() - 3600))
             camweb.sweep()   # camera web pages past their idle or hard limit
+            stills.purge_old()   # last pictures older than 30 days
         except Exception:
             log.exception("sweeper")
         await asyncio.sleep(30)
@@ -761,6 +762,7 @@ def _site_card(s: dict, ctx: dict | None = None) -> dict:
             "location_id": s.get("location_id"), "location_name": ctx["locations"].get(s.get("location_id")),
             "cameras_total": cams_total, "cameras_online": cams_online,
             "central": ctx.get("central", {}).get(s["id"]),   # a central recording instance: {mode, quota_gb, used_gb, ...}
+            "stills": ctx.get("stills", {}).get(s["id"], {}),   # camera -> ts of its latest picture kept here (stills.py)
             "direct": direct.info(summ)}   # Direct-on-LAN: lets the UI know whether to ask for a token at all
 
 
@@ -773,7 +775,8 @@ def _card_ctx(servers: list[dict]) -> dict:
     online = {s["id"] for s in servers if s["online"] and s["id"] in registry.by_site}
     loc_ids = list({s.get("location_id") for s in servers if s.get("location_id")})
     names = {r["id"]: r["name"] for r in db.rows(sa.select(db.locations.c.id, db.locations.c.name).where(db.locations.c.id.in_(loc_ids)))} if loc_ids else {}
-    return {"alerts": alerts_by, "cameras": cameras.counts(ids, online), "locations": names, "central": hosts.by_server(ids)}
+    return {"alerts": alerts_by, "cameras": cameras.counts(ids, online), "locations": names, "central": hosts.by_server(ids),
+            "stills": stills.times(ids)}
 
 
 def _cards(servers: list[dict]) -> list[dict]:
@@ -1024,9 +1027,11 @@ async def delete_location(location_id: str, move_to: str | None = None, u: dict 
 @app.get("/api/locations/{location_id}/cameras")
 async def location_cameras(location_id: str, u: dict = Depends(user)):
     """The registry's cameras for this Site's servers: `online` = stream ready on an online server; missing and
-    disabled cameras are included (missing_since / enabled say so)."""
+    disabled cameras are included (missing_since / enabled say so). `still_ts`: when the latest picture the hub keeps
+    of the camera was taken (GET /api/servers/{sid}/cameras/{cid}/still), null = none."""
     loc, _ = auth.location_access(u, location_id)
     servers = {s["id"]: s for s in auth.visible_sites(u, loc["org_id"]) if s.get("location_id") == location_id}
+    kept = stills.times(list(servers))
     out = []
     for cam in cameras.for_location(location_id):
         srv = servers.get(cam["server_id"])
@@ -1034,8 +1039,25 @@ async def location_cameras(location_id: str, u: dict = Depends(user)):
             continue   # retired server (or a stale denormalized row)
         up = bool(srv["online"]) and srv["id"] in registry.by_site
         out.append({**cam, "server_name": srv["name"], "server_online": up,
-                    "online": up and bool(cam["stream_ready"]) and bool(cam["enabled"]) and not cam["missing_since"]})
+                    "online": up and bool(cam["stream_ready"]) and bool(cam["enabled"]) and not cam["missing_since"],
+                    "still_ts": kept.get(srv["id"], {}).get(cam["camera_id"])})
     return out
+
+
+@app.get("/api/servers/{server_id}/cameras/{camera_id}/still")
+async def camera_still(server_id: str, camera_id: str, request: Request, u: dict = Depends(user)):
+    """The latest picture the hub keeps of a camera (stills.py), for whoever may view the camera (a 403/404 as for
+    the camera otherwise; a 404 when there is none yet). Revalidated with its ETag (the frame's time) after 30 s."""
+    auth.camera_access(u, server_id, camera_id)
+    row = stills.get(server_id, camera_id)
+    if row is None:
+        raise HTTPException(404, "no picture of this camera yet")
+    tag = stills.etag(row["ts"])
+    headers = {"Cache-Control": "private, max-age=30", "ETag": tag, "X-Frame-Time": f"{row['ts']:.3f}"}
+    match = {t.strip().removeprefix("W/") for t in (request.headers.get("if-none-match") or "").split(",")}
+    if tag in match or "*" in match:
+        return Response(status_code=304, headers=headers)
+    return Response(row["jpeg"], media_type="image/jpeg", headers=headers)
 
 
 def _location_scope(u: dict, org_id: str, location_id: str | None) -> set[str] | None:
@@ -2333,7 +2355,7 @@ async def fleet_events(org: str, sites: str | None = None, cameras: str | None =
 @app.websocket("/api/fleet/ws")
 async def fleet_ws(ws: WebSocket, org: str):
     """Every event from every site of the org the viewer may see: {type:"event", event, site_id, site_name},
-    plus site_online / site_offline."""
+    plus site_online / site_offline and server_status (a server's cameras_up / cameras_total changed)."""
     u = auth.current_user(ws)  # type: ignore[arg-type]
     if not u or not auth.role_in(u, org):
         await ws.close(code=4401 if not u else 4403)
@@ -2400,8 +2422,9 @@ async def telemetry_live(request: Request, u: dict = Depends(user)):
         raise HTTPException(422, str(e).splitlines()[0][:200])
     if telemetry.rate_limited(u["id"]):
         raise HTTPException(429, "too many live reports; try again shortly")
-    auth.site_access(u, body.server)
+    site, _ = auth.site_access(u, body.server)
     telemetry.record(body)
+    viewing.beacon(u, site, body, request.client.host if request.client else None)   # the audit's viewing sessions
     return Response(status_code=204)
 
 

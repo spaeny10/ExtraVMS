@@ -8,6 +8,7 @@ import { toast } from "@site/ui";
 import { type HubSitesOrg, api } from "./api";
 import { groupByCustomer } from "./hubAdmin";
 import { ServerCard } from "./servers";
+import { useFleetRefresh } from "./fleetRefresh";
 import { SiteCard } from "./SitesPage";
 
 export function AllSitesPage({ onOpenCustomer }: { onOpenCustomer: (orgId: string) => void }) {
@@ -16,7 +17,8 @@ export function AllSitesPage({ onOpenCustomer }: { onOpenCustomer: (orgId: strin
   const [showRetired, setShowRetired] = useState(false);
   const [q, setQ] = useState("");
   const load = useCallback(() => api.hubSites(showRetired).then((r) => { setRows(r); setNow(Date.now() / 1000); }).catch((e) => toast.error(e)), [showRetired]);
-  useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, [load]);
+  useEffect(() => { load(); }, [load]);
+  useFleetRefresh(load, { orgs: rows?.map((r) => r.org.id) ?? [] });   // one fleet socket per customer
   const groups = useMemo(() => groupByCustomer(rows ?? [], q), [rows, q]);
   if (!rows) return null;
   const online = groups.reduce((n, g) => n + g.servers_online, 0);
