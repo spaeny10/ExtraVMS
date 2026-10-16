@@ -1,5 +1,6 @@
 /**
- * One Site: header with its rollup, tabs Live · Timeline · Find · Ask · Alerts · Servers · Settings, and the server panel
+ * One Site: a header line (Customer › Site, the Map button, the health pill, ⋮), one row with the tabs Live · Timeline ·
+ * Find · Ask · Alerts · Servers · Settings and, on the right, the current tab's toolbar (Live's: tabTools.ts), and the server panel
  * at /sites/:id/servers/:serverId. Live is the combined grid (SiteLive), Find the server UI's Find over the Site's
  * servers (SiteFind: search and filters), Ask one answer for the whole Site in private conversations (site/SiteAsk,
  * /sites/:id/ask/:thread), Alerts the customer-wide page scoped to this Site (AlertsPage's SiteAlerts).
@@ -7,14 +8,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Icon, confirmDialog, promptDialog, toast } from "@site/ui";
 import { type Camera, type Me, type Org, type Server, type Site, type SiteCoverage, ago, api, fmtTime } from "./api";
-import { canCheckCoverage, canEditMonitoring, canOpenCameraWeb, isAdmin, isSocUser, ofTotal } from "./access";
+import { canCheckCoverage, canEditMonitoring, canOpenCameraWeb, isAdmin, isSocUser } from "./access";
 import { Breadcrumbs } from "./Breadcrumbs";
-import { DirectChips } from "./DirectChip";
 import { SETTINGS_SECTIONS, SITE_TABS, type SettingsSection, type SiteTab, consoleHref, go, navigate, serverHref, settingsHref, siteHref } from "./nav";
 import { AddressBox } from "./site/AddressBox";
 import { CentralDetails, CentralPlaceholder, CentralStats, useCentral } from "./site/CentralCard";
-import { COVERAGE_ANCHOR, CoverageCard } from "./site/CoverageCard";
-import { bestCarrier, chipText } from "./coverage";
+import { CoverageCard } from "./site/CoverageCard";
+import { HealthPill, MapButton } from "./site/HealthPill";
 import { datacenterLine, instanceFor, siteBandwidth, unenrolledInstances, uploadLine } from "./central";
 import { CamerasBox } from "./site/CamerasBox";
 import { CameraWebCard } from "./site/CameraWebCard";
@@ -30,7 +30,9 @@ import { SiteAsk } from "./site/SiteAsk";
 import { SiteAlerts } from "./AlertsPage";
 import { useFleetRefresh } from "./fleetRefresh";
 import { useTabStrip } from "./tabStrip";
-import { type PlaceForm, cityState, fmtCoord, hasPoint, placePatch } from "./place";
+import { type PlaceForm, placePatch } from "./place";
+import { alertBadge } from "./siteHealth";
+import { TabToolsSlot } from "./tabTools";
 
 const TAB_LABEL: Record<SiteTab, [string, string]> = {
   live: ["Live", "live"], timeline: ["Timeline", "timeline"], find: ["Find", "find"], ask: ["Ask", "sparkle"], alerts: ["Alerts", "alert"], servers: ["Servers", "grid"], settings: ["Settings", "settings"],
@@ -53,7 +55,7 @@ export function useSite(siteId: string, orgId?: string) {
 
 /**
  * The Site's cellular coverage (hub coverage.py) when this user sees coverage at all (me.coverage.visible; trial = hub
- * administrators only). Loaded once per Site page and again when the Site's point changes; shared by the header chip and
+ * administrators only). Loaded once per Site page and again when the Site's point changes; shared by the health pill and
  * Settings › General (the coverage card under the map, and the map's rings).
  */
 function useCoverage(site: Site | null, me: Me) {
@@ -76,6 +78,8 @@ export function SitePage({ org, me, siteId, tab, section = "general", serverId, 
   const { cov, setCov } = useCoverage(site, me);
   // phones: the seven tabs scroll sideways, the current one kept in view (tabStrip.ts, hub.css .scroll-tabs)
   const strip = useTabStrip(tab);
+  // the tab row's right side, where the Live tab puts its toolbar (a callback ref: the row renders after loading)
+  const [tools, setTools] = useState<HTMLDivElement | null>(null);
   // a link into another customer's Site switches the header's Customer picker to it
   useEffect(() => { if (site && site.org_id !== org.id && me.orgs.some((o) => o.id === site.org_id)) onOrg(site.org_id); }, [site, org.id, me.orgs, onOrg]);
   if (error) return <p className="muted">{error} <a href="/sites" onClick={go("/sites")}>All sites</a></p>;
@@ -87,14 +91,24 @@ export function SitePage({ org, me, siteId, tab, section = "general", serverId, 
   return (
     <>
       <SiteHeader org={siteOrg} site={site} server={server} servers={active} admin={admin} onChanged={reload} cov={cov} />
-      {/* styled like the server UI's top nav (plain buttons, the current one raised) so a Site reads like a server */}
-      <div ref={strip.ref} className={`site-tabs ${strip.className}`} role="tablist">
-        {SITE_TABS.map((t) => (
-          <button key={t} role="tab" aria-selected={tab === t} className={tab === t ? "active" : ""} onClick={() => navigate(siteHref(site.id, t))}>
-            <Icon name={TAB_LABEL[t][1]} size={16} /> {TAB_LABEL[t][0]}
-          </button>
-        ))}
+      {/* styled like the server UI's top nav (plain buttons, the current one raised) so a Site reads like a server; the
+          open alerts are a count on the Alerts tab */}
+      <div className="site-tabbar">
+        <div ref={strip.ref} className={`site-tabs ${strip.className}`} role="tablist">
+          {SITE_TABS.map((t) => {
+            const badge = t === "alerts" ? alertBadge(site.open_alerts) : null;
+            return (
+              <button key={t} role="tab" aria-selected={tab === t} className={tab === t ? "active" : ""} onClick={() => navigate(siteHref(site.id, t))}
+                title={badge ? `${site.open_alerts} open alert${site.open_alerts > 1 ? "s" : ""}` : undefined}>
+                <Icon name={TAB_LABEL[t][1]} size={16} /> {TAB_LABEL[t][0]}
+                {badge && <span className="tab-badge"><span aria-hidden="true">{badge}</span><span className="sr-only">, {site.open_alerts} open</span></span>}
+              </button>
+            );
+          })}
+        </div>
+        <div ref={setTools} className="site-tabbar-tools" />
       </div>
+      <TabToolsSlot.Provider value={tools}>
       {serverId ? (server ? <ServerPanel site={site} server={server} admin={admin} onChanged={reload} /> : <p className="muted">That server isn't in this site. <a href={siteHref(site.id, "servers")} onClick={go(siteHref(site.id, "servers"))}>Servers</a></p>)
         : tab === "live" ? <SiteLive org={siteOrg} site={site} />
         : tab === "timeline" ? <SiteTimeline org={siteOrg} site={site} query={location.search} canRecoverSd={admin} />
@@ -103,13 +117,15 @@ export function SitePage({ org, me, siteId, tab, section = "general", serverId, 
         : tab === "alerts" ? <><SiteIncidents site={site} /><SiteAlerts org={siteOrg} site={site} /></>
         : tab === "servers" ? <ServersTab site={site} admin={admin} onChanged={reload} />
         : <SettingsSections site={site} org={siteOrg} me={me} section={section} admin={admin} onChanged={reload} cov={cov} setCov={setCov} />}
+      </TabToolsSlot.Provider>
     </>
   );
 }
 
 /**
- * One row: "Customer › Site" as the title (the customer links back to its Sites list), the rollup chips, the ⋯ menu.
- * It replaces a crumb line, a title block and a chip row, so the Live grid starts where the server UI's does.
+ * One row: "Customer › Site" as the title (the customer links back to its Sites list; the address is its tooltip), the
+ * Map button, the health pill (servers, cameras, routes, cellular and direct-connection offers behind one click:
+ * site/HealthPill.tsx) and the ⋮ menu. The Live grid starts two rows under the top bar, as on the server UI.
  */
 function SiteHeader({ org, site, server, servers, admin, onChanged, cov }: {
   org: Org; site: Site; server?: Server; servers: Server[]; admin: boolean; onChanged: () => void; cov: SiteCoverage | null;
@@ -119,22 +135,12 @@ function SiteHeader({ org, site, server, servers, admin, onChanged, cov }: {
   return (
     <div className="site-head">
       <Breadcrumbs org={org} site={site} server={server} title={site.address || undefined} />
-      {site.address && <span className="muted small site-addr">{site.address}</span>}
       {/* where it is: the map, coordinates and links are on Settings › General (read-only there for viewers) */}
-      <a className={`chip small place-chip ${hasPoint(site) ? "" : "muted"}`} href={settingsHref(site.id, "general")} onClick={go(settingsHref(site.id, "general"))}
-        title={hasPoint(site) ? `${cityState(site.address_parts) || site.address} · ${fmtCoord(site.lat, site.lon)} · map in Settings` : "Not on the map yet: set the address in Settings"}>
-        📍{hasPoint(site) ? " Map" : " Locate"}
-      </a>
-      <div className="site-chips">
-        <span className={`chip ${site.servers_online < site.servers_total ? "warn" : ""}`}>Servers {ofTotal(site.servers_online, site.servers_total, "online")}</span>
-        <span className={`chip ${site.cameras_online < site.cameras_total ? "warn" : ""}`}>Cameras {ofTotal(site.cameras_online, site.cameras_total, "up")}</span>
-        {site.open_alerts > 0 && <span className="chip warn">⚠ {site.open_alerts} open alert{site.open_alerts > 1 ? "s" : ""}</span>}
-        <DirectChips servers={servers} />
-        <CoverageChip site={site} cov={cov} />
-      </div>
+      <MapButton site={site} />
       <span className="spacer" />
+      <HealthPill site={site} servers={servers} cov={cov} />
       <div className="menu-anchor">
-        <button className="ghost" aria-label="More" aria-expanded={menu} onClick={() => setMenu(!menu)}><Icon name="more" /></button>
+        <button className="ghost icon-btn" aria-label="More" aria-haspopup="menu" aria-expanded={menu} onClick={() => setMenu(!menu)}><Icon name="more" /></button>
         {menu && (
           <>
             <div className="menu-veil" onClick={() => setMenu(false)} />
@@ -148,26 +154,6 @@ function SiteHeader({ org, site, server, servers, admin, onChanged, cov }: {
         )}
       </div>
     </div>
-  );
-}
-
-/** "📶 VZW 8.6": the best carrier's overall score, linking to the coverage under the map on Settings › General. */
-function CoverageChip({ site, cov }: { site: Site; cov: SiteCoverage | null }) {
-  const text = chipText(cov?.data);
-  const best = bestCarrier(cov?.data);
-  if (!cov || !text || !best) return null;
-  const href = settingsHref(site.id, "general");
-  const open = (e: React.MouseEvent) => {
-    e.preventDefault();
-    navigate(href);
-    // the map loads lazily above it: scroll once it has had a moment to take its height
-    setTimeout(() => document.getElementById(COVERAGE_ANCHOR)?.scrollIntoView({ behavior: "smooth", block: "start" }), 250);
-  };
-  return (
-    <a className={`chip cov-chip ${cov.evaluation ? "eval" : ""}`} href={href} onClick={open}
-      title={`Cellular: best here ${best.name} ${best.technology.toUpperCase()}, overall ${best.score.toFixed(1)} of 10 (CoverageMap)${cov.evaluation ? " · evaluation only, hub administrators" : ""}`}>
-      {text}
-    </a>
   );
 }
 

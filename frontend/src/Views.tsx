@@ -3,13 +3,13 @@ import { BASE, api, bandwidthText, type AiSettings, fmtTime, frameUrl, type Band
 import { EventCard } from "./Events";
 import { EventDetail } from "./EventDetail";
 import { LivePlayer, hdPathClass } from "./LivePlayer";
-import { QualityButtons, type QualityMode, useLiveQuality } from "./LiveQuality";
+import { QualityBadge, QualityButtons, type QualityMode, useLiveQuality } from "./LiveQuality";
 import { LiveBudgetProvider } from "./dashboard/budget";
 import { ZoneEditor } from "./ZoneEditor";
 import { RetentionPanel } from "./RetentionPanel";
 import { Advisor } from "./Advisor";
 import { QwenFeedbackInfo } from "./QwenFeedbackInfo";
-import { Skeleton, confirmDialog, swipeHandlers, toast, useIsPhone } from "./ui";
+import { Icon, Skeleton, confirmDialog, swipeHandlers, toast, useIsPhone } from "./ui";
 import { RegionBadge, RegionOverlay } from "./RegionPaint";
 import { PtzBadge, PtzOverlay } from "./PtzControl";
 import { ZoomScope } from "./VideoZoom";
@@ -44,8 +44,11 @@ export { livePath };   // moved to cameraStreams.ts; kept here for existing impo
 
 /** One live camera: the WHEP player with the paint-a-region overlay and the tile bar; with `speakers` bound to the camera,
  *  the 🔊 Talk-down button and its panel under the picture (TalkdownPanel.tsx). `quality` is the tile's mode (Auto, or
- *  the viewer's SD / HD: LiveQuality.tsx); `bar` gets the tile's Auto · SD · HD control to place. */
-export function LiveTile({ c, quality, onQuality, focused = false, port, active, bar, phone, onSwipe, iceServers, site = api, regionKey, speakers, poster }: {
+ *  the viewer's SD / HD: LiveQuality.tsx); `bar` gets the tile's Auto · SD · HD control to place.
+ *  `tidy` (the hub's Site Live): `bar` holds only the name side (it gets no control); the quality is one badge and the
+ *  actions are icon buttons, all in a `.tile-acts` group with `actions` (e.g. Expand) that the page's CSS shows on hover
+ *  or focus on a desktop and always on a touch screen. */
+export function LiveTile({ c, quality, onQuality, focused = false, port, active, bar, phone, onSwipe, iceServers, site = api, regionKey, speakers, poster, tidy = false, actions }: {
   c: Camera; quality: QualityMode; onQuality: (m: QualityMode) => void;
   /** the tile is the one expanded: Auto may pick HD whatever its width */
   focused?: boolean;
@@ -59,6 +62,10 @@ export function LiveTile({ c, quality, onQuality, focused = false, port, active,
   speakers?: TalkSpeaker[];
   /** a picture to show until the live one starts, before the server's own still arrives (the hub's cached still) */
   poster?: string | null;
+  /** the compact bar: a quality badge and icon actions revealed on hover (see above) */
+  tidy?: boolean;
+  /** with `tidy`: more actions for the group (the page's own, e.g. Expand) */
+  actions?: React.ReactNode;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const box = useRef<HTMLDivElement | null>(null);
@@ -72,7 +79,7 @@ export function LiveTile({ c, quality, onQuality, focused = false, port, active,
   const ptz = c.status?.ptz;
   const aspect = hd ? 2592 / 1520 : 4 / 3;
   return (
-    <div ref={box} className={`tile ${active ? "alerting" : ""} ${painting ? "painting" : ""} ${ptzOn ? "ptz" : ""}`}
+    <div ref={box} className={`tile ${active ? "alerting" : ""} ${painting ? "painting" : ""} ${ptzOn ? "ptz" : ""} ${talking ? "talking" : ""}`}
       {...(phone && onSwipe && !painting && !ptzOn && !talking ? swipeHandlers(onSwipe) : {})}>
       {/* digital zoom: kept across SD/HD and a fallback to recordings, back to 1× on another camera; off in PTZ mode,
           whose drag / click-to-center / wheel steer the camera and map to the unzoomed picture */}
@@ -94,7 +101,34 @@ export function LiveTile({ c, quality, onQuality, focused = false, port, active,
           </LivePlayer>
         )}
       </ZoomScope>
-      <div className="tile-bar">
+      {tidy ? (
+        <div className="tile-bar tile-bar-tidy">
+          {bar(null)}
+          <PtzBadge cam={c.id} ptz={ptz} site={site} />
+          {!painting && <RegionBadge cam={regionKey ?? c.id} onEdit={() => setPainting(true)} />}
+          <span className="tile-acts">
+            <QualityBadge mode={quality} hd={hd} hdBlocked={lq.hdBlocked} onPick={(m) => { lq.clicked(); onQuality(m); }} />
+            {actions}
+            {hasAudio && (
+              <button type="button" className={`ghost small icon-act ${sound ? "on" : ""}`} aria-pressed={sound} aria-label={sound ? "Mute" : "Listen"} title={sound ? "Mute" : "Listen"}
+                onClick={() => setSound((s) => !s)}><Icon name={sound ? "volume" : "volumeOff"} size={16} /></button>
+            )}
+            {!!speakers?.length && (
+              <button type="button" className={`ghost small icon-act talk-btn ${talking ? "on" : ""}`} aria-pressed={talking} aria-label="Talk-down"
+                onClick={() => setTalking((t) => !t)} title={`Talk-down through ${speakers.map((s) => s.name).join(", ")} while watching this camera`}>
+                <Icon name="megaphone" size={16} />
+              </button>
+            )}
+            {ptz?.available && (
+              <button type="button" className={`ghost small icon-act ${ptzOn ? "on" : ""}`} aria-pressed={ptzOn} disabled={painting}
+                aria-label={ptz.pan_tilt === false ? "Zoom and camera controls" : "Pan, tilt and zoom"}
+                title={ptz.pan_tilt === false ? "Zoom, relay, digital input" : "Pan / tilt / zoom, presets, relay"} onClick={() => setPtzOn((p) => !p)}><Icon name="move" size={16} /></button>
+            )}
+            <button type="button" className={`ghost small icon-act ${painting ? "on" : ""}`} aria-pressed={painting} disabled={ptzOn} aria-label="Paint a region"
+              title="Paint a region: the activity feed shows only events that passed through it" onClick={() => setPainting((p) => !p)}><Icon name="pencil" size={16} /></button>
+          </span>
+        </div>
+      ) : <div className="tile-bar">
         {bar(<QualityButtons mode={quality} hd={hd} hdBlocked={lq.hdBlocked} onPick={(m) => { lq.clicked(); onQuality(m); }} />)}
         <PtzBadge cam={c.id} ptz={ptz} site={site} />
         {!painting && <RegionBadge cam={regionKey ?? c.id} onEdit={() => setPainting(true)} />}
@@ -109,7 +143,7 @@ export function LiveTile({ c, quality, onQuality, focused = false, port, active,
         )}
         <button className={`ghost small ${painting ? "on" : ""}`} title="Paint a region: the activity feed shows only events that passed through it" disabled={ptzOn}
           onClick={() => setPainting((p) => !p)}>✎</button>
-      </div>
+      </div>}
       {/* under the tile, never over the picture: the operator must see the person while talking to them (over the
           picture it hid half a desktop tile and nearly all of a phone's 1920x576 panorama) */}
       {talking && !!speakers?.length && <TalkdownPanel speakers={speakers} site={site} cameraId={c.id} onClose={() => setTalking(false)} />}

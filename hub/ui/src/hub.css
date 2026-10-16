@@ -48,22 +48,76 @@
 
 /* ---------- Sites › Site › Server (tenancy stage 2) ---------- */
 .customer-pick { display: flex; align-items: center; gap: 6px; }
-/* Site header: one row of "Customer › Site" title, address, rollup chips and the ⋯ menu (SitePage SiteHeader) */
-.site-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; min-height: 32px; }
+/* Site header: one row of "Customer › Site" title, the Map button, the health pill and the ⋮ menu (SitePage SiteHeader) */
+.site-head { position: relative; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; min-height: 36px; }
 .crumbs-title { min-width: 0; flex: 0 1 auto; }
 .hub-page .crumbs-title h2 { margin: 0; font-size: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .crumb-up a { color: var(--muted); font-weight: 500; text-decoration: none; }
 .crumb-up a:hover { color: var(--accent); }
 .crumb-sep { color: var(--muted); font-weight: 400; }
-.site-addr { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 28ch; }
-.site-chips { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .chip.warn { border-color: var(--bad); color: var(--bad); }
+/* square icon buttons (the Map pin, ⋮): 32 px, 44 px on touch screens */
+.icon-btn { display: inline-grid; place-items: center; width: 32px; height: 32px; padding: 0; border-radius: 8px; color: var(--muted); text-decoration: none; flex: none; }
+a.icon-btn:hover, button.icon-btn:hover { color: var(--text); background: var(--panel-2); }
+.icon-btn.muted { opacity: .6; }
+a.icon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.site-head button.icon-btn { border: 0; }
+@media (pointer: coarse) { .icon-btn { width: 44px; height: 44px; } }
+/* the health pill (site/HealthPill.tsx): green / amber / red dot, the counts, a note only when it matters */
+.health-anchor { position: relative; flex: none; }
+.health-pill { display: inline-flex; align-items: center; gap: 6px; background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 99px; padding: 4px 10px 4px 9px; font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.health-pill:hover { border-color: var(--muted); }
+.health-pill .icon { color: var(--muted); }
+.hp-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); flex: none; }
+.health-pill.warn .hp-dot { background: var(--vehicle); }
+.health-pill.bad .hp-dot { background: var(--bad); }
+.health-pill.warn { border-color: color-mix(in srgb, var(--vehicle) 55%, var(--border)); }
+.health-pill.bad { border-color: color-mix(in srgb, var(--bad) 60%, var(--border)); }
+.hp-note { color: var(--t-medium); font-weight: 600; }
+:root:not([data-theme="light"]) .hp-note { color: var(--vehicle); }
+@media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) .hp-note { color: var(--t-medium); } }
+.hp-short { display: none; }
+/* a direct connection is offered (it waits in the panel, not as a banner) */
+.hp-offer { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex: none; }
+/* popover panels: the health panel, Live's View menu */
+.hub-pop { position: absolute; right: 0; top: calc(100% + 6px); z-index: 20; width: min(360px, calc(100vw - 24px)); max-height: min(70vh, 560px); overflow-y: auto;
+  display: flex; flex-direction: column; gap: 12px; padding: 12px 14px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgb(0 0 0 / .35); text-align: left; font-size: 13px; overflow-x: hidden; }
+.hub-pop:focus { outline: none; }
+.hub-pop:focus-visible { box-shadow: 0 0 0 2px var(--accent), 0 8px 24px rgb(0 0 0 / .35); }
+.pop-sec { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.pop-col { display: flex; flex-direction: column; align-items: stretch; gap: 4px; }
+.pop-h { color: var(--muted); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; min-width: 64px; }
+.hp-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.hp-row { display: flex; align-items: center; gap: 4px 8px; flex-wrap: wrap; min-width: 0; }
+.hp-row > a { color: var(--text); font-weight: 600; text-decoration: none; }
+.hp-row > a:hover { color: var(--accent); }
+.hp-route { color: var(--muted); }
+.hp-route.ok { color: var(--ok); }
+.hp-offers .linkish { font-size: 12px; }
+.hp-offers-h { font-weight: 600; }
+/* touch screens: the panels' links and buttons are finger-sized */
+@media (pointer: coarse) {
+  .hub-pop .linkish, .hp-row > a, .hub-pop .pop-sec > a, .hub-pop button, .hub-pop select { min-height: 44px; }
+  .hub-pop .linkish, .hp-row > a { display: inline-flex; align-items: center; padding: 0 6px; }
+  .view-toggle, .live-layout-pick select, .live-layout-pick button { min-height: 44px; }
+}
 /* Direct-on-LAN (DirectChip): green when media comes straight from the server, the plain gray chip otherwise */
 .direct-chip { color: var(--muted); }
 /* the toolkit's .chip.on is the red "filter on" chip: reset its background, this "on" means healthy */
 .direct-chip.on { border-color: var(--ok); color: var(--ok); background: var(--panel-2); }
 .direct-chip.offer { color: var(--text); display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-/* Site tabs look like the server UI's top nav (styles.css `nav button`), on a hairline that closes the header */
+/* Site tabs look like the server UI's top nav (styles.css `nav button`), on a hairline that closes the header; the
+   current tab's toolbar (Live: Layout, Save, Activity, View) shares the row on the right and wraps under it when narrow */
+.site-tabbar { display: flex; align-items: center; gap: 6px 12px; flex-wrap: wrap; margin-bottom: 12px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+.site-tabbar .site-tabs { margin: 0; padding: 0; border: 0; flex: 0 1 auto; min-width: 0; }
+.site-tabbar-tools { margin-left: auto; display: flex; align-items: center; min-width: 0; }
+.site-tabbar-tools:empty { display: none; }
+.site-tabbar-tools .live-toolbar { flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin: 0; }
+.live-layout-pick { display: inline-flex; align-items: center; gap: 6px; }
+.tab-badge { display: inline-block; min-width: 18px; margin-left: 2px; padding: 0 5px; border-radius: 99px; background: var(--bad); color: #fff;
+  font-size: 11px; font-weight: 700; line-height: 17px; text-align: center; font-variant-numeric: tabular-nums; }
 .site-tabs { display: flex; gap: 2px; margin-bottom: 12px; padding-bottom: 6px; border-bottom: 1px solid var(--border); max-width: 100%; overflow-x: auto; }
 .site-tabs button { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; background: transparent; color: var(--muted); padding: 6px 12px; }
 .site-tabs button:hover { color: var(--text); }
@@ -95,15 +149,19 @@
   .customer-pick > span { display: none; }
   .customer-pick select { max-width: 40vw; }
   .hub-page { padding: 10px 10px calc(70px + env(safe-area-inset-bottom)); }
-  /* the header row wraps: title and ⋯ on the first line, the chips wrap in rows under them */
-  .site-head { gap: 6px; }
+  /* one header line: the title takes what is left, the pill says only what matters ("13/14 cameras"); the panel
+     opens under the whole row (the header is its anchor) */
+  .site-head { gap: 4px; flex-wrap: nowrap; }
   .site-head .crumbs-title { flex: 1 1 0; }
-  .site-head .menu-anchor { order: 2; }
-  .site-head > .spacer, .site-addr { display: none; }
-  .site-chips { order: 3; flex: 1 0 100%; gap: 4px 6px; }
-  .site-chips .chip { white-space: nowrap; }
-  .site-chips .direct-chip.offer { white-space: normal; border-radius: 10px; }
+  .site-head > .spacer { display: none; }
+  .health-anchor { position: static; }
+  .health-pill { padding: 4px 8px; min-height: 36px; }
+  .hp-long { display: none; }
+  .hp-short { display: inline; }
+  .hub-pop { left: 0; right: 0; width: auto; max-height: 70vh; }
   .hub-page .crumbs-title h2 { font-size: 16px; }
+  .site-tabbar { margin-bottom: 8px; }
+  .site-tabbar .site-tabs { flex: 1 1 100%; }
   .site-tabs { margin-bottom: 8px; }
   .site-tabs button { padding: 6px 10px; }
   .hub-table { display: block; overflow-x: auto; }
@@ -140,16 +198,27 @@
 /* ---------- Site › Live (combined grid over the site's servers; tiles reuse the server's live-grid/tile/dash-still) ---------- */
 /* Expand: the camera fits the window (useExpandFit sets --expand-h, the picture's aspect --expand-ar), centered */
 .live-grid.expanded > .site-live-cell { width: min(100%, calc(var(--expand-h, 9999px) * var(--expand-ar, 1.3333))); justify-self: center; }
-/* "Cameras ▾" in the Live toolbar (SiteLive CameraPicker): a popover list of show/hide toggles, drag to reorder */
-.cams-toggle.filtered { border-color: var(--accent); }
-.menu-pop.cams-pop { min-width: 260px; max-height: min(60vh, 480px); overflow-y: auto; }
+/* "View ▾" in the Live toolbar (SiteLive ViewMenu): Stream, Columns, the camera list (show/hide toggles, drag to
+   reorder) and the layout's actions */
+.view-toggle { display: inline-flex; align-items: center; gap: 4px; }
+.view-toggle.filtered, .pop-disclose.filtered { border-color: var(--accent); }
+.view-pop { width: min(340px, calc(100vw - 24px)); }
+.view-pop .segmented button { padding: 4px 10px; font-size: 12px; }
+.view-pop select { padding-top: 3px; padding-bottom: 3px; }
+.pop-disclose { display: inline-flex; align-items: center; gap: 6px; align-self: flex-start; background: transparent; color: var(--text); border: 1px solid var(--border);
+  padding: 3px 9px; font-size: 12px; }
+.pop-disclose:hover { background: var(--panel-2); }
+.cams-list { display: flex; flex-direction: column; min-width: 0; overflow-x: hidden; max-height: min(40vh, 360px); overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; padding: 4px; }
 .cams-hint { padding: 2px 10px 6px; }
-.menu-pop .site-live-chip { display: flex; align-items: center; gap: 8px; cursor: grab; }
+.cams-list .site-live-chip { display: flex; align-items: center; gap: 8px; min-width: 0; flex: none; cursor: grab; background: transparent; color: var(--text); text-align: left;
+  padding: 5px 8px; border-radius: 6px; font-size: 13px; }
+.cams-list .site-live-chip:hover { background: var(--panel-2); }
+.cams-off { display: inline-block; width: 10px; height: 10px; border-radius: 50%; border: 1.5px dashed var(--muted); }
+.pop-acts .row { gap: 6px; }
 .site-live-chip.hidden-cam { color: var(--muted); opacity: .7; }
 .site-live-chip.dragging { opacity: .4; }
 .cams-eye { width: 1.2em; text-align: center; }
 .cams-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.menu-pop .cams-reset { border-top: 1px solid var(--border); border-radius: 0; margin-top: 4px; padding-top: 8px; color: var(--muted); }
 .site-live-cell { min-width: 0; }
 /* Live layouts (SiteLive LayoutPicker): the picker, columns and Activity sit in the same toolbar; tile drag uses the
    Timeline's visuals (the dragged tile dims, the drop target is outlined, .drag-ghost follows the pointer) */
@@ -272,8 +341,6 @@
 .address-note { margin: 0; }
 .coord-row { gap: 8px; flex-wrap: wrap; align-items: center; }
 .coord-row code { font-size: 12px; }
-.place-chip { text-decoration: none; white-space: nowrap; }
-.place-chip.muted { color: var(--muted); }
 .sites-map { display: grid; gap: 8px; }
 .map-legend { gap: 14px; flex-wrap: wrap; color: var(--muted); }
 .map-legend-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; vertical-align: -1px; }

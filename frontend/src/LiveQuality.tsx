@@ -18,6 +18,8 @@ import { livePath } from "./cameraStreams";
 import { HD_FAILED_TITLE, HD_H265_TITLE, type LiveCodecs, SD_H265_TEXT, canPlayLive, codecCache, pathCodec } from "./codecs";
 import { MAX_HD, useBudget } from "./dashboard/budget";
 import type { WhepStatsSample } from "./whepTiming";
+import { MODE_LABEL, QUALITY_MODES, qualityBadge } from "./qualityBadge";
+import { menuKeys, useDismiss } from "./ui";
 
 export type QualityMode = "auto" | Quality;
 
@@ -175,5 +177,40 @@ export function QualityButtons({ mode, hd, hdBlocked = null, onPick, live = true
       <button className={pick("sd")} aria-pressed={mode === "sd"} onClick={() => onPick("sd")} title="Sub stream: low bandwidth">SD</button>
       <button className={pick("hd")} aria-pressed={mode === "hd"} disabled={!!hdBlocked} onClick={() => onPick("hd")} title={hdBlocked ?? (stalled ? "HD didn't start, so SD plays: click to try again" : "Full-resolution main stream")}>HD</button>
     </div>
+  );
+}
+
+/**
+ * The same choice as one small badge (the hub's Site Live tiles): it shows the mode and, live under Auto, what plays
+ * ("Auto · SD"); a click opens a tiny Auto / SD / HD menu (Escape or a click outside closes it, arrows move).
+ * HD this browser can't play is greyed out with the reason, as on QualityButtons.
+ */
+export function QualityBadge({ mode, hd, hdBlocked = null, onPick, live = true }: {
+  mode: QualityMode; hd: boolean; hdBlocked?: string | null; onPick: (m: QualityMode) => void; live?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const box = useRef<HTMLSpanElement>(null);
+  const btn = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
+  useDismiss(box, open, () => setOpen(false), btn);
+  // the picked item takes the focus, so the arrows start from it
+  useEffect(() => { if (open) menu.current?.querySelector<HTMLElement>("[aria-checked=true]:not(:disabled), [role=menuitemradio]:not(:disabled)")?.focus(); }, [open]);
+  const b = qualityBadge(mode, hd, live, hdBlocked);
+  const choose = (m: QualityMode) => { setOpen(false); onPick(m); btn.current?.focus(); };
+  return (
+    <span ref={box} className={`qbadge-box ${open ? "open" : ""}`}>
+      <button ref={btn} type="button" className={`qbadge ${mode === "auto" ? "" : "picked"} ${b.stalled ? "stalled" : ""}`} aria-haspopup="menu" aria-expanded={open}
+        aria-label={b.label} title={b.title} onClick={() => setOpen((o) => !o)}>{b.text}</button>
+      {open && (
+        <div ref={menu} className="qbadge-menu" role="menu" aria-label="Stream quality" onKeyDown={menuKeys}>
+          {QUALITY_MODES.map((m) => (
+            <button key={m} type="button" role="menuitemradio" aria-checked={mode === m} disabled={m === "hd" && !!hdBlocked} onClick={() => choose(m)}
+              title={m === "auto" ? `HD while the tile is large and the link is clean (at most ${MAX_HD} at once), else SD` : m === "sd" ? "Sub stream: low bandwidth" : hdBlocked ?? "Full-resolution main stream"}>
+              {MODE_LABEL[m]}
+            </button>
+          ))}
+        </div>
+      )}
+    </span>
   );
 }

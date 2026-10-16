@@ -1113,3 +1113,50 @@ body:has(.drag-ghost) { cursor: grabbing; user-select: none; }
   .cam-panel { padding: 12px; }
   .cam-foot { padding-bottom: calc(10px + env(safe-area-inset-bottom)); }
 }
+
+/* ---------- the tidy live tile bar (LiveTile `tidy`: the hub's Site Live) ---------- */
+/* the name on one line (full name in its tooltip), a status dot; the quality badge and icon actions in .tile-acts */
+.tile-bar-tidy { position: relative; min-height: 34px; gap: 6px; }
+.tile-bar-tidy .tile-name { min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tile-bar-tidy .tile-state { white-space: nowrap; }
+.tile-bar-tidy .dot, .tile-bar-tidy .sync-grip, .tile-bar-tidy .label-chip { flex: none; }
+.tile-bar-tidy .ptz-badge, .tile-bar-tidy .region-badge { white-space: nowrap; }
+.tile-acts { display: inline-flex; align-items: center; gap: 4px; flex: none; }
+.tile-acts .icon-act, .icon-act { display: inline-grid; place-items: center; padding: 3px 6px; line-height: 0; }
+.tile-acts .icon-act.on { color: var(--accent); }
+/* a pointer that hovers (a desktop): the actions sit over the end of the bar and show while the pointer is on the tile or
+   the keyboard is in the bar; always while one of them is on (painting, PTZ, talk-down, a menu open) or the tile is expanded */
+@media (hover: hover) and (pointer: fine) {
+  .tile-bar-tidy > .tile-acts {
+    position: absolute; right: 6px; bottom: 0; z-index: 2; min-height: 100%; max-width: calc(100% - 12px); padding: 3px 0 3px 10px;
+    /* a tile too narrow for them all: the extra ones wrap upward over the picture, the first (quality) stays in the bar */
+    flex-wrap: wrap-reverse; justify-content: flex-end; align-content: center;
+    background: var(--panel); box-shadow: -14px 0 10px -6px var(--panel); opacity: 0; transition: opacity .12s ease;
+  }
+  .tile:hover .tile-acts, .site-live-cell:hover .tile-acts, .tile-acts:focus-within, .tile-acts:has(.open) { opacity: 1; }
+  .tile.painting .tile-acts, .tile.ptz .tile-acts, .tile.talking .tile-acts, .site-live-cell.focused .tile-acts {
+    position: static; box-shadow: none; padding: 0; min-height: 0; max-width: none; flex-wrap: wrap; opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) { .tile-bar-tidy > .tile-acts { transition: none; } }
+/* touch screens: always shown, and finger-sized */
+@media (pointer: coarse) {
+  .tile-bar-tidy { flex-wrap: wrap; }
+  .tile-acts { flex-wrap: wrap; margin-left: auto; }
+  .tile-acts .icon-act, .tile-acts .qbadge { min-width: 44px; min-height: 44px; }
+}
+
+/* the one-badge quality control (LiveQuality.tsx QualityBadge) and its tiny menu, opening upward over the picture */
+.qbadge-box { position: relative; display: inline-flex; }
+.qbadge { background: transparent; color: var(--muted); border: 1px solid var(--border); border-radius: 6px; padding: 2px 7px; font-size: 11px; font-weight: 600;
+  white-space: nowrap; font-variant-numeric: tabular-nums; }
+.qbadge:hover { color: var(--text); background: var(--panel-2); }
+.qbadge.picked { color: var(--text); border-color: var(--accent); }
+.qbadge.stalled { border-style: dashed; }
+.qbadge-menu { position: absolute; right: 0; bottom: calc(100% + 4px); z-index: 25; display: flex; flex-direction: column; min-width: 96px; padding: 4px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 8px 24px rgb(0 0 0 / .35); }
+.qbadge-menu button { background: transparent; color: var(--text); text-align: left; padding: 5px 10px; border-radius: 6px; font-size: 12px; }
+.qbadge-menu button:hover:not(:disabled), .qbadge-menu button:focus-visible { background: var(--panel-2); }
+.qbadge-menu button[aria-checked="true"] { color: var(--accent); font-weight: 600; }
+.qbadge-menu button[aria-checked="true"]::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: currentColor; margin-right: 6px; vertical-align: middle; }
+@media (pointer: coarse) { .qbadge-menu button { min-height: 44px; } }

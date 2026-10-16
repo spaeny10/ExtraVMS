@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { EMPTY_LAYOUT, type LiveLayout, applyFocus, arrange, coerceLayout, gridCols, isDirty, isVisible, layoutCols, layoutIdStorageKey, layoutReducer,
-  layoutStorageKey, parseLayout, shownKeys, tileLabel, tileQuality, toSavedConfig, wrapIndex } from "./liveLayout";
+  layoutStorageKey, parseLayout, shownKeys, streamMode, tileLabel, tileQuality, toSavedConfig, viewSummary, wrapIndex } from "./liveLayout";
 
 describe("gridCols", () => {
   it("is square-ish and at most 4 wide, like the server's LiveView", () => {
@@ -195,5 +195,28 @@ describe("drop (tile drag)", () => {
   it("in a saved layout whose cameras have changed, gone ones drop out of the new order", () => {
     const l: LiveLayout = { ...EMPTY_LAYOUT, order: ["gone/1", "b/2", "a/1"] };
     expect(layoutReducer(l, { type: "drop", key: "a/1", onto: "b/2", all }).order).toEqual(["a/1", "b/2", "a/2", "b/1"]);
+  });
+});
+
+describe("the View menu (streamMode, viewSummary)", () => {
+  const keys = ["s/a", "s/b", "s/c"];
+  const withQ = (quality: Record<string, "sd" | "hd">, extra: Partial<LiveLayout> = {}): LiveLayout => ({ ...EMPTY_LAYOUT, quality, ...extra });
+  it("Stream is Auto, All SD, All HD or mixed over the live tiles", () => {
+    expect(streamMode(EMPTY_LAYOUT, keys)).toBe("auto");
+    expect(streamMode(withQ({ "s/a": "sd", "s/b": "sd", "s/c": "sd" }), keys)).toBe("sd");
+    expect(streamMode(withQ({ "s/a": "hd", "s/b": "hd", "s/c": "hd" }), keys)).toBe("hd");
+    expect(streamMode(withQ({ "s/a": "hd" }), keys)).toBe("mixed");
+    // a pick on a tile that isn't live (offline server) doesn't count
+    expect(streamMode(withQ({ "s/x": "hd" }), keys)).toBe("auto");
+    expect(streamMode(withQ({ "s/a": "hd" }), [])).toBe("auto");
+  });
+  it("summarises columns and cameras for the button and its tooltip", () => {
+    const all = viewSummary(EMPTY_LAYOUT, keys, 14, 14);
+    expect(all).toMatchObject({ stream: "auto", cols: "Auto columns", cameras: "Cameras 14", filtered: null });
+    expect(all.title).toBe("Stream Auto · Auto columns · all 14 cameras");
+    const some = viewSummary(withQ({ "s/a": "sd", "s/b": "sd", "s/c": "sd" }, { cols: 3 }), keys, 9, 14);
+    expect(some).toMatchObject({ stream: "sd", cols: "3 columns", cameras: "Cameras 9/14", filtered: "9/14" });
+    expect(some.title).toBe("Stream All SD · 3 columns · 9/14 cameras shown");
+    expect(viewSummary({ ...EMPTY_LAYOUT, cols: 1 }, keys, 1, 1).cols).toBe("1 column");
   });
 });

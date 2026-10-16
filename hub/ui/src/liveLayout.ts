@@ -223,3 +223,37 @@ export function applyFocus(ordered: string[], focus: LiveFocus | null | undefine
   const seen = new Set(head);
   return [...head, ...ordered.filter((k) => !seen.has(k))];
 }
+
+// ---------------------------------------------------------------- the toolbar's View menu
+
+export type StreamMode = "auto" | "sd" | "hd" | "mixed";
+/** Every live tile on Auto, all SD, all HD, or a mix (no live tile: Auto). Drives the View menu's Stream buttons. */
+export function streamMode(layout: LiveLayout, liveKeys: string[]): StreamMode {
+  if (!liveKeys.length) return "auto";
+  const first = tileQuality(layout, liveKeys[0]);
+  return liveKeys.every((k) => tileQuality(layout, k) === first) ? first : "mixed";
+}
+
+export type ViewSummary = {
+  stream: StreamMode;
+  /** "Auto columns" / "3 columns" */
+  cols: string;
+  /** "Cameras 9/14", or "Cameras 14" when all show */
+  cameras: string;
+  /** some cameras are hidden: the View button says how many show ("View · 9/14") */
+  filtered: string | null;
+  /** the View button's tooltip: what the menu holds right now */
+  title: string;
+};
+
+export function viewSummary(layout: LiveLayout, liveKeys: string[], shown: number, total: number): ViewSummary {
+  const stream = streamMode(layout, liveKeys);
+  const cols = layout.cols ? `${layout.cols} column${layout.cols > 1 ? "s" : ""}` : "Auto columns";
+  const filtered = shown < total ? `${shown}/${total}` : null;
+  const streamText = { auto: "Auto", sd: "All SD", hd: "All HD", mixed: "Mixed" }[stream];
+  return {
+    stream, cols, filtered,
+    cameras: `Cameras ${filtered ?? total}`,
+    title: `Stream ${streamText} · ${cols} · ${filtered ? `${filtered} cameras shown` : `all ${total} cameras`}`,
+  };
+}

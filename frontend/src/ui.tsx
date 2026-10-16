@@ -1,6 +1,6 @@
 /* Small UI toolkit: SVG icons, toasts, in-app confirm/prompt dialogs, skeletons, connection status. */
 import { probeHealth } from "./api";
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 // ---------------------------------------------------------------- icons (24px stroke paths, Lucide-style)
 
@@ -42,6 +42,14 @@ const PATHS: Record<string, string> = {
   eye: "M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12zM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z",
   stop: "M6.5 6.5h11v11h-11z",
   send: "M21 3 10.5 13.5M21 3l-6.5 18-4-7.5L3 9.5z",
+  // live tile actions and the hub's Site header (hub SitePage, SiteLive)
+  pin: "M12 21s-7-6.2-7-11.5a7 7 0 0 1 14 0C19 14.8 12 21 12 21zM12 12a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z",
+  megaphone: "M3 11 21 6v12L3 14zM11.6 16.8a3 3 0 1 1-5.8-1.6",
+  volume: "M4 9.5h3.5L12 5.5v13l-4.5-4H4zM15.5 9a4 4 0 0 1 0 6",
+  volumeOff: "M4 9.5h3.5L12 5.5v13l-4.5-4H4zM16 9.5l5 5M21 9.5l-5 5",
+  move: "M12 3v18M3 12h18M12 3 9.5 5.5M12 3l2.5 2.5M12 21l-2.5-2.5M12 21l2.5-2.5M3 12l2.5-2.5M3 12l2.5 2.5M21 12l-2.5-2.5M21 12l-2.5 2.5",
+  pencil: "M4 20h4L19 9l-4-4L4 16zM13.5 6.5l4 4",
+  sliders: "M4 7h10M18 7h2M4 17h4M12 17h8M16 5v4M10 15v4",
 };
 
 export function Icon({ name, size = 18, className = "" }: { name: keyof typeof PATHS | string; size?: number; className?: string }) {
@@ -51,6 +59,42 @@ export function Icon({ name, size = 18, className = "" }: { name: keyof typeof P
       <path d={PATHS[name] ?? PATHS.info} />
     </svg>
   );
+}
+
+// ---------------------------------------------------------------- popovers
+
+/**
+ * Closes a popover (menu, panel) on Escape and on a pointer press outside `ref`; Escape also gives the focus back to
+ * `returnTo` (the button that opened it). Only listens while `open`.
+ */
+export function useDismiss(ref: React.RefObject<HTMLElement | null>, open: boolean, close: () => void, returnTo?: React.RefObject<HTMLElement | null>): void {
+  const latest = useRef(close);
+  latest.current = close;
+  useEffect(() => {
+    if (!open) return;
+    const down = (e: PointerEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) latest.current(); };
+    const key = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.stopPropagation();
+      latest.current();
+      returnTo?.current?.focus();
+    };
+    document.addEventListener("pointerdown", down, true);
+    document.addEventListener("keydown", key);
+    return () => { document.removeEventListener("pointerdown", down, true); document.removeEventListener("keydown", key); };
+  }, [open, ref, returnTo]);
+}
+
+/** Up / Down / Home / End move the focus between a menu's enabled items (role menuitem, menuitemradio). */
+export function menuKeys(e: React.KeyboardEvent<HTMLElement>): void {
+  const items = [...e.currentTarget.querySelectorAll<HTMLElement>("[role^=menuitem]:not(:disabled)")];
+  if (!items.length) return;
+  const i = items.indexOf(document.activeElement as HTMLElement);
+  const to = e.key === "ArrowDown" ? (i + 1) % items.length : e.key === "ArrowUp" ? (i - 1 + items.length) % items.length
+    : e.key === "Home" ? 0 : e.key === "End" ? items.length - 1 : -1;
+  if (to < 0) return;
+  e.preventDefault();
+  items[to].focus();
 }
 
 // ---------------------------------------------------------------- tiny external store
