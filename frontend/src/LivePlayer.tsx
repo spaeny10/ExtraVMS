@@ -9,11 +9,12 @@ import { api, makeApi, type SiteApi } from "./api";
 import { NO_RECORDING_RETRY_MS, NO_RECORDING_TEXT, afterFollowError, httpStatus } from "./liveFallback";
 import { CHUNK, LIVE_LAG, nowS } from "./playback";
 import { WhepPlayer, type WhepState } from "./WhepPlayer";
+import type { WhepStatsSample, WhepTimingSnapshot } from "./whepTiming";
 import { ZoomFrame } from "./VideoZoom";
 
 const FALLBACK_LAG = LIVE_LAG + 6;   // a chunk must exist on disk before it can be fetched
 
-export function LivePlayer({ path, camera, port, className, onUnsupported, showSize, iceServers, videoRef, children, base, site, muted, onAudio, onState }: {
+export function LivePlayer({ path, camera, port, className, onUnsupported, showSize, iceServers, videoRef, children, base, site, muted, onAudio, onState, onFirstFrame, onStats }: {
   path: string; port: number; className?: string; onUnsupported?: () => void; showSize?: boolean;
   /** the camera whose recording the fallback follows; default: the path without _sub / _hd */
   camera?: string;
@@ -25,6 +26,8 @@ export function LivePlayer({ path, camera, port, className, onUnsupported, showS
   /** the camera's server client; wins over `base` (the hub's direct client carries a token a bare base can't) */
   site?: SiteApi;
   muted?: boolean; onAudio?: (has: boolean) => void;
+  /** passed to the WebRTC player (WhepPlayer): the first frame's timing, and link quality every 2 s */
+  onFirstFrame?: (timing: WhepTimingSnapshot) => void; onStats?: (sample: WhepStatsSample) => void;
 }) {
   // webrtc → (repeated failures) → recording → (its chunk is a 404) → none → (30 s) → webrtc
   const [mode, setMode] = useState<"webrtc" | "recording" | "none">("webrtc");
@@ -38,7 +41,7 @@ export function LivePlayer({ path, camera, port, className, onUnsupported, showS
   if (mode === "webrtc") {
     // camera: the still shown while connecting comes from this camera's recording
     return <WhepPlayer path={path} camera={camera} port={port} className={className} onUnsupported={onUnsupported} showSize={showSize} base={base} site={site}
-      iceServers={iceServers} videoRef={videoRef} muted={muted} onAudio={onAudio} onState={onState} onFallback={() => { onState?.("playing"); setMode("recording"); }}>{children}</WhepPlayer>;
+      iceServers={iceServers} videoRef={videoRef} muted={muted} onAudio={onAudio} onState={onState} onFirstFrame={onFirstFrame} onStats={onStats} onFallback={() => { onState?.("playing"); setMode("recording"); }}>{children}</WhepPlayer>;
   }
   if (mode === "none") {
     return (

@@ -22,7 +22,7 @@ from . import find as find_mod
 from . import camera_groups as groups_mod
 from . import layouts as layouts_mod
 from . import camweb, site_ask, talkdown_voice
-from . import central_cameras, coverage, geocode, hosts, security, soc, soc_reports
+from . import central_cameras, coverage, geocode, hosts, security, soc, soc_reports, telemetry
 from fastapi.responses import StreamingResponse
 from .agents import registry
 from .config import settings
@@ -2376,6 +2376,41 @@ async def site_turn(site_id: str, request: Request):
     u = auth.require_user(request)
     auth.site_access(u, site_id)
     return {"iceServers": turn.ice_servers(f"user:{u['id']}", settings.turn_user_ttl_s)}
+
+
+# ---------------------------------------------------------------- live-view timing (telemetry.py)
+
+@app.post("/api/telemetry/live", status_code=204)
+async def telemetry_live(request: Request, u: dict = Depends(user)):
+    """One live tile's time to first frame, or the end of its attempt (the hub UI's beacon). Anyone who may view the
+    server may report; JSON only, at most telemetry.MAX_BODY bytes, rate-limited per user."""
+    if not (request.headers.get("content-type") or "").lower().startswith("application/json"):
+        raise HTTPException(415, "application/json only")
+    length = request.headers.get("content-length") or "0"
+    if not length.isdigit() or int(length) > telemetry.MAX_BODY:
+        raise HTTPException(413, "report too large")
+    raw = b""
+    async for chunk in request.stream():
+        raw += chunk
+        if len(raw) > telemetry.MAX_BODY:
+            raise HTTPException(413, "report too large")
+    try:
+        body = telemetry.LiveIn.model_validate_json(raw)
+    except ValueError as e:
+        raise HTTPException(422, str(e).splitlines()[0][:200])
+    if telemetry.rate_limited(u["id"]):
+        raise HTTPException(429, "too many live reports; try again shortly")
+    auth.site_access(u, body.server)
+    telemetry.record(body)
+    return Response(status_code=204)
+
+
+@app.get("/api/telemetry/live")
+async def telemetry_live_stats(server: str = Query(min_length=1, max_length=64), u: dict = Depends(user)):
+    """TTFF p50/p95 for one server, by route and stage: its customer's admins and hub administrators."""
+    site, _ = auth.site_access(u, server)
+    auth.require_role(u, site["org_id"], "admin")
+    return telemetry.summary(server)
 
 
 app.include_router(vlm_proxy.router)

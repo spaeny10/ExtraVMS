@@ -4,10 +4,10 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import { confirmDialog, promptDialog, toast } from "@site/ui";
-import { type Backup, type Server, type Site, ago, api, fmtTime } from "./api";
+import { type Backup, type LiveStats, type Server, type Site, ago, api, fmtTime } from "./api";
 import { consoleHref } from "./nav";
 import { CENTRAL_TAG, fmtGB, fmtMbps, quotaText, serverBandwidth } from "./central";
-import { anyAction, serverActions } from "./serverList";
+import { anyAction, liveStartText, liveStartTitle, serverActions } from "./serverList";
 
 /**
  * Status card. With `children` (actions) it is a plain box whose name links to `href`; without, the whole card is the link.
@@ -15,8 +15,10 @@ import { anyAction, serverActions } from "./serverList";
  * administrators); `central.stats` adds rows to the stats grid and `central.details` a block above the actions (Site →
  * Servers, for those who may read the instance).
  */
-export function ServerCard({ s, now, href = consoleHref(s.id), central, children }: {
+export function ServerCard({ s, now, href = consoleHref(s.id), central, live, children }: {
   s: Server; now: number; href?: string; central?: { line?: string; stats?: React.ReactNode; details?: React.ReactNode }; children?: React.ReactNode;
+  /** its live tiles' time to first frame (useLiveStats; admins): a "Live start" row once there are enough */
+  live?: LiveStats;
 }) {
   const sm = s.summary ?? {};
   const cams = sm.cameras ?? [];
@@ -43,6 +45,7 @@ export function ServerCard({ s, now, href = consoleHref(s.id), central, children
         <div><span>AI</span> {sm.yolo_ready ? "YOLO ✓" : "YOLO …"} · {sm.vlm_ready ? "Qwen ✓" : "Qwen …"}{sm.queues?.synopsis ? ` (${sm.queues.synopsis} waiting)` : ""}</div>
         <div><span>Stream</span> {sm.bitrate_mbps != null ? `${sm.bitrate_mbps} Mbps` : "—"}</div>
         {bw && <div><span>Upload</span> {fmtMbps(bw.mbps)}{bw.month_gb != null ? ` · ${fmtGB(bw.month_gb)} this month` : ""}</div>}
+        {live && liveStartText(live) && <div title={liveStartTitle(live)}><span>Live start</span> {liveStartText(live)}</div>}
         {s.central && <div><span>Storage</span> {quotaText(s.central.used_gb, s.central.quota_gb)}</div>}
         {s.central && central?.stats}
         <div><span>Version</span> {s.version ?? "—"}{s.clock_skew_s != null && Math.abs(s.clock_skew_s) > 30 ? ` · clock ${s.clock_skew_s > 0 ? "+" : ""}${Math.round(s.clock_skew_s)} s` : ""}</div>
@@ -57,6 +60,22 @@ export function ServerCard({ s, now, href = consoleHref(s.id), central, children
     </>
   );
   return children ? <div className={cls}>{body}<div className="row server-actions">{children}</div></div> : <a className={cls} href={href}>{body}</a>;
+}
+
+/**
+ * The live-start numbers (hub telemetry: time to first frame) of these servers, read once per set of servers; `enabled`
+ * only for those the hub lets read them (the customer's admins, hub administrators). Retired servers are skipped.
+ */
+export function useLiveStats(servers: Pick<Server, "id" | "retired_at">[], enabled: boolean): Record<string, LiveStats> {
+  const [stats, setStats] = useState<Record<string, LiveStats>>({});
+  const ids = enabled ? servers.filter((s) => !s.retired_at).map((s) => s.id).sort().join(",") : "";
+  useEffect(() => {
+    if (!ids) return;
+    let alive = true;
+    for (const id of ids.split(",")) api.liveStats(id).then((st) => { if (alive) setStats((m) => ({ ...m, [id]: st })); }).catch(() => {});
+    return () => { alive = false; };
+  }, [ids]);
+  return stats;
 }
 
 /** The admin actions' handlers, shared by the inline buttons (ServerActions) and the ⋯ menu (ServerMenu). */

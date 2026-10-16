@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { Server, ServerCamera, ServerSummary } from "./api";
+import type { LiveStats, Server, ServerCamera, ServerSummary } from "./api";
 import {
   NO_FILTERS, UNASSIGNED, aiText, anyAction, cameraCounts, compareVersions, daysLeft, downText, filterServers, groupBySite, hasProblems,
-  latestVersion, matchesSearch, networkText, parseFilters, recordingText, serverActions, updateAvailable,
+  LIVE_START_MIN, latestVersion, liveStartText, liveStartTitle, matchesSearch, networkText, parseFilters, recordingText, serverActions,
+  updateAvailable,
 } from "./serverList";
 
 const cam = (name: string, ok = true, problems: string[] = []): ServerCamera => ({ id: name.toLowerCase(), name, stream_ready: ok, problems });
@@ -126,5 +127,28 @@ describe("groupBySite", () => {
     expect(g.groups.map((x) => [x.name, x.servers.map((s) => s.id)])).toEqual([["Austin", ["3"]], ["Main Facility", ["2", "1"]], ["Zed", ["6"]]]);
     expect(g.unassigned.map((s) => s.id)).toEqual(["4"]);
     expect(g.retired.map((s) => s.id)).toEqual(["5"]);
+  });
+});
+
+describe("liveStartText", () => {
+  const pct = { p50: null, p95: null };
+  const stats = (n: number, p50: number | null, p95: number | null, hub = 0, direct = 0): LiveStats => ({
+    n, ttff: { p50, p95 }, ice_timeouts: 0, no_frame: 0,
+    by_route: { hub: { n: hub, p50: hub ? 1500 : null, p95: null }, direct: { n: direct, p50: direct ? 640 : null, p95: null } },
+    stages: { offer: pct, ice: pct, post: pct, answer: pct, connected: pct, first_frame: pct },
+  });
+  it("says p50 and p95 in seconds, with the count", () => {
+    expect(liveStartText(stats(42, 1234, 3456))).toBe("p50 1.2 s · p95 3.5 s (42)");
+  });
+  it("says nothing with fewer than five views, or no numbers", () => {
+    expect(LIVE_START_MIN).toBe(5);
+    expect(liveStartText(stats(4, 1000, 2000))).toBeNull();
+    expect(liveStartText(stats(5, 1000, 2000))).toBe("p50 1.0 s · p95 2.0 s (5)");
+    expect(liveStartText(stats(9, null, null))).toBeNull();
+    expect(liveStartText(null)).toBeNull();
+  });
+  it("names the routes in the tooltip when they were used", () => {
+    expect(liveStartTitle(stats(7, 1000, 2000, 4, 3))).toMatch(/through the hub p50 1\.5 s \(4\), direct on the LAN p50 0\.6 s \(3\)$/);
+    expect(liveStartTitle(stats(7, 1000, 2000, 7, 0))).not.toMatch(/direct/);
   });
 });

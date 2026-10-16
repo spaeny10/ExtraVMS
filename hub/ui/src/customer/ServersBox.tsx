@@ -1,19 +1,19 @@
 /**
  * Customer → Servers: every server of the customer (retired ones too), grouped by Site. A toolbar searches and filters
  * (Site, "Has problems"); Table and Cards show the same fields: status and alerts, cameras (naming the ones down),
- * recording, AI, network. Each server has one "Open console" link and its admin actions in a ⋯ menu (servers.tsx
+ * recording, AI, network (and, for admins, how long its live tiles take to start). Each server has one "Open console" link and its admin actions in a ⋯ menu (servers.tsx
  * ServerMenu). "+ Add server" opens the enroll form (ClaimBox). Retired servers sit in a collapsed section at the bottom.
  * The view and the filters are remembered per viewer (localStorage).
  */
 import { useMemo, useState } from "react";
-import type { Org, Server, Site } from "../api";
+import type { LiveStats, Org, Server, Site } from "../api";
 import { ago } from "../api";
 import { CENTRAL_TAG } from "../central";
 import { go, siteHref } from "../nav";
-import { ServerMenu } from "../servers";
+import { ServerMenu, useLiveStats } from "../servers";
 import {
   type ServerFilters, NO_FILTERS, UNASSIGNED, aiText, cameraCounts, camDown, downText, filterServers, groupBySite, hasProblems, latestVersion,
-  networkText, parseFilters, recordingText, updateAvailable,
+  liveStartText, liveStartTitle, networkText, parseFilters, recordingText, updateAvailable,
 } from "../serverList";
 import { ClaimBox } from "./ClaimBox";
 
@@ -25,7 +25,7 @@ const loadFilters = (): ServerFilters => { try { return parseFilters(localStorag
 const save = (key: string, v: string) => { try { localStorage.setItem(key, v); } catch { /* private mode */ } };
 
 /** What a row and a card both need, worked out once per server. */
-type Ctx = { now: number; latest: string | null; admin: boolean; sites: Site[]; onChanged: () => void };
+type Ctx = { now: number; latest: string | null; admin: boolean; sites: Site[]; onChanged: () => void; live: Record<string, LiveStats> };
 
 /** Name, the "update available" badge, and its note · host (and the central recording tag, linking to its Site). */
 function ServerName({ s, latest }: { s: Server; latest: string | null }) {
@@ -72,6 +72,11 @@ function Cameras({ s }: { s: Server }) {
 }
 
 const Network = ({ s }: { s: Server }) => { const t = networkText(s); return t ? <>{t}</> : <span className="muted">—</span>; };
+/** "Live start p50 1.2 s · p95 3.4 s (42)" under Network in the table (nothing until there are enough views). */
+function LiveStart({ st }: { st?: LiveStats }) {
+  const t = liveStartText(st);
+  return t && st ? <div className="muted small" title={liveStartTitle(st)}>Live start {t}</div> : null;
+}
 
 function Row({ s, ctx }: { s: Server; ctx: Ctx }) {
   return (
@@ -81,7 +86,7 @@ function Row({ s, ctx }: { s: Server; ctx: Ctx }) {
       <td data-label="Cameras"><Cameras s={s} /></td>
       <td className="small" data-label="Recording" title={s.central ? (s.central.mode === "vpn" ? "Central recording over SpeedFusion" : "Central recording over port forwards") : "Free disk, and how long it lasts at the cameras' current bitrate"}>{recordingText(s)}</td>
       <td className="small" data-label="AI">{aiText(s)}</td>
-      <td className="small" data-label="Network"><Network s={s} /></td>
+      <td className="small" data-label="Network"><Network s={s} /><LiveStart st={ctx.live[s.id]} /></td>
       <td className="acts"><ServerMenu s={s} admin={ctx.admin} sites={ctx.sites} onChanged={ctx.onChanged} /></td>
     </tr>
   );
@@ -91,6 +96,7 @@ function Row({ s, ctx }: { s: Server; ctx: Ctx }) {
 function Card({ s, ctx }: { s: Server; ctx: Ctx }) {
   const [all, setAll] = useState(false);
   const cams = s.summary?.cameras ?? [];
+  const live = liveStartText(ctx.live[s.id]);
   return (
     <div className={`site-card server-list-card ${s.online ? "" : "offline"} ${s.retired_at ? "retired" : ""}`}>
       <div className="head"><div className="grow"><ServerName s={s} latest={ctx.latest} /></div></div>
@@ -100,6 +106,7 @@ function Card({ s, ctx }: { s: Server; ctx: Ctx }) {
         <span>Recording</span><div>{recordingText(s)}</div>
         <span>AI</span><div>{aiText(s)}</div>
         <span>Network</span><div><Network s={s} /></div>
+        {live && <><span>Live start</span><div title={liveStartTitle(ctx.live[s.id])}>{live}</div></>}
       </div>
       {cams.length > 0 && <button className="linkish" aria-expanded={all} onClick={() => setAll(!all)}>{all ? "Hide cameras" : "Show all cameras"}</button>}
       {all && (
@@ -134,7 +141,8 @@ export function ServersBox({ org, servers, sites, admin, onChanged }: { org: Org
   const site = filters.site === UNASSIGNED || siteNames[filters.site] ? filters.site : "";
   const shown = useMemo(() => filterServers(servers, { ...filters, site }), [servers, filters, site]);
   const { groups, unassigned, retired } = useMemo(() => groupBySite(shown, siteNames), [shown, siteNames]);
-  const ctx: Ctx = { now, latest: latestVersion(servers), admin, sites, onChanged };
+  const live = useLiveStats(servers, admin);
+  const ctx: Ctx = { now, latest: latestVersion(servers), admin, sites, onChanged, live };
   const problems = servers.filter(hasProblems).length;
   const filtered = !!(filters.q.trim() || site || filters.problems);
   const sections = [

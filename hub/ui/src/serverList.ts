@@ -3,7 +3,7 @@
  * (cameras, recording, AI, network), problem detection, search and Site filter, grouping by Site, and the
  * "update available" check. Pure, so vitest covers it.
  */
-import type { Server } from "./api";
+import type { LiveStats, Server } from "./api";
 import { fmtGB, fmtMbps, quotaText, serverBandwidth } from "./central";
 
 /**
@@ -62,6 +62,24 @@ export function aiText(s: Cams): string {
 export function networkText(s: Cams): string | null {
   const bw = serverBandwidth(s);
   return bw ? `${fmtMbps(bw.mbps)} in${bw.month_gb != null ? ` · ${fmtGB(bw.month_gb)} this month` : ""}` : null;
+}
+
+/** Fewer live starts than this and the card says nothing (a percentile of two or three views means little). */
+export const LIVE_START_MIN = 5;
+/** "p50 1.2 s · p95 3.4 s (42)": how long the server's live tiles took to show a picture; null below LIVE_START_MIN. */
+export function liveStartText(st: LiveStats | null | undefined): string | null {
+  if (!st || st.n < LIVE_START_MIN || st.ttff.p50 == null || st.ttff.p95 == null) return null;
+  const s = (ms: number) => `${(ms / 1000).toFixed(1)} s`;
+  return `p50 ${s(st.ttff.p50)} · p95 ${s(st.ttff.p95)} (${st.n})`;
+}
+/** The tooltip: the routes apart, when both were used. */
+export function liveStartTitle(st: LiveStats): string {
+  const route = (k: "hub" | "direct", label: string) => {
+    const r = st.by_route[k];
+    return r.n && r.p50 != null ? `${label} p50 ${(r.p50 / 1000).toFixed(1)} s (${r.n})` : null;
+  };
+  const parts = [route("hub", "through the hub"), route("direct", "direct on the LAN")].filter(Boolean);
+  return `Time from opening a live tile to its first picture, over the last ${st.n} views since the hub started${parts.length ? `: ${parts.join(", ")}` : ""}`;
 }
 
 /** Offline, a camera down, or open alerts. A retired server is never a problem (it is out of service on purpose). */

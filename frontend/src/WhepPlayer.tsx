@@ -2,6 +2,10 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode }
 import { api, makeApi, whepSession, type SiteApi } from "./api";
 import { cameraOfPath, stillWidth } from "./cameraStreams";
 import { ZoomFrame } from "./VideoZoom";
+import {
+  type InboundVideo, type WhepStatsSample, type WhepTiming, type WhepTimingSnapshot, inboundVideo, pathQuality, reportLive, statsSample,
+  whepRoute, whepTiming,
+} from "./whepTiming";
 
 /**
  * WebRTC (WHEP) player for a MediaMTX path.
@@ -11,6 +15,10 @@ import { ZoomFrame } from "./VideoZoom";
  * While it connects (until the first video frame plays) it shows the camera's latest recorded still (/api/frame,
  * sized to the player) with a small "Connecting…" badge, then cross-fades to the video. A still that can't load
  * leaves the plain black "Connecting…" box as before.
+ *
+ * Each connection attempt is timed (whepTiming.ts): onFirstFrame gets its stages when the first frame is presented
+ * (requestVideoFrameCallback, else getStats polled until a frame decodes), and the registered live reporter, if any (the
+ * hub's), gets a report then and when the attempt ends. onStats gets link quality every 2 s while connected.
  */
 export type WhepState = "connecting" | "playing" | "error";
 
@@ -39,8 +47,12 @@ function usePoster(site: SiteApi, camera: string | null, box: React.RefObject<HT
   return { url: failed ? null : url, loaded: loaded && !failed, onLoad: () => setLoaded(true), onError: () => setFailed(true) };
 }
 
-export function WhepPlayer({ path, port, className, onUnsupported, showSize = false, videoRef, children, iceServers, onFallback, base, site: given, muted = true, onAudio, onState, camera, poster = true }: {
+export function WhepPlayer({ path, port, className, onUnsupported, showSize = false, videoRef, children, iceServers, onFallback, base, site: given, muted = true, onAudio, onState, camera, poster = true, onFirstFrame, onStats }: {
   path: string; port: number; className?: string; onUnsupported?: () => void; showSize?: boolean;
+  /** the attempt's first video frame was presented: how long each stage took (whepTiming.ts) */
+  onFirstFrame?: (timing: WhepTimingSnapshot) => void;
+  /** link quality every 2 s while connected (loss, freezes, dropped frames, frame size, jitter) */
+  onStats?: (sample: WhepStatsSample) => void;
   /** the camera whose recording the still comes from; default: the path without _sub / _hd */
   camera?: string;
   /** show the camera's latest still while connecting (default on) */
@@ -79,6 +91,10 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
   const site = useMemo(() => given ?? (base === undefined ? api : makeApi(base)), [given, base]);
   const audioCb = useRef(onAudio);
   audioCb.current = onAudio;
+  const firstFrameCb = useRef(onFirstFrame);
+  firstFrameCb.current = onFirstFrame;
+  const statsCb = useRef(onStats);
+  statsCb.current = onStats;
   useEffect(() => { if (video.current) video.current.muted = muted; }, [muted]);  // React doesn't sync the muted attribute
   const box = useRef<HTMLDivElement | null>(null);
   const still = usePoster(site, poster ? camera ?? cameraOfPath(path) : null, box);
@@ -96,17 +112,81 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
     let retryTimer: number | undefined;
     let noFramesTimer: number | undefined;
     let sessionUrl: string | null = null;   // this connection's session on the server, from the answer's Location
+    let attempt = 0;
+    let timing: WhepTiming | null = null;   // the current attempt's marks; null once it has been reported as ended
+    const route = whepRoute(site.whepUrl(path));   // hub, direct (the hub's LAN client) or local
+    let framePoll: number | undefined;      // getStats polled for the first frame (no requestVideoFrameCallback)
+    let frameReq: { v: HTMLVideoElement; id: number } | null = null;
+    let statsTimer: number | undefined;
+    const cam = camera ?? cameraOfPath(path);
     failures.current = 0;
     setSize("");
+    const report = (t: WhepTiming, event: "first_frame" | "end") => reportLive({
+      ...t.snapshot(), event, base: site.base, camera: cam, path, quality: pathQuality(path), route, duration_s: event === "end" ? t.elapsedS() : null,
+    });
+    const stopWatching = () => {
+      clearInterval(framePoll);
+      clearInterval(statsTimer);
+      if (frameReq) frameReq.v.cancelVideoFrameCallback(frameReq.id);
+      frameReq = null;
+    };
+    // the attempt is over (a retry, the fallback, unmount, the page closing): its "end" report, once
+    const endAttempt = () => {
+      stopWatching();
+      if (timing) report(timing, "end");
+      timing = null;
+    };
     const hangUp = () => {
+      endAttempt();
       pc?.close();
       if (sessionUrl) endSession(sessionUrl);
       sessionUrl = null;
     };
+    const gotFrame = (t: WhepTiming) => {
+      if (t !== timing || !t.mark("firstFrame")) return;
+      clearInterval(framePoll);
+      firstFrameCb.current?.(t.snapshot());
+      report(t, "first_frame");
+    };
+    // first frame: the video's next presented frame, else (no requestVideoFrameCallback, or a background tab, where
+    // nothing is presented) a decoded frame in getStats, polled every 250 ms for at most 15 s
+    const watchFirstFrame = (t: WhepTiming, conn: RTCPeerConnection) => {
+      const v = video.current;
+      if (v && typeof v.requestVideoFrameCallback === "function" && document.visibilityState !== "hidden") {
+        frameReq = { v, id: v.requestVideoFrameCallback(() => { frameReq = null; gotFrame(t); }) };
+        return;
+      }
+      const until = performance.now() + 15000;
+      framePoll = window.setInterval(async () => {
+        if (performance.now() > until || t !== timing) { clearInterval(framePoll); return; }
+        try {
+          if (inboundVideo((await conn.getStats()).values())?.framesDecoded) gotFrame(t);
+        } catch { /* closed meanwhile */ }
+      }, 250);
+    };
+    // link quality for onStats, every 2 s while this connection is up
+    const watchStats = (conn: RTCPeerConnection) => {
+      clearInterval(statsTimer);
+      let prev: InboundVideo | null = null;
+      statsTimer = window.setInterval(async () => {
+        if (!statsCb.current) return;
+        try {
+          const cur = inboundVideo((await conn.getStats()).values());
+          if (!cur || canceled || conn !== pc) return;
+          statsCb.current?.(statsSample(prev, cur));
+          prev = { ...cur };
+        } catch { /* closed meanwhile */ }
+      }, 2000);
+    };
+    const onPageHide = () => endAttempt();   // effects don't clean up when the page goes away: report it now
+    window.addEventListener("pagehide", onPageHide);
 
     const start = async () => {
       setState("connecting");
+      const tm = (timing = whepTiming(++attempt));
       pc = new RTCPeerConnection(iceServers?.length ? { iceServers } : undefined);
+      const conn = pc;
+      watchFirstFrame(tm, conn);
       pc.addTransceiver("video", { direction: "recvonly" });
       pc.addTransceiver("audio", { direction: "recvonly" });   // answered only if the camera sends a WebRTC-playable codec
       audioCb.current?.(false);
@@ -124,6 +204,8 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
         if (!pc) return;
         if (pc.connectionState === "connected") {
           setState("playing");
+          tm.mark("connected");
+          watchStats(conn);
           // Connected but nothing decodes: the codec negotiated but the decoder can't handle it.
           clearTimeout(noFramesTimer);
           noFramesTimer = window.setTimeout(async () => {
@@ -137,9 +219,11 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
       try {
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
+        tm.mark("offer");
         await new Promise<void>((resolve) => {
           if (pc!.iceGatheringState === "complete") return resolve();
-          const t = setTimeout(resolve, iceServers?.length ? 3000 : 1500);  // relay candidates take longer
+          // relay candidates take longer
+          const t = setTimeout(() => { tm.iceTimedOut(); resolve(); }, iceServers?.length ? 3000 : 1500);
           pc!.onicegatheringstatechange = () => {
             if (pc!.iceGatheringState === "complete") {
               clearTimeout(t);
@@ -147,12 +231,14 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
             }
           };
         });
+        tm.mark("iceGathered");
         // same-origin signaling via the NVR (works over HTTPS); media flows directly from MediaMTX
         const r = await fetch(site.whepUrl(path), {
           method: "POST",
           headers: { "Content-Type": "application/sdp" },
           body: pc.localDescription!.sdp,
         });
+        tm.mark("posted");
         if (!r.ok) {
           const text = await r.text();
           // MediaMTX rejects offers that lack the track's codec ("codecs not supported by client").
@@ -167,6 +253,7 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
         sessionUrl = session ? site.whepSessionUrl(path, session) : null;
         if (canceled) { hangUp(); return; }
         await pc.setRemoteDescription({ type: "answer", sdp: await r.text() });
+        tm.mark("answer");
       } catch {
         retry();
       }
@@ -185,6 +272,7 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
     start();
     return () => {
       canceled = true;
+      window.removeEventListener("pagehide", onPageHide);
       clearTimeout(retryTimer);
       clearTimeout(noFramesTimer);
       hangUp();

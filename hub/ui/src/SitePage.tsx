@@ -22,7 +22,7 @@ import { ContactsBox } from "./site/ContactsBox";
 import { MonitoringBox } from "./site/MonitoringBox";
 import { ProceduresBox } from "./site/ProceduresBox";
 import { SiteIncidents } from "./site/SiteIncidents";
-import { ServerActions, ServerCard } from "./servers";
+import { ServerActions, ServerCard, useLiveStats } from "./servers";
 import { SiteLive } from "./SiteLive";
 import { SiteTimeline } from "./SiteTimeline";
 import { SiteFind } from "./SiteFind";
@@ -176,6 +176,7 @@ function ServersTab({ site, admin, onChanged }: { site: Site; admin: boolean; on
   const central = useCentral(site.id, admin, onChanged);
   const hubAdmin = !!central?.can_manage;
   const pending = unenrolledInstances(central?.instances, site.servers);
+  const live = useLiveStats(site.servers, admin);
   const now = Date.now() / 1000;
   // what the Site's servers pull from its cameras (a central instance: the site's cellular upload)
   const upload = uploadLine(siteBandwidth(site.servers));
@@ -187,7 +188,7 @@ function ServersTab({ site, admin, onChanged }: { site: Site; admin: boolean; on
           {site.servers.map((s) => {
             const ci = instanceFor(central?.instances, s.id);
             return (
-              <ServerCard key={s.id} s={s} now={now} href={serverHref(site.id, s.id)}
+              <ServerCard key={s.id} s={s} now={now} href={serverHref(site.id, s.id)} live={live[s.id]}
                 central={ci ? { line: datacenterLine(ci, hubAdmin), stats: <CentralStats ci={ci} />, details: <CentralDetails siteName={site.name} ci={ci} hubAdmin={hubAdmin} enrolled /> } : undefined}>
                 <ServerActions s={s} admin={admin} sites={sites} onChanged={onChanged} />
               </ServerCard>

@@ -134,6 +134,13 @@ export type DirectInfo = { available: boolean; urls: { url: string; local?: bool
 // (direct.candidates also accepts bare URL strings in `urls`: that is how the server's own heartbeat lists LAN URLs)
 /** POST /api/servers/{id}/direct-token: a short-lived token the server accepts for read-only + WHEP requests. */
 export type DirectToken = DirectInfo & { token: string; exp: number; role: string };
+/** GET /api/telemetry/live (hub telemetry.py): time to first frame of this server's live tiles, ms, over the hub's last
+ *  300 attempts since its restart. `n` = attempts that showed a frame; `no_frame` = ended without one. */
+export type LivePct = { p50: number | null; p95: number | null };
+export type LiveStats = {
+  n: number; ttff: LivePct; by_route: Record<"hub" | "direct", LivePct & { n: number }>;
+  stages: Record<"offer" | "ice" | "post" | "answer" | "connected" | "first_frame", LivePct>; ice_timeouts: number; no_frame: number;
+};
 // ---- Cellular coverage (hub/hub/coverage.py, the CoverageMap API), normalized per carrier and technology
 /** One speed-test metric at the nearest radius with successful tests ("closest" = the closest tested area, up to 10 km). */
 export type CoverageMetric = { radius: "0.5km" | "1km" | "2km" | "closest"; med: number | null; min: number | null; avg: number | null; max: number | null;
@@ -316,9 +323,25 @@ function seen<T>(p: Promise<T>, pick: (x: T) => Server[]): Promise<T> {
   });
 }
 
+const LIVE_REPORT_URL = "/api/telemetry/live";
+/**
+ * Send one live-tile report (liveTelemetry.ts) to the hub. sendBeacon outlives the page closing; it is same-origin, so the
+ * session cookie and an Origin header go with it (the hub's CSRF check accepts it like any of its own POSTs). Where the
+ * browser refuses a JSON beacon, a keepalive fetch takes over. Failures don't matter.
+ */
+export function sendLiveReport(body: unknown): void {
+  const data = JSON.stringify(body);
+  try {
+    if (navigator.sendBeacon?.(LIVE_REPORT_URL, new Blob([data], { type: "application/json" }))) return;
+  } catch { /* refused: fall back */ }
+  fetch(LIVE_REPORT_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: data, keepalive: true }).catch(() => {});
+}
+
 export const api = {
   me: () => req<Me>("/auth/me").then((m) => { setMapConfig(m.map); return m; }),
   directToken: (server: string) => req<DirectToken>(`/api/servers/${server}/direct-token`, { method: "POST" }),
+  /** TTFF p50/p95 of the server's live tiles (its customer's admins and hub administrators). */
+  liveStats: (server: string) => req<LiveStats>(`/api/telemetry/live?${qs({ server })}`),
   login: (email: string, password: string, totp?: string) => req<{ totp_required?: boolean } & Partial<Me>>("/auth/login", json("POST", { email, password, totp })),
   logout: () => req("/auth/logout", { method: "POST" }),
   /** Two-factor changes re-check the password, and a current authenticator code while two-factor is on. */
