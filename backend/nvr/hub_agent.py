@@ -343,8 +343,9 @@ class HubAgent:
             self._ws = ws
             hello = {"t": "hello", "proto": PROTO, "site_version": __version__, "now": time.time(),
                      "site_id": self.site_id, "hostname": socket.gethostname(),
-                     # camweb: camera web pages (/api/camweb/<camera>) and WebSockets through the tunnel ("ws" requests)
-                     "caps": ["events", "turn", "vlm", "camweb", *(["direct"] if settings.direct_enabled else [])]}
+                     # camweb: camera web pages (/api/camweb/<camera>) and WebSockets through the tunnel ("ws" requests);
+                     # talk: live talk-down from the browser's microphone (WebSocket /api/speakers/<id>/talk)
+                     "caps": ["events", "turn", "vlm", "camweb", "talk", *(["direct"] if settings.direct_enabled else [])]}
             try:
                 hello["cameras"] = [{"id": c["id"], "name": c["name"]} for c in db.cameras(enabled_only=True)]
             except sqlite3.Error:

@@ -2,7 +2,7 @@
 
 viewer   watch: every GET (but the talk-down voice and a camera's own settings), the live WebSocket, WHEP signaling (offer and
          hang-up), media, playback, frames
-operator act: PTZ / relay / presets, talk-down (play / stop a message on a speaker, Describe & warn, the voice and its
+operator act: PTZ / relay / presets, talk-down (play / stop a message on a speaker, Hold to Talk, Describe & warn, the voice and its
          preview), naming people and vehicles, feedback and synopsis edits, locks, Ask and clip chat, reprocess, briefings on demand
 admin    configure: cameras (and their own settings over ONVIF: clock, encoders, imaging, rules, reboot), speakers and
          their message library, the talk-down voice, zones, retention, topology, remote AI, backups, site rules, SD card recovery
@@ -31,7 +31,7 @@ RULES: list[tuple[set[str], re.Pattern, str]] = [
     ({"POST"}, re.compile(r"^/api/footage/verify$"), "viewer"),
     ({"PUT"}, re.compile(r"^/api/cameras/[^/]+/ptz/config$"), "admin"),                # return-home timer etc.: configuration
     ({"POST", "PUT", "DELETE"}, re.compile(r"^/api/cameras/[^/]+/(ptz|relay)(/|$)"), "operator"),
-    ({"POST"}, re.compile(r"^/api/speakers/[^/]+/(play|stop|describe)$"), "operator"),   # talk-down on a bound camera's live view; Describe & warn
+    ({"POST"}, re.compile(r"^/api/speakers/[^/]+/(play|stop|describe|talk)$"), "operator"),   # talk-down on a bound camera's live view; Describe & warn; talk: Hold to Talk, a WebSocket checked as a POST
     ({"POST"}, re.compile(r"^/api/talkdown/preview$"), "operator"),       # a voice sample in the browser, never on a speaker
     ({"PUT"}, re.compile(r"^/api/talkdown/voice$"), "admin"),             # the voice (the hub pushes its Site setting)
     ({"PUT", "POST", "DELETE"}, re.compile(r"^/api/(speakers|talkdown)(/|$)"), "admin"),  # speakers, Check, the message library

@@ -166,10 +166,21 @@ export type SpeakerCheck = { ok: boolean; online: boolean; backchannel: boolean;
 export type SpeakerStatus = {
   state: "idle" | "connecting" | "playing"; message: string | null; by: string | null; requested_at: number | null; started_at: number | null;
   elapsed_s: number | null; duration_s: number | null;
+  /** a live talk (Hold to Talk, newer servers): no duration, the message is "Live talk" */
+  live?: boolean;
   last: { message: string; by: string; result: "played" | "stopped" | "replaced" | "failed"; error: string | null; at: number; played_s: number;
     /** who spoke a text (newer servers; null for a recording or when it failed before speaking) */
-    tts?: Spoken | null } | null;
+    tts?: Spoken | null;
+    /** how a live talk ended: let go, no audio for a while, the 60 s limit */
+    reason?: "released" | "idle" | "cap" | null } | null;
 };
+/** What a live talk's socket (talkUrl) says, as JSON text; the browser sends 8 kHz 16-bit PCM, then {"type": "end"}. */
+export type TalkMessage =
+  | { type: "talk"; state: "connecting"; speaker_id: string; speaker: string; camera_ids: string[]; replaced: string | null }
+  | { type: "talk"; state: "live" }
+  | { type: "talk"; state: "ended"; result: "played" | "stopped" | "replaced" | "failed" | null; reason: "released" | "idle" | "cap" | null;
+      error: string | null; played_s: number | null }
+  | { type: "talk"; state: "refused"; error: string };
 export type Speaker = {
   id: string; name: string; host: string; rtsp_port: number; onvif_port: number; path: string; username: string; codec: SpeakerCodec;
   volume_note: string; camera_ids: string[]; enabled: boolean; check: SpeakerCheck | null; checked_at: number | null; status: SpeakerStatus;
@@ -618,6 +629,10 @@ export function makeApi(base: string, opts: ApiOptions = {}) {
   // an absolute base (the direct client) is another origin: its socket goes there, not to this page's host
   wsUrl: () => (/^https?:\/\//.test(base) ? u("/api/ws").replace(/^http/, "ws")
     : `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${u("/api/ws")}`),
+  /** Hold to Talk (operator): the socket that carries the microphone to a speaker (TalkMessage). Not a media URL: on the
+   *  hub it stays on the proxy (hubSource MEDIA_KEYS), where it is audited; a direct connection is read-only. */
+  talkUrl: (speakerId: string) => (/^https?:\/\//.test(base) ? u(`/api/speakers/${speakerId}/talk`).replace(/^http/, "ws")
+    : `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${u(`/api/speakers/${speakerId}/talk`)}`),
   /** Live updates. onMessage gets the other message types (e.g. {type: "briefing"}). */
   subscribe(onEvent: (e: NvrEvent) => void, onMessage?: (msg: { type: string; [k: string]: unknown }) => void): () => void {
     let ws: WebSocket | null = null;

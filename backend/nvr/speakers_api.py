@@ -1,7 +1,7 @@
-"""Talk-down routes (talkdown.py): IP speakers, the message library, play / stop / status, Describe & warn
-(talkdown_describe.py), the talk-down voice (tts.py).
+"""Talk-down routes (talkdown.py): IP speakers, the message library, play / stop / status, live talk (Hold to Talk, a
+WebSocket), Describe & warn (talkdown_describe.py), the talk-down voice (tts.py).
 
-Roles through the hub (hub/hub/roles.py): play, stop, describe, the voice preview and reading the voice need operator,
+Roles through the hub (hub/hub/roles.py): play, stop, live talk, describe, the voice preview and reading the voice need operator,
 everything else that writes needs admin. Checked here too for a tunneled or direct request (the site's own page has no
 sign-in: the LAN is the trust boundary). A speaker's password is never returned; omitted on PUT = kept, as for cameras.
 The voice of a hub-enrolled server is the hub's (set per Site, pushed through the tunnel): its own page can't change it.
@@ -11,16 +11,18 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import contextlib
+import json
 import re
 import time
 import uuid
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Query, Request, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field, model_validator
 
-from . import hub_agent, talkdown, talkdown_describe, tts
+from . import hub_agent, lan_guard, talkdown, talkdown_describe, tts
 from .db import db
 
 router = APIRouter()
@@ -210,6 +212,88 @@ async def stop(speaker_id: str, request: Request):
     if stopped:
         talkdown.log.info("talk-down on %s stopped by %s", speaker_id, by)
     return {"stopped": stopped, "status": talkdown.manager.status(speaker_id)}
+
+
+# a live talk refused after the socket opened: {"type": "talk", "state": "refused", "error"} and one of these close codes
+# (a browser never sees the code of a socket refused before it opened, nor does a socket relayed through the hub)
+WS_FORBIDDEN, WS_UNKNOWN, WS_OFF = 4403, 4404, 4409
+TALK_POLL_S = 0.05
+
+
+@router.websocket("/api/speakers/{speaker_id}/talk")
+async def talk(speaker_id: str, sock: WebSocket):
+    """Hold to Talk: the browser's microphone, live on this speaker (talkdown.LiveFeed). Binary messages are 8 kHz mono
+    16-bit little-endian PCM (any length; the panel sends 40 ms); a text {"type": "end"} or closing the socket means the
+    operator let go (what is buffered still plays). The server says {"type": "talk", "state": "connecting" (with the
+    speaker, its cameras and the message it replaced), "live" (the speaker is playing it), then "ended" (result, reason,
+    error, played_s)} and closes, or "refused" (error). Operator, as play: it replaces what plays on the speaker, a
+    message or Stop ends it. WebSockets bypass the HTTP middleware, so the checks are here: the tunnel's marker and the
+    hub role, or else this server's own page (lan_guard: an allowed Host, the same Origin; anything else is refused before
+    the socket opens). A Direct-on-LAN page is refused too: direct connections are read-only."""
+    tunnel = hub_agent.is_tunnel(sock.scope)
+    if not tunnel:
+        host, origin = sock.headers.get("host"), sock.headers.get("origin")
+        if not lan_guard.host_allowed(host) or (origin is not None and not lan_guard.same_origin(origin, host)):
+            await sock.close(code=WS_FORBIDDEN)
+            return
+    by = (sock.headers.get("x-hub-user") or "hub") if tunnel else "local"
+    s = db.speaker(speaker_id) if re.match(ID_RX, speaker_id) else None
+    await sock.accept()
+    if tunnel and RANK.get(sock.headers.get("x-hub-role") or "", -1) < RANK["operator"]:
+        refused = (WS_FORBIDDEN, "needs the operator role")
+    elif not s:
+        refused = (WS_UNKNOWN, "unknown speaker")
+    elif not s["enabled"]:
+        refused = (WS_OFF, "the speaker is turned off in its settings")
+    else:
+        refused = None
+    if refused:
+        with contextlib.suppress(WebSocketDisconnect, RuntimeError):
+            await sock.send_json({"type": "talk", "state": "refused", "error": refused[1]})
+            await sock.close(code=refused[0])
+        return
+    job = talkdown.manager.talk(s, by)
+    feed = job.feed
+
+    async def receive() -> None:
+        while True:
+            m = await sock.receive()
+            if m["type"] == "websocket.disconnect":
+                return
+            if m.get("bytes") is not None:
+                if len(m["bytes"]) > talkdown.LIVE_MAX_MESSAGE:
+                    return
+                feed.push(m["bytes"])
+            elif m.get("text"):
+                with contextlib.suppress(ValueError, AttributeError):
+                    if json.loads(m["text"]).get("type") == "end":
+                        return
+
+    rx = asyncio.create_task(receive())
+    try:
+        await sock.send_json({"type": "talk", "state": "connecting", "speaker_id": s["id"], "speaker": s["name"],
+                              "camera_ids": s.get("camera_ids") or [], "replaced": job.replacing})
+        live = False
+        while job.thread and job.thread.is_alive():
+            if not live and job.state == "playing":
+                live = True
+                await sock.send_json({"type": "talk", "state": "live"})
+            if rx.done():
+                feed.end()   # let go (or the page went): the thread plays out the buffer and ends
+                await asyncio.sleep(TALK_POLL_S)
+            else:
+                await asyncio.wait([rx], timeout=TALK_POLL_S)
+        r = job.result or {}
+        await sock.send_json({"type": "talk", "state": "ended", "result": r.get("result"), "reason": r.get("reason"),
+                              "error": r.get("error"), "played_s": r.get("played_s")})
+        await sock.close()
+    except (WebSocketDisconnect, RuntimeError):
+        pass   # the browser went: the talk ends on its own (released, played out)
+    finally:
+        feed.end()
+        rx.cancel()
+        with contextlib.suppress(asyncio.CancelledError, WebSocketDisconnect, RuntimeError):
+            await rx
 
 
 class DescribeIn(BaseModel):

@@ -1,7 +1,8 @@
 """/s/{site_id}/... : the site's own UI and API, reached through its tunnel.
 
 Static files come from the site UI bundle the hub ships (frontend/dist), byte-identical to what the site
-serves itself; API and WebSocket requests go down the tunnel with the hub user's identity attached.
+serves itself; API and WebSocket requests go down the tunnel with the hub user's identity attached. Hold to Talk
+(/s/{site_id}/api/speakers/{id}/talk) is a WebSocket relayed through the tunnel to the site, both ways.
 """
 from __future__ import annotations
 
@@ -14,9 +15,10 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
+from tunnelproto import chunk
 
 from . import auth, central_cameras, db, security, viewing
-from .agents import TooManyStreams, registry
+from .agents import TooManyStreams, WsAssembler, registry, ws_pieces
 from .config import settings
 from .roles import allows, required_role
 
@@ -32,6 +34,11 @@ TALKDOWN_ANSWER_MAX = 8192
 # does). The offers themselves (retries included) make one row per viewing session of a camera (viewing.py).
 WHEP_HANGUP = re.compile(r"^/api/whep/[^/]+/[^/]+$")
 TALKDOWN_TEXT_MAX = 300
+# Hold to Talk (backend speakers_api.talk): the browser's microphone, a WebSocket relayed to the site as a "ws" stream (as
+# camera page sockets are, camweb.py), allowed as a POST of its path would be (roles.py); one audit row per live talk,
+# written when it ends, from the site's own status messages (the speaker, its cameras, how long it was live), never audio
+SPEAKER_ID = re.compile(r"^[a-z0-9_]{1,32}$")   # backend speakers_api.ID_RX
+TALK_INFO_MAX = 4096                            # a status message of the site's larger than this is relayed, not read
 
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding",
        "upgrade", "cookie", "authorization", "host", "content-length"}
@@ -69,13 +76,8 @@ async def proxy_api(site_id: str, path: str, request: Request):
             reserved = await central_cameras.check(central, kind, api_path, await request.body())
         except central_cameras.Refused as e:
             raise HTTPException(e.status, e.detail)
-    headers ={k: v for k, v in request.headers.items() if k.lower() not in HOP and not k.lower().startswith("x-hub-")}
-    headers.update({"x-hub-user": u["email"], "x-hub-role": role, "x-hub-site": site_id,
-                    "x-forwarded-for": request.client.host if request.client else "", "x-forwarded-host": request.headers.get("host", ""),
-                    "x-forwarded-proto": request.url.scheme,
-                    # the Site this server belongs to (cached on the connection; the agent passes headers as UTF-8)
-                    "x-hub-location": (conn.location or {}).get("id") or site.get("location_id") or "",
-                    "x-hub-location-name": (conn.location or {}).get("name") or ""})
+    headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP and not k.lower().startswith("x-hub-")}
+    headers.update(_identity(u, role, site, conn, request, request.url.scheme))
     body = await request.body() if request.method in ("POST", "PUT", "PATCH") else None
     t0 = time.time()
     try:
@@ -129,6 +131,16 @@ async def proxy_api(site_id: str, path: str, request: Request):
     return StreamingResponse(body_iter(), status_code=status, headers=resp_headers, media_type=resp_headers.get("content-type"))
 
 
+def _identity(u: dict, role: str, site: dict, conn, request, scheme: str) -> dict:
+    """What the site is told about the request: the hub user and role, the server and its Site, where it came from."""
+    return {"x-hub-user": u["email"], "x-hub-role": role, "x-hub-site": site["id"],
+            "x-forwarded-for": request.client.host if request.client else "", "x-forwarded-host": request.headers.get("host", ""),
+            "x-forwarded-proto": scheme,
+            # the Site this server belongs to (cached on the connection; the agent passes headers as UTF-8)
+            "x-hub-location": (conn.location or {}).get("id") or site.get("location_id") or "",
+            "x-hub-location-name": (conn.location or {}).get("name") or ""}
+
+
 def _talkdown(answer: bytearray, status: int, conn) -> dict | None:
     """{action, detail} for a talk-down play: which speaker, which message, its cameras and the Site (None = the site
     refused it or the answer can't be read; the plain "POST speakers/<id>/play" row is written then)."""
@@ -166,10 +178,12 @@ def _describe(api_path: str, body: bytes | None, conn) -> dict | None:
                                              "location_id": loc.get("id"), "location_name": loc.get("name")}}}
 
 
-def _audit(u: dict, site: dict, request: Request, status: int, dt: float, special: dict | None = None) -> None:
+def _audit(u: dict, site: dict, request: Request | WebSocket, status: int, dt: float, special: dict | None = None,
+           method: str | None = None) -> None:
+    method = method or request.method   # a WebSocket has none: the caller names it
     db.insert(db.audit_log, {"ts": time.time(), "user_id": u["id"], "user_email": u["email"], "org_id": site["org_id"], "site_id": site["id"],
-                             "action": (special or {}).get("action") or f"{request.method} {request.url.path.split('/api/', 1)[-1]}",
-                             "method": request.method, "path": request.url.path, "status": status,
+                             "action": (special or {}).get("action") or f"{method} {request.url.path.split('/api/', 1)[-1]}",
+                             "method": method, "path": request.url.path, "status": status,
                              "ip": request.client.host if request.client else None,
                              "detail": {"ms": round(dt * 1000), **((special or {}).get("detail") or {})}})
 
@@ -203,6 +217,157 @@ async def proxy_ws(site_id: str, ws: WebSocket):
         c = registry.get(site_id)
         if c is not None:
             c.subscribers.discard(q)
+
+
+def _talk_audit(speaker_id: str, info: dict, live_s: float | None, conn) -> dict:
+    """{action, detail} for a live talk: the speaker (as the site named it), its cameras, the message it replaced, how
+    long it was live and how it ended, the Site."""
+    loc = getattr(conn, "location", None) or {}
+    speaker = str(info.get("speaker") or speaker_id)[:80]
+    detail = {"speaker_id": speaker_id, "speaker": speaker, "message": "Live talk", "live": True,
+              "camera_ids": [str(c)[:40] for c in (info.get("camera_ids") or []) if isinstance(c, (str, int))][:64],
+              "replaced": str(info["replaced"])[:120] if info.get("replaced") else None,
+              "duration_s": round(live_s, 1) if live_s is not None else None,
+              "result": str(info.get("result") or ("refused" if info.get("refused") else "ended"))[:20],
+              "location_id": loc.get("id"), "location_name": loc.get("name")}
+    if info.get("error"):
+        detail["error"] = str(info["error"])[:200]
+    return {"action": f"talk-down: Live talk on {speaker}", "detail": {"talkdown": detail}}
+
+
+async def _refuse(ws: WebSocket, code: int, error: str) -> None:
+    """Refuse an opened talk socket the way the site does: a message the page can read (it never sees a close code
+    of a socket refused before it opened), then the code."""
+    try:
+        await ws.send_json({"type": "talk", "state": "refused", "error": error})
+        await ws.close(code=code)
+    except (WebSocketDisconnect, RuntimeError):
+        pass
+
+
+@router.websocket("/s/{site_id}/api/speakers/{speaker_id}/talk")
+async def proxy_talk(site_id: str, speaker_id: str, ws: WebSocket):
+    """Hold to Talk through the hub: the browser's audio up to the site's /api/speakers/{id}/talk, its status messages
+    down. Signed in, from the hub's own pages only (a WebSocket carries no CSRF protection of its own), then the same
+    role a POST to the path needs. The talk is audited when it ends."""
+    u = auth.current_user(ws)  # type: ignore[arg-type]  (Request-like: cookies + headers)
+    origin = (ws.headers.get("origin") or "").rstrip("/")
+    own = {settings.public_url.rstrip("/"), f"{'https' if ws.url.scheme == 'wss' else 'http'}://{ws.headers.get('host', '')}"}
+    if not u or (origin and origin not in own):
+        await ws.close(code=4401 if not u else 4403)
+        return
+    await ws.accept()
+    api_path = f"/api/speakers/{speaker_id}/talk"
+    try:
+        site, role = auth.site_access(u, site_id)
+    except HTTPException:
+        await _refuse(ws, 4403, "no access to this server")
+        return
+    needed = required_role("POST", api_path)
+    if not SPEAKER_ID.match(speaker_id):
+        await _refuse(ws, 4404, "unknown speaker")
+        return
+    if not allows(role, needed):
+        await _refuse(ws, 4403, f"needs the {needed} role")
+        return
+    conn = registry.get(site_id)
+    if conn is None:
+        await _refuse(ws, 4503, "the server is offline")
+        return
+    if "talk" not in conn.caps():
+        await _refuse(ws, 4501, "this server's software is too old to talk live: update it")
+        return
+    try:
+        s = await conn.open("GET", api_path, "", _identity(u, role, site, conn, ws, "https" if ws.url.scheme == "wss" else "http"),
+                            body=True, ws=True)
+    except TooManyStreams:
+        await _refuse(ws, 4429, "too many requests to this server at once")
+        return
+    t0 = time.time()
+    info: dict = {}
+    live_at: list[float] = []
+    try:
+        try:
+            await asyncio.wait_for(s.head.wait(), settings.first_byte_timeout_s)
+        except asyncio.TimeoutError:
+            await conn.abort(s, "timeout")
+        if s.aborted or s.status != 101:
+            info["refused"], info["error"] = True, "the server did not take the call"
+            await _refuse(ws, 4502, info["error"])
+            return
+        await _talk_relay(ws, conn, s, info, live_at)
+    finally:
+        await conn.abort(s, "closed")
+        conn.finish(s)
+        live_s = (info.get("played_s") if isinstance(info.get("played_s"), (int, float)) else None) or \
+            (time.time() - live_at[0] if live_at else None)
+        try:
+            _audit(u, site, ws, s.status or 502, time.time() - t0, _talk_audit(speaker_id, info, live_s, conn), method="WS")
+        except Exception:   # the audit must not break the socket's teardown
+            log.exception("live talk audit for %s/%s", site_id, speaker_id)
+
+
+async def _talk_relay(ws: WebSocket, conn, s, info: dict, live_at: list[float]) -> None:
+    """Both ways until either side closes: the browser's messages up the tunnel (credit-paced), the site's down; the
+    site's small JSON status messages are read on the way for the audit."""
+    async def up():
+        while True:
+            m = await ws.receive()
+            if m["type"] == "websocket.disconnect":
+                return
+            for piece in ws_pieces(m["bytes"] if m.get("bytes") is not None else (m.get("text") or "")):
+                await s.take_credit(len(piece))
+                if s.aborted:
+                    return
+                await conn.send_bytes(chunk(s.id, piece))
+
+    async def down():
+        asm = WsAssembler()
+        while (c := await s.read()) is not None:
+            await conn.send({"t": "credit", "id": s.id, "bytes": len(c)})
+            got = asm.feed(c)
+            if got is None:
+                continue
+            binary, payload = got
+            if not binary and len(payload) <= TALK_INFO_MAX:
+                _talk_info(payload, info, live_at)
+            await (ws.send_bytes(payload) if binary else ws.send_text(payload.decode("utf-8", "replace")))
+
+    tasks = [asyncio.create_task(up()), asyncio.create_task(down())]
+    try:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for t in tasks:
+            t.cancel()
+        for t in tasks:
+            try:
+                await t
+            except (asyncio.CancelledError, WebSocketDisconnect, RuntimeError, ValueError):
+                pass
+            except Exception:
+                log.exception("live talk socket")
+        try:
+            await ws.close()
+        except RuntimeError:
+            pass   # the browser already went
+
+
+def _talk_info(payload: bytes, info: dict, live_at: list[float]) -> None:
+    try:
+        m = json.loads(payload)
+    except ValueError:
+        return
+    if not isinstance(m, dict) or m.get("type") != "talk":
+        return
+    state = m.get("state")
+    if state == "connecting":
+        info.update({k: m.get(k) for k in ("speaker", "camera_ids", "replaced")})
+    elif state == "live" and not live_at:
+        live_at.append(time.time())
+    elif state == "ended":
+        info.update({k: m.get(k) for k in ("result", "error", "played_s")})
+    elif state == "refused":
+        info.update(refused=True, error=m.get("error"))
 
 
 # ---- the site UI bundle under /s/{site_id}/

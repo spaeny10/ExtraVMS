@@ -43,7 +43,7 @@ function loadQuality(): Record<string, Quality> {
 export { livePath };   // moved to cameraStreams.ts; kept here for existing importers
 
 /** One live camera: the WHEP player with the paint-a-region overlay and the tile bar; with `speakers` bound to the camera,
- *  the 🔊 Talk-down button and its panel over the picture (TalkdownPanel.tsx). `quality` is the tile's mode (Auto, or
+ *  the 🔊 Talk-down button and its panel under the picture (TalkdownPanel.tsx). `quality` is the tile's mode (Auto, or
  *  the viewer's SD / HD: LiveQuality.tsx); `bar` gets the tile's Auto · SD · HD control to place. */
 export function LiveTile({ c, quality, onQuality, focused = false, port, active, bar, phone, onSwipe, iceServers, site = api, regionKey, speakers, poster }: {
   c: Camera; quality: QualityMode; onQuality: (m: QualityMode) => void;
@@ -112,7 +112,7 @@ export function LiveTile({ c, quality, onQuality, focused = false, port, active,
       </div>
       {/* under the tile, never over the picture: the operator must see the person while talking to them (over the
           picture it hid half a desktop tile and nearly all of a phone's 1920x576 panorama) */}
-      {talking && !!speakers?.length && <TalkdownPanel docked speakers={speakers} site={site} cameraId={c.id} onClose={() => setTalking(false)} />}
+      {talking && !!speakers?.length && <TalkdownPanel speakers={speakers} site={site} cameraId={c.id} onClose={() => setTalking(false)} />}
     </div>
   );
 }

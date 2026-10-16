@@ -17,6 +17,12 @@ text-to-speech engine speaks), or a one-off upload or typed text. ffmpeg convert
 Text-to-speech is tts.py: a Piper neural voice (the Site's voice setting, or a library message's own voice / speed),
 falling back to another Piper voice, Windows SAPI, then espeak-ng / espeak; the play answer says who will speak, the
 finished play's result and the log who did. Without any engine, the routes say so and the UI hides the Say field.
+
+Live talk (Hold to Talk, speakers_api.py's WebSocket): the browser's microphone as 8 kHz 16-bit PCM (LiveFeed), on the
+same kind of session: the wake tone, then the frames in the speaker's law as they arrive, one packet per 20 ms, silence
+while none is buffered (a short gap in the network), a backlog trimmed at the operator's pauses. It ends when the
+operator lets go (what is buffered still plays), after LIVE_IDLE_S without audio, or at LIVE_MAX_S. It is a playback
+like any other: it replaces what plays on the speaker, a message replaces it, Stop ends it, and it is logged as "Live talk".
 """
 from __future__ import annotations
 
@@ -33,8 +39,11 @@ import shutil
 import socket
 import subprocess
 import threading
+import sys
 import time
 import uuid
+from array import array
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -66,6 +75,15 @@ CHECK_EVERY_S = 600                # background DESCRIBE of each speaker (online
 WAKE_HZ = 200
 WAKE_PEAK = 330                    # of 32767
 WAKE_FADE_S = 0.05
+# live talk (LiveFeed, live()): the browser sends 8 kHz mono 16-bit little-endian PCM, any length per message
+LIVE_NAME = "Live talk"            # its name in the status, the log and the hub's audit
+LIVE_MAX_S = 60                    # longest live talk
+LIVE_IDLE_S = 1.5                  # no audio from the browser this long: it is over (the page went, the network failed)
+LIVE_PCM_FRAME = FRAME_BYTES * 2   # 20 ms of 16-bit PCM
+LIVE_TARGET = 5                    # frames (100 ms): the jitter buffer kept when trimming a backlog
+LIVE_MAX_BACKLOG = 100             # frames (2 s): beyond this the oldest go
+LIVE_QUIET = 330                   # peak of a frame that may be skipped to trim a backlog (about -40 dBFS, as WAKE_PEAK)
+LIVE_MAX_MESSAGE = 64 * 1024       # bytes of one WebSocket message
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 DEFAULT_MESSAGES = (
     ("Leave now", "You are on private property and being recorded. Leave now."),
@@ -173,6 +191,32 @@ def wake_tone(codec: str, ms: int) -> bytes:
     fade = max(1, int(RATE * WAKE_FADE_S))
     return bytes(enc(round(WAKE_PEAK * min(1.0, i / fade, (n - 1 - i) / fade) * math.sin(2 * math.pi * WAKE_HZ * i / RATE)))
                  for i in range(n))
+
+
+_LAW_TABLES: dict[str, bytes] = {}
+
+
+def _pcm(pcm: bytes, code: str) -> array:
+    a = array(code)
+    a.frombytes(pcm[:len(pcm) & ~1])
+    if sys.byteorder == "big":
+        a.byteswap()   # the wire is little-endian
+    return a
+
+
+def pcm_to_g711(pcm: bytes, codec: str) -> bytes:
+    """16-bit little-endian PCM as G.711 in the codec's law, through a table of every sample (built once per law)."""
+    table = _LAW_TABLES.get(codec)
+    if table is None:
+        enc = lin2ulaw if codec == "PCMU" else lin2alaw
+        table = _LAW_TABLES[codec] = bytes(enc(u - 65536 if u >= 32768 else u) for u in range(65536))
+    return bytes(map(table.__getitem__, _pcm(pcm, "H")))
+
+
+def quiet(pcm: bytes) -> bool:
+    """A 16-bit PCM frame with no sample louder than LIVE_QUIET (the operator's pause, the mic's noise floor)."""
+    a = _pcm(pcm, "h")
+    return not a or max(-min(a), max(a)) < LIVE_QUIET
 
 
 def interleaved(channel: int, pkt: bytes) -> bytes:
@@ -289,6 +333,111 @@ def stream(sess: Session, audio: bytes, pt: int, stop: threading.Event, silence:
         elif i % 25 == 0:
             sess.drain()
     return sent
+
+
+class LiveFeed:
+    """The browser's audio of one live talk, between the WebSocket (push / end, on the event loop) and the playback
+    thread (take): 16-bit PCM in, 20 ms frames out. A backlog (the time the speaker took to connect, a burst after a
+    network stall) is trimmed by skipping quiet frames down to LIVE_TARGET, and never grows past LIVE_MAX_BACKLOG."""
+
+    def __init__(self, clock=time.monotonic) -> None:
+        self._lock = threading.Lock()
+        self._frames: deque[bytes] = deque()
+        self._rest = b""
+        self.clock = clock
+        self.last_rx = clock()
+        self.ended = False
+        self.received = 0              # frames
+        self.dropped = 0               # frames skipped or dropped
+
+    def push(self, pcm: bytes) -> None:
+        with self._lock:
+            if self.ended:
+                return
+            data = self._rest + pcm
+            whole = len(data) - len(data) % LIVE_PCM_FRAME
+            for i in range(0, whole, LIVE_PCM_FRAME):
+                self._frames.append(data[i:i + LIVE_PCM_FRAME])
+                self.received += 1
+            self._rest = data[whole:]
+            while len(self._frames) > LIVE_MAX_BACKLOG:
+                self._frames.popleft()
+                self.dropped += 1
+            self.last_rx = self.clock()
+
+    def end(self) -> None:
+        """The operator let go: what is buffered still plays."""
+        with self._lock:
+            self.ended = True
+
+    def touch(self) -> None:
+        """Count idleness from now (the speaker is ready)."""
+        with self._lock:
+            self.last_rx = max(self.last_rx, self.clock())
+
+    def take(self) -> bytes | None:
+        """The next 20 ms frame to play, None when nothing is buffered (bridge with silence)."""
+        with self._lock:
+            while len(self._frames) > LIVE_TARGET and quiet(self._frames[0]):
+                self._frames.popleft()
+                self.dropped += 1
+            return self._frames.popleft() if self._frames else None
+
+    def backlog(self) -> int:
+        return len(self._frames)
+
+    def done(self) -> bool:
+        """Released and played out."""
+        with self._lock:
+            return self.ended and not self._frames
+
+    def idle(self, idle_s: float = LIVE_IDLE_S) -> bool:
+        """Nothing buffered and nothing arrived for idle_s."""
+        with self._lock:
+            return not self._frames and self.clock() - self.last_rx >= idle_s
+
+
+def live(sess: Session, feed: LiveFeed, codec: str, pt: int, stop: threading.Event, lead: bytes = b"", clock=time.monotonic, wait=None,
+         ssrc: int | None = None, seq0: int | None = None, ts0: int | None = None, max_s: float = LIVE_MAX_S, idle_s: float = LIVE_IDLE_S) -> str:
+    """Send a live talk as RTP over the session, one packet per 20 ms by `clock` (scheduled from the start, as stream()):
+    `lead` first (the wake tone, G.711), then the feed's frames in the codec's law, silence while none is buffered, with
+    one sequence and timestamp run throughout. Returns why it ended: "released" (let go and played out), "idle" (no audio
+    for idle_s), "cap" (max_s) or "stopped" (`stop` set: Stop, or replaced). `clock`/`wait` are the tests' fake time."""
+    wait = wait or stop.wait
+    ssrc = random.getrandbits(32) if ssrc is None else ssrc
+    seq = random.getrandbits(16) if seq0 is None else seq0
+    ts = random.getrandbits(32) if ts0 is None else ts0
+    silence = bytes([LAWS[codec][2]]) * FRAME_BYTES
+    leads = [(lead[i:i + FRAME_BYTES] + silence)[:FRAME_BYTES] for i in range(0, len(lead), FRAME_BYTES)]
+    keep_every = max(5.0, min(KEEPALIVE_S, sess.timeout_s / 2))
+    t0 = last_keep = clock()
+    feed.touch()
+    i = 0
+    while True:
+        if stop.is_set():
+            return "stopped"
+        if i * FRAME_S >= max_s - 1e-9:   # the next packet would start past the cap
+            return "cap"
+        if i >= len(leads):
+            if feed.done():
+                return "released"
+            if feed.idle(idle_s):
+                return "idle"
+        delay = t0 + i * FRAME_S - clock()
+        if delay > 0 and wait(delay):
+            return "stopped"
+        if i < len(leads):
+            payload = leads[i]
+        else:
+            pcm = feed.take()
+            payload = pcm_to_g711(pcm, codec) if pcm else silence
+        sess.send(interleaved(sess.channel, rtp_packet(payload, pt, seq + i, ts + i * FRAME_BYTES, ssrc, marker=i == 0)))
+        i += 1
+        if clock() - last_keep >= keep_every:
+            sess.keepalive()
+            last_keep = clock()
+        elif i % 25 == 0:
+            sess.drain()
 
 
 def check(speaker: dict, timeout: float = 5) -> dict:
@@ -468,6 +617,9 @@ class Job:
     replaced_by: str | None = None
     result: dict | None = None
     log_id: int | None = None
+    feed: LiveFeed | None = None    # a live talk: the browser's audio
+    replacing: str | None = None   # the message it replaced
+    reason: str | None = None      # how a live talk ended (live())
 
 
 class Talkdown:
@@ -486,6 +638,18 @@ class Talkdown:
             msg.voice = msg.voice or voice_for()
             eff = tts.effective(msg.voice["voice"], probe=False)
             will = eff.public() if eff else None
+        job = self._start(speaker, msg, by)
+        return {"speaker_id": sid, "speaker": speaker["name"], "camera_ids": speaker.get("camera_ids") or [], "message": msg.name,
+                "message_id": msg.message_id, "text": msg.text, "replaced": job.replacing, "status": self.status(sid),
+                "tts": will}
+
+    def talk(self, speaker: dict, by: str, feed: LiveFeed | None = None) -> Job:
+        """Start a live talk on the speaker (it replaces what plays there, as play() does): the caller pushes the
+        browser's audio into job.feed and ends it when the operator lets go; the job's thread ends on its own after that."""
+        return self._start(speaker, Message(LIVE_NAME), by, feed or LiveFeed())
+
+    def _start(self, speaker: dict, msg: Message, by: str, feed: LiveFeed | None = None) -> Job:
+        sid = speaker["id"]
         with self._lock:
             old = self._jobs.get(sid)
             if old and old.thread and old.thread.is_alive():
@@ -493,16 +657,14 @@ class Talkdown:
                 old.stop.set()
             else:
                 old = None
-            job = Job(sid, speaker["name"], msg, by)
+            job = Job(sid, speaker["name"], msg, by, feed=feed, replacing=old.message.name if old else None)
             job.log_id = db.execute_insert("INSERT INTO talkdown_log (ts, speaker_id, message, text, by, result) VALUES (?,?,?,?,?,?)",
                                            [job.requested_at, sid, msg.name, msg.text, by, "playing"])
             log.info("talk-down: %r on %s (%s) by %s%s", msg.name, sid, speaker["name"], by, f", replacing {old.message.name!r}" if old else "")
             self._jobs[sid] = job
             job.thread = threading.Thread(target=self._run, args=(job, dict(speaker), old), daemon=True, name=f"talkdown-{sid}")
             job.thread.start()
-        return {"speaker_id": sid, "speaker": speaker["name"], "camera_ids": speaker.get("camera_ids") or [], "message": msg.name,
-                "message_id": msg.message_id, "text": msg.text, "replaced": old.message.name if old else None, "status": self.status(sid),
-                "tts": will}
+        return job
 
     def stop(self, speaker_id: str) -> bool:
         with self._lock:
@@ -532,9 +694,9 @@ class Talkdown:
             now = time.time()
             return {"state": job.state, "message": job.message.name, "by": job.by, "requested_at": job.requested_at,
                     "started_at": job.started_at, "elapsed_s": round(now - job.started_at, 1) if job.started_at else None,
-                    "duration_s": job.duration_s, "last": None}
+                    "duration_s": job.duration_s, "live": job.feed is not None, "last": None}
         return {"state": "idle", "message": None, "by": None, "requested_at": None, "started_at": None, "elapsed_s": None,
-                "duration_s": None, "last": job.result if job else None}
+                "duration_s": None, "live": False, "last": job.result if job else None}
 
     def _audio(self, msg: Message, codec: str) -> bytes:
         if msg.g711 is not None:
@@ -584,14 +746,19 @@ class Talkdown:
                 raise TalkdownError("the speaker's backchannel offers no G.711 (PCMU / PCMA)")
             name, pt = codec
             # the wake-up tone first, so a speaker whose amplifier slept is awake when the words come
-            audio = (wake_tone(name, settings.talkdown_wake_ms) + self._audio(job.message, name))[:MAX_S * RATE]
-            job.duration_s = round(len(audio) / RATE, 1)
+            lead = wake_tone(name, settings.talkdown_wake_ms)
+            if job.feed is None:
+                audio = (lead + self._audio(job.message, name))[:MAX_S * RATE]
+                job.duration_s = round(len(audio) / RATE, 1)
             if job.stop.is_set():
                 raise _Stopped()
             sess.setup(track)
             sess.play()
             job.state, job.started_at = "playing", time.time()
-            stream(sess, audio, pt, job.stop, silence=LAWS[name][2])
+            if job.feed is not None:
+                job.reason = live(sess, job.feed, name, pt, job.stop, lead=lead)
+            else:
+                stream(sess, audio, pt, job.stop, silence=LAWS[name][2])
             if job.stop.is_set():
                 result = "replaced" if job.replaced_by else "stopped"
             else:
@@ -613,15 +780,20 @@ class Talkdown:
                 sess.close()
             if job.message.cleanup and job.message.path:
                 job.message.path.unlink(missing_ok=True)
+            if job.feed is not None:
+                job.feed.end()   # nothing takes its audio any more
             played = round(time.time() - job.started_at, 1) if job.started_at else 0.0
             spoken = job.message.spoken
             job.result = {"message": job.message.name, "by": job.by, "result": result, "error": error, "at": time.time(),
                           "played_s": played, "tts": spoken}
+            if job.feed is not None:
+                job.result["reason"] = job.reason   # a live talk: released, idle or cap (None when it never started)
             job.state = "done"
             said = f"{spoken['engine']}:{spoken['voice']}" if spoken and spoken.get("voice") else (spoken or {}).get("engine")
             with contextlib.suppress(Exception):
                 db.execute("UPDATE talkdown_log SET result=?, error=?, duration_s=?, tts=? WHERE id=?", [result, error, played, said, job.log_id])
-            (log.warning if error else log.info)("talk-down: %r on %s %s after %.1f s%s%s", job.message.name, speaker["id"], result, played,
+            (log.warning if error else log.info)("talk-down: %r on %s %s after %.1f s%s%s%s", job.message.name, speaker["id"], result, played,
+                                                 f" ({job.reason})" if job.reason else "",
                                                  f", spoken by {said}" + (f" (fallback: {spoken['reason']})" if spoken.get("fallback") else "") if spoken else "",
                                                  f": {error}" if error else "")
 

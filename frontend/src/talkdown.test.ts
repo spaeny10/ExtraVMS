@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { DescribeAnswer, SpeakerStatus, TalkdownLibrary, TalkdownMessage } from "./api";
-import { ALL, WARN_IDLE, asOf, clientsOf, defaultChoice, describeNote, fillTemplate, isActive, messageOn, playOutcome, playableMessages, serversOf, speakerKey,
-  speakersByCamera, statusText, targets, uploadProblem, warnChoices, warnReducer } from "./talkdown";
+import { ALL, PRESETS_MAX, TALK_IDLE, TALK_MAX_MS, type TalkAction, WARN_IDLE, asOf, clientsOf, clock, defaultChoice, describeNote, fillTemplate, isActive,
+  lastResult, messageOn, micErrorText, micProblem, onlineCount, playOutcome, playableMessages, playingBar, presetLook, serversOf, speakerKey, speakerState,
+  speakersByCamera, splitPresets, statusText, talkCloseText, talkLabel, talkReducer, targets, uploadProblem, warnChoices, warnReducer } from "./talkdown";
 
 const idle: SpeakerStatus = { state: "idle", message: null, by: null, requested_at: null, started_at: null, elapsed_s: null, duration_s: null, last: null };
 const playing = (elapsed: number, duration: number | null = 6): SpeakerStatus =>
@@ -200,5 +201,116 @@ describe("Describe & warn", () => {
     s = warnReducer(warnReducer(s, { type: "template", id: "police" }), { type: "pick", phrase: chips[0].phrase });
     expect(s).toMatchObject({ phrase: "You by the gate", text: "You by the gate: the police have been called. Leave the property immediately." });
     expect(warnChoices({ ...a, group_phrase: null })[0]).toEqual({ label: "Everyone", phrase: "You there" });
+  });
+});
+
+describe("the panel: presets, the playing bar, each speaker", () => {
+  it("presets are the first messages; the icon and accent come from the name", () => {
+    const names = ["Leave now", "Police called", "Monitored site", "Closed", "Hello", "Smile", "Seventh", "Eighth"];
+    const { presets, more } = splitPresets(names);
+    expect(presets).toEqual(names.slice(0, PRESETS_MAX));
+    expect(more).toEqual(["Seventh", "Eighth"]);
+    expect(splitPresets(names.slice(0, 3))).toEqual({ presets: names.slice(0, 3), more: [] });
+    expect(presetLook("Leave now")).toEqual({ icon: "alert", tone: "warn" });
+    expect(presetLook("Police called")).toEqual({ icon: "siren", tone: "danger" });
+    expect(presetLook("Monitored site")).toEqual({ icon: "camera", tone: "info" });
+    expect(presetLook("You are being RECORDED")).toEqual({ icon: "camera", tone: "info" });
+    expect(presetLook("Trespassing")).toEqual({ icon: "alert", tone: "warn" });
+    expect(presetLook("Police: leave now")).toEqual({ icon: "siren", tone: "danger" });   // police wins over leave
+    expect(presetLook("Good evening")).toEqual({ icon: "speaker", tone: "neutral" });
+  });
+
+  it("the bar: what plays, elapsed of total moving between polls, never past the end", () => {
+    expect(playingBar([idle, undefined])).toBeNull();
+    const bar = playingBar([idle, playing(2, 4)], 0.5)!;
+    expect(bar).toEqual({ message: "Leave now", live: false, connecting: false, elapsed: 2.5, total: 4, fraction: 0.625, speakers: 1 });
+    expect(playingBar([playing(3.8, 4)], 1)!.fraction).toBe(1);
+    expect(`${clock(bar.elapsed)} / ${clock(bar.total!)}`).toBe("0:02 / 0:04");
+    // the one playing wins over one still connecting; both count
+    const connecting: SpeakerStatus = { ...playing(0), state: "connecting", elapsed_s: null, message: "Police called" };
+    expect(playingBar([connecting, playing(1, 6)])).toMatchObject({ message: "Leave now", speakers: 2 });
+    expect(playingBar([connecting], 3)).toMatchObject({ connecting: true, elapsed: 0, fraction: 0 });
+    // a live talk has no length: elapsed only
+    expect(playingBar([{ ...playing(7, null), message: "Live talk", live: true }], 0.4)).toMatchObject({ live: true, elapsed: 7.4, total: null, fraction: null });
+    expect(clock(65.9)).toBe("1:05");
+  });
+
+  it("idle: the most recent result among the speakers", () => {
+    const ended = (at: number, result: "played" | "failed", error: string | null = null): SpeakerStatus =>
+      ({ ...idle, last: { message: "Leave now", by: "op", result, error, at, played_s: 3 } });
+    expect(lastResult([idle, undefined])).toBeNull();
+    expect(lastResult([ended(5, "played"), ended(9, "failed", "no answer")])).toEqual({ text: "Failed: no answer", failed: true });
+    expect(lastResult([ended(9, "played"), ended(5, "failed", "x")])).toEqual({ text: "Played 'Leave now'", failed: false });
+  });
+
+  const check = (online: boolean, ok = online, error: string | null = null) =>
+    ({ check: { ok, online, backchannel: ok, codecs: [], codec: ok ? "PCMU" : null, error }, checked_at: 100 });
+  it("N/M online from the checks (the summary's flag before one is read)", () => {
+    const sp = [{ id: "a", name: "A", online: true }, { id: "b", name: "B", online: true }, { id: "c", name: "C", online: null }];
+    expect(onlineCount(sp, {})).toEqual({ online: 2, total: 3 });
+    expect(onlineCount(sp, { a: check(true), b: check(false), c: check(true, false, "no backchannel") })).toEqual({ online: 2, total: 3 });
+  });
+
+  it("each speaker's state from real data: playing, ready, offline, failed with the reason", () => {
+    expect(speakerState(playing(1), check(true))).toEqual({ tone: "playing", text: "Playing 'Leave now'" });
+    expect(speakerState({ ...playing(1), live: true, message: "Live talk" }, undefined)).toEqual({ tone: "playing", text: "Live talk" });
+    expect(speakerState({ ...playing(0), state: "connecting" }, check(false))).toEqual({ tone: "connecting", text: "Connecting…" });
+    expect(speakerState(idle, check(true))).toEqual({ tone: "ready", text: "Ready" });
+    expect(speakerState(idle, check(false))).toEqual({ tone: "offline", text: "Offline" });
+    expect(speakerState(idle, check(true, false, "the backchannel offers no G.711 (PCMU / PCMA)")))
+      .toEqual({ tone: "failed", text: "Failed: the backchannel offers no G.711 (PCMU / PCMA)" });
+    const failed = (at: number): SpeakerStatus => ({ ...idle, last: { message: "x", by: "op", result: "failed", error: "can't reach the speaker", at, played_s: 0 } });
+    expect(speakerState(failed(150), check(true))).toEqual({ tone: "failed", text: "Failed: can't reach the speaker" });
+    expect(speakerState(failed(50), check(true))).toEqual({ tone: "ready", text: "Ready" });   // a good check since
+    expect(speakerState(undefined, undefined, false)).toEqual({ tone: "offline", text: "Offline" });
+    expect(speakerState(undefined, undefined, null)).toEqual({ tone: "unknown", text: "…" });
+  });
+});
+
+describe("Hold to Talk", () => {
+  const go = (...actions: TalkAction[]) => actions.reduce(talkReducer, TALK_IDLE);
+  it("press, live, let go, ended; the label follows", () => {
+    const opening = go({ type: "press", now: 1000 });
+    expect(opening).toEqual({ stage: "opening", since: 1000 });
+    expect(talkLabel(opening, 1200)).toBe("Connecting…");
+    const live = talkReducer(opening, { type: "live", now: 1400 });
+    expect(live).toEqual({ stage: "live", since: 1000, live: 1400 });
+    expect(talkLabel(live, 8100)).toBe("Talking… 0:07");
+    expect(talkReducer(live, { type: "press", now: 2000 })).toBe(live);   // a second press does nothing
+    const closing = talkReducer(live, { type: "release" });
+    expect(closing).toEqual({ stage: "closing", since: 1000, capped: false });
+    expect(talkLabel(closing, 9000)).toBe("Finishing…");
+    expect(talkReducer(closing, { type: "live", now: 9000 })).toBe(closing);
+    expect(talkReducer(closing, { type: "ended" })).toEqual({ stage: "idle", note: null });
+    expect(talkLabel(TALK_IDLE, 0)).toBe("Hold to talk");
+  });
+  it("letting go before it is live ends it too; a release while idle does nothing", () => {
+    expect(go({ type: "press", now: 0 }, { type: "release" })).toEqual({ stage: "closing", since: 0, capped: false });
+    expect(go({ type: "release" })).toBe(TALK_IDLE);
+    expect(go({ type: "press", now: 0 }, { type: "release" }, { type: "ended", note: "Gate: unknown speaker" }))
+      .toEqual({ stage: "idle", note: "Gate: unknown speaker" });
+  });
+  it("stops itself at 60 s from the press", () => {
+    const live = go({ type: "press", now: 0 }, { type: "live", now: 300 });
+    expect(talkReducer(live, { type: "tick", now: TALK_MAX_MS - 1 })).toBe(live);
+    const capped = talkReducer(live, { type: "tick", now: TALK_MAX_MS });
+    expect(capped).toEqual({ stage: "closing", since: 0, capped: true });
+    expect(talkReducer(capped, { type: "ended" })).toEqual({ stage: "idle", note: "Stopped at the 60 s limit" });
+    expect(talkReducer(go({ type: "press", now: 0 }), { type: "tick", now: 61_000 }).stage).toBe("closing");   // never got live
+  });
+  it("says why it can't talk instead of failing silently", () => {
+    const ok = { secure: true, getUserMedia: true, audio: true, webSocket: true };
+    expect(micProblem(ok)).toBeNull();
+    expect(micProblem({ ...ok, secure: false })).toMatch(/secure page.*https/);
+    expect(micProblem({ ...ok, getUserMedia: false })).toMatch(/can't send its microphone/);
+    expect(go({ type: "failed", note: "No microphone found" })).toEqual({ stage: "idle", note: "No microphone found" });
+    expect(micErrorText({ name: "NotAllowedError" })).toMatch(/denied/);
+    expect(micErrorText({ name: "NotFoundError" })).toBe("No microphone found");
+    expect(micErrorText({ name: "NotReadableError" })).toMatch(/in use/);
+    expect(micErrorText(new Error("boom"))).toBe("The microphone could not start (boom)");
+    expect(talkCloseText(1000)).toBeNull();
+    expect(talkCloseText(4409)).toBe("The speaker is turned off in its settings");
+    expect(talkCloseText(4501)).toMatch(/update it/);
+    expect(talkCloseText(1006)).toBe("The connection to the speaker was lost");
   });
 });

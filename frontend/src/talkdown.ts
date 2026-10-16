@@ -4,8 +4,11 @@
  * line, and the checks on a one-off file before it is sent. On the hub a camera's speakers may be on several servers
  * (a Site's camera groups): each speaker carries its own server, and messages are per server (matched by name).
  * Describe & warn: the state of the reviewed message (warnReducer) between Qwen's answer and Play.
+ * The panel's look: the one-tap presets (the first messages, an icon and an accent by name), the playing bar, each
+ * speaker's state from real data (its last check and its status) and how many are online; Hold to Talk's states
+ * (talkReducer) and why a browser can't talk (micProblem, micErrorText, talkCloseText).
  */
-import type { DescribeAnswer, SiteApi, SpeakerStatus, TalkdownLibrary, TalkdownMessage } from "./api";
+import type { DescribeAnswer, SiteApi, SpeakerCheck, SpeakerStatus, TalkdownLibrary, TalkdownMessage } from "./api";
 import { type Spoken, voiceName } from "./talkdownVoice";
 
 /** A speaker as a live tile knows it: GET /api/speakers on the server's own UI, the heartbeat summary on the hub. */
@@ -183,3 +186,158 @@ export function warnChoices(a: DescribeAnswer): { label: string; phrase: string 
 /** "as of 3:21:05 PM": when the picture Qwen looked at was taken. */
 export const asOf = (ts: number): string =>
   `as of ${new Date(ts * 1000).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", second: "2-digit" })}`;
+
+// ---------------------------------------------------------------- the panel: presets, the playing bar, each speaker's state
+
+/** One tap plays a preset: the first messages of the library (the rest are under More…). */
+export const PRESETS_MAX = 6;
+export type PresetTone = "warn" | "danger" | "info" | "neutral";
+export type PresetLook = { icon: "alert" | "siren" | "camera" | "speaker"; tone: PresetTone };
+const LOOKS: [RegExp, PresetLook][] = [
+  [/police|sheriff|911|siren|alarm|dispatch/i, { icon: "siren", tone: "danger" }],
+  [/leave|trespass|warn|private|exit|go away|closed|no entry|keep out/i, { icon: "alert", tone: "warn" }],
+  [/monitor|record|camera|cctv|video|watch|surveil/i, { icon: "camera", tone: "info" }],
+];
+/** A message's icon and accent, by its name: police (red siren), leave / trespass (amber warning), monitored (blue
+ *  camera), else a neutral speaker. */
+export function presetLook(name: string): PresetLook {
+  return LOOKS.find(([rx]) => rx.test(name))?.[1] ?? { icon: "speaker", tone: "neutral" };
+}
+export function splitPresets<T>(messages: T[], max = PRESETS_MAX): { presets: T[]; more: T[] } {
+  return { presets: messages.slice(0, max), more: messages.slice(max) };
+}
+
+/** "0:07", "1:05" */
+export function clock(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+export type PlayingBar = { message: string; live: boolean; connecting: boolean; elapsed: number; total: number | null; fraction: number | null; speakers: number };
+/**
+ * The bar while anything plays: what (the first playing speaker's, else the first connecting one's), its elapsed time
+ * and length with the progress (elapsed_s plus the seconds since the status was read, so it moves between polls), and
+ * how many speakers are busy. null when nothing plays.
+ */
+export function playingBar(statuses: (SpeakerStatus | null | undefined)[], sinceFetch = 0): PlayingBar | null {
+  const active = statuses.filter((st): st is SpeakerStatus => isActive(st));
+  if (!active.length) return null;
+  const st = active.find((x) => x.state === "playing") ?? active[0];
+  const total = st.duration_s ? st.duration_s : null;
+  const connecting = st.state === "connecting";
+  const run = connecting ? 0 : Math.max(0, (st.elapsed_s ?? 0) + sinceFetch);
+  const elapsed = total ? Math.min(run, total) : run;
+  return { message: st.message ?? "", live: !!st.live, connecting, elapsed, total, fraction: total ? elapsed / total : null, speakers: active.length };
+}
+
+/** What the panel knows of a speaker's hardware: its last check (GET /api/speakers on its server) and when. */
+export type SpeakerHealth = { check: SpeakerCheck | null; checked_at: number | null };
+
+/** "N/M online": the speakers whose last check answered (else the summary's online flag); unknown counts as not online. */
+export function onlineCount(speakers: TalkSpeaker[], health: Record<string, SpeakerHealth | undefined>): { online: number; total: number } {
+  const online = speakers.filter((s) => {
+    const h = health[speakerKey(s)];
+    return h?.check ? h.check.online : s.online === true;
+  }).length;
+  return { online, total: speakers.length };
+}
+
+export type SpeakerState = { tone: "playing" | "connecting" | "ready" | "offline" | "failed" | "unknown"; text: string };
+/**
+ * A speaker's row: Playing / Connecting while it plays; otherwise Failed (its last playback failed after its last check,
+ * or the check found no usable backchannel), Offline (its last check got no answer), Ready, or "…" before anything is known.
+ */
+export function speakerState(st: SpeakerStatus | null | undefined, health: SpeakerHealth | undefined, online?: boolean | null): SpeakerState {
+  if (st?.state === "playing") return { tone: "playing", text: st.live ? "Live talk" : `Playing '${st.message}'` };
+  if (st?.state === "connecting") return { tone: "connecting", text: "Connecting…" };
+  const chk = health?.check ?? null;
+  const last = st?.last;
+  if (last?.result === "failed" && !(chk?.ok && (health?.checked_at ?? 0) > last.at)) return { tone: "failed", text: `Failed: ${last.error ?? "unknown error"}` };
+  if (chk) {
+    if (!chk.online) return { tone: "offline", text: "Offline" };
+    if (!chk.ok) return { tone: "failed", text: `Failed: ${chk.error ?? "no usable audio backchannel"}` };
+    return { tone: "ready", text: "Ready" };
+  }
+  if (online === false) return { tone: "offline", text: "Offline" };
+  if (online === true || st) return { tone: "ready", text: "Ready" };
+  return { tone: "unknown", text: "…" };
+}
+
+/** The idle line: how the most recent playback among these speakers ended ("Played 'Leave now'", "Failed: …"), or null. */
+export function lastResult(statuses: (SpeakerStatus | null | undefined)[]): { text: string; failed: boolean } | null {
+  const done = statuses.filter((st): st is SpeakerStatus => !!st?.last && !isActive(st));
+  if (!done.length) return null;
+  const st = done.reduce((a, b) => (b.last!.at > a.last!.at ? b : a));
+  return { text: statusText(st), failed: st.last!.result === "failed" };
+}
+
+// ---------------------------------------------------------------- Hold to Talk
+
+/** The longest live talk (the server ends one at talkdown.LIVE_MAX_S too). */
+export const TALK_MAX_MS = 60_000;
+
+/** idle → opening (the microphone, the sockets) → live (the speaker plays it) → closing (let go: the server plays out
+ *  what it has) → idle. A press while not idle does nothing; letting go before it is live ends it as well. */
+export type Talk =
+  | { stage: "idle"; note: string | null }
+  | { stage: "opening"; since: number }
+  | { stage: "live"; since: number; live: number }
+  | { stage: "closing"; since: number; capped: boolean };
+export type TalkAction =
+  | { type: "press"; now: number } | { type: "live"; now: number } | { type: "release" } | { type: "tick"; now: number }
+  | { type: "ended"; note?: string | null } | { type: "failed"; note: string };
+export const TALK_IDLE: Talk = { stage: "idle", note: null };
+
+export function talkReducer(t: Talk, a: TalkAction): Talk {
+  switch (a.type) {
+    case "press":
+      return t.stage === "idle" ? { stage: "opening", since: a.now } : t;
+    case "live":
+      return t.stage === "opening" ? { stage: "live", since: t.since, live: a.now } : t;
+    case "release":
+      return t.stage === "opening" || t.stage === "live" ? { stage: "closing", since: t.since, capped: false } : t;
+    case "tick":
+      return (t.stage === "opening" || t.stage === "live") && a.now - t.since >= TALK_MAX_MS ? { stage: "closing", since: t.since, capped: true } : t;
+    case "ended":
+      return { stage: "idle", note: a.note ?? (t.stage === "closing" && t.capped ? `Stopped at the ${TALK_MAX_MS / 1000} s limit` : null) };
+    case "failed":
+      return { stage: "idle", note: a.note };
+  }
+}
+
+/** The button: "Hold to talk", "Connecting…", "Talking… 0:07" (from the press), "Finishing…". */
+export function talkLabel(t: Talk, now: number): string {
+  if (t.stage === "opening") return "Connecting…";
+  if (t.stage === "live") return `Talking… ${clock((now - t.since) / 1000)}`;
+  if (t.stage === "closing") return "Finishing…";
+  return "Hold to talk";
+}
+
+/** Why this browser can't talk at all, or null: a plain-http page (no microphone outside a secure context), no API. */
+export function micProblem(env: { secure: boolean; getUserMedia: boolean; audio: boolean; webSocket: boolean }): string | null {
+  if (!env.secure) return "Talking needs a secure page: open this server at https://…:8443, or through the hub";
+  if (!env.getUserMedia || !env.audio || !env.webSocket) return "This browser can't send its microphone from this page";
+  return null;
+}
+
+/** A getUserMedia failure in words. */
+export function micErrorText(e: unknown): string {
+  const name = (e as { name?: string } | null)?.name ?? "";
+  if (name === "NotAllowedError" || name === "SecurityError" || name === "PermissionDeniedError")
+    return "Microphone access was denied: allow it for this site in the browser's settings";
+  if (name === "NotFoundError" || name === "OverconstrainedError" || name === "DevicesNotFoundError") return "No microphone found";
+  if (name === "NotReadableError" || name === "TrackStartError") return "The microphone is in use by another app or can't be opened";
+  return `The microphone could not start (${(e as Error | null)?.message || name || "unknown error"})`;
+}
+
+const CLOSE_TEXT: Record<number, string> = {
+  1008: "Not allowed to talk from this page", 4401: "Sign in again to talk", 4403: "Not allowed to talk on this speaker",
+  4404: "Unknown speaker", 4409: "The speaker is turned off in its settings", 4429: "Too many requests to this server at once",
+  4501: "This server's software is too old to talk live: update it", 4502: "The server did not take the call",
+  4503: "The server is offline",
+};
+/** A talk socket that closed without saying why (talkMic.ts): its close code in words; null for a normal close. */
+export function talkCloseText(code: number): string | null {
+  if (code === 1000 || code === 1005) return null;
+  return CLOSE_TEXT[code] ?? "The connection to the speaker was lost";
+}
