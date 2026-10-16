@@ -51,7 +51,10 @@
 /* Site header: one row of "Customer › Site" title, the Map button, the health pill and the ⋮ menu (SitePage SiteHeader) */
 .site-head { position: relative; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; min-height: 36px; }
 .crumbs-title { min-width: 0; flex: 0 1 auto; }
-.hub-page .crumbs-title h2 { margin: 0; font-size: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hub-page .crumbs-title h2 { margin: 0; font-size: 18px; white-space: nowrap; overflow: hidden; display: flex; align-items: baseline; min-width: 0; }
+/* the page itself (the Site, or the server) is what matters: the crumbs above it give up their room first */
+.crumb-up { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 0.82em; }
+.crumb-here { flex: 0 0 auto; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .crumb-up a { color: var(--muted); font-weight: 500; text-decoration: none; }
 .crumb-up a:hover { color: var(--accent); }
 .crumb-sep { color: var(--muted); font-weight: 400; }
@@ -159,7 +162,13 @@ a.icon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px
   .hp-long { display: none; }
   .hp-short { display: inline; }
   .hub-pop { left: 0; right: 0; width: auto; max-height: 70vh; }
-  .hub-page .crumbs-title h2 { font-size: 16px; }
+  .hub-page .crumbs-title h2 { font-size: 18px; }
+  /* the customer is in the picker at the top already: on a phone the title starts at the Site */
+  .crumbs-title .crumb-up:first-child { display: none; }
+  .crumbs-title .crumb-up:first-child + span > .crumb-sep { display: none; }
+  /* and a long Site name wraps to a second line rather than losing its end */
+  .hub-page .crumbs-title h2 { white-space: normal; line-height: 1.2; }
+  .crumb-here { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
   .site-tabbar { margin-bottom: 8px; }
   .site-tabbar .site-tabs { flex: 1 1 100%; }
   .site-tabs { margin-bottom: 8px; }
