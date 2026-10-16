@@ -34,6 +34,7 @@ import { useIceServers } from "@site/dashboard/ice";
 import { camKey, splitKey, type DashboardSource } from "@site/dashboard/source";
 import type { FleetEvent } from "@site/dashboard/types";
 import { regionFetchKey, regionPass, useRegionResults, useRegions } from "@site/region";
+import { useResync } from "@site/resync";
 import type { TalkSpeaker } from "@site/talkdown";
 import { Icon, confirmDialog, promptDialog, swipeHandlers, toast, useIsPhone } from "@site/ui";
 import { type Camera as RegistryCam, type Fleet, type Org, type Server, type Site, type SiteCameraGroup, type SiteLayout, api } from "./api";
@@ -475,6 +476,18 @@ function useSiteActivity(site: Site, servers: Server[], source: DashboardSource,
     return () => { alive = false; unsub(); };
   }, [enabled, site.id, serverKey, source]);
 
+  // back from the background (or the network): read the list again and REPLACE what the page holds — updates the
+  // socket missed meanwhile (server restarts, a sleeping phone) left cards "Waiting for verification…" for hours
+  const resync = useResync();
+  useEffect(() => {
+    if (!enabled || !resync) return;
+    let alive = true;
+    api.locationEvents(site.id, { limit: RECENT_LIMIT })
+      .then((r) => { if (alive) { setRecent(r.events); setOffline(r.offline); } })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [enabled, site.id, resync]);
+
   const regionMap = useRegions();
   const regionKeys = useMemo(() => siteRegionKeys(regionMap, serverKey.split(",")), [regionMap, serverKey]);
   const scopeKey = regionKeys.join(",");
@@ -498,7 +511,7 @@ function useSiteActivity(site: Site, servers: Server[], source: DashboardSource,
     siteApi(server).events({ camera: id, status: "open,pending,verified", limit: SCOPED_LIMIT })
       .then((evs) => { if (alive) setFocused(tagServer(evs, server, name)); }).catch(() => {});
     return () => { alive = false; };
-  }, [enabled, withFeed, focusKey]);
+  }, [enabled, withFeed, focusKey, resync]);
 
   const pool = useMemo(() => {
     const deeper = [...(scopeKey ? scoped : []), ...focused];

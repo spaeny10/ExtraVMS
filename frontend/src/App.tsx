@@ -1,3 +1,4 @@
+import { useResync } from "./resync";
 import { useCallback, useEffect, useState } from "react";
 import { decodeCells, regions } from "./region";
 import { BASE, api, subscribe, type Camera, type HubStatus, type NvrEvent } from "./api";
@@ -104,6 +105,14 @@ export default function App() {
     else if (target?.t && target.cam) openInTimeline({ id: 0, camera_id: target.cam, start_ts: target.t, end_ts: target.t + 5, camera_class: "moment" });
     else if (target) choose("Timeline");
   }, [openInTimeline, choose]);
+
+  // back from the background (or the network): read the recent list again and replace it — live updates missed
+  // meanwhile (a server restart, a sleeping phone) left cards stuck "Waiting for verification…" (resync.ts)
+  const resync = useResync();
+  useEffect(() => {
+    if (!resync) return;
+    api.events({ limit: 20, status: "open,pending,verified" }).then(setRecent).catch(() => {});
+  }, [resync]);
 
   const loadCameras = useCallback(() => api.cameras().then(setCameras).catch(() => {}), []);
 
