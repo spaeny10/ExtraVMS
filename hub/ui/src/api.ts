@@ -31,7 +31,7 @@ export type Org = { id: string; name: string; slug: string; role: string; soc?: 
  * `Server` is what the hub's tables call a "site": one NVR box, one token, one tunnel at /s/<id>/.
  */
 /** `link_down`: unreachable because the whole site link is down (summary.site_link_down); no camera_down then. */
-export type ServerCamera = { id: string; name: string; stream_ready: boolean; metadata?: boolean; onvif_events?: boolean; bitrate_mbps?: number | null; problems: string[]; ptz?: { at_home: boolean; preset_name: string | null } | null; link_down?: boolean };
+export type ServerCamera = { id: string; name: string; stream_ready: boolean; record_stream?: "main" | "sub"; metadata?: boolean; onvif_events?: boolean; bitrate_mbps?: number | null; problems: string[]; ptz?: { at_home: boolean; preset_name: string | null } | null; link_down?: boolean };
 /** A talk-down speaker of the server (backend talkdown.summary_speakers; no address or credentials): the cameras it is
  *  bound to, whether it answered its last check (null = not checked yet) and the message playing now. */
 export type SummarySpeaker = { id: string; name: string; camera_ids: string[]; online?: boolean | null; ok?: boolean | null; checked_at?: number | null; playing?: string | null };

@@ -8,6 +8,9 @@ from hub.roles import RULES, allows, required_role
 def test_role_table_reads_right():
     assert required_role("GET", "/api/events") == "viewer"
     assert required_role("POST", "/api/whep/cam1") == "viewer"
+    # hanging up a live view (WhepPlayer teardown) is the viewer's own session; nothing else under whep is deletable
+    assert required_role("DELETE", "/api/whep/cam1_sub/0b6c1f8e-2d3a-4e5f-8a9b-1c2d3e4f5a6b") == "viewer"
+    assert required_role("DELETE", "/api/whep/cam1") == "admin"
     assert required_role("POST", "/api/assistant/ask") == "viewer"
     assert required_role("POST", "/api/assistant/retrieve") == "viewer"   # the hub's Site Ask: read-only evidence
     assert required_role("POST", "/api/cameras/cam1/ptz/move") == "operator"

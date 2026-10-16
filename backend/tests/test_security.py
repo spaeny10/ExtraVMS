@@ -109,6 +109,12 @@ def test_unknown_api_path_is_json_404():
         assert json.loads(body) == {"detail": "Not Found"}
 
 
+def test_health_probe():
+    # the UI's OfflineBanner probe (also on the hub): JSON {ok: true}, nothing else
+    status, body, hdrs = raw_get("/api/health")
+    assert status == 200 and hdrs["content-type"].startswith("application/json") and json.loads(body) == {"ok": True}
+
+
 def test_ui_still_served():
     status, body, hdrs = raw_get("/")
     assert status == 200 and b"<html" in body.lower() and hdrs.get("cache-control") == "no-cache"

@@ -547,6 +547,26 @@ export function withQuery(url: string, extra?: Record<string, string>): string {
 }
 
 /**
+ * The session id in a WHEP answer's Location (the server's /api/whep/<path>/<id>, "/s/<site>" first through the hub),
+ * or null when there is none or it is for another path. Only MediaMTX's UUIDs: the id goes back into a URL.
+ */
+export function whepSession(location: string | null | undefined, path: string): string | null {
+  const m = /\/api\/whep\/([a-z0-9_]{1,40})\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:[?#]|$)/.exec(location ?? "");
+  return m && m[1] === path ? m[2] : null;
+}
+
+/**
+ * Is this page's server there? Its /api/health must answer JSON {ok: true}: a login page, a proxy's error page or
+ * a hub that served its UI for the path doesn't count. Throws when the request itself fails (no network).
+ */
+export async function probeHealth(): Promise<boolean> {
+  const r = await fetch(`${BASE}/api/health`, { cache: "no-store" });
+  if (!r.ok || !/^application\/(.+\+)?json\b/i.test(r.headers.get("content-type") ?? "")) return false;
+  const body = await r.json().catch(() => null);
+  return Boolean(body && typeof body === "object" && (body as { ok?: unknown }).ok === true);
+}
+
+/**
  * All backend calls for one site. `api` is the site this page is served from (prefix BASE); the fleet hub's
  * dashboard builds one per site with makeApi("/s/<site>") so tiles and feeds can mix sites on one page.
  * `opts` (ApiOptions) is only used by the hub's direct client; without it every URL is exactly as before.
@@ -592,6 +612,8 @@ export function makeApi(base: string, opts: ApiOptions = {}) {
   /** What the server's playback can do: `sd` = it can transcode to the low-bitrate SD rendition. */
   playbackCapabilities: () => req<{ sd: boolean; encoder?: string | null }>("/api/playback/capabilities"),
   whepUrl: (path: string) => u(`/api/whep/${path}`),
+  /** one WHEP session (whepSession reads its id from the offer's Location): DELETE ends it on the server */
+  whepSessionUrl: (path: string, session: string) => u(`/api/whep/${path}/${session}`),
   // an absolute base (the direct client) is another origin: its socket goes there, not to this page's host
   wsUrl: () => (/^https?:\/\//.test(base) ? u("/api/ws").replace(/^http/, "ws")
     : `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${u("/api/ws")}`),

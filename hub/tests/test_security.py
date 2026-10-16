@@ -80,6 +80,25 @@ def test_hsts_on_https(client):
     assert _csp(r)["connect-src"].startswith("'self' wss://testserver")
 
 
+def test_unknown_api_paths_are_json_404s_not_the_ui(client, tmp_path, monkeypatch):
+    (tmp_path / "index.html").write_text("<html>hub</html>", encoding="utf-8")
+    monkeypatch.setattr(settings, "ui_dir", tmp_path)
+    for path in ("/api", "/api/", "/api/nope", "/api/system", "/api/a/b/c"):
+        r = client.get(path)
+        assert r.status_code == 404 and r.headers["content-type"].startswith("application/json"), path
+        assert r.json() == {"detail": "Not Found"}, path
+    page = client.get("/sites/abc/live")   # a client-side route still gets the UI
+    assert page.status_code == 200 and page.text == "<html>hub</html>"
+    assert client.get("/apiary").status_code == 200   # only api and api/... are API paths
+
+
+def test_health_probe_needs_no_sign_in(client):
+    from fastapi.testclient import TestClient
+    anon = TestClient(client.app, base_url="http://testserver")   # its own cookie jar: never signed in
+    r = anon.get("/api/health")
+    assert r.status_code == 200 and r.headers["content-type"].startswith("application/json") and r.json() == {"ok": True}
+
+
 def test_inline_scripts_allowed_by_hash(tmp_path, monkeypatch):
     html = tmp_path / "index.html"
     html.write_text('<html><head><script>var t = 1;</script><script type="module" src="./a.js"></script></head></html>', encoding="utf-8")

@@ -22,7 +22,7 @@ export const siteApi = (site: string): SiteApi => {
 };
 
 /** The SiteApi members that only build media URLs (or read what playback can do): these may go direct. */
-const MEDIA_KEYS = ["media", "frameUrl", "playbackUrl", "whepUrl", "playbackCapabilities"] as const;
+const MEDIA_KEYS = ["media", "frameUrl", "playbackUrl", "whepUrl", "whepSessionUrl", "playbackCapabilities"] as const;
 
 /**
  * A client whose media URLs point straight at the server on its LAN and whose REST calls (and so every write: locks,
@@ -87,6 +87,7 @@ export function makeHubSource(org: Org, fleet: Fleet | null, groups: CameraGroup
   const sites = fleetServers(fleet, org);
   const cameras: SourceCamera[] = sites.flatMap((s) => (s.summary?.cameras ?? []).map((c) => ({
     site: s.id, siteName: s.name, id: c.id, name: c.name, streamReady: !!c.stream_ready, online: s.online, ptz: !!c.ptz,
+    recordStream: c.record_stream,
   })));
   const siteRows: SourceSite[] = sites.map((s) => ({
     id: s.id, name: s.name, location: s.location, online: s.online,

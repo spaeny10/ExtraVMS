@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { api, makeApi, type SiteApi } from "./api";
+import { api, makeApi, whepSession, type SiteApi } from "./api";
 import { cameraOfPath, stillWidth } from "./cameraStreams";
 import { ZoomFrame } from "./VideoZoom";
 
@@ -13,6 +13,15 @@ import { ZoomFrame } from "./VideoZoom";
  * leaves the plain black "Connecting…" box as before.
  */
 export type WhepState = "connecting" | "playing" | "error";
+
+/** End a WHEP session on the server (DELETE its URL) so the camera's reader slot frees now, not when MediaMTX notices
+ *  the peer is gone. keepalive: it still goes out when the page is closing. Some browsers refuse keepalive on a
+ *  request that needs a CORS preflight (the direct-LAN client): then it is sent plainly. Failures don't matter. */
+function endSession(url: string) {
+  fetch(url, { method: "DELETE", keepalive: true })
+    .catch(() => fetch(url, { method: "DELETE" }))
+    .catch(() => {});
+}
 
 /** The camera's most recent still (from its recording) while the live picture connects. */
 function usePoster(site: SiteApi, camera: string | null, box: React.RefObject<HTMLDivElement | null>) {
@@ -86,7 +95,14 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
     let canceled = false;
     let retryTimer: number | undefined;
     let noFramesTimer: number | undefined;
+    let sessionUrl: string | null = null;   // this connection's session on the server, from the answer's Location
+    failures.current = 0;
     setSize("");
+    const hangUp = () => {
+      pc?.close();
+      if (sessionUrl) endSession(sessionUrl);
+      sessionUrl = null;
+    };
 
     const start = async () => {
       setState("connecting");
@@ -147,7 +163,9 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
           }
           throw new Error(`WHEP ${r.status}`);
         }
-        if (canceled) return;
+        const session = whepSession(r.headers.get("location"), path);
+        sessionUrl = session ? site.whepSessionUrl(path, session) : null;
+        if (canceled) { hangUp(); return; }
         await pc.setRemoteDescription({ type: "answer", sdp: await r.text() });
       } catch {
         retry();
@@ -157,8 +175,8 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
     const retry = () => {
       if (canceled) return;
       setState("error");
-      if (++failures.current >= 2 && fallback.current) { canceled = true; pc?.close(); fallback.current(); return; }
-      pc?.close();
+      if (++failures.current >= 2 && fallback.current) { canceled = true; hangUp(); fallback.current(); return; }
+      hangUp();
       pc = null;
       clearTimeout(retryTimer);
       retryTimer = window.setTimeout(start, 4000);
@@ -169,7 +187,7 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
       canceled = true;
       clearTimeout(retryTimer);
       clearTimeout(noFramesTimer);
-      pc?.close();
+      hangUp();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [path, port, site, JSON.stringify(iceServers ?? [])]);
@@ -182,7 +200,10 @@ export function WhepPlayer({ path, port, className, onUnsupported, showSize = fa
           autoPlay
           muted
           playsInline
-          onPlaying={(e) => { if (e.currentTarget.videoWidth) setFrame(true); }}
+          onPlaying={(e) => {
+            // frames decode: a later drop gets its retry again before the caller's fallback
+            if (e.currentTarget.videoWidth) { setFrame(true); failures.current = 0; }
+          }}
           onResize={(e) => {
             const v = e.currentTarget;
             if (v.videoWidth) setSize(`${v.videoWidth}×${v.videoHeight}`);

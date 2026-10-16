@@ -27,8 +27,14 @@ Push-Location "$root\hub"
 & $py -m pytest -q tests 2>&1 | Select-Object -Last 1
 if ($LASTEXITCODE -ne 0) { $failed += "hub tests" }
 Pop-Location
-Write-Host "== hub UI build"
 Push-Location "$root\hub\ui"
+Write-Host "== hub UI typecheck"
+npx tsc --noEmit -p . 2>&1 | Select-Object -Last 20 | ForEach-Object { $_ }
+if ($LASTEXITCODE -ne 0) { $failed += "hub UI typecheck" } else { Write-Host "ok" }
+Write-Host "== hub UI unit tests"
+npx vitest run --reporter=dot 2>&1 | Select-String -Pattern "Tests|Test Files|FAIL|Error" | ForEach-Object { $_.Line }
+if ($LASTEXITCODE -ne 0) { $failed += "hub UI tests" }
+Write-Host "== hub UI build"
 npm run build 2>&1 | Select-String -Pattern "error|built" | ForEach-Object { $_.Line }
 if ($LASTEXITCODE -ne 0) { $failed += "hub UI build" }
 Pop-Location

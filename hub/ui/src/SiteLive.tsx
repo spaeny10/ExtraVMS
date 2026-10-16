@@ -33,10 +33,12 @@ import { LiveBudgetProvider, useBudget } from "@site/dashboard/Dashboard";
 import { useIceServers } from "@site/dashboard/ice";
 import { camKey, splitKey, type DashboardSource } from "@site/dashboard/source";
 import type { FleetEvent } from "@site/dashboard/types";
+import { NO_PICTURE_TEXT, stillDue } from "@site/liveFallback";
 import { regionFetchKey, regionPass, useRegionResults, useRegions } from "@site/region";
 import { useResync } from "@site/resync";
 import type { TalkSpeaker } from "@site/talkdown";
 import { Icon, confirmDialog, promptDialog, swipeHandlers, toast, useIsPhone } from "@site/ui";
+import { useStill } from "@site/useStill";
 import { type Camera as RegistryCam, type Fleet, type Org, type Server, type Site, type SiteCameraGroup, type SiteLayout, api } from "./api";
 import { type EventRef, applyLiveEvent, cameraNameFor, mergePool, regionFeed, removeLiveEvent, siteRegionKeys, tagServer } from "./eventOpen";
 import { HubEventDetail } from "./HubEventDetail";
@@ -673,12 +675,8 @@ function SiteTile({ t, source, multi, q, dispatch, hdUnsupported, onUnsupported,
   const site = mediaApi(t.server.id);
   const hd = q(t.key) === "hd";
   const playing = t.state === "live" && (phone || budget.playing(t.key)) && ice !== undefined;
-  const [stillTs, setStillTs] = useState(() => Date.now() / 1000 - 3);
-  useEffect(() => {
-    if (playing || t.state !== "live") return;
-    const i = setInterval(() => setStillTs(Date.now() / 1000 - 3), 10000);
-    return () => clearInterval(i);
-  }, [playing, t.state]);
+  // every 10 s while paused, every 60 s after a still failed to load
+  const still = useStill(!playing && t.state === "live");
   const label = tileLabel(t.server.name, t.name, multi);
   const active = activeOf(t.key);
   const qualityButtons = (
@@ -705,7 +703,10 @@ function SiteTile({ t, source, multi, q, dispatch, hdUnsupported, onUnsupported,
       ) : (
         <div className={`tile ${t.state === "live" ? "" : "site-live-down"}`} {...(phone && onSwipe ? swipeHandlers(onSwipe) : {})}>
           <div className="player dash-still">
-            {t.state === "live" ? <img src={site.frameUrl(t.id, stillTs, 640)} alt="" /> : <div className="player-state">{STATE_TEXT[t.state]}</div>}
+            {t.state === "live"
+              ? <img src={site.frameUrl(t.id, still.ts, 640)} alt="" onLoad={still.onLoad} onError={still.onError} style={still.failed ? { visibility: "hidden" } : undefined} />
+              : <div className="player-state">{STATE_TEXT[t.state]}</div>}
+            {t.state === "live" && still.failed && <div className="player-state">{NO_PICTURE_TEXT}</div>}
             {t.state === "live" && (
               <button className="dash-play" onClick={() => budget.force(t.key)} title="Play live (another tile pauses if the page is at its limit)"><Icon name="play" size={22} /></button>
             )}
@@ -732,6 +733,15 @@ function PhoneLive({ tiles, activity, picker, ...common }: TileCommon & { tiles:
   const [idx, setIdx] = useState(0);
   const [tick, setTick] = useState(0);
   useEffect(() => { const t = setInterval(() => setTick((x) => x + 1), 10000); return () => clearInterval(t); }, []);
+  // thumbnails whose still failed, by the tick it failed on: they try again once a minute instead of every tick
+  const [failedAt, setFailedAt] = useState<Record<string, number>>({});
+  const stillFailed = (key: string, failed: boolean) => setFailedAt((f) => {
+    if (failed) return { ...f, [key]: tick };
+    if (!(key in f)) return f;
+    const rest = { ...f };
+    delete rest[key];
+    return rest;
+  });
   const i = Math.min(idx, tiles.length - 1);
   const t = tiles[i];
   const step = (dir: -1 | 1) => setIdx(wrapIndex(i, dir, tiles.length));
@@ -744,7 +754,13 @@ function PhoneLive({ tiles, activity, picker, ...common }: TileCommon & { tiles:
           <div className="live-strip" role="tablist">
             {tiles.map((x, j) => (
               <button key={x.key} role="tab" aria-selected={j === i} className={`live-strip-item ${j === i ? "active" : ""}`} onClick={() => setIdx(j)}>
-                {x.state === "live" ? <img src={`${mediaApi(x.server.id).frameUrl(x.id, Date.now() / 1000 - 15, 320)}&r=${tick}`} alt="" /> : <div className="site-live-strip-off">offline</div>}
+                {x.state !== "live" ? <div className="site-live-strip-off">offline</div> : <>
+                  {stillDue(tick, failedAt[x.key]) && (
+                    <img src={`${mediaApi(x.server.id).frameUrl(x.id, Date.now() / 1000 - 15, 320)}&r=${tick}`} alt=""
+                      onLoad={() => stillFailed(x.key, false)} onError={() => stillFailed(x.key, true)} style={x.key in failedAt ? { display: "none" } : undefined} />
+                  )}
+                  {x.key in failedAt && <div className="site-live-strip-off">{NO_PICTURE_TEXT}</div>}
+                </>}
                 <span><span className={`dot ${x.state === "live" && x.streamReady ? "ok" : "bad"}`} /> {tileLabel(x.server.name, x.name, common.multi)}</span>
               </button>
             ))}

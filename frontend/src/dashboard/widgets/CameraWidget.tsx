@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
+import { NO_PICTURE_TEXT } from "../../liveFallback";
 import { LivePlayer } from "../../LivePlayer";
-import { nowS } from "../../playback";
 import { Icon } from "../../ui";
+import { useStill } from "../../useStill";
+import { livePath } from "../../Views";
 import { useBudget } from "../Dashboard";
 import { useIceServers } from "../ice";
 import type { DashboardSource } from "../source";
@@ -33,7 +35,6 @@ export function CameraWidget({ widget: w, source, editing, big, onProps }: {
   const [hdOk, setHdOk] = useState(true);
   const [quality, setQuality] = useState<"sd" | "hd">(w.props.quality ?? "sd");
   useEffect(() => { setQuality(w.props.quality ?? "sd"); }, [w.props.quality]);
-  const [stillTs, setStillTs] = useState(() => nowS() - 3);
   const [hasAudio, setHasAudio] = useState(false);
   const [sound, setSound] = useState(false);
 
@@ -48,25 +49,25 @@ export function CameraWidget({ widget: w, source, editing, big, onProps }: {
     return () => { io.disconnect(); visible(w.id, false); };
   }, [visible, w.id]);
   const playing = (big || budget.playing(w.id)) && !editing;
-  useEffect(() => {
-    if (playing) return;
-    const t = setInterval(() => setStillTs(nowS() - 3), 10000);
-    return () => clearInterval(t);
-  }, [playing]);
+  const still = useStill(!playing);
 
   if (!site || !camera) return <div className="dash-empty muted small">Choose a camera in ⚙ settings.</div>;
   if (!cam) return <div className="dash-empty muted small">Camera {camera} is not on any site you can see.</div>;
   const hd = quality === "hd" && hdOk;
-  const path = hd ? camera : `${camera}_sub`;
+  // SD is <id>_sub; HD is <id>, or <id>_hd on a camera that records its sub stream
+  const path = livePath({ id: camera, record_stream: cam.recordStream }, hd);
   const setQ = (q: "sd" | "hd") => { setQuality(q); if (editing) onProps({ quality: q }); };
   return (
     <div ref={box} className={`dash-cam ${big ? "big" : ""}`}>
       {playing && cam.online ? (
         <LivePlayer key={`${site}-${path}`} path={path} port={source.port} base={api!.base} iceServers={ice} className={hd ? "hd" : ""}
-          onUnsupported={() => setHdOk(false)} muted={!sound} onAudio={setHasAudio} />
+          onUnsupported={hd ? () => setHdOk(false) : undefined} muted={!sound} onAudio={setHasAudio} />
       ) : (
         <div className="player dash-still">
-          {cam.online ? <img src={api!.frameUrl(camera, stillTs, 640)} alt="" /> : <div className="player-state">{cam.siteName} is offline</div>}
+          {cam.online
+            ? <img src={api!.frameUrl(camera, still.ts, 640)} alt="" onLoad={still.onLoad} onError={still.onError} style={still.failed ? { visibility: "hidden" } : undefined} />
+            : <div className="player-state">{cam.siteName} is offline</div>}
+          {cam.online && still.failed && <div className="player-state">{NO_PICTURE_TEXT}</div>}
           {cam.online && !editing && (
             <button className="dash-play" onClick={() => budget.force(w.id)} title="Play live (another tile pauses if the page is at its limit)"><Icon name="play" size={22} /></button>
           )}

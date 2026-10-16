@@ -2361,6 +2361,12 @@ def _median(xs) -> float | None:
     return round(xs[len(xs) // 2], 1) if xs else None
 
 
+@app.get("/api/health")
+async def api_health():
+    """The UI's "is the server there" probe (OfflineBanner): cheap, and the same answer as the hub's."""
+    return {"ok": True}
+
+
 @app.get("/api/system")
 async def system():
     rec = shutil.disk_usage(settings.recordings_dir)
@@ -2554,12 +2560,25 @@ async def ws(sock: WebSocket):
 
 # ---------------------------------------------------------------- live view signaling
 
+WHEP_PATH = re.compile(r"[a-z0-9_]{1,40}")
+# MediaMTX names a WHEP session by a random UUID (its answer's Location: /<path>/whep/<uuid>)
+WHEP_SESSION = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def whep_location(path: str, location: str | None) -> str | None:
+    """MediaMTX's session URL for `path` as this server's own route (/api/whep/<path>/<session>), or None when it
+    isn't one: the browser never learns MediaMTX's port, and DELETE goes through the same auth as the offer."""
+    loc = urllib.parse.urlsplit(location or "").path
+    m = re.fullmatch(rf"/?{re.escape(path)}/whep/(.+)", loc)
+    return f"/api/whep/{path}/{m.group(1)}" if m and WHEP_SESSION.fullmatch(m.group(1)) else None
+
+
 @app.post("/api/whep/{path}")
 async def whep(path: str, request: Request):
     """Forward a WebRTC (WHEP) offer to MediaMTX so the browser only talks to this origin. That keeps live view
     working over HTTPS (installed app on a phone): no mixed-content request to MediaMTX's own port. The video
     itself still flows straight from MediaMTX over WebRTC."""
-    if not re.fullmatch(r"[a-z0-9_]{1,40}", path):
+    if not WHEP_PATH.fullmatch(path):
         raise HTTPException(400)
     async with httpx.AsyncClient(timeout=15) as c:
         r = await c.post(f"http://127.0.0.1:{settings.mediamtx_webrtc_port}/{path}/whep", content=await request.body(),
@@ -2570,7 +2589,24 @@ async def whep(path: str, request: Request):
         ips = await asyncio.to_thread(public_ips, hosts)
         if ips:
             body = add_candidates(body.decode(), ips, settings.webrtc_media_port).encode()
-    return Response(body, status_code=r.status_code, media_type=r.headers.get("content-type", "application/sdp"))
+    loc = whep_location(path, r.headers.get("location")) if r.status_code in (200, 201) else None
+    return Response(body, status_code=r.status_code, media_type=r.headers.get("content-type", "application/sdp"),
+                    headers={"Location": loc} if loc else None)
+
+
+@app.delete("/api/whep/{path}/{session}")
+async def whep_close(path: str, session: str):
+    """End a live-view session now (the player closed) instead of when MediaMTX notices the peer is gone, so the
+    camera's reader slot is free sooner."""
+    if not WHEP_PATH.fullmatch(path) or not WHEP_SESSION.fullmatch(session):
+        raise HTTPException(400)
+    try:
+        async with httpx.AsyncClient(timeout=5) as c:
+            r = await c.delete(f"http://127.0.0.1:{settings.mediamtx_webrtc_port}/{path}/whep/{session}",
+                               headers=mediamtx.reader_auth_header())
+    except httpx.HTTPError:
+        return Response(status_code=502)   # MediaMTX not answering: it drops the session itself when the peer goes
+    return Response(status_code=r.status_code if r.status_code < 500 else 502)
 
 
 def public_ips(hosts: list[str]) -> list[str]:

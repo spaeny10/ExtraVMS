@@ -1,5 +1,5 @@
-import { expect, test } from "vitest";
-import { api, makeApi, withQuery } from "./api";
+import { afterEach, describe, expect, it, test, vi } from "vitest";
+import { api, makeApi, probeHealth, whepSession, withQuery } from "./api";
 
 test("makeApi builds every backend URL under its site prefix", () => {
   const s = makeApi("/s/s_abc");
@@ -30,4 +30,37 @@ test("a direct client puts its token on every URL and its socket on the server's
   expect(d.whepUrl("c_sub")).toBe("https://192.168.1.10:8443/api/whep/c_sub?direct=t.k");
   expect(d.wsUrl()).toBe("wss://192.168.1.10:8443/api/ws?direct=t.k");
   expect(withQuery("/a", {})).toBe("/a");
+});
+
+test("WHEP sessions: the id comes from the answer's Location, the hang-up URL from the same client", () => {
+  const id = "0b6c1f8e-2d3a-4e5f-8a9b-1c2d3e4f5a6b";
+  expect(whepSession(`/api/whep/cam1_sub/${id}`, "cam1_sub")).toBe(id);
+  expect(whepSession(`/s/s_abc/api/whep/cam1_sub/${id}`, "cam1_sub")).toBe(id);   // through the hub
+  for (const bad of [null, undefined, "", `/api/whep/cam2/${id}`, "/api/whep/cam1_sub/abc", `/api/whep/cam1_sub/${id}/x`]) {
+    expect(whepSession(bad, "cam1_sub")).toBeNull();
+  }
+  expect(makeApi("/s/s_abc").whepSessionUrl("cam1_sub", id)).toBe(`/s/s_abc/api/whep/cam1_sub/${id}`);
+  expect(makeApi("https://192.168.1.10:8443", { query: { direct: "t.k" } }).whepSessionUrl("c", id))
+    .toBe(`https://192.168.1.10:8443/api/whep/c/${id}?direct=t.k`);
+});
+
+describe("probeHealth", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const answer = (status: number, type: string, body: string) =>
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(body, { status, headers: { "content-type": type } })));
+  it("counts only JSON {ok: true}", async () => {
+    answer(200, "application/json", '{"ok":true}');
+    expect(await probeHealth()).toBe(true);
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith("/api/health", { cache: "no-store" });
+  });
+  it("an HTML page, an error or another answer is not healthy", async () => {
+    answer(200, "text/html", "<html></html>");
+    expect(await probeHealth()).toBe(false);
+    answer(200, "application/json", '{"ok":false}');
+    expect(await probeHealth()).toBe(false);
+    answer(200, "application/json", "not json");
+    expect(await probeHealth()).toBe(false);
+    answer(503, "application/json", '{"ok":true}');
+    expect(await probeHealth()).toBe(false);
+  });
 });

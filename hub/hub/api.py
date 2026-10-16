@@ -2391,8 +2391,17 @@ async def healthz():
     return {"ok": True, "version": __version__, "sites_online": len(registry.by_site), "turn": turn.configured(), "shared_ai": vlm_proxy.configured()}
 
 
+@app.get("/api/health")
+async def api_health():
+    """The UI's "is the server there" probe (OfflineBanner): cheap, no sign-in, same answer shape as the NVR's."""
+    return {"ok": True}
+
+
 @app.get("/{full_path:path}")
 async def ui(full_path: str):
+    if full_path == "api" or full_path.startswith("api/"):
+        # an unknown API path is a real 404 for clients, not the UI's index.html (as the NVR does)
+        return JSONResponse({"detail": "Not Found"}, status_code=404)
     dist: Path = settings.ui_dir
     target = (dist / full_path).resolve() if full_path else None
     if target and full_path and target.is_file() and str(target).startswith(str(dist.resolve())):

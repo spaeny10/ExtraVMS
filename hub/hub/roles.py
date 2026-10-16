@@ -1,6 +1,7 @@
 """Who may do what through the proxy. Roles nest: viewer < operator < admin < owner.
 
-viewer   watch: every GET (but the talk-down voice and a camera's own settings), the live WebSocket, WHEP signaling, media, playback, frames
+viewer   watch: every GET (but the talk-down voice and a camera's own settings), the live WebSocket, WHEP signaling (offer and
+         hang-up), media, playback, frames
 operator act: PTZ / relay / presets, talk-down (play / stop a message on a speaker, Describe & warn, the voice and its
          preview), naming people and vehicles, feedback and synopsis edits, locks, Ask and clip chat, reprocess, briefings on demand
 admin    configure: cameras (and their own settings over ONVIF: clock, encoders, imaging, rules, reboot), speakers and
@@ -23,6 +24,7 @@ RULES: list[tuple[set[str], re.Pattern, str]] = [
     ({"GET", "HEAD"}, re.compile(r"^/api/cameras/([^/]+/)?device(/|$)"), "operator"),
     ({"GET", "HEAD"}, re.compile(r".*"), "viewer"),
     ({"POST"}, re.compile(r"^/api/whep/"), "viewer"),
+    ({"DELETE"}, re.compile(r"^/api/whep/[^/]+/[^/]+$"), "viewer"),   # ends the viewer's own live session (WhepPlayer teardown)
     ({"POST"}, re.compile(r"^/api/(assistant/ask|assistant/plan|assistant/retrieve|assistant/warm|remote/warm|query/parse)$"), "viewer"),
     ({"POST"}, re.compile(r"^/api/assistant/execute$"), "operator"),   # site actions; the site checks each verb's own role
     ({"POST"}, re.compile(r"^/api/events/\d+/chat$"), "viewer"),
@@ -52,6 +54,7 @@ RULES: list[tuple[set[str], re.Pattern, str]] = [
     ({"POST"}, re.compile(r"^/api/sd/recover$"), "admin"),   # replays footage from a camera's SD card into its recordings
     ({"PUT", "POST", "DELETE"}, re.compile(r"^/api/cameras(/|$)"), "admin"),
     ({"PUT"}, re.compile(r"^/api/(retention|topology|remote|briefings/settings)(/|$)"), "admin"),
+    ({"PUT"}, re.compile(r"^/api/ai-settings$"), "admin"),   # verification and synopsis thresholds
     ({"PUT"}, re.compile(r"^/api/hub$"), "owner"),   # hub-managed; effectively blocked (see proxy)
 ]
 

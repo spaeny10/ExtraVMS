@@ -44,6 +44,7 @@ async def site_summary(state, since: float | None = None, version: str = "") -> 
         h = state.health.camera(c["id"]) or {}
         ptz = state.ptz.status(c["id"]) if getattr(state, "ptz", None) else None
         cam = {"id": c["id"], "name": c["name"], "stream_ready": bool(status.get(c["id"], {}).get("ready")),
+               "record_stream": c.get("record_stream") or "main",   # the hub's live tiles pick <id> or <id>_hd for HD
                "metadata": bool(st.get("metadata")), "onvif_events": bool(st.get("onvif_events")),
                "bitrate_mbps": h.get("bitrate_mbps"), "problems": h.get("problems") or [],
                "ptz": {"at_home": ptz["at_home"], "preset_name": ptz["preset_name"]} if ptz else None}

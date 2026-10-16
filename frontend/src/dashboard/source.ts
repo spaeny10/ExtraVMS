@@ -10,7 +10,9 @@ export { camKey, splitKey } from "../playback";
 /** `site`/`siteName` are the SERVER id/name (legacy naming, matches the persisted CameraRef). The optional
  *  `server`/`serverName` say the same explicitly; `siteId`/`locationName` are the physical Site the server is in. */
 export type SourceCamera = { site: string; siteName: string; id: string; name: string; streamReady: boolean; online: boolean; ptz?: boolean;
-  server?: string; serverName?: string; siteId?: string; locationName?: string };
+  server?: string; serverName?: string; siteId?: string; locationName?: string;
+  /** which stream the camera records ("sub": HD live is the on-demand <id>_hd path, Views.tsx livePath); absent = main */
+  recordStream?: "main" | "sub" };
 /** A physical Site and the servers in it, for grouping pickers (Site → Server → cameras). */
 export type SourceSiteGroup = { id: string; name: string; servers: string[] };
 export type SourceSite = { id: string; name: string; location?: string; online: boolean; camerasUp: number; cameras: number; diskFreeGb?: number | null; openAlerts: number; version?: string | null;

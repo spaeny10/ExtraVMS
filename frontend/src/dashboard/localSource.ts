@@ -15,6 +15,7 @@ export function makeLocalSource(cameras: Camera[], home: HomeData | null, port: 
   const byId = new Map(cameras.map((c) => [c.id, c]));
   const cams: SourceCamera[] = cameras.filter((c) => c.enabled).map((c) => ({
     site: LOCAL, siteName: name, id: c.id, name: c.name, streamReady: !!c.status?.stream_ready, online: true, ptz: !!c.status?.ptz?.available,
+    recordStream: c.record_stream,
   }));
   const site: SourceSite = {
     id: LOCAL, name, online: true, cameras: cams.length, camerasUp: cams.filter((c) => c.streamReady).length,
