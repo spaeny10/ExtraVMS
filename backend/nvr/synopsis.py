@@ -42,6 +42,10 @@ SYSTEM = (
     "a wide shot (amber box = camera detection, green box = verified object) and close-up crops in time order. "
     "Describe only what is visible. Be specific about people (clothing colors, what they are doing) "
     "and vehicles (type, color, make if clearly visible, direction). Do not guess identities. "
+    # event 15205: parked pickups described as "moving from left to right" from frames in which nothing moved
+    "Motion needs evidence: say a vehicle or person is moving, driving, walking or arriving only if its position "
+    "clearly changes across the frames you were given; if it is in the same place in every frame, describe it as "
+    "parked or stationary (and give no direction). "
     "Small objects (phones, cups, bags, tools) are usually a few pixels in these crops: name one only when it is "
     "unmistakable; otherwise say nothing about the hands rather than guess. "
     "Weapons especially: describe a small dark object in someone's hand neutrally unless a gun or knife is clearly "

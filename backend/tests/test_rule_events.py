@@ -395,14 +395,14 @@ db.upsert_camera({"id": "cam6", "name": "Panoramic", "host": "10.0.0.6", "onvif_
                   "event_source": "auto", "motion_events": 0})
 
 
-def verify(scene, label="person", start=None, dur=12.0, zone_list=None, track_id=None):
+def verify(scene, label="person", start=None, dur=12.0, zone_list=None, track_id=None, frame=(36, 64)):
     start = start or time.time() - 100
     model = FakeYOLO(scene)
 
     def grab(clip, clip_start, targets):
         ts = [t for t in targets if clip_start <= t <= start + dur + settings.clip_post_roll]
         model.targets = ts
-        return {t: np.zeros((36, 64, 3), np.uint8) for t in ts}
+        return {t: np.zeros((*frame, 3), np.uint8) for t in ts}
 
     old = verifier.grab_frames
     verifier.grab_frames = grab
@@ -487,7 +487,8 @@ def test_parked_vehicle_without_camera_box_is_rejected():
     parked.save("cam6", [])
     jcb = (0.29, 0.26, 0.74, 0.58)
     r = verify(lambda ts: [(TRUCK, 0.91, jcb)], label="vehicle", dur=20.0)
-    assert r["status"] == "rejected" and r["detections"].get("rejected") == parked.REASON, r["detections"].get("rejected")
+    # (the boxless motion rule rejects it before the parked check: it was in the pre-roll and never moved)
+    assert r["status"] == "rejected" and r["detections"].get("rejected") == STILL_TRUCK, r["detections"].get("rejected")
     # a car driving past the parked machine: the moving one verifies it
     start = time.time() - 100
 
@@ -497,6 +498,201 @@ def test_parked_vehicle_without_camera_box_is_rejected():
     parked.save("cam6", [])
     r = verify(passing, label="vehicle", start=start, dur=20.0)
     assert r["status"] == "verified" and r["yolo_class"] == "car", (r["status"], r["detections"].get("rejected"))
+
+
+STILL_TRUCK = "nothing moving: YOLO found only stationary truck(s)"
+STILL_CAR = "nothing moving: YOLO found only stationary car(s)"
+PARKED_CAR = (0.40, 0.45, 0.52, 0.62)
+
+
+def driving_car(start, conf=0.8, size=(0.12, 0.17)):
+    """A car driving left to right across the frame (already in view, further left, in the pre-roll)."""
+    def scene(ts):
+        x = 0.1 + 0.04 * (ts - start)
+        return [(CAR, conf, (x, 0.45, x + size[0], 0.45 + size[1]))]
+    return scene
+
+
+def test_boxless_moving_car_passes():
+    parked.save("cam6", [])
+    start = time.time() - 100
+    r = verify(driving_car(start), label="vehicle", start=start)
+    assert r["status"] == "verified" and r["yolo_class"] == "car" and "rejected" not in r["detections"], r["detections"].get("rejected")
+    xs = [p[1] for p in r["path"]]
+    assert xs == sorted(xs) and xs[-1] - xs[0] > 0.3   # one object's path, left to right
+
+
+def test_boxless_parked_car_in_every_frame_is_rejected():
+    parked.save("cam6", [])
+    r = verify(lambda ts: [(CAR, 0.85, jitter(PARKED_CAR, ts))], label="vehicle")
+    assert r["status"] == "rejected" and r["detections"]["rejected"] == STILL_CAR, r["detections"].get("rejected")
+    assert r["yolo_hits"] == 0 and "path" not in r
+    # a "motion" event that only finds the parked car is rejected the same way
+    r = verify(lambda ts: [(CAR, 0.85, PARKED_CAR)], label="motion")
+    assert r["status"] == "rejected" and r["detections"]["rejected"] == STILL_CAR and "camera_class" not in r
+    # event 15205: a parked car at 0.42, flickering blobs elsewhere: nothing to confirm with (too unsure)
+    start = time.time() - 100
+
+    def e15205(ts):
+        out = [(CAR, 0.42, (0.6456, 0.2261, 0.6755, 0.2845))]
+        k = int(ts - start)
+        if k >= 3:
+            out += [(CAR, 0.40, (0.2307, 0.2973, 0.2426, 0.3214)) if k == 3 else (CAR, 0.32, (0.6748, 0.2582, 0.6921, 0.3046)),
+                    (TRUCK, 0.31, (0.4761, 0.1806, 0.5143, 0.2817))]
+        return out
+    r = verify(e15205, label="vehicle", start=start, dur=5.2)
+    assert r["status"] == "rejected" and r["detections"]["rejected"].startswith("too unsure: YOLO car 42%"), r["detections"].get("rejected")
+
+
+def test_boxless_new_car_passes():
+    """Absent from the pre-roll frame, then standing in view all event: it arrived (and stopped)."""
+    parked.save("cam6", [])
+    start = time.time() - 100
+    r = verify(lambda ts: [] if ts < start - 1 else [(CAR, 0.85, PARKED_CAR)], label="vehicle", start=start)
+    assert r["status"] == "verified" and "rejected" not in r["detections"], r["detections"].get("rejected")
+    # ...unless it sits on a remembered parking spot (YOLO missed the parked car in the pre-roll)
+    now = time.time()
+    parked.save("cam6", [{"box": list(PARKED_CAR), "cls": "car", "first_seen": now - 3600, "last_seen": now - 60, "count": 5}])
+    r = verify(lambda ts: [] if ts < start - 1 else [(CAR, 0.85, PARKED_CAR)], label="vehicle", start=start)
+    assert r["status"] == "rejected" and r["detections"]["rejected"] == parked.REASON, r["detections"].get("rejected")
+    parked.save("cam6", [])
+
+
+def test_boxless_needs_a_confident_big_enough_box():
+    start = time.time() - 100
+    r = verify(driving_car(start, conf=0.4), label="vehicle", start=start)
+    assert r["status"] == "rejected" and r["detections"]["rejected"] == "too unsure: YOLO car 40% < 50%", r["detections"].get("rejected")
+    tiny = (0.008, 0.02)   # 0.016% of the frame; 0.008 x 64 px wide is 10 px at YOLO's 1280
+    r = verify(driving_car(start, size=tiny), label="vehicle", start=start)
+    assert r["status"] == "rejected" and r["detections"]["rejected"] == "too small to judge: YOLO found only tiny car(s)", r["detections"].get("rejected")
+    assert verifier.big_enough({"box": [0, 0, 0.05, 0.03]}, (64, 36))           # 0.15% of the frame
+    # 4096x1248 panorama analysed at 1280x390: 0.02 x 0.07 of the frame = 25.6 px wide there (0.14% of it)
+    assert verifier.big_enough({"box": [0, 0, 0.02, 0.07]}, (4096, 1248))
+    assert not verifier.big_enough({"box": [0, 0, 0.015, 0.07]}, (4096, 1248))
+    # one confident frame makes the object count; its weaker frames then count too (a car at 0.8 then 0.4 as it leaves)
+    def fading(ts):
+        x = 0.1 + 0.01 * (ts - start)   # slow enough that its boxes overlap frame to frame
+        return [(CAR, 0.8 if ts < start + 3 else 0.4, (x, 0.45, x + 0.12, 0.62))]
+    r = verify(fading, label="vehicle", start=start)
+    assert r["status"] == "verified" and r["yolo_hits"] >= 4 and r["yolo_conf"] == 0.8, (r["status"], r["yolo_hits"])
+    # people too: an unsure one does not confirm a PeopleDetect event (but one standing still does, see zones test)
+    r = verify(lambda ts: [(PERSON_CLS, 0.45, (0.2, 0.3, 0.26, 0.7))], label="person", start=start)
+    assert r["status"] == "rejected" and r["detections"]["rejected"].startswith("too unsure: YOLO person 45%")
+    r = verify(lambda ts: [(PERSON_CLS, 0.75, (0.2, 0.3, 0.26, 0.7))], label="person", start=start)
+    assert r["status"] == "verified"
+
+
+def test_boxless_size_floor_is_for_vehicles_unless_asked():
+    """A walker across a 4096x1248 panorama is ~0.01 x 0.1 of the frame (cam6 event 15093, a real person at 0.75):
+    below both size floors, so by default the floor applies to vehicles only."""
+    start = time.time() - 100
+
+    def walker_far(ts):
+        x = 0.8 - 0.01 * (ts - start)
+        return [(PERSON_CLS, 0.75, (x, 0.22, x + 0.01, 0.32))]
+    old = settings.boxless_size_labels
+    try:
+        r = verify(walker_far, label="person", start=start, frame=(1248, 4096))
+        assert r["status"] == "verified", r["detections"].get("rejected")
+        settings.boxless_size_labels = ["vehicle", "person"]
+        r = verify(walker_far, label="person", start=start, frame=(1248, 4096))
+        assert r["status"] == "rejected" and r["detections"]["rejected"] == "too small to judge: YOLO found only tiny person(s)"
+    finally:
+        settings.boxless_size_labels = old
+
+
+SUV = (0.235, 0.277, 0.307, 0.436)   # event 14031: a black SUV driving through, 76% in one frame, 37% in the next
+
+
+def one_frame(start, conf=0.76, box=SUV, still_conf=None):
+    """YOLO sees the car in one sample (start + 2.4 s) at `conf`; the next sample a weak box a little further on.
+    still_conf: a weak box of it also sits on the same spot in every other frame and the pre-roll (a parked car)."""
+    def scene(ts):
+        if abs(ts - (start + 2.4)) < 0.1:
+            return [(CAR, conf, box)]
+        if still_conf is not None:
+            return [(CAR, still_conf, box)]
+        if abs(ts - (start + 4.8)) < 0.1:
+            return [(CAR, 0.37, (0.225, 0.289, 0.257, 0.404))]
+        return []
+    return scene
+
+
+def test_boxless_one_very_confident_frame_is_enough():
+    parked.save("cam6", [])
+    start = time.time() - 100
+    r = verify(one_frame(start), label="vehicle", start=start)
+    assert r["status"] == "verified" and r["yolo_hits"] == 1 and r["yolo_conf"] == 0.76, (r["status"], r["detections"].get("rejected"))
+    assert r["detections"]["needed"] == 2   # met by the single confident frame
+    # below boxless_single_frame_conf (0.70): one frame is not enough
+    r = verify(one_frame(start, conf=0.65), label="vehicle", start=start)
+    assert r["status"] == "rejected" and r["yolo_hits"] == 1
+    # a confident frame of a car parked there all along (weakly seen in the pre-roll and every other frame): rejected
+    r = verify(one_frame(start, still_conf=0.3), label="vehicle", start=start)
+    assert r["status"] == "rejected" and r["detections"]["rejected"] == STILL_CAR, r["detections"].get("rejected")
+    # the size floor still applies (0.016% of the frame, 10 px at YOLO's input)
+    r = verify(one_frame(start, conf=0.9, box=(0.3, 0.3, 0.308, 0.32)), label="vehicle", start=start)
+    assert r["status"] == "rejected" and r["detections"]["rejected"].startswith("too small to judge")
+    # and the setting decides
+    old = settings.boxless_single_frame_conf
+    settings.boxless_single_frame_conf = 0.8
+    try:
+        assert verify(one_frame(start), label="vehicle", start=start)["status"] == "rejected"
+    finally:
+        settings.boxless_single_frame_conf = old
+    # 15205 / 15209 / 13823 stay rejected (see test_boxless_parked_car_in_every_frame_is_rejected)
+    wh = (4096, 1248)
+    truck = [0.702, 0.219, 0.998, 0.992]
+    frames = [(t, []) for t in range(4)] + [(t, [{"cls_id": TRUCK, "cls": "truck", "conf": c, "box": truck}])
+                                            for t, c in ((4, 0.635), (5, 0.753))]
+    m, reason, _, _, single = verifier.boxless_matches(frames, [{"cls_id": TRUCK, "box": truck}], wh, verifier.VEHICLE, True)
+    assert not any(m) and not single and reason == STILL_TRUCK   # 13823: a parked utility truck, in the pre-roll
+
+
+def test_boxless_motion_rule_can_be_turned_off():
+    parked.save("cam6", [])
+    old = settings.boxless_require_motion
+    settings.boxless_require_motion = False
+    try:   # the old behaviour: the parked check (not the motion rule) rejects the still truck
+        r = verify(lambda ts: [(TRUCK, 0.91, (0.29, 0.26, 0.74, 0.58))], label="vehicle", dur=20.0)
+        assert r["status"] == "rejected" and r["detections"].get("rejected") == parked.REASON
+    finally:
+        settings.boxless_require_motion = old
+
+
+def test_link_objects_and_motion():
+    wh = (4096, 1248)
+    still = [(t, [{"cls_id": CAR, "cls": "car", "conf": 0.8, "box": list(jitter(PARKED_CAR, t))}]) for t in range(6)]
+    objs = verifier.link_objects(still)
+    assert len(objs) == 1 and len(objs[0]) == 6 and not verifier.object_moved(objs[0], wh)
+    # car / truck flicker on one parked pickup is one object
+    flick = [(t, [{"cls_id": CAR if t % 2 else TRUCK, "cls": "car", "conf": 0.8, "box": list(PARKED_CAR)}]) for t in range(4)]
+    assert len(verifier.link_objects(flick)) == 1
+    # creeping 1% of the width per frame: 5% over the event, more than 2% of the diagonal and half its width
+    creep = [(t, [{"cls_id": CAR, "cls": "car", "conf": 0.8, "box": [0.40 + 0.01 * t, 0.45, 0.45 + 0.01 * t, 0.62]}]) for t in range(6)]
+    objs = verifier.link_objects(creep)
+    assert len(objs) == 1 and verifier.object_moved(objs[0], wh)
+    m, reason, moved, _, _ = verifier.boxless_matches(still, [{"cls_id": CAR, "box": list(PARKED_CAR)}], wh, verifier.VEHICLE, True)
+    assert not any(m) and reason == STILL_CAR
+    m, reason, moved, _, _ = verifier.boxless_matches(still, [], wh, verifier.VEHICLE, True)   # not in the pre-roll: new
+    assert all(m) and reason is None and not any(moved.values())
+    m, _, _, _, _ = verifier.boxless_matches(still, None, wh, verifier.VEHICLE, True)        # no pre-roll frame: unproven
+    assert not any(m)
+    # driving straight at the camera: the foot point barely moves, the box grows (event 15064, a telehandler)
+    approach = [(t, [{"cls_id": TRUCK, "cls": "truck", "conf": 0.85, "box": [0.70 - 0.02 * t, 0.30 - 0.03 * t, 0.76 + 0.02 * t, 0.62]}])
+                for t in range(4)]
+    objs = verifier.link_objects(approach)
+    assert len(objs) == 1 and verifier.object_moved(objs[0], wh)
+    # back and forth: compared over every pair of frames, not only the first and the last
+    back = [(t, [{"cls_id": CAR, "cls": "car", "conf": 0.8, "box": [0.40 + d, 0.45, 0.45 + d, 0.62]}])
+            for t, d in enumerate((0.0, 0.02, 0.04, 0.02, 0.0))]
+    objs = verifier.link_objects(back)
+    assert len(objs) == 1 and verifier.object_moved(objs[0], wh)
+
+
+def jitter(box, ts, a=0.002):
+    d = a * np.sin(ts * 1.7)
+    return tuple(round(float(v + d), 4) for v in box)
 
 
 def test_merge_never_joins_on_whole_frame_points():

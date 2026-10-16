@@ -4,8 +4,10 @@ For a closed event: fetch the clip from MediaMTX recordings, decode frames at sa
 timestamps, run YOLO, and check that YOLO sees the same class where the camera said it was.
 
 Events opened from a camera's ONVIF detection events (ruleevents.py) have no camera boxes: frames are sampled evenly
-over the event, any YOLO object of the event's label (inside the zones) counts, and the path is rebuilt from YOLO's
-boxes. A "motion" event takes the class YOLO sees most (person or vehicle), or is rejected.
+over the event, a YOLO object of the event's label (inside the zones) counts if it is confident and big enough
+(boxless_min_conf, boxless_min_area / boxless_min_side_px) and, for vehicles, moved during the event or was not in the
+pre-roll frame (boxless_matches), and the path is rebuilt from YOLO's boxes. A "motion" event takes the class YOLO
+sees most (person or vehicle), or is rejected.
 """
 from __future__ import annotations
 
@@ -150,6 +152,130 @@ def sample_path(path: list, n: int) -> list:
     return out
 
 
+LINK_IOU = 0.3          # boxless: a box in a later frame is the same object as one this much overlapping before it
+MOVE_DIAG = 0.02        # boxless: an object moved if its foot point travelled this share of the frame diagonal...
+MOVE_WIDTHS = 0.5       # ...and at least this many of its own widths (between any two of its frames)
+MOVE_SCALE = 1.25       # ...or its box grew / shrank by this factor in width AND height (driving toward / away from us)
+
+
+def big_enough(b: dict, wh: tuple[int, int]) -> bool:
+    """Boxless events: more than a blob. The box covers boxless_min_area of the frame, or boxless_min_side_px on its
+    shorter side at the size YOLO analysed the frame (its long side scaled to yolo_imgsz)."""
+    w, h = wh
+    bw, bh = (b["box"][2] - b["box"][0]), (b["box"][3] - b["box"][1])
+    side = min(bw * w, bh * h) * settings.yolo_imgsz / max(w, h, 1)
+    return bw * bh >= settings.boxless_min_area or side >= settings.boxless_min_side_px
+
+
+def link_objects(frame_boxes: list[tuple[float, list]]) -> list[list[tuple[int, dict]]]:
+    """Group boxes into objects across the frames: each box (most confident first) joins the object whose latest box
+    overlaps it most (IoU >= LINK_IOU), one box per object per frame. Vehicle classes are one family here: YOLO
+    calls the same pickup a car in one frame and a truck in the next. Returns [[(frame index, box), ...], ...]."""
+    objects: list[list[tuple[int, dict]]] = []
+    for fi, (_, boxes) in enumerate(frame_boxes):
+        taken: set[int] = set()
+        for b in sorted(boxes, key=lambda b: -b["conf"]):
+            best, best_iou = None, LINK_IOU
+            for k, obj in enumerate(objects):
+                if k not in taken and obj[-1][0] < fi and (s := iou(obj[-1][1]["box"], b["box"])) >= best_iou:
+                    best, best_iou = k, s
+            if best is None:
+                objects.append([(fi, b)])
+                best = len(objects) - 1
+            else:
+                objects[best].append((fi, b))
+            taken.add(best)
+    return objects
+
+
+def object_moved(obj: list[tuple[int, dict]], wh: tuple[int, int]) -> bool:
+    """Its foot point (bottom center) moved, between any two frames it was in, by more than max(MOVE_DIAG of the frame
+    diagonal, MOVE_WIDTHS of its width) in pixels; or its box changed size by MOVE_SCALE in both directions (a vehicle
+    driving straight at the camera barely moves its foot point: event 15064, a telehandler)."""
+    if len(obj) < 2:
+        return False
+    w, h = wh
+    feet = [zones.foot(b["box"]) for _, b in obj]
+    dist = max((((x1 - x0) * w) ** 2 + ((y1 - y0) * h) ** 2) ** 0.5 for x0, y0 in feet for x1, y1 in feet)
+    ws = [max(1e-6, b["box"][2] - b["box"][0]) for _, b in obj]
+    hs = [max(1e-6, b["box"][3] - b["box"][1]) for _, b in obj]
+    if max(ws) / min(ws) >= MOVE_SCALE and max(hs) / min(hs) >= MOVE_SCALE:
+        return True
+    return dist > max(MOVE_DIAG * (w * w + h * h) ** 0.5, MOVE_WIDTHS * sum(ws) / len(ws) * w)
+
+
+def _in_pre_roll(obj: list[tuple[int, dict]], pre_boxes: list | None, allowed: set) -> bool | None:
+    """Was the object already there in the pre-roll frame (before the camera fired)? None: no pre-roll frame."""
+    if pre_boxes is None:
+        return None
+    first = obj[0][1]["box"]
+    return any(p["cls_id"] in allowed and iou(p["box"], first) >= LINK_IOU for p in pre_boxes)
+
+
+def _plural(classes) -> str:
+    return " and ".join(f"{c}(s)" for c in sorted(set(classes)))
+
+
+def boxless_matches(frame_boxes: list[tuple[float, list]], pre_boxes: list | None, wh: tuple[int, int], allowed: set,
+                    require_motion: bool, check_size: bool = True
+                    ) -> tuple[list[dict | None], str | None, dict[int, bool], list[list], bool]:
+    """Events without camera boxes (ruleevents.py): which YOLO box in each frame is the event's object.
+
+    YOLO's boxes of the label are grouped into objects across the frames (link_objects). An object counts if YOLO was
+    at least boxless_min_conf sure of it in one frame (its weaker frames then count too) and, with check_size, one of
+    its boxes is big enough to judge (big_enough). With require_motion (vehicles) it must also have moved during the
+    event (object_moved) or not be in the pre-roll frame (it arrived): a parked one that was already there and stayed
+    put is not what the camera saw (event 15205: a dark blob behind a tree "confirmed" a vehicle event, and Qwen then
+    described the parked pickups as driving). Without a pre-roll frame an object that did not move never counts.
+    Per frame the most confident box of a counting object.
+
+    One very confident frame is enough (event 14031: a black SUV driving through, 76% in one frame, 37% in the next):
+    an object YOLO saw in only one frame, at boxless_single_frame_conf or more, that was new (not in the pre-roll frame)
+    or whose spot is empty in every other frame (it went by) counts, and alone meets the verifier's frames-needed.
+
+    Returns (match per frame or None, reason when nothing counted, {frame index: the match moved}, the boxes per frame
+    that count: the parked check may pick another of them, whether one confident single-frame object is enough)."""
+    objects = link_objects([(ts, [b for b in boxes if b["cls_id"] in allowed]) for ts, boxes in frame_boxes])
+    def gone_elsewhere(obj) -> bool:   # its spot is empty in every other frame: it was passing through
+        fi0, b0 = obj[0]
+        return not any(o["cls_id"] in allowed and iou(o["box"], b0["box"]) >= LINK_IOU
+                       for fi, (_, boxes) in enumerate(frame_boxes) if fi != fi0 for o in boxes)
+
+    live, still, weak, single = [], [], [], False
+    for obj in objects:
+        if max(b["conf"] for _, b in obj) < settings.boxless_min_conf or (check_size and not any(big_enough(b, wh) for _, b in obj)):
+            weak.append(obj)
+            continue
+        went = require_motion and object_moved(obj, wh)
+        pre = _in_pre_roll(obj, pre_boxes, allowed)
+        alone = (len(obj) == 1 and obj[0][1]["conf"] >= settings.boxless_single_frame_conf
+                 and (pre is False or gone_elsewhere(obj)))
+        if require_motion and not went and pre is not False:
+            if not alone:
+                still.append(obj)
+                continue
+            went = True   # in one frame only, its spot empty in all the others: it moved through
+        single = single or alone
+        live.append((went, obj))
+    matches: list[dict | None] = [None] * len(frame_boxes)
+    moved: dict[int, bool] = {}
+    pool: list[list] = [[] for _ in frame_boxes]
+    for went, obj in live:
+        for fi, b in obj:
+            pool[fi].append(b)
+            if matches[fi] is None or b["conf"] > matches[fi]["conf"]:   # the most confident counting box
+                matches[fi], moved[fi] = b, went
+    reason = None
+    if not live and still:
+        reason = f"nothing moving: YOLO found only stationary {_plural(b['cls'] for obj in still for _, b in obj)}"
+    elif not live and weak:
+        top = max((b for obj in weak for _, b in obj), key=lambda b: b["conf"])
+        reason = (f"too small to judge: YOLO found only tiny {_plural(b['cls'] for obj in weak for _, b in obj)}"
+                  if top["conf"] >= settings.boxless_min_conf else
+                  f"too unsure: YOLO {top['cls']} {top['conf']:.0%} < {settings.boxless_min_conf:.0%}")
+    return matches, reason, moved, pool, single
+
+
 def grab_frames(clip: Path, clip_start: float, targets: list[float]) -> dict[float, np.ndarray]:
     """Decode the clip once and return the frame nearest each target epoch timestamp."""
     wanted = sorted(targets)
@@ -257,21 +383,29 @@ class Verifier:
             log.exception("re-ID embedding failed")
             return None
 
-    def _parked(self, event: dict, detections: list, hits: int, best, need: int, allowed: set, pre_boxes: list | None = None):
+    def _parked(self, event: dict, detections: list, hits: int, best, need: int, allowed: set, pre_boxes: list | None = None,
+                pool: list[list] | None = None, moved: dict[int, bool] | None = None, save: bool = True):
         """Parked-vehicle check and the camera's parked-spot memory (parked.py). Returns
         (parked_info or None, detections, hits, best); the matches change only when another vehicle passing the
-        parked one turns out to be what the camera saw."""
+        parked one turns out to be what the camera saw. Boxless events (boxless_matches) pass `pool`, the boxes per
+        frame that may still match (those of objects that moved or arrived), and `moved`, which matches moved: the
+        motion rule already judged them, so only the parking-spot memory can still drop one that never moved.
+        save=False (the replay tool): the remembered spots are left as they are."""
         label, cam, now = event["camera_class"], event.get("camera_id"), event.get("start_ts") or 0.0
         try:
             entries = parked.load(cam) if cam else []
         except Exception:
             entries = []
         info = None
+        pool = pool if pool is not None else [d["yolo"] for d in detections]
         if settings.parked_suppress and label in parked.VEHICLE_LABELS:
             # Per-frame: a match on a vehicle that sits unmoved through the whole clip is not a hit. Only the
             # matches on something that moved (or appeared) count.
             spots = [e["box"] for e in parked.active(entries, now)]
             idx = parked.static_matches(detections, pre_boxes, spots)
+            if moved is not None:   # boxless: arrived (not in the pre-roll) counts, unless it sits on a known spot
+                idx = [i for i in idx if not moved.get(i)
+                       and any(parked.iou(detections[i]["match"]["box"], sp) >= parked.MEMORY_IOU for sp in spots)]
             if idx:
                 dropped = [detections[i]["match"] for i in idx]
                 for i in idx:
@@ -286,9 +420,10 @@ class Verifier:
         if info is None:
             info = parked.judge(label, detections, event.get("path") or [], entries, now)
         if info:
-            alt = [_matches(tuple(d["cam_box"]), parked.without(d["yolo"], info["box"]), allowed) for d in detections]
+            alt = [_matches(tuple(d["cam_box"]), parked.without(p, info["box"]), allowed) for d, p in zip(detections, pool)]
             trial = [{**d, "match": m, "iou": round(s, 3), "static": False} for d, (m, s) in zip(detections, alt)]
-            for i in parked.static_matches(trial, pre_boxes, [e["box"] for e in parked.active(entries, now)]):  # another parked vehicle is no better
+            stills = [] if moved is not None else parked.static_matches(trial, pre_boxes, [e["box"] for e in parked.active(entries, now)])
+            for i in stills:  # another parked vehicle is no better (boxless: the pool holds only moving / arriving ones)
                 trial[i] = {**trial[i], "match": None, "iou": 0.0, "static": True}
             if sum(d["match"] is not None for d in trial) >= need:
                 if parked.judge(label, trial, event.get("path") or [], entries, now) is None:
@@ -300,7 +435,7 @@ class Verifier:
             log.info("event %s: %s %s sat still (%s), camera motion elsewhere: rejected as parked",
                      event.get("id"), info["cls"], info["box"], info["via"])
         # Remember (or forget) parking spots: verified events (and the parked ones) only; others never matched anything.
-        if cam and (entries or label in parked.VEHICLE_LABELS):
+        if save and cam and (entries or label in parked.VEHICLE_LABELS):
             ref = info["box"] if info else (parked.static_box(detections) if label in parked.VEHICLE_LABELS else None)
             cls = info["cls"] if info else (best[1]["cls"] if best and ref else None)
             new = parked.update([dict(e) for e in entries], detections, ref, cls, now)
@@ -311,7 +446,10 @@ class Verifier:
                     log.exception("saving parked spots for %s failed", cam)
         return info, detections, hits, best
 
-    def verify(self, event: dict, clip: Path, clip_start: float, zone_list: list[dict] | None = None) -> dict:
+    def verify(self, event: dict, clip: Path, clip_start: float, zone_list: list[dict] | None = None,
+               dry_run: bool = False) -> dict:
+        """Verify a closed event from its clip. dry_run (tools/replay_verification.py): the decision only; nothing is
+        written (no snapshot, keyframes, parked-spot memory or re-ID) and the path is not extended."""
         zone_list = zones.normalize(zone_list)
         label = event["camera_class"]
         no_box = ruleevents.is_rule_event(event)   # opened by the camera's ONVIF event: no camera boxes to match
@@ -322,7 +460,9 @@ class Verifier:
         else:
             samples = sample_path(event["path"], settings.verify_frames)
         # vehicles also get one pre-roll frame from before the camera saw motion: what was already parked there
-        pre_t = clip_start + 0.5 if ((label in parked.VEHICLE_LABELS or motion) and settings.parked_suppress) else None
+        # (boxless ones always: an object that was not there before arrived, see boxless_matches)
+        pre_t = clip_start + 0.5 if ((label in parked.VEHICLE_LABELS or motion)
+                                     and (settings.parked_suppress or (no_box and settings.boxless_require_motion))) else None
         frames = grab_frames(clip, clip_start, [s[0] for s in samples] + ([pre_t] if pre_t else []))
         if not frames:
             return {"status": "error", "error": "no frames decoded from recording"}
@@ -350,13 +490,25 @@ class Verifier:
             ]
             # Drop anything standing in a masked area (e.g. a box that straddles the mask edge).
             frame_boxes.append((ts, [b for b in boxes if zones.allowed(zones.foot(b["box"]), zone_list)]))
-        if motion:
-            label = pick_label(frame_boxes)
+        wh = frames[ts_list[0]].shape[1::-1] if ts_list else (1, 1)   # (width, height) of the decoded frames
+        if motion:   # by what YOLO is sure of (boxless_matches counts nothing else)
+            label = pick_label([(ts, [b for b in boxes if b["conf"] >= settings.boxless_min_conf]) for ts, boxes in frame_boxes])
             allowed = LABEL_CLASSES[label]
-        for ts, boxes in frame_boxes:
+        boxless_reason, pool, moved, single = None, None, None, False
+        if no_box:
+            # no camera box (the whole frame): a confident (vehicles: big-enough) YOLO object of the label; vehicles
+            # must also move or arrive during the event
+            require_motion = settings.boxless_require_motion and label in parked.VEHICLE_LABELS
+            box_matches, boxless_reason, moved, pool, single = boxless_matches(
+                frame_boxes, pre_boxes, wh, allowed, require_motion, check_size=label in settings.boxless_size_labels)
+            if not require_motion:   # people (or the rule off): the parked check works as before, on the strong boxes
+                moved = None
+        for i, (ts, boxes) in enumerate(frame_boxes):
             cam_box = tuple(sample_by_ts[ts][1:5])
-            # no camera box: the whole frame, so any allowed YOLO object matches (the most confident one)
-            match, match_iou = _matches(cam_box, boxes, allowed)
+            if no_box:
+                match, match_iou = box_matches[i], 0.0
+            else:
+                match, match_iou = _matches(cam_box, boxes, allowed)
             if match:
                 hits += 1
                 if best is None or match["conf"] > best[1]["conf"]:
@@ -384,14 +536,16 @@ class Verifier:
                             best = (d["ts"], m, tuple(cb))
             else:
                 shift = 0.0
-        verified = hits >= need
+        verified = hits >= need or (single and hits >= 1)   # boxless: one very confident frame of a passing object
         # A parked vehicle "confirming" motion next to it (shimmer, shadows): rejected, with the reason recorded.
         parked_info = None
         if verified:
             parked_info, detections, hits, best = self._parked({**event, "camera_class": label}, detections, hits, best,
-                                                               need, allowed, pre_boxes)
+                                                               need, allowed, pre_boxes, pool, moved, save=not dry_run)
             if parked_info:
                 verified = False
+        # boxless: why nothing counted (only parked / tiny / unsure objects), shown on the card like the parked reason
+        rejected = parked.REASON if parked_info else (boxless_reason if not verified else None)
         # Where did it come from / go to? Cameras often report a person a step or two late, so the doorway
         # is on the pre-roll but not in the camera's path. Follow the verified object into the pre- and
         # post-roll with YOLO and extend the path (stored in camera-clock time, i.e. frame time + shift).
@@ -399,6 +553,10 @@ class Verifier:
         path = list(event["path"])
         if no_box:   # the camera gave no positions: the object's path is where YOLO saw it
             path = [[d["ts"], *d["match"]["box"], d["match"]["conf"]] for d in detections if d["match"]] if verified else []
+        if dry_run:
+            return {"status": "verified" if verified else "rejected", "yolo_class": best[1]["cls"] if best else None,
+                    "yolo_conf": best[1]["conf"] if best else None, "yolo_hits": hits, "needed": need, "rejected": rejected,
+                    **({"camera_class": label} if motion and verified else {})}
         if verified and path:
             clip_end = clip_start + (event["end_ts"] or event["start_ts"]) + settings.clip_post_roll - event["start_ts"] + settings.clip_pre_roll
             first_ts, last_ts = path[0][0] - shift, path[-1][0] - shift
@@ -439,7 +597,7 @@ class Verifier:
             "yolo_hits": hits,
             "detections": {"samples": detections, "keyframes": keyframes, "needed": need, "time_shift_s": shift,
                            "path_extended": path_ext, **({"source": ruleevents.SOURCE} if no_box else {}),
-                           **({"rejected": parked.REASON, "parked": parked_info} if parked_info else {})},
+                           **({"rejected": rejected} if rejected else {}), **({"parked": parked_info} if parked_info else {})},
             "snapshot": str(snapshot.relative_to(settings.data_dir)),
             "clip_start": clip_start,
             **({"path": path} if path_ext["before"] or path_ext["after"] or (no_box and path) else {}),

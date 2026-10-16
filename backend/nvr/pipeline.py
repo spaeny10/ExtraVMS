@@ -39,6 +39,15 @@ def synopsis_error(e: dict | None, ex: Exception) -> str:
     return f"synopsis: {ex}" if n == 1 else f"synopsis (attempt {n}): {ex}"
 
 
+def synopsis_min_conf() -> float:
+    """The Qwen confidence gate: Settings -> System (settings table `synopsis_min_conf`), else NVR_SYNOPSIS_MIN_CONF."""
+    try:
+        v = db.get_setting("synopsis_min_conf")
+    except Exception:  # noqa: BLE001 - the default still gates
+        v = None
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else settings.synopsis_min_conf
+
+
 class Pipeline:
     def __init__(self) -> None:
         self.frames: asyncio.Queue = asyncio.Queue(maxsize=10000)
@@ -272,11 +281,22 @@ class Pipeline:
             a = baseline.apply(event_id) or {}
         if a.get("reasons"):
             log.info("event %s unusual %.2f: %s", event_id, a["score"], "; ".join(a["reasons"]))
-        if self.wants_synopsis(db.event(event_id)) or a.get("score", 0) >= settings.anomaly_synopsis_min:
+        if not self.plan_synopsis(event_id, a.get("score", 0)):
+            await self.reindex(event_id)  # no VLM for this label: index the YOLO tags for search
+
+    def plan_synopsis(self, event_id: int, anomaly: float = 0.0) -> bool:
+        """After verification: hold the event for Qwen (True), or not. An event Qwen would describe but YOLO is too
+        unsure of (synopsis_gate) gets the gate's note in detections.synopsis_skipped: the card shows it instead of
+        "Qwen is writing a synopsis"."""
+        e = db.event(event_id)
+        if self.wants_synopsis(e) or anomaly >= settings.anomaly_synopsis_min:
             # hold long enough for a follow-on fragment to close, be verified and merge in; then describe once
             self.synopsis_hold[event_id] = e["end_ts"] + settings.track_merge_gap + settings.clip_post_roll + settings.recording_lag + 2
-        else:
-            await self.reindex(event_id)  # no VLM for this label: index the YOLO tags for search
+            return True
+        if self.wants_synopsis(e, gate=False) and (note := self.synopsis_gate(e)):
+            db.update_event(event_id, detections={**(e.get("detections") or {}), "synopsis_skipped": note})
+            log.info("event %s: %s", event_id, note)
+        return False
 
     async def hold_loop(self) -> None:
         """Queue held synopses once their merge window has passed (events merged meanwhile were removed from the hold)."""
@@ -654,10 +674,28 @@ class Pipeline:
         labels = own if own is not None else settings.synopsis_labels
         return sorted(set(labels) | policy.labels_needed(cam))  # a site rule about vehicles needs them described
 
-    def wants_synopsis(self, e: dict | None) -> bool:
+    def synopsis_gate(self, e: dict, floor: float | None = None) -> str | None:
+        """The owner's confidence gate: no Qwen synopsis for an event YOLO is less sure of than synopsis_min_conf
+        (it stays verified; the card shows the returned note). Still described: a broken site rule, a PPE check, a
+        label one of the camera's site rules needs Qwen for (towing: the rule can only break once Qwen has looked),
+        and an event unusual enough for its own synopsis. "Generate with Qwen", Describe & warn and Ask don't ask.
+        floor: the gate to apply (default the site's synopsis_min_conf; the replay tool passes the site's own)."""
+        floor, conf = synopsis_min_conf() if floor is None else floor, e.get("yolo_conf")
+        if floor <= 0 or conf is None or conf >= floor:
+            return None
+        if e.get("policy") or (e.get("detections") or {}).get("ppe") or (e.get("anomaly") or 0) >= settings.anomaly_synopsis_min:
+            return None
+        if e["camera_class"] in policy.labels_needed(self.cameras.get(e["camera_id"])):
+            return None
+        return f"No synopsis: YOLO {conf:.0%} < {floor:.0%}"
+
+    def wants_synopsis(self, e: dict | None, gate: bool = True) -> bool:
         """Qwen describes a verified event if its label is chosen for the camera and, when the camera has include
-        zones, YOLO confirmed it inside one (never for something only seen outside the zones)."""
+        zones, YOLO confirmed it inside one (never for something only seen outside the zones), and (gate) YOLO is
+        sure enough of it (synopsis_gate)."""
         if not e or e["status"] != "verified" or e["camera_class"] not in self.synopsis_labels(e["camera_id"]):
+            return False
+        if gate and self.synopsis_gate(e):
             return False
         if e.get("ptz_preset"):
             # The zones describe the home view. Away from it, people are still worth describing; vehicles are

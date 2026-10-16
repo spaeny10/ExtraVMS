@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { BASE, api, bandwidthText, fmtTime, frameUrl, type Bandwidth, type BaselineCamera, type FootageStatus, type RemoteStatus, type Camera, type FeedbackStats, type HubStatus, type NvrEvent, type RetentionPolicy, type SiteApi, type SystemInfo } from "./api";
+import { BASE, api, bandwidthText, type AiSettings, fmtTime, frameUrl, type Bandwidth, type BaselineCamera, type FootageStatus, type RemoteStatus, type Camera, type FeedbackStats, type HubStatus, type NvrEvent, type RetentionPolicy, type SiteApi, type SystemInfo } from "./api";
 import { EventCard } from "./Events";
 import { EventDetail } from "./EventDetail";
 import { LivePlayer } from "./LivePlayer";
@@ -484,6 +484,7 @@ export function SystemView() {
         <Row label="Qwen" value={<><Status ok={s.vlm_ready} /> {vlmValue(s)}</>}
           sub={vlmSub(s)}
           action={<QwenFeedbackInfo />} />
+        <SynopsisGateRow />
         <RemoteRow />
         <FootageRow />
         <BackupRow s={s} />
@@ -536,6 +537,36 @@ function BackupRow({ s }: { s: SystemInfo }) {
       value={last ? fmtTime(last.at) : "Never"}
       sub={last ? `${(last.bytes / 1e6).toFixed(1)} MB · ${last.count} copies in ${s.backup?.dir}` : `Nightly at 03:30 into ${s.backup?.dir ?? "the backup folder"}`}
       action={<button className="ghost small" disabled={busy} onClick={run}>{busy ? "Backing up…" : "Back up now"}</button>} />
+  );
+}
+
+/** The Qwen confidence gate (backend pipeline.synopsis_gate): events YOLO is less sure of stay verified but get no
+ * synopsis. Per server. */
+function SynopsisGateRow() {
+  const [g, setG] = useState<AiSettings | null>(null);
+  const [pct, setPct] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { api.aiSettings().then(setG).catch(() => {}); }, []);
+  if (!g) return null;
+  const cur = Math.round(g.synopsis_min_conf * 100);
+  const n = pct == null ? cur : Number(pct);
+  const valid = pct != null && pct.trim() !== "" && Number.isFinite(n) && n >= 0 && n <= 100 && n !== cur;
+  const save = async () => {
+    setBusy(true);
+    try { setG(await api.saveAiSettings({ synopsis_min_conf: n / 100 })); setPct(null); toast.success(n ? `Qwen describes events from YOLO ${n}%` : "Qwen describes every event"); }
+    catch (e) { toast.error(e); }
+    setBusy(false);
+  };
+  return (
+    <Row label="Synopsis threshold" hint={"Qwen writes no synopsis for an event whose YOLO confidence is below this: the event stays verified and its card says why. "
+      + "Events that break a site rule (or are on a camera with a towing rule), PPE checks and unusual events are still described; "
+      + "Generate with Qwen, Describe & warn and Ask are not affected. 0 = off. Applies to new events."}
+      value={<>{cur ? <>YOLO ≥ <strong>{cur}%</strong></> : "Off: every event"}</>}
+      sub={`default ${Math.round(g.synopsis_min_conf_default * 100)}% · fewer Qwen runs on distant or doubtful detections`}
+      action={<div className="row small">
+        <input type="number" min={0} max={100} step={5} value={pct ?? String(cur)} onChange={(e) => setPct(e.target.value)} style={{ width: 64 }} title="Minimum YOLO confidence, %" />
+        <button className="ghost small" disabled={!valid || busy} onClick={save}>{busy ? "Saving…" : "Save"}</button>
+      </div>} />
   );
 }
 

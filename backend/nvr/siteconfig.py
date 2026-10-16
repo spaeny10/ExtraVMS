@@ -1,6 +1,6 @@
 """Export / import of a site's configuration (not its recordings or events): cameras, zones, named places,
 site rules, PTZ settings, talk-down speakers, neighbor topology, named people/vehicles with their looks, timeline layouts,
-retention and briefing settings. The fleet hub pulls this nightly; restoring a dead site is
+retention, briefing and Qwen-gate settings. The fleet hub pulls this nightly; restoring a dead site is
 "install, enroll, import". Camera and speaker passwords are not exported: they're re-entered on restore.
 
 Fleet actions (hub/hub/fleet_actions.py) move cameras between sites with `handoff` (a partial export of some
@@ -19,7 +19,7 @@ import time
 from . import __version__
 from .db import db
 
-SETTINGS_KEYS = ("retention_policy", "briefing")
+SETTINGS_KEYS = ("retention_policy", "briefing", "synopsis_min_conf")   # synopsis_min_conf: the Qwen confidence gate
 
 
 class InvalidCamera(ValueError):

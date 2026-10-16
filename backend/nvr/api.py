@@ -36,7 +36,7 @@ from .db import JOURNEY_CAMS_SQL, LOCKED_SQL, PRIORITY_RANK_SQL, db, event_filte
 from .ingest import CameraIngest
 from . import onvif_soap
 from .onvif_soap import OnvifError
-from .pipeline import Pipeline
+from .pipeline import Pipeline, synopsis_min_conf
 from .seed import seed_cameras_from_env
 
 log = logging.getLogger("nvr.api")
@@ -1999,6 +1999,29 @@ async def generate_briefing():
 async def put_briefing_settings(body: BriefingSettingsIn):
     db.set_setting("briefing", body.model_dump())
     return assistant.briefing_settings()
+
+
+# ---------------------------------------------------------------- Qwen confidence gate (pipeline.synopsis_gate)
+
+class AiSettingsIn(BaseModel):
+    synopsis_min_conf: float = Field(ge=0.0, le=1.0)   # 0 = every verified event in a described label gets a synopsis
+
+
+def _ai_settings() -> dict:
+    return {"synopsis_min_conf": synopsis_min_conf(), "synopsis_min_conf_default": settings.synopsis_min_conf}
+
+
+@app.get("/api/ai-settings")
+async def get_ai_settings():
+    return _ai_settings()
+
+
+@app.put("/api/ai-settings")
+async def put_ai_settings(body: AiSettingsIn):
+    """Per server (the hub has no fleet-wide AI setting); admin under the hub (roles.py default). Applies to events
+    verified from now on: one skipped earlier can still be described with "Generate with Qwen"."""
+    db.set_setting("synopsis_min_conf", round(body.synopsis_min_conf, 2))
+    return _ai_settings()
 
 
 # ---------------------------------------------------------------- remote Qwen (optional, e.g. RunPod Serverless)

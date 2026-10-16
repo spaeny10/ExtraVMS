@@ -64,6 +64,25 @@ models in `models/` and Ollama's model store.
   event, or around the video playhead with *focus on current moment*. Chat jumps ahead of queued
   synopses on GPU 1. Answers can be saved as notes, which are searchable.
 - Qwen runs automatically only for `synopsis_labels` (person); *Generate with Qwen* runs it for any event.
+- **Synopsis threshold** (System → Status, per server; default `NVR_SYNOPSIS_MIN_CONF` 0.60, 0 = off): no automatic
+  synopsis for an event whose YOLO confidence is below it. The event stays verified and its card says
+  *No synopsis: YOLO 45% < 60%*. Still described: a broken site rule, a PPE check, a vehicle on a camera with a towing
+  rule (the rule needs Qwen's look) and unusual events. *Generate with Qwen*, Describe & warn and Ask are unaffected.
+
+## Cameras that send no boxes (ONVIF yes/no events)
+
+Some cameras (Reolink RP-PCT8MD panorama) only say *VehicleDetect / PeopleDetect yes/no* (`backend/nvr/ruleevents.py`), so
+the verifier has no camera box to compare with. YOLO's boxes are followed across the event's frames as objects; an object
+counts only if YOLO was sure of it in at least one frame and (vehicles) one of its boxes is big enough, and a vehicle only
+if it moved during the event (foot point, or its size as it drives toward / away from the camera) or was not there in the
+pre-roll frame before the camera fired (a parked one never confirms). Rejected events say why: *Nothing moving: YOLO found
+only stationary car(s)*, *Too unsure: YOLO car 42% < 50%*, *Too small to judge*. Settings: `NVR_BOXLESS_MIN_CONF` (0.5),
+`NVR_BOXLESS_MIN_AREA` (0.0015 of the frame) or `NVR_BOXLESS_MIN_SIDE_PX` (24 px on the shorter side at YOLO's
+`yolo_imgsz`), `NVR_BOXLESS_SIZE_LABELS` (`["vehicle"]`: a person walking across a panorama is narrower than that),
+`NVR_BOXLESS_REQUIRE_MOTION` (on; vehicles only), `NVR_BOXLESS_SINGLE_FRAME_CONF` (0.70: an object YOLO saw in only one
+frame counts on its own at this confidence if it was new or its spot is empty in every other frame).
+Cameras that send boxes are unchanged. To see what the rules would have done to a camera's past events (read-only):
+`..\.venv\Scripts\python.exe ..\tools\replay_verification.py --camera cam6 --hours 48` from `backend/`.
 
 ## Retention (AI-first)
 

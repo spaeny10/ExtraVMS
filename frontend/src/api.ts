@@ -290,7 +290,9 @@ export type NvrEvent = {
     /** the still YOLO box the camera's motion sat on (backend/nvr/parked.py); via "memory" = a remembered parking spot */
     parked?: { box: number[]; cls: string; via: "clip" | "memory" };
     /** "onvif_event": opened by the camera's ONVIF detection event, no camera boxes (backend/nvr/ruleevents.py) */
-    source?: string };
+    source?: string;
+    /** no Qwen synopsis: YOLO was below the site's confidence gate, e.g. "No synopsis: YOLO 45% < 60%" */
+    synopsis_skipped?: string };
   synopsis_json?: Synopsis | null;
   synopsis_original?: Synopsis | null;
   clip_start?: number | null;
@@ -785,6 +787,9 @@ export function makeApi(base: string, opts: ApiOptions = {}) {
   briefings: (limit = 10) => req<{ briefings: Briefing[]; settings: BriefingSettings }>(`/api/briefings?${qs({ limit })}`),
   generateBriefing: () => req<Briefing>("/api/briefings/generate", { method: "POST" }),
   saveBriefingSettings: (s: BriefingSettings) => req<BriefingSettings>("/api/briefings/settings", json("PUT", s)),
+  /** Qwen confidence gate (Settings -> System): no synopsis for events YOLO is less sure of */
+  aiSettings: () => req<AiSettings>("/api/ai-settings"),
+  saveAiSettings: (s: { synopsis_min_conf: number }) => req<AiSettings>("/api/ai-settings", json("PUT", s)),
   remote: () => req<RemoteStatus>("/api/remote"),
   remoteTasks: (tasks: string[]) => req<RemoteStatus>("/api/remote/tasks", json("PUT", { tasks })),
   remoteTest: () => req<{ ok: boolean; seconds?: number; was?: string; reply?: string; error?: string; status: RemoteStatus }>("/api/remote/test", { method: "POST" }),
@@ -827,6 +832,9 @@ export type AskChunk =
 export type Briefing = { id: number; period_start: number; period_end: number; headline: string; text: string; model: string | null;
   created_at: number; stats: { refs?: CiteRefs; free_gb?: number; gaps?: string[] } };
 export type BriefingSettings = { enabled: boolean; time: string };
+/** backend api._ai_settings: the Qwen confidence gate (0-1; 0 = off) and its .env default */
+export type AiSettings = { synopsis_min_conf: number; synopsis_min_conf_default: number };
+
 export type RemoteStatus = {
   configured: boolean; model: string | null; local_model: string; state: "off" | "cold" | "warm" | "down"; tasks: string[]; all_tasks: string[];
   down_until: number | null; last_error: string; today: { billed_s: number; requests: number; usd: number }; budget_usd: number;

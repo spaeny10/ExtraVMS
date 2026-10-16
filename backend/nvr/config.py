@@ -58,6 +58,16 @@ class Settings(BaseSettings):
     parked_max_move: float = 0.02           # YOLO box center (and size) may wander this much of the frame and still be parked
     parked_cam_box_ratio: float = 0.25      # camera box smaller than this share of the YOLO box: the motion is not the vehicle
     parked_memory_min_events: int = 3       # static sightings (over >= 10 min) before a spot is remembered as a parking place
+    # Cameras that send no boxes (ruleevents.py: ONVIF yes/no events such as Reolink VehicleDetect): any car-like
+    # object anywhere used to confirm them (cam6: 152 "verified" vehicles in 48 h, mostly parked ones at YOLO 0.3-0.5).
+    boxless_min_conf: float = 0.5           # YOLO must be at least this sure of an object (in one of its frames) to count
+    boxless_min_area: float = 0.0015        # ...and one of its boxes cover this share of the frame (0.15%)...
+    boxless_min_side_px: int = 24           # ...or be this many pixels on its shorter side at YOLO's input size (yolo_imgsz)
+    # labels the size floor applies to: a person is narrow (a walker across cam6's 4096x1248 panorama is ~13 px wide at
+    # 1280, 0.1% of the frame), and the replay of cam6's 48 h lost 25 real people to it; add "person" to apply it anyway
+    boxless_size_labels: list[str] = ["vehicle"]
+    boxless_require_motion: bool = True     # vehicles must move or be new (absent from the pre-roll frame); see verifier.py
+    boxless_single_frame_conf: float = 0.70  # one frame is enough for an object YOLO is this sure of, if it is new or passing
 
     # PPE compliance (ppe.py): people who stay in a "ppe" zone are checked for the hard hat / hi-vis vest it requires
     ppe_model: str = "ppe_yolov8s.pt"       # under models/; Apache-2.0 YOLOv8s (huggingface killuminati1/construction-ppe-yolov8)
@@ -103,6 +113,10 @@ class Settings(BaseSettings):
     merge_gap_max_frames: int = 40          # at most this many frames checked per pair (the step widens to fit)
     synopsis_labels: list[str] = ["person"]  # Qwen runs only for these; YOLO verifies every label
     anomaly_synopsis_min: float = 0.75  # ...and for any other label once it is this unusual for its camera
+    # No Qwen synopsis for events YOLO is less sure of than this (pipeline.synopsis_gate; 0 = off). Settings -> System
+    # edits it (settings table `synopsis_min_conf`, which wins over this default). Site rules, PPE checks and
+    # unusual events are still described.
+    synopsis_min_conf: float = 0.60
 
     # A small site without a GPU: no local Ollama at all, every Qwen task goes to the remote model (the hub's
     # shared AI, or the three NVR_REMOTE_VLM_* below). Search is keyword-only there (no local embeddings).
