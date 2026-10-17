@@ -106,6 +106,9 @@ main { flex: 1; padding: 16px; }
 .tile-bar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; }
 .live-feed { display: flex; flex-direction: column; gap: 8px; max-height: calc(100vh - 90px); overflow-y: auto; }
 .live-feed .event-card { grid-template-columns: 110px 1fr; }
+/* a flex column with a max height squeezes its children to fit instead of scrolling: cards keep their height */
+.live-feed > * { flex-shrink: 0; }
+.live-feed .event-card { min-height: 92px; }
 /* the narrow column: camera and time each on one line (stacked, not squeezed side by side), two lines of synopsis */
 .live-feed .event-meta { flex-direction: column; gap: 0; }
 .live-feed .event-meta > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
