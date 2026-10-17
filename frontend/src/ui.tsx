@@ -26,6 +26,7 @@ const PATHS: Record<string, string> = {
   chevronRight: "M9 6l6 6-6 6",
   chevronLeft: "M15 6l-6 6 6 6",
   play: "M7 5v14l11-7z",
+  pause: "M8 5v14M16 5v14",
   clock: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 7v5l3 2",
   wifiOff: "M2 2l20 20M8.5 16.5a5 5 0 0 1 7 0M5 13a10 10 0 0 1 3.4-2.3M12 8a14 14 0 0 1 10 4M2 12a14 14 0 0 1 3.1-2.5M12 20h.01",
   refresh: "M21 12a9 9 0 1 1-2.6-6.4M21 4v5h-5",
@@ -34,6 +35,7 @@ const PATHS: Record<string, string> = {
   more: "M12 6h.01M12 12h.01M12 18h.01",
   grid: "M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z",
   expand: "M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5",
+  shrink: "M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5",
   // talk-down (TalkdownPanel.tsx)
   speaker: "M4 9.5h3.5L12 5.5v13l-4.5-4H4zM15.5 9a4 4 0 0 1 0 6M18.5 6.5a7.5 7.5 0 0 1 0 11",
   siren: "M7 18v-5a5 5 0 0 1 10 0v5M5 18h14v3H5zM12 3v2M4.5 6.5l1.4 1.4M19.5 6.5l-1.4 1.4M10 13a2 2 0 0 1 2-2",
