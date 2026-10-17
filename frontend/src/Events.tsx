@@ -61,7 +61,7 @@ export function EventCard({ e, cameraName, onOpen, site = api, siteName, focused
       </div>
       <div className="event-body">
         <div className="event-meta">
-          <span className="cam">{siteName ? `${siteName} · ` : ""}{cameraName}</span>
+          <span className="cam" title={`${siteName ? `${siteName} · ` : ""}${cameraName}`}>{siteName ? `${siteName} · ` : ""}{cameraName}</span>
           <span className="muted" title={new Date(e.start_ts * 1000).toLocaleString()}>{fmtWhen(e.start_ts)} · {fmtDuration(e)}</span>
         </div>
         <p className={e.synopsis ? "synopsis" : "synopsis muted"}>{e.synopsis ?? placeholder(e)}</p>

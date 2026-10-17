@@ -10,8 +10,8 @@
 import type { NvrEvent, PlaybackQuality, TimelineEvent } from "./api";
 import { LIVE_LAG, chunkLen, firstChunkLen, spanAt, type Span } from "./playback";
 
-/** Playback starts this long before the event (or at the clip's start when that is earlier). */
-export const PRE_ROLL_S = 10;
+/** Playback starts this long before the event (Shawn, 2026-10-17: 10 s was too early; the strip has the rest). */
+export const PRE_ROLL_S = 2;
 /** The server's clip pre-roll (NVR_CLIP_PRE_ROLL default), for an older server whose event detail has no clip_start. */
 export const CLIP_PRE_ROLL_S = 5;
 /** The strip's zoom levels: this much either side of the event (level 0, the default: ±1 min, so an event of a few
@@ -35,8 +35,15 @@ export type Win = { start: number; end: number };
 
 /** Clip time 0: the event's clip_start, else what the server would have used. */
 export const clipOrigin = (e: Pick<NvrEvent, "start_ts" | "clip_start">): number => e.clip_start ?? e.start_ts - CLIP_PRE_ROLL_S;
-/** Where playback starts: PRE_ROLL_S before the event, or the clip's start when that is earlier. */
-export const playStart = (e: Pick<NvrEvent, "start_ts" | "clip_start">): number => Math.min(e.start_ts - PRE_ROLL_S, clipOrigin(e));
+/** Where playback starts: PRE_ROLL_S before the event (the clip's own longer pre-roll doesn't pull it earlier). */
+export const playStart = (e: Pick<NvrEvent, "start_ts" | "clip_start">): number => e.start_ts - PRE_ROLL_S;
+
+/**
+ * Offer SD at all? Only when the server converts on a GPU (NVENC and kin): a CPU encoder (libx264) takes ~14 s for a
+ * 20 s chunk on our servers, too slow to start playback, so those play HD only (2026-10-17).
+ */
+export const sdUsable = (c: { sd?: boolean; encoder?: string | null } | null | undefined): boolean =>
+  !!c?.sd && /nvenc|qsv|vaapi|videotoolbox|amf|v4l2m2m/i.test(c.encoder ?? "");
 /** The event's end; an event still being tracked ends now. */
 export const eventEnd = (e: Pick<NvrEvent, "start_ts" | "end_ts">, now: number): number => e.end_ts ?? Math.max(e.start_ts, now);
 

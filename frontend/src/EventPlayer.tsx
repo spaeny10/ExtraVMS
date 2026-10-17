@@ -3,7 +3,7 @@ import { fmtTime, type NvrEvent, type PlaybackQuality, type SiteApi, type Timeli
 import {
   KEY_STEP_S, ZOOM_HALF_S, afterPlaybackError, atFrac, chunkAt, chunkStep, clipOrigin, clock, coverage, defaultQuality, eventEnd,
   followWindow, footageAvailable, initialSource, jumpTarget, listingRange, needsListing, neighbour, nextChunkStart, pauseAtEnd,
-  playStart, prefetchLead, relLabel, scaleMarks, snapToRecorded, stripWindow, ticks, toFrac, viaHub, zoomLabel, zoomWindow,
+  playStart, prefetchLead, relLabel, scaleMarks, sdUsable, snapToRecorded, stripWindow, ticks, toFrac, viaHub, zoomLabel, zoomWindow,
   type Source, type Win,
 } from "./eventPlayback";
 import { httpStatus } from "./liveFallback";
@@ -13,12 +13,13 @@ import { Icon, useIsPhone } from "./ui";
 /** What the event viewer can do with the player: seek it (Ask answers' frames, notes) to epoch `t`, paused if asked. */
 export type EventPlayerHandle = { seek: (t: number, pause?: boolean) => void };
 
-/** Can the server transcode playback to SD (q=sd)? Asked once per server client per page load; an older server says no. */
+/** Can the server transcode playback to SD (q=sd) quickly (a GPU encoder: sdUsable)? Asked once per server client per
+ *  page load; an older server says no. */
 const sdCaps = new WeakMap<SiteApi, Promise<boolean>>();
 const canSd = (site: SiteApi): Promise<boolean> => {
   let p = sdCaps.get(site);
   if (!p) {
-    p = site.playbackCapabilities().then((c) => !!c?.sd).catch(() => false);
+    p = site.playbackCapabilities().then(sdUsable).catch(() => false);
     sdCaps.set(site, p);
   }
   return p;

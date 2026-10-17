@@ -4,7 +4,7 @@ import {
   CLIP_PRE_ROLL_S, EDGE_S, EVENT_MARGIN_S, JUMP_LEAD_S, MID_STALL_S, NEAR_END_S, NEIGHBOUR_RANGE_S, PRE_ROLL_S, START_TIMEOUT_S,
   STRIP_FILL, STRIP_HALF_S, STUCK_S, ZOOM_HALF_S, afterPlaybackError, atFrac, chunkAt, chunkStep, clipOrigin, coverage,
   defaultQuality, eventEnd, firstRecorded, followWindow, footageAvailable, initialSource, jumpTarget, listingRange, nearChunkEnd,
-  needsListing, neighbour, nextChunkStart, pauseAtEnd, playStart, prefetchLead, PREV_SLACK_S, relLabel, scaleMarks,
+  needsListing, neighbour, nextChunkStart, pauseAtEnd, playStart, prefetchLead, PREV_SLACK_S, relLabel, scaleMarks, sdUsable,
   snapToRecorded, stripWindow, ticks, toFrac, viaHub, zoomLabel, zoomWindow, type ChunkLook,
 } from "./eventPlayback";
 import {
@@ -20,9 +20,17 @@ const ev = (id: number, start_ts: number, extra: Partial<TimelineEvent> = {}): T
 } as TimelineEvent);
 
 describe("where playback starts", () => {
-  it("10 s before the event, or at the clip's start when that is earlier", () => {
-    expect(playStart({ start_ts: 1000, clip_start: 995 })).toBe(1000 - PRE_ROLL_S);
-    expect(playStart({ start_ts: 1000, clip_start: 980 })).toBe(980);
+  it("2 s before the event, whatever the clip's own pre-roll", () => {
+    expect(PRE_ROLL_S).toBe(2);
+    expect(playStart({ start_ts: 1000, clip_start: 995 })).toBe(998);
+    expect(playStart({ start_ts: 1000, clip_start: 980 })).toBe(998);
+  });
+  it("SD only where the server converts on a GPU", () => {
+    expect(sdUsable({ sd: true, encoder: "h264_nvenc" })).toBe(true);
+    expect(sdUsable({ sd: true, encoder: "libx264" })).toBe(false);   // ~14 s for a 20 s chunk: too slow to start
+    expect(sdUsable({ sd: false, encoder: "h264_nvenc" })).toBe(false);
+    expect(sdUsable({ sd: true })).toBe(false);
+    expect(sdUsable(null)).toBe(false);
   });
   it("clip time 0 is clip_start, else the server's pre-roll before the event (an older server)", () => {
     expect(clipOrigin({ start_ts: 1000, clip_start: 993 })).toBe(993);
