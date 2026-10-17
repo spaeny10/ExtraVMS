@@ -180,6 +180,34 @@ def test_set_home_persists_and_away_labels():
     assert p.away_label() is None and p.public()["home_name"] == "parking"
 
 
+def test_split_track_earns_its_zone_pass_again():
+    """T-304's NW PTZ (2026-10-17) reuses one object id for every car: one old frame outside the highway mask kept
+    every 60 s continuation event 'in zone', so highway traffic opened an event a minute."""
+    from nvr.config import settings
+    async def _noop(eid): return None
+    tr = Tracker(_noop)
+    tr.set_zones("cam1", [{"name": "highway", "type": "exclude", "points": [[0, 0], [1, 0], [1, 0.15], [0, 0.15]]}])
+    yard = DetectedObject(object_id="0", cls="vehicle", conf=0.9, box=[0.4, 0.5, 0.6, 0.8])     # outside the mask
+    road = DetectedObject(object_id="0", cls="vehicle", conf=0.9, box=[0.1, 0.03, 0.2, 0.1])    # on the highway
+    tr.on_frame(MetaFrame(camera_id="cam1", ts=1000.0, objects=[yard]))
+    ts = 1000.0
+    while ts < 1000 + settings.track_max_seconds + 2:
+        ts += 1
+        tr.on_frame(MetaFrame(camera_id="cam1", ts=ts, objects=[road]))
+    first = tr.tracks[("cam1", "0")].event_id
+    assert first is not None                     # it was in the yard: a real event
+    asyncio.run(tr.sweep())                      # too long: split, the same object goes on as a new track
+    nt = tr.tracks[("cam1", "0")]
+    assert nt.event_id is None and not nt.in_zone
+    for _ in range(int(settings.track_min_seconds) + 5):
+        ts += 1
+        tr.on_frame(MetaFrame(camera_id="cam1", ts=ts, objects=[road]))
+    assert tr.tracks[("cam1", "0")].event_id is None   # only highway since the split: no event
+    ts += 1
+    tr.on_frame(MetaFrame(camera_id="cam1", ts=ts, objects=[yard]))
+    assert tr.tracks[("cam1", "0")].event_id is not None   # back in the yard: an event again
+
+
 def test_tracker_tags_away_events():
     tr = Tracker(lambda eid: None)
     tr.set_zones("cam1", [{"name": "yard", "type": "include", "points": [[0, 0], [0.5, 0], [0.5, 0.5], [0, 0.5]]}])

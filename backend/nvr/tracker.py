@@ -271,9 +271,12 @@ class Tracker:
             if too_long and not quiet and (t.on or not rule):
                 # keep following the same object as a new event (a rule-event track only while the camera still says
                 # it's there: after its state=false the next true opens a new event the usual way)
+                # an object track earns its zone pass again from its own positions: a camera that reuses one object
+                # id for every car (T-304's NW PTZ, 2026-10-17) otherwise carried one old pass outside a mask into
+                # every 60 s event after it, highway traffic included. A rule-event track has no positions: it keeps it.
                 nt = self.tracks[key] = Track(t.camera_id, t.object_id, t.label, t.last_ts, t.last_ts, t.last_wall,
-                                              in_zone=t.in_zone, source=t.source, on=t.on, last_on=t.last_on,
-                                              states=set(t.states))
+                                              in_zone=t.in_zone if rule else False, source=t.source, on=t.on,
+                                              last_on=t.last_on, states=set(t.states))
                 if rule:   # the camera still says it's there: the next event opens now, like the first one did
                     nt.away = self.away_preset(t.camera_id)
                     nt.path.append(ruleevents.point(nt.first_ts))
