@@ -1185,6 +1185,9 @@ async def get_event(event_id: int):
     if not e:
         raise HTTPException(404)
     e["lock"] = db.one("SELECT * FROM locks WHERE event_id=?", [event_id])
+    # where clip time 0 is (chat frame times and `at` count from it), also for an event whose clip is gone: the
+    # viewer plays the recording and maps those times onto it
+    e["clip_start"] = e.get("clip_start") or e["start_ts"] - settings.clip_pre_roll
     return state.pipeline.annotate(e)
 
 

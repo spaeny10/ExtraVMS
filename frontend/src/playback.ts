@@ -83,6 +83,24 @@ export function fmtClock(t: number): string {
   return `${d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
+/** The recordings listing (GET /api/recordings: MediaMTX segments, RFC 3339 start + seconds) as sorted spans; holes
+ *  under 2 s (segment boundaries) are joined. */
+export function mergeSpans(raw: { start: string; duration: number }[]): Span[] {
+  const spans = raw
+    .map((s) => {
+      const start = Date.parse(s.start) / 1000;
+      return { start, end: start + s.duration };
+    })
+    .sort((a, b) => a.start - b.start);
+  const out: Span[] = [];
+  for (const s of spans) {
+    const last = out[out.length - 1];
+    if (last && s.start - last.end < 2) last.end = Math.max(last.end, s.end);
+    else out.push({ ...s });
+  }
+  return out;
+}
+
 export const spanAt = (spans: Span[] | undefined, t: number) => spans?.find((s) => t >= s.start && t < s.end);
 
 /** True if clip time `rel` (seconds) is already buffered, so a seek there will succeed. */

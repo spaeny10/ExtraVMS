@@ -131,6 +131,40 @@ main { flex: 1; padding: 16px; }
 /* a loaded <video> reports its intrinsic width (2592 px); without these a single-column grid grows to fit it and the viewer runs off a phone screen */
 .modal-grid > * { min-width: 0; }
 .clip { width: 100%; max-width: 100%; border-radius: 8px; background: #000; display: block; aspect-ratio: 16 / 9; object-fit: contain; }
+/* the event viewer's player (EventPlayer.tsx): the recording around the event, with a strip of ~10 minutes under it */
+.ep { display: flex; flex-direction: column; gap: 6px; }
+.ep > p { margin: 0; }
+.ep-video { position: relative; }
+.ep-preview { position: absolute; inset: 0; background: #000; border-radius: 8px; overflow: hidden; pointer-events: none; }
+.ep-preview img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.ep-preview .ep-msg { position: absolute; inset: 0; display: grid; place-items: center; color: #9aa4b1; font-size: 13px; }
+.ep-msg-bar { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); background: rgb(0 0 0 / .72); color: #fff; padding: 4px 10px; border-radius: 6px; font-size: 13px; white-space: nowrap; pointer-events: none; }
+.ep-strip { position: relative; height: 44px; touch-action: pan-y; user-select: none; -webkit-user-select: none; cursor: pointer; }
+.ep-track { position: absolute; inset: 6px 0; border-radius: 6px; background: var(--panel-2); border: 1px solid var(--border); overflow: hidden; }
+.ep-track:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ep-rec, .ep-key.rec { background: color-mix(in srgb, var(--ok) 38%, transparent); }
+/* not recorded: hatched, so a gap reads as "nothing here", not as a quiet stretch */
+.ep-gap, .ep-key.gap { background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--muted) 40%, transparent) 0 2px, transparent 2px 7px); }
+.ep-rec, .ep-gap { position: absolute; top: 0; bottom: 0; }
+.ep-event { position: absolute; top: 3px; bottom: 3px; border-radius: 4px; background: color-mix(in srgb, var(--accent) 30%, transparent); border: 2px solid var(--accent); pointer-events: none; }
+.ep-playhead { position: absolute; top: 0; bottom: 0; width: 0; margin-left: -1px; border-left: 2px solid var(--bad); pointer-events: none; z-index: 2; }
+/* another event on the camera: a thin mark, in a 24 px wide hit area as tall as the strip */
+.ep-tick { position: absolute; top: 0; bottom: 0; width: 24px; margin-left: -12px; padding: 0; background: transparent; border: 0; border-radius: 0; z-index: 3; }
+.ep-tick::before { content: ""; position: absolute; left: 10px; width: 4px; top: 4px; bottom: 4px; border-radius: 2px; background: var(--muted); }
+.ep-tick.person::before { background: var(--person); }
+.ep-tick.vehicle::before { background: var(--vehicle); }
+.ep-tick.rejected::before { opacity: .35; }
+.ep-tick:hover::before { outline: 2px solid var(--text); }
+.ep-axis { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-variant-numeric: tabular-nums; }
+.ep-legend { display: inline-flex; align-items: center; gap: 4px; }
+.ep-key { display: inline-block; width: 14px; height: 10px; border-radius: 2px; border: 1px solid var(--border); }
+.ep-controls { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ep-time { margin-left: auto; white-space: nowrap; font-variant-numeric: tabular-nums; }
+@media (max-width: 700px), (pointer: coarse) {
+  .ep-controls button { min-height: 44px; }
+  .ep-tick { width: 32px; margin-left: -16px; }
+  .ep-tick::before { left: 14px; }
+}
 .crops { display: flex; gap: 8px; margin-top: 8px; overflow-x: auto; }
 .crops img { height: 110px; border-radius: 6px; }
 .detail-side { display: flex; flex-direction: column; gap: 16px; }

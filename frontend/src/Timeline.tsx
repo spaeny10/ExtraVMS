@@ -4,7 +4,7 @@ import { api, fmtTime, localApi, type ApiResolver, type Camera, type KeptSpan, t
 import { ConfidenceSlider, loadNumber, saveNumber } from "./ConfidenceSlider";
 import { EventDetail } from "./EventDetail";
 import { NavContext, useNav, type TimelineFocus, type TimelineTarget } from "./nav";
-import { HOLD_MAX_MS, LIVE_LAG, camKey, fmtClock, nowS, reachesLiveEdge, retryDelayMs, spanAt, splitKey, useLatestFrame, type Span } from "./playback";
+import { HOLD_MAX_MS, LIVE_LAG, camKey, fmtClock, mergeSpans, nowS, reachesLiveEdge, retryDelayMs, spanAt, splitKey, useLatestFrame, type Span } from "./playback";
 import { SyncTile, type TileStatus } from "./SyncPlayer";
 import { encodeCells, regionPass, regions, useRegions } from "./region";
 import { timelineHash } from "./nav";
@@ -124,22 +124,6 @@ function fmtTick(t: number, step: number): string {
     return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   if (step >= 60) return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-}
-
-function mergeSpans(raw: { start: string; duration: number }[]): Span[] {
-  const spans = raw
-    .map((s) => {
-      const start = Date.parse(s.start) / 1000;
-      return { start, end: start + s.duration };
-    })
-    .sort((a, b) => a.start - b.start);
-  const out: Span[] = [];
-  for (const s of spans) {
-    const last = out[out.length - 1];
-    if (last && s.start - last.end < 2) last.end = Math.max(last.end, s.end);
-    else out.push({ ...s });
-  }
-  return out;
 }
 
 function clampView(start: number, end: number): View {

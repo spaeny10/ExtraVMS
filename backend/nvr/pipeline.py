@@ -11,8 +11,9 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 
 import cv2
 import httpx
+import numpy as np
 
-from . import baseline, cells, detector, identities, journeys, policy, ppe, retention, vlmroute, weaponcheck, zones, merge
+from . import baseline, cells, detector, frames, identities, journeys, policy, ppe, retention, vlmroute, weaponcheck, zones, merge
 from . import synopsis as vlm
 from .config import settings
 from .db import db
@@ -22,6 +23,14 @@ from .verifier import Verifier, event_dir, grab_frames
 
 log = logging.getLogger("nvr.pipeline")
 _ATTEMPT = re.compile(r"^synopsis \(attempt (\d+)\)")
+
+
+def recording_frame(camera_id: str, t: float):
+    """The recorded frame nearest epoch t (BGR, at most 1280 px wide), or None where nothing is recorded (chat_frames)."""
+    got = frames.preview_jpeg(camera_id, t, 1280, exact=True)
+    if not got:
+        return None
+    return cv2.imdecode(np.frombuffer(got[0], np.uint8), cv2.IMREAD_COLOR)
 
 
 def synopsis_attempts(e: dict | None) -> int:
@@ -566,13 +575,16 @@ class Pipeline:
     async def chat_frames(self, e: dict, at: float | None) -> list[tuple[float, bytes, str]]:
         """Frames for a chat turn: an overview across the track, or a close look around clip time `at`.
 
-        Returns [(clip_time, jpeg_bytes, filename)]; files are cached in the event folder.
+        Returns [(clip_time, jpeg_bytes, filename)]; files are cached in the event folder. Clip time counts from the
+        clip's start (clip_start), also when there is no clip: the event viewer plays the camera's recording around
+        the event, so `at` may lie before the clip or after it. Frames come from the event's clip.mp4 where it covers
+        them, else from the recording (retention trims a kept event's clip; the recording keeps that span, and more).
         """
         clip = settings.data_dir / (e["clip"] or "")
-        if not e["clip"] or not clip.exists():
-            return []
+        has_clip = bool(e["clip"]) and clip.exists()
         clip_start = e.get("clip_start") or e["start_ts"] - settings.clip_pre_roll
         end = (e["end_ts"] or e["start_ts"]) - clip_start
+        clip_len = end + settings.clip_post_roll
         # Ollama sizes every image to ~1,050 Qwen tokens, so 4 frames + prompt + history fit in vlm_num_ctx.
         n = settings.chat_frames
         if at is None:
@@ -580,20 +592,32 @@ class Pipeline:
             times = [round(first + (last - first) * i / (n - 1), 2) for i in range(n)]
         else:
             offsets = (-1.0, 0.0, 0.6, 1.2, -2.0, 2.0)[:n]
-            times, width = [round(max(0.0, at + d), 2) for d in offsets], 896
+            times, width = [round(at + d, 2) for d in offsets], 896
         times = sorted(set(times))
         d = event_dir(e["id"])
 
         def work():
             cached = {t: d / f"chat_{int(t * 1000)}_{width}.jpg" for t in times}
             missing = [t for t, f in cached.items() if not f.exists()]
-            if missing:
-                for t, img in grab_frames(clip, 0.0, missing).items():
-                    scale = width / img.shape[1]
-                    img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-                    cv2.putText(img, f"t={t:.1f}s", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 4)
-                    cv2.putText(img, f"t={t:.1f}s", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
-                    cv2.imwrite(str(cached[t]), img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            got: dict[float, object] = {}
+            if missing and has_clip:
+                got.update(grab_frames(clip, 0.0, [t for t in missing if 0.0 <= t <= clip_len]))
+            for t in missing:
+                if t not in got:
+                    got[t] = recording_frame(e["camera_id"], clip_start + t)
+            if has_clip:   # outside the clip and not in the recording either: the clip's nearest end, as before
+                edge = [t for t in missing if got.get(t) is None]
+                near = grab_frames(clip, 0.0, sorted({min(max(t, 0.0), clip_len) for t in edge})) if edge else {}
+                for t in edge:
+                    got[t] = near.get(min(max(t, 0.0), clip_len))
+            for t, img in got.items():
+                if img is None:
+                    continue
+                scale = width / img.shape[1]
+                img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+                cv2.putText(img, f"t={t:.1f}s", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 4)
+                cv2.putText(img, f"t={t:.1f}s", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
+                cv2.imwrite(str(cached[t]), img, [cv2.IMWRITE_JPEG_QUALITY, 85])
             return [(t, f.read_bytes(), f.name) for t, f in cached.items() if f.exists()]
 
         return await asyncio.get_running_loop().run_in_executor(self.decode, work)

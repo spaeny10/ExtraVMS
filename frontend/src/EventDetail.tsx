@@ -1,9 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type NamedIdentity,
   api, fmtDuration, fmtTime, ppeItemsText, type SiteApi,
   type ChatMessage, type Feedback, type Journey, type NvrEvent, type Synopsis, type Threat, type Verdict, type WeaponCheck,
 } from "./api";
+import { EventPlayer, type EventPlayerHandle } from "./EventPlayer";
+import { clipOrigin } from "./eventPlayback";
 import { StatusBadge, placeholder, rejectedReason } from "./Events";
 import { useNav } from "./nav";
 import { Icon, confirmDialog, toast, useIsPhone } from "./ui";
@@ -24,11 +26,17 @@ export function EventDetail({ id: initialId, cameraName, onClose, site = api, va
   useEffect(() => setId(initialId), [initialId]);
   const [e, setE] = useState<NvrEvent | null>(null);
   const [tab, setTab] = useState<"clip" | "details" | "journey" | "chat">("details");
-  const [clipGone, setClipGone] = useState<number | null>(null);   // the event whose clip (and recording) failed to load
   const isPhone = useIsPhone();
   useEffect(() => { if (isPhone) setTab("clip"); }, [isPhone]);
   const [chat, setChat] = useState<ChatMessage[]>([]);
-  const video = useRef<HTMLVideoElement>(null);
+  // The player (EventPlayer): its playhead for the Ask tab, and seek for chat frames and notes. A phone shows it on
+  // the Clip tab only: coming back there (or tapping a chat frame elsewhere) mounts it again at `resume`.
+  const player = useRef<EventPlayerHandle | null>(null);
+  const playhead = useRef<Playhead>({ t: null, subs: new Set() });
+  const [resume, setResume] = useState<{ t: number; paused: boolean } | null>(null);
+  const [footage, setFootage] = useState<boolean | undefined>(undefined);   // is any of the event's footage there?
+  useEffect(() => { playhead.current.t = null; setResume(null); setFootage(undefined); }, [id]);
+  const onTime = useCallback((t: number) => { playhead.current.t = t; playhead.current.subs.forEach((f) => f(t)); }, []);
   const { openInTimeline } = useNav();
 
   const gone = () => { toast.info("This sighting was merged into a longer event"); onClose(); };
@@ -53,11 +61,15 @@ export function EventDetail({ id: initialId, cameraName, onClose, site = api, va
   // the Journey tab exists only for an event that is part of a journey; a stale selection falls back to Details
   const view = tab === "journey" && !e.journey_id ? "details" : tab;
   const crops = e.detections?.keyframes?.filter((k) => k.kind === "crop") ?? [];
+  // chat frames and notes give clip time (seconds from the clip's start): the player works in epoch seconds
   const seek = (t: number) => {
-    if (video.current) {
-      video.current.currentTime = t;
-      video.current.pause();
-    }
+    const at = clipOrigin(e) + t;
+    if (player.current) player.current.seek(at, true);
+    else { setResume({ t: at, paused: true }); setTab("clip"); }
+  };
+  const showClip = () => {
+    if (view !== "clip" && playhead.current.t != null) setResume({ t: playhead.current.t, paused: false });
+    setTab("clip");
   };
 
   return (
@@ -83,7 +95,7 @@ export function EventDetail({ id: initialId, cameraName, onClose, site = api, va
         </header>
         {isPhone && (
           <div className="segmented detail-tabs">
-            <button className={view === "clip" ? "active" : ""} onClick={() => setTab("clip")}>Clip</button>
+            <button className={view === "clip" ? "active" : ""} onClick={showClip}>Clip</button>
             <button className={view === "details" ? "active" : ""} onClick={() => setTab("details")}>Details</button>
             {e.journey_id ? <button className={view === "journey" ? "active" : ""} onClick={() => setTab("journey")}>Journey</button> : null}
             <button className={view === "chat" ? "active" : ""} onClick={() => setTab("chat")}>Ask{chat.length ? ` (${chat.filter((m) => m.role === "user").length})` : ""}</button>
@@ -91,25 +103,7 @@ export function EventDetail({ id: initialId, cameraName, onClose, site = api, va
         )}
         <div className={`modal-grid ${isPhone ? "phone" : ""}`}>
           {(!isPhone || view === "clip") && <div>
-            {/* retention trims a kept event's clip.mp4 once its footage is kept in the recording (e.clip is then
-                null), and the server streams the same span from the recording in its place: try it, and say the
-                footage is gone only when that fails too */}
-            {(e.clip || (e.status !== "open" && e.status !== "pending")) && clipGone !== e.id ? (
-              <>
-                <video ref={video} className="clip" src={site.media(e, "clip.mp4")} poster={e.snapshot ? site.media(e, "snapshot.jpg", 960) : undefined}
-                  controls autoPlay muted onError={() => setClipGone(e.id)} />
-                {!e.clip && <p className="muted small">Played from the recording: the event's own clip was trimmed after the continuous window.</p>}
-              </>
-            ) : e.snapshot ? (
-              <>
-                <img className="clip" src={site.media(e, "snapshot.jpg", 960)} alt="" />
-                {e.status !== "open" && e.status !== "pending" && (
-                  <p className="muted small">The footage for this event is no longer recorded (retention policy); only the snapshot remains.</p>
-                )}
-              </>
-            ) : (
-              <div className="clip thumb-empty">No media yet</div>
-            )}
+            <EventPlayer key={e.id} e={e} site={site} startAt={resume} onTime={onTime} handle={player} onFootage={setFootage} />
             {crops.length > 0 && (
               <div className="crops">
                 {crops.map((k) => <img key={k.file} src={site.media(e, k.file)} alt="" />)}
@@ -130,7 +124,7 @@ export function EventDetail({ id: initialId, cameraName, onClose, site = api, va
               <JourneySection e={e} site={site} cameraName={cameraName} onShow={(eid) => setId(eid)}
                 onOpenTimeline={(members) => { openInTimeline({ ...e, members }); onClose(); }} />
             ) : view === "chat" ? (
-              <ChatPanel e={e} site={site} chat={chat} setChat={setChat} video={video} seek={seek} />
+              <ChatPanel e={e} site={site} chat={chat} setChat={setChat} playhead={playhead} footage={footage} seek={seek} />
             ) : (
               <Details e={e} site={site} setE={setE} notes={chat.filter((m) => m.saved)} onUnsave={(m) => site.saveNote(e.id, m.id, false).then(setChat)} seek={seek} />
             )}
@@ -556,24 +550,28 @@ function SynopsisEditor({ initial, onSave, onCancel }: { initial: Synopsis; onSa
 
 const SUGGESTIONS = ["What is the person doing?", "Describe their clothing and anything they carry.", "Which way did they come from and leave?", "Is anything suspicious here?"];
 
-function ChatPanel({ e, site, chat, setChat, video, seek }: {
+/** The player's playhead (epoch seconds; null before it plays), shared without re-rendering the whole viewer. */
+type Playhead = { t: number | null; subs: Set<(t: number) => void> };
+
+function ChatPanel({ e, site, chat, setChat, playhead, footage, seek }: {
   e: NvrEvent; site: SiteApi; chat: ChatMessage[]; setChat: (c: ChatMessage[]) => void;
-  video: React.RefObject<HTMLVideoElement | null>; seek: (t: number) => void;
+  playhead: React.RefObject<Playhead>; footage: boolean | undefined; seek: (t: number) => void;
 }) {
   const [q, setQ] = useState("");
   const [atMoment, setAtMoment] = useState(false);
-  const [now, setNow] = useState(0);
+  // clip time of the playhead (what `at` and the frames' t count in): it may be before the clip, or after it
+  const t0 = clipOrigin(e);
+  const [now, setNow] = useState(() => (playhead.current.t ?? t0) - t0);
   const [pending, setPending] = useState<{ q: string; at: number | null; answer: string; frames: { file: string; t: number }[] } | null>(null);
   const [err, setErr] = useState("");
   const end = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const v = video.current;
-    if (!v) return;
-    const tick = () => setNow(v.currentTime);
-    v.addEventListener("timeupdate", tick);
-    return () => v.removeEventListener("timeupdate", tick);
-  }, [video]);
+    const subs = playhead.current.subs;
+    const tick = (t: number) => setNow(t - t0);
+    subs.add(tick);
+    return () => { subs.delete(tick); };
+  }, [playhead, t0]);
   useEffect(() => {
     // Block body on purpose: newer browsers return a Promise from scrollIntoView, and React
     // would try to call an effect's return value as its cleanup.
@@ -599,7 +597,8 @@ function ChatPanel({ e, site, chat, setChat, video, seek }: {
     setPending(null);
   };
 
-  if (!e.clip) return <p className="muted">Chat needs the event's recording, which isn't available.</p>;
+  // the server reads frames from the clip, else from the recording: refuse only when neither is there
+  if (footage === false) return <p className="muted">Chat needs the event's footage: its clip and the recording around it are no longer kept.</p>;
 
   return (
     <div className="chat">
