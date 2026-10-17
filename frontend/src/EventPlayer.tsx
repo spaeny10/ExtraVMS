@@ -483,7 +483,10 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage }: {
             {frames.shot.url ? <img src={frames.shot.url} alt="" /> : <div className="ep-msg">No recording here</div>}
           </div>
         )}
-        {hasVideo && !want && !stopped && !frames.shot && <div className="ep-big" aria-hidden="true"><Icon name="play" size={30} /></div>}
+        {/* one play control at a time: the big one while paused, the bar's Pause while playing */}
+        {hasVideo && !want && !stopped && !frames.shot && (
+          <button type="button" className="ep-big" onClick={toggle} aria-label="Play" title="Play (Space)"><Icon name="play" size={30} /></button>
+        )}
         {stopped === "failed" && chunk ? (
           <button type="button" className="ep-retry" onClick={() => { setWant(true); again(chunk, true); }}>
             {played.current || chunk.cont ? "Couldn't load the next part" : "Couldn't load the recording"} — tap to retry
@@ -493,9 +496,11 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage }: {
         ) : null}
         {hasVideo && (
           <div className="ep-bar">
-            <button type="button" onClick={toggle} aria-label={want ? "Pause" : "Play"} title={want ? "Pause (Space)" : "Play (Space)"}>
-              <Icon name={want ? "pause" : "play"} size={20} />
-            </button>
+            {(want || stopped) && (
+              <button type="button" onClick={toggle} aria-label={want ? "Pause" : "Play"} title={want ? "Pause (Space)" : "Play (Space)"}>
+                <Icon name={want ? "pause" : "play"} size={20} />
+              </button>
+            )}
             <span className="grow" />
             <button type="button" onClick={toggleMute} aria-label={muted ? "Turn sound on" : "Mute"} aria-pressed={!muted} title={muted ? "Sound on" : "Mute"}>
               <Icon name={muted ? "volumeOff" : "volume"} size={20} />
