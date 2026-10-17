@@ -24,6 +24,7 @@ export function EventDetail({ id: initialId, cameraName, onClose, site = api, va
   useEffect(() => setId(initialId), [initialId]);
   const [e, setE] = useState<NvrEvent | null>(null);
   const [tab, setTab] = useState<"clip" | "details" | "journey" | "chat">("details");
+  const [clipGone, setClipGone] = useState<number | null>(null);   // the event whose clip (and recording) failed to load
   const isPhone = useIsPhone();
   useEffect(() => { if (isPhone) setTab("clip"); }, [isPhone]);
   const [chat, setChat] = useState<ChatMessage[]>([]);
@@ -90,13 +91,20 @@ export function EventDetail({ id: initialId, cameraName, onClose, site = api, va
         )}
         <div className={`modal-grid ${isPhone ? "phone" : ""}`}>
           {(!isPhone || view === "clip") && <div>
-            {e.clip ? (
-              <video ref={video} className="clip" src={site.media(e, "clip.mp4")} poster={e.snapshot ? site.media(e, "snapshot.jpg", 960) : undefined} controls autoPlay muted />
+            {/* retention trims a kept event's clip.mp4 once its footage is kept in the recording (e.clip is then
+                null), and the server streams the same span from the recording in its place: try it, and say the
+                footage is gone only when that fails too */}
+            {(e.clip || (e.status !== "open" && e.status !== "pending")) && clipGone !== e.id ? (
+              <>
+                <video ref={video} className="clip" src={site.media(e, "clip.mp4")} poster={e.snapshot ? site.media(e, "snapshot.jpg", 960) : undefined}
+                  controls autoPlay muted onError={() => setClipGone(e.id)} />
+                {!e.clip && <p className="muted small">Played from the recording: the event's own clip was trimmed after the continuous window.</p>}
+              </>
             ) : e.snapshot ? (
               <>
                 <img className="clip" src={site.media(e, "snapshot.jpg", 960)} alt="" />
                 {e.status !== "open" && e.status !== "pending" && (
-                  <p className="muted small">The clip for this event has expired under the retention policy; only the snapshot remains.</p>
+                  <p className="muted small">The footage for this event is no longer recorded (retention policy); only the snapshot remains.</p>
                 )}
               </>
             ) : (
