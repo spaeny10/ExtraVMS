@@ -26,6 +26,7 @@ const PAUSE_LIVE_BACK_S = 5; // pausing a live tile rewinds this far, so the fra
 const THREAT_RANK: Record<string, number> = { none: 0, low: 1, medium: 2, high: 3 };
 
 function matches(e: Marker, f: Filter): boolean {
+  if (e.status === "masked") return false;   // hidden by a mask (or by hand): never on the Timeline, whatever the filter
   if (e.camera_class === "person" ? !f.person : e.camera_class === "vehicle" ? !f.vehicle : false) return false;
   if (f.ppe && !e.ppe) return false;
   if (f.status === "verified" && e.status !== "verified") return false;

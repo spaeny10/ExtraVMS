@@ -122,7 +122,8 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage }: {
   const list = useCallback((w: Win) => {
     const { from: lo, to: hi } = listingRange(w, nowS());
     return site.recordings(cam, lo, hi)
-      .then((r) => ({ spans: mergeSpans(r.spans), events: r.events, from: lo, to: hi }))
+      // masked events (a mask, or hidden by hand) are no ticks and no Prev / Next stops
+      .then((r) => ({ spans: mergeSpans(r.spans), events: r.events.filter((x) => x.status !== "masked"), from: lo, to: hi }))
       .catch(() => ({ spans: null, events: [], from: lo, to: hi }));
   }, [site, cam]);
   useEffect(() => {
