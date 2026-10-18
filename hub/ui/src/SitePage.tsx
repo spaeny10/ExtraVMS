@@ -12,6 +12,7 @@ import { canCheckCoverage, canEditMonitoring, canOpenCameraWeb, isAdmin, isSocUs
 import { Breadcrumbs } from "./Breadcrumbs";
 import { SETTINGS_SECTIONS, SITE_TABS, type SettingsSection, type SiteTab, consoleHref, go, navigate, serverHref, settingsHref, siteHref } from "./nav";
 import { AddressBox } from "./site/AddressBox";
+import { BridgesCard } from "./site/BridgesCard";
 import { CentralDetails, CentralPlaceholder, CentralStats, useCentral } from "./site/CentralCard";
 import { CoverageCard } from "./site/CoverageCard";
 import { HealthPill, MapButton } from "./site/HealthPill";
@@ -160,7 +161,8 @@ function SiteHeader({ org, site, server, servers, admin, onChanged, cov }: {
 /**
  * The Site's servers as cards. A central recording instance is its own server's card (the Site's admins and hub
  * administrators see its connection, limit, camera addresses and Peplink sheet there; site/CentralCard.tsx); one whose
- * server has not enrolled yet is a placeholder card with its progress.
+ * server has not enrolled yet is a placeholder card with its progress. Below them, the Site's Axiom Bridges and bridged
+ * cameras (site/BridgesCard.tsx).
  */
 function ServersTab({ site, admin, onChanged }: { site: Site; admin: boolean; onChanged: () => void }) {
   const [sites, setSites] = useState<Site[]>([]);
@@ -189,6 +191,8 @@ function ServersTab({ site, admin, onChanged }: { site: Site; admin: boolean; on
           {pending.map((ci) => <CentralPlaceholder key={ci.id} siteName={site.name} ci={ci} hubAdmin={hubAdmin} />)}
         </div>
       )}
+      {/* Axiom Bridge: read-only for everyone who sees the Site, managed by its admins (hidden while there is none to show) */}
+      <BridgesCard key={site.id} site={site} />
     </>
   );
 }

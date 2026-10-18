@@ -109,6 +109,14 @@ class Settings(BaseSettings):
     host_create_timeout_s: float = 600.0      # create_instance may pull images and set up quotas: minutes
     host_command_timeout_s: float = 120.0     # every other host command
 
+    # Axiom Bridge (bridges.py): TCP streams from a central instance to a Site's cameras through a PC at the Site
+    bridge_max_streams: int = 16              # TCP streams at once per bridge (welcome.max_streams)
+    bridge_window: int = 512 * 1024           # bytes a sender may have unacknowledged per stream (welcome.window; the
+                                              # host agent's relay has the same fixed: never raise it above 512 KB alone)
+    bridge_open_rate: float = 10.0            # new streams per second per bridge; more are refused
+    bridge_open_timeout_s: float = 10.0       # the bridge must answer an open (opened / abort) within this
+    bridge_enroll_ttl_s: int = 86400          # how long an enrollment code stays valid
+
     # Cellular coverage per Site (coverage.py): the CoverageMap API (FCC coverage, crowdsourced speed tests, summary scores)
     coveragemap_key: str = ""                 # empty = the feature is off everywhere (stored data is kept: `python -m hub coverage purge`)
     coveragemap_plan: str = "trial"           # trial = evaluation only (hub administrators see it) | paid = customers see their Sites'

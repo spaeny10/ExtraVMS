@@ -9,6 +9,8 @@ Glossary (code name -> what the UI calls it):
                   group JSON means a server id.
   cameras         Camera: the hub's registry of (server_id, camera_id), synced from hello/heartbeats (cameras.py).
   camera_stills   The latest picture of each registry camera, sent by its server (stills.py).
+  bridges         Axiom Bridge: a PC at a Site carrying its central instance's camera connections (bridges.py);
+                  bridge_targets are the cameras behind it, bridge_enroll_codes its one-time enrollment codes.
   incidents       SOC incident: one or more events at a monitored Site that the SOC handles (soc.py);
                   location_contacts and location_procedures are a Site's call list and SOP checklists.
 Access: a membership's role plus `all_sites` (sees every Site of the customer) or, when false, only the Sites in
@@ -264,6 +266,42 @@ central_enroll_tokens = Table("central_enroll_tokens", metadata,
                               Column("org_id", String(24), nullable=False), Column("location_id", String(24), nullable=False),
                               Column("created_at", Float, nullable=False), Column("expires_at", Float, nullable=False),
                               Column("used_at", Float, nullable=True), Column("server_id", String(24), nullable=True))
+
+# ---- Axiom Bridge (bridges.py, docs/axiom-bridge-plan.md). A bridge is a small program on a PC at a Site with no
+# inbound access: it dials WS /bridge with its own device token (hashed at rest, like a server's) and carries TCP
+# streams to the cameras the hub assigned it (bridge_targets). A target is one camera's LAN address and ports, each
+# port relayed from a listen port (47000-47999, unique per instance) on the Site's central instance's gateway. A Site's
+# admins enroll bridges with single-use codes (hashed at rest, settings.bridge_enroll_ttl_s).
+bridges = Table("bridges", metadata,
+                Column("id", String(24), primary_key=True), Column("org_id", String(24), nullable=False, index=True),
+                Column("location_id", String(24), nullable=False, index=True), Column("name", String(120), nullable=False),
+                Column("token_hash", String(64), nullable=False, index=True), Column("token_prev_hash", String(64), nullable=True),
+                Column("token_rotated_at", Float, nullable=True),   # the previous token works for 10 more minutes
+                Column("created_at", Float, nullable=False), Column("created_by", String(24), nullable=True),
+                Column("online", Boolean, nullable=False, default=False), Column("last_seen_at", Float, nullable=True),
+                Column("agent_ip", String(64), nullable=True),
+                Column("hello", sa.JSON, nullable=True),    # {version, os, arch, hostname, lan: [{if, addr}], caps}
+                Column("stats", sa.JSON, nullable=True),    # the last heartbeat: {streams, bytes_up, bytes_down, uptime_s, target_errors}
+                Column("targets_rev", Integer, nullable=False, default=0),   # bumped on every change to its targets
+                Column("retired_at", Float, nullable=True))  # retired: its token stops working, its targets are gone
+bridge_enroll_codes = Table("bridge_enroll_codes", metadata,
+                            Column("id", String(24), primary_key=True), Column("code_hash", String(64), nullable=False, unique=True),
+                            Column("org_id", String(24), nullable=False), Column("location_id", String(24), nullable=False, index=True),
+                            Column("name", String(120), nullable=True),   # the bridge's name (else the PC's hostname)
+                            Column("created_at", Float, nullable=False), Column("created_by", String(24), nullable=True),
+                            Column("created_by_email", String(200), nullable=True),
+                            Column("expires_at", Float, nullable=False), Column("used_at", Float, nullable=True),
+                            Column("bridge_id", String(24), nullable=True))
+bridge_targets = Table("bridge_targets", metadata,
+                       Column("id", String(24), primary_key=True), Column("bridge_id", String(24), nullable=False, index=True),
+                       Column("org_id", String(24), nullable=False), Column("location_id", String(24), nullable=False, index=True),
+                       Column("instance_id", String(24), nullable=False, index=True),   # the central instance whose host listens
+                       Column("camera_id", String(64), nullable=True),   # the instance's camera it feeds (Apply to camera)
+                       Column("name", String(120), nullable=False), Column("host", String(64), nullable=False),   # the camera's LAN IPv4
+                       Column("ports", sa.JSON, nullable=False),   # [{port: camera port, listen: listen port on the instance's gateway}]
+                       Column("enabled", Boolean, nullable=False, default=True),
+                       Column("created_at", Float, nullable=False), Column("updated_at", Float, nullable=False),
+                       Column("applied_at", Float, nullable=True))   # last written into the instance's camera
 
 # ---- Cellular coverage (coverage.py): the CoverageMap API's answer for each Site (normalized + raw), and the units used
 # per calendar month (budget). `python -m hub coverage purge` deletes both (and the address-check cache in kv,

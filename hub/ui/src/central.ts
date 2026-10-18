@@ -3,7 +3,7 @@
  * the bandwidth / storage numbers shown on Site → Servers and Customer → Servers, and the instance's lines on its own
  * server card (Site → Servers). Kept apart from the components so they are unit-tested (central.test.ts).
  */
-import type { CentralInstance, Host, HostCapacity, HubSitesOrg, InstanceWork, Peplink, Server, VllmWork, WorkTrend } from "./api";
+import type { CentralInstance, CentralMode, Host, HostCapacity, HubSitesOrg, InstanceWork, Peplink, Server, VllmWork, WorkTrend } from "./api";
 
 /** provisioning (the host is creating it) → waiting_enroll (created, not dialed in yet) → running. */
 export const PHASE_LABEL: Record<string, string> = {
@@ -113,7 +113,7 @@ export function lanGateway(subnet: string | null | undefined): string | null {
 }
 
 /** The provisioning form's checks, so the button only enables when the hub would accept it. */
-export function centralFormError(f: { mode: "vpn" | "forward"; public_ip: string; subnet: string; quota_gb: string }): string | null {
+export function centralFormError(f: { mode: CentralMode; public_ip: string; subnet: string; quota_gb: string }): string | null {
   const q = Number(f.quota_gb);
   if (!f.quota_gb.trim() || !Number.isInteger(q) || q < 10) return "Enter the storage quota in GB (at least 10)";
   if (f.mode === "forward" && !f.public_ip.trim()) return "Port forwarding needs the site's public IP";
@@ -259,7 +259,7 @@ export function sitesWithoutCentral(orgs: HubSitesOrg[], orgId: string, instance
   return (org?.locations ?? []).filter((l) => !taken.has(l.id)).map((l) => ({ id: l.id, name: l.name })).sort((a, b) => a.name.localeCompare(b.name));
 }
 
-export type AllocateFields = { org: string; site: string; mode: "vpn" | "forward"; subnet: string; public_ip: string; quota_gb: string; camera_limit: string };
+export type AllocateFields = { org: string; site: string; mode: CentralMode; subnet: string; public_ip: string; quota_gb: string; camera_limit: string };
 
 /** The Allocate form's checks (the hub decides; this keeps the button off until it would accept). roomGb: the host's room. */
 export function allocateFormError(f: AllocateFields, roomGb: number | null | undefined): string | null {
@@ -301,8 +301,9 @@ export function datacenterLine(ci: Pick<CentralInstance, "host_id" | "host_name"
   return `Datacenter · ${host}${ci.host_online === false ? " (offline)" : ""} · ${gpu}`;
 }
 
-/** "VPN · 10.20.7.0/24" or "Port forwarding". */
-export const connectionText = (ci: Pick<CentralInstance, "mode" | "subnet">) => (ci.mode === "vpn" ? `VPN · ${ci.subnet ?? "—"}` : "Port forwarding");
+/** "VPN · 10.20.7.0/24", "Port forwarding" or "Axiom Bridge". */
+export const connectionText = (ci: Pick<CentralInstance, "mode" | "subnet">) =>
+  (ci.mode === "vpn" ? `VPN · ${ci.subnet ?? "—"}` : ci.mode === "bridge" ? "Axiom Bridge" : "Port forwarding");
 
 /** "3 of 5 cameras" (" · over" when the limit was lowered below the count), or "no limit". */
 export function limitText(count: number | null | undefined, limit: number | null | undefined): string {
@@ -313,6 +314,7 @@ export function limitText(count: number | null | undefined, limit: number | null
 /** "Cameras reachable at: 10.20.7.0/24 · opened for its cameras: cam1.example.net" (the Site networks first). */
 export function reachableText(ci: Pick<CentralInstance, "mode" | "subnet" | "public_ip" | "camera_network">): string {
   const p = addressParts(ci);
+  if (ci.mode === "bridge" && !p.site.length && !p.cameras.length) return "Cameras reached through the Site's Axiom Bridge (below)";
   return `Cameras reachable at: ${p.site.length ? p.site.join(" · ") : "no Site network"}${p.cameras.length ? ` · opened for its cameras: ${p.cameras.join(" · ")}` : ""}`;
 }
 

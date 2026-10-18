@@ -13,6 +13,10 @@ such a request goes down the tunnel, check() applies, for everyone (hub administ
                  IP or DNS name is allowed, unless it is the hub's, a host's, the datacenter's or the FusionHub's own
                  address, or another live instance's camera address (409), or a name that spells out an IP such as
                  10.20.8.1.nip.io (400). The host checks what names resolve to again (axiom_host.py).
+  relay          the instance's own gateway on its host (Axiom Bridge, bridges.py) is accepted as a camera's
+                 public_host only with this instance's listen ports: public RTSP and ONVIF ports set, and every
+                 public_*_port one the Site's bridged cameras map on this instance (400 otherwise). It opens nothing on
+                 the firewall (the host's relay rule does).
 
 Guarded requests: PUT /api/cameras/<id> (create or update), POST /api/cameras, POST /api/config/import and
 /api/config/merge (cameras in a backup or a camera handoff), and a backup restored from the hub (backups.restore). After a camera change succeeds (and whenever a central
@@ -89,8 +93,23 @@ def instance_for_server(server_id: str | None) -> dict | None:
 
 # ---------------------------------------------------------------- the rules
 
+RELAY_PORT_KEYS = ("public_rtsp_port", "public_onvif_port", "public_replay_port", "public_web_port")
+
+
+def _port(v):
+    """A public_*_port as the server reads it: a port number, or None for empty ("" and 0 mean none there too)."""
+    if v in (None, "", 0):
+        return None
+    if isinstance(v, str) and v.strip().isdigit():
+        v = int(v.strip())
+    if not isinstance(v, int) or isinstance(v, bool) or not 1 <= v <= 65535:
+        raise Refused(400, f"{v!r} is not a port number")
+    return v
+
+
 def _cams_in(kind: str, path: str, body) -> list[dict]:
-    """[{id, enabled, host, public_host, has_public}] the request writes (never the password)."""
+    """[{id, enabled, host, public_host, has_public, ports: {public_*_port: value sent}}] the request writes (never the
+    password); `ports` holds only the keys the request sends (a PUT without one keeps the stored value)."""
     if isinstance(body, (bytes, bytearray)):
         try:
             body = json.loads(body.decode() or "null")
@@ -119,7 +138,8 @@ def _cams_in(kind: str, path: str, body) -> list[dict]:
         if enabled is None:
             raise Refused(400, "a camera's enabled must be true or false")
         out.append({"id": str(c.get("id") or ""), "enabled": enabled,
-                    "host": (host or "").strip(), "public_host": (pub or "").strip(), "has_public": "public_host" in c})
+                    "host": (host or "").strip(), "public_host": (pub or "").strip(), "has_public": "public_host" in c,
+                    "ports": {k: _port(c.get(k)) for k in RELAY_PORT_KEYS if k in c}})
     return out
 
 
@@ -227,6 +247,18 @@ def _check_address(addr: str, site: dict, hub: tuple[set[str], set[str]], others
     return kind, a
 
 
+def _check_relay(c: dict, stored: dict, ci_id: str, mine: set[int]) -> None:
+    """A camera at the instance's relay address: every public port it will use is a listen port of this instance."""
+    ports = {k: c["ports"][k] if k in c["ports"] else _port(stored.get(k)) for k in RELAY_PORT_KEYS}
+    if ports["public_rtsp_port"] is None or ports["public_onvif_port"] is None:
+        raise Refused(400, "a camera behind the Axiom Bridge needs its public RTSP and ONVIF ports: use Apply to camera on the "
+                           "Site's Bridged cameras, or the ports listed there")
+    bad = sorted({p for p in ports.values() if p is not None and p not in mine})
+    if bad:
+        raise Refused(400, f"port {', '.join(map(str, bad))} is not one of this Site's bridged camera ports: use the ports "
+                           "listed under Bridged cameras")
+
+
 _pending: dict[str, dict[str, float]] = {}     # server id -> {camera id (or "merge:<id>"): until}
 
 
@@ -257,9 +289,13 @@ async def check(ci: dict, kind: str, path: str, body) -> list[str]:
     cams = _cams_in(kind, path, body)
     if not cams:
         return []
+    from . import bridges   # (bridges imports this module lazily too)
+    relay = bridges.relay_address(ci)
     stored: dict[str, dict] | None = None
-    if kind == "camera" and not cams[0]["has_public"]:
-        # PUT without public_host keeps the stored one: where the instance really connects
+    c0 = cams[0]
+    if kind == "camera" and (not c0["has_public"] or (relay and _norm(c0["public_host"]) == relay and len(c0["ports"]) < len(RELAY_PORT_KEYS))):
+        # PUT without public_host (or, at the relay address, a public port) keeps the stored one: where the instance
+        # really connects
         live = await live_cameras(server_id)
         stored = {str(c.get("id")): c for c in live or [] if isinstance(c, dict)}
     site = hosts.camera_network(ci)
@@ -274,6 +310,9 @@ async def check(ci: dict, kind: str, path: str, body) -> list[str]:
         addr = addr or c["host"]
         if not addr:
             continue   # the server refuses a camera without an address itself
+        if relay and _norm(addr) == relay:
+            _check_relay(c, (stored or {}).get(c["id"]) or {}, ci["id"], bridges.listen_ports(ci["id"]))
+            continue
         k, a = _check_address(addr, site, hub, others)
         if k != "private" and a not in union["public_ips"] and a not in union["hosts"]:
             added.add(a)

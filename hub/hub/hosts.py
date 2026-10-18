@@ -6,18 +6,19 @@ rest like a server's device token) and keeps the socket open. Protocol (JSON tex
 
   host -> hub  {"t": "hello", "proto": 1, "hostname", "version", "capacity": {cpus, load, ram_gb: {total, free},
                  gpus: [{index, name, mem_total_mb, mem_used_mb, util}], disks: [{path, total_gb, free_gb}], instances: int}}
-               {"t": "heartbeat", "capacity": {..., work?: {at, vllm, instances}}, "instances": [{id, location_id, name, state,
-                 quota_gb, used_gb, gpu, mode, cpus, mem_gb}]}
+               {"t": "heartbeat", "capacity": {..., work?: {at, vllm, instances}, relay?: {port_range, connected}},
+                 "instances": [{id, location_id, name, state, quota_gb, used_gb, gpu, mode, cpus, mem_gb, gateway?, relay?}]}
                {"t": "result", "id": int, "ok": bool, "detail": str, "instance"?: {...}}
                {"t": "ping"}                                   -> hub answers {"t": "pong"}
   hub -> host  {"t": "cmd", "id": int, "op": create_instance | delete_instance | set_quota | set_camera_network |
-                 restart_instance | set_resources | list, "args": {...}}
+                 restart_instance | set_resources | set_relay | list, "args": {...}}
     create_instance  {id, location, name, mode, subnet, public_ip, quota_gb, gpu, enroll_token, hub_url, vlm_url}
     delete_instance  {id, purge}        purge false = the recordings and database stay on the host
     set_quota        {id, quota_gb}
     set_camera_network {id, subnets, public_ips, hosts}   the instance's camera allow-list (the hub sends all three)
     restart_instance {id}
     set_resources    {id, cpus, mem_gb}  CPU / memory limits; applied live (docker update), recreated only if that fails
+    set_relay        {id, ports: [{port, label}]}  the instance's Axiom Bridge listen ports (bridges.py; agent 0.3.0+)
     list             {}
 
 capacity.work (agent 0.2.0+, tools/central/PROTOCOL.md): the shared vLLM's running / waiting requests and the instances'
@@ -25,10 +26,11 @@ YOLO verify queues. The latest stays in hosts.capacity; a short in-memory histor
 Hosts page its sparklines and drives the hub-level host_queue_growing alert (check_work_alerts).
 
 A central instance is one isolated server container recording one customer Site's cameras, over SpeedFusion (mode
-vpn: the BR1's LAN is 10.20.<site_number>.0/24) or port forwards locked to the datacenter's IP (mode forward: the
-Site's public IP). Hub administrators allocate it from the Hosts page: provision() places it (the chosen host, a GPU)
-with a storage quota and an optional camera limit, mints a single-use enrollment token bound to the Site, and asks the
-host to create it; the instance then dials /agent with `Authorization: Enroll <token>` and becomes an ordinary server
+vpn: the BR1's LAN is 10.20.<site_number>.0/24), port forwards locked to the datacenter's IP (mode forward: the
+Site's public IP) or an Axiom Bridge at the Site (mode bridge: no subnet, no public IP; bridges.py relays each camera
+through the host agent's listeners on the instance's gateway). Hub administrators allocate it from the Hosts page:
+provision() places it (the chosen host, a GPU) with a storage quota and an optional camera limit, mints a single-use
+enrollment token bound to the Site, and asks the host to create it; the instance then dials /agent with `Authorization: Enroll <token>` and becomes an ordinary server
 of that Site (agents.py -> enroll_check / enroll_consume).
 
 Its camera allow-list on the host is the union of two parts (camera_network):
@@ -58,10 +60,10 @@ from .config import settings
 log = logging.getLogger("hub.hosts")
 
 PROTO = 1
-OPS = ("create_instance", "delete_instance", "set_quota", "set_camera_network", "restart_instance", "set_resources", "list")
+OPS = ("create_instance", "delete_instance", "set_quota", "set_camera_network", "restart_instance", "set_resources", "set_relay", "list")
 STATES = ("provisioning", "running", "failed", "deleting", "deleted")
 LIVE_STATES = ("provisioning", "running", "failed", "deleting")   # everything but deleted: holds its site number
-MODES = ("vpn", "forward")
+MODES = ("vpn", "forward", "bridge")
 SITE_NUMBERS = range(1, 251)
 # Port-forward mode: camera k is forwarded from these outside ports (+k) on the BR1 (the Peplink sheet, hub UI central.ts)
 RTSP_BASE, ONVIF_BASE = 5540, 8080
@@ -209,10 +211,16 @@ class HostRegistry:
             if not isinstance(inst, dict) or not inst.get("id"):
                 continue
             info = {k: inst.get(k) for k in ("state", "used_gb", "quota_gb", "gpu", "mode", "location_id", "name", "host_ips",
-                                             "cpus", "mem_gb")}
+                                             "cpus", "mem_gb", "gateway", "relay")}
             # only this host's own instances: a host can never report on (or overwrite) another host's rows
             db.run(sa.update(db.central_instances).where(db.central_instances.c.id == str(inst["id"])[:24],
                                                          db.central_instances.c.host_id == conn.host_id).values(info=info, info_at=now))
+        if isinstance(frame.get("instances"), list):
+            try:   # relay ports the host lost or never got are sent again (bridges.py); never costs the heartbeat
+                from . import bridges   # (bridges imports this module)
+                bridges.on_host_heartbeat(conn.host_id, frame["instances"][:1000])
+            except Exception:
+                log.exception("host %s: relay ports", conn.host_id)
 
     async def _detach(self, conn: HostConn) -> None:
         conn.fail_pending("the host disconnected")
@@ -806,7 +814,9 @@ async def provision(location_id: str, host_id: str | None, mode: str, subnet: st
     if not loc:
         raise LookupError("unknown site")
     if mode not in MODES:
-        raise ValueError("mode must be vpn or forward")
+        raise ValueError("mode must be vpn, forward or bridge")
+    if mode == "bridge" and ((subnet or "").strip() or (public_ip or "").strip()):
+        raise ValueError("bridge mode takes no camera subnet or public IP: its cameras are reached through the Site's Axiom Bridge")
     if not isinstance(quota_gb, int) or quota_gb < 10:   # axiom_host refuses less than 10 GB
         raise ValueError("the storage quota must be at least 1 GB")
     _check_limit(camera_limit)

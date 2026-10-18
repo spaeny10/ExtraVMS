@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import re
 import shutil
@@ -1427,6 +1428,299 @@ class AgentFrames(unittest.TestCase):
         self.assertEqual(sent[0]["t"], "hello")
         self.assertEqual((sent[1]["t"], sent[1]["id"]), ("result", 9))
         self.assertFalse(self.agent.outbox)
+
+
+BRIDGE_ARGS = {"id": "gamma-farm", "location": "loc_gamma3", "name": "Gamma Farm · Central", "mode": "bridge",
+               "quota_gb": 500, "gpu": "none", "quota_mode": "xfs"}
+
+
+class RelayHost(unittest.TestCase):
+    """The Axiom Bridge relay's host side: bridge-mode instances, set_relay and its firewall rule."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.exe = FakeExec()
+        self.host = make_host(self.tmp, self.exe)
+        self.host.create_instance(dict(VPN_ARGS))
+        self.rec = self.host.create_instance(dict(BRIDGE_ARGS))["instance"]
+
+    def fw(self) -> str:
+        return (self.tmp / "srv" / "firewall.nft").read_text()
+
+    def test_bridge_mode_needs_no_camera_address(self):
+        self.assertEqual((self.rec["mode"], self.rec["subnets"], self.rec["public_ips"], self.rec["hosts"]), ("bridge", [], [], []))
+        self.assertEqual(self.rec["relay"], {"ip": "10.200.0.17", "ports": [], "listening": [], "errors": {}})
+        self.assertEqual(self.rec["gateway"], "10.200.0.17")
+        with self.assertRaises(ah.OpError):   # every other mode still needs one
+            self.host.create_instance({**BRIDGE_ARGS, "id": "delta", "location": "loc_d", "mode": "forward"})
+        # no camera rule at all: the instance reaches its vLLM, DNS and the hub, and nothing else
+        c = chain(self.fw(), "inst_gamma_farm")
+        self.assertNotIn("camera networks", c)
+        self.assertNotIn("remote cameras", c)
+
+    def test_relay_rule_before_the_pool_drop_only_with_ports(self):
+        self.assertNotIn("Axiom Bridge relay", self.fw())
+        seen = []
+        self.host.on_relay_change = lambda: seen.append(1)
+        out = self.host.set_relay({"id": "gamma-farm", "ports": [{"port": 47001, "label": "Gate ONVIF"}, {"port": 47000, "label": "Gate RTSP"}, 47002]})
+        self.assertEqual(out["instance"]["relay"]["ports"], [47000, 47001, 47002])
+        self.assertEqual(seen, [1])   # the agent's listeners follow
+        inp = [ln.strip() for ln in chain(self.fw(), "input").splitlines()]
+        rule = 'iifname "axb1" ip saddr 10.200.0.18 ip daddr 10.200.0.17 tcp dport { 47000, 47001, 47002 } accept comment "Axiom Bridge relay (gamma-farm)"'
+        self.assertIn(rule, inp)
+        self.assertLess(inp.index(rule), next(i for i, ln in enumerate(inp) if "counter drop comment \"instance to host\"" in ln))
+        self.assertGreater(inp.index(rule), next(i for i, ln in enumerate(inp) if "ct state established,related accept" in ln))
+        self.assertEqual(sum("Axiom Bridge relay" in ln for ln in inp), 1)   # only the instance with ports
+        reg = self.host.load()
+        self.assertEqual([p["label"] for p in reg["instances"]["gamma-farm"]["relay_ports"]], ["Gate RTSP", "Gate ONVIF", ""])
+        again = [{"port": 47000, "label": "Gate RTSP"}, {"port": 47001, "label": "Gate ONVIF"}, 47002]
+        self.assertIn("(unchanged)", self.host.set_relay({"id": "gamma-farm", "ports": again})["detail"])
+        self.host.set_relay({"id": "gamma-farm", "ports": []})
+        self.assertNotIn("Axiom Bridge relay", self.fw())
+
+    def test_set_relay_validation(self):
+        for ports in (None, "47000", [46999], [48000], [47000, 47000], [True], ["47000"], [{"port": 47000, "label": "a\nb"}],
+                      [{"port": 47000, "label": "x" * 81}], [{"label": "no port"}]):
+            with self.assertRaises(ah.OpError, msg=repr(ports)):
+                self.host.set_relay({"id": "gamma-farm", "ports": ports})
+        with self.assertRaises(ah.OpError):
+            self.host.set_relay({"id": "nope", "ports": [47000]})
+        self.assertEqual(self.host.load()["instances"]["gamma-farm"]["relay_ports"], [])
+
+    def test_nft_failure_keeps_the_old_ruleset_and_registry(self):
+        self.host.set_relay({"id": "gamma-farm", "ports": [47000]})
+        text, reg = self.fw(), json.loads(self.host.registry_path.read_text())
+        real = self.exe._run
+
+        def fail_nft(argv, input, timeout):
+            if argv[0] == "nft":
+                return ah.Result(1, "", "Error: syntax error")
+            return real(argv, input, timeout)
+        self.exe._run = fail_nft
+        seen = []
+        self.host.on_relay_change = lambda: seen.append(1)
+        with self.assertRaises(ah.CmdError):
+            self.host.set_relay({"id": "gamma-farm", "ports": [47000, 47005]})
+        self.assertEqual(self.fw(), text)
+        self.assertEqual(json.loads(self.host.registry_path.read_text()), reg)
+        self.assertEqual(seen, [])
+
+    def test_dry_run_and_dispatch(self):
+        text = self.fw()
+        out = self.host.dispatch("set_relay", {"id": "gamma-farm", "ports": [47003], "dry_run": True})
+        self.assertIn("tcp dport { 47003 }", chain(out["dry_run"]["firewall"], "input"))
+        self.assertEqual(self.fw(), text)
+        self.assertEqual(self.host.load()["instances"]["gamma-farm"]["relay_ports"], [])
+        cap = self.host.capacity()
+        self.assertEqual(cap["relay"], {"port_range": [47000, 47999], "connected": False})
+        self.assertEqual(ah.relay_url("wss://hub.example.test/host-agent"), "wss://hub.example.test/host-relay")
+        self.assertEqual(ah.relay_url("ws://localhost:8000"), "ws://localhost:8000/host-relay")
+
+    def test_registry_from_before_the_relay(self):
+        reg = json.loads(self.host.registry_path.read_text())
+        for rec in reg["instances"].values():
+            rec.pop("relay_ports", None)
+        self.host.registry_path.write_text(json.dumps(reg))
+        self.assertEqual(self.host.load()["instances"]["acme-gate"]["relay_ports"], [])
+        self.assertNotIn("Axiom Bridge relay", self.host.firewall_text(self.host.load()))
+
+
+class FakeRelayWS:
+    """The hub's end of /host-relay for a Relay: frames the test pushes come in, what the relay sends is recorded."""
+
+    def __init__(self) -> None:
+        self.incoming: asyncio.Queue = asyncio.Queue()
+        self.sent: list = []
+        self.changed = asyncio.Event()
+
+    async def send(self, msg) -> None:
+        self.sent.append(ah.relay_parse(msg))
+        self.changed.set()
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        m = await self.incoming.get()
+        if m is None:
+            raise StopAsyncIteration
+        return m
+
+    def push(self, frame) -> None:
+        self.incoming.put_nowait(frame if isinstance(frame, bytes) else ah.relay_frame(frame))
+
+    async def wait_for(self, pred, timeout: float = 5.0):
+        end = asyncio.get_running_loop().time() + timeout
+        while True:
+            for f in self.sent:
+                if pred(f):
+                    return f
+            self.changed.clear()
+            left = end - asyncio.get_running_loop().time()
+            if left <= 0:
+                raise AssertionError(f"timed out; sent {self.sent}")
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self.changed.wait(), left)
+
+
+def _free_port() -> int:
+    s = ah.socket.socket()
+    s.bind(("127.0.0.1", 0))
+    p = s.getsockname()[1]
+    s.close()
+    return p
+
+
+class RelayListener(unittest.TestCase):
+    """The Relay on 127.0.0.1 (the instance's gateway and address injected): the stream protocol with the hub."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.port = _free_port()
+        self.host = make_host(self.tmp, FakeExec())
+        self.host.cfg["relay_port_range"] = [self.port, self.port]
+        self.host.create_instance(dict(BRIDGE_ARGS))
+        self.host.set_relay({"id": "gamma-farm", "ports": [{"port": self.port, "label": "Gate RTSP"}]})
+
+    def run_relay(self, body, peer="127.0.0.1"):
+        async def go():
+            relay = ah.Relay(self.host, "wss://hub.example.test/host-agent", "t", addr_of=lambda rec: ("127.0.0.1", peer))
+            await relay.reload()
+            ws = FakeRelayWS()
+            serving = asyncio.create_task(relay.serve(ws))
+            try:
+                await ws.wait_for(lambda f: isinstance(f, dict) and f.get("t") == "hello")
+                await body(relay, ws)
+            finally:
+                ws.incoming.put_nowait(None)
+                await asyncio.wait_for(serving, 5)
+                for srv, _ in relay.servers.values():
+                    srv.close()
+        asyncio.run(go())
+
+    async def connect(self):
+        return await asyncio.open_connection("127.0.0.1", self.port)
+
+    def test_hello_lists_the_listeners(self):
+        async def body(relay, ws):
+            hello = ws.sent[0]
+            self.assertEqual((hello["proto"], hello["version"]), (1, ah.VERSION))
+            self.assertEqual(hello["listeners"], [{"instance": "gamma-farm", "port": self.port, "ok": True, "error": None}])
+            self.assertTrue(self.host.relay_connected)
+            self.assertEqual(self.host.view(self.host.load()["instances"]["gamma-farm"])["relay"]["listening"], [self.port])
+        self.run_relay(body)
+        self.assertFalse(self.host.relay_connected)
+
+    def test_open_opened_echo_end(self):
+        async def body(relay, ws):
+            r, w = await self.connect()
+            op = await ws.wait_for(lambda f: isinstance(f, dict) and f.get("t") == "open")
+            self.assertEqual({k: op[k] for k in ("instance", "port", "peer")}, {"instance": "gamma-farm", "port": self.port, "peer": "127.0.0.1"})
+            sid = op["id"]
+            self.assertEqual(sid % 2, 1)
+            w.write(b"early")   # sent before the hub said opened: held back until it does
+            await w.drain()
+            await asyncio.sleep(0.1)
+            self.assertFalse(any(isinstance(f, tuple) for f in ws.sent))
+            ws.push({"t": "opened", "id": sid})
+            got = await ws.wait_for(lambda f: isinstance(f, tuple) and f[0] == sid)
+            self.assertEqual(got[1], b"early")
+            # the hub's bytes reach the socket, then (only then) the hub gets its credit
+            ws.push(ah.relay_chunk(sid, b"x" * 70000))
+            data = await asyncio.wait_for(r.readexactly(70000), 5)
+            self.assertEqual(data, b"x" * 70000)
+            cr = await ws.wait_for(lambda f: isinstance(f, dict) and f.get("t") == "credit")
+            self.assertEqual((cr["id"], cr["bytes"]), (sid, 70000))
+            ws.push({"t": "end", "id": sid})                      # the camera half-closed: a FIN to the instance
+            self.assertEqual(await asyncio.wait_for(r.read(), 5), b"")
+            w.write_eof()                                         # the instance's FIN becomes `end`
+            await ws.wait_for(lambda f: isinstance(f, dict) and f.get("t") == "end" and f.get("id") == sid)
+            await asyncio.sleep(0.05)
+            self.assertNotIn(sid, relay.streams)
+        self.run_relay(body)
+
+    def test_window_holds_back_until_credit(self):
+        async def body(relay, ws):
+            r, w = await self.connect()
+            sid = (await ws.wait_for(lambda f: isinstance(f, dict) and f.get("t") == "open"))["id"]
+            ws.push({"t": "opened", "id": sid})
+            w.write(b"y" * (ah.RELAY_WINDOW + 200_000))
+            await asyncio.sleep(0.3)
+            sent = sum(len(f[1]) for f in ws.sent if isinstance(f, tuple))
+            self.assertLessEqual(sent, ah.RELAY_WINDOW)          # no credit: at most one window on the wire
+            ws.push({"t": "credit", "id": sid, "bytes": sent})
+            await asyncio.sleep(0.3)
+            self.assertGreater(sum(len(f[1]) for f in ws.sent if isinstance(f, tuple)), sent)
+        self.run_relay(body)
+
+    def test_hub_abort_resets_the_connection(self):
+        async def body(relay, ws):
+            r, w = await self.connect()
+            sid = (await ws.wait_for(lambda f: isinstance(f, dict) and f.get("t") == "open"))["id"]
+            ws.push({"t": "opened", "id": sid})
+            await asyncio.sleep(0.05)
+            ws.push({"t": "abort", "id": sid, "reason": "the bridge went offline"})
+            with contextlib.suppress(ConnectionError):
+                self.assertEqual(await asyncio.wait_for(r.read(), 5), b"")
+            self.assertNotIn(sid, relay.streams)
+            self.assertFalse(any(isinstance(f, dict) and f.get("t") == "abort" for f in ws.sent))   # not echoed back
+        self.run_relay(body)
+
+    def test_hub_refusal_closes_the_connection(self):
+        async def body(relay, ws):
+            r, w = await self.connect()
+            sid = (await ws.wait_for(lambda f: isinstance(f, dict) and f.get("t") == "open"))["id"]
+            ws.push({"t": "abort", "id": sid, "reason": "the bridge is offline"})
+            with contextlib.suppress(ConnectionError):
+                self.assertEqual(await asyncio.wait_for(r.read(), 5), b"")
+            self.assertEqual(relay.streams, {})
+        self.run_relay(body)
+
+    def test_instance_reset_aborts_the_stream(self):
+        async def body(relay, ws):
+            r, w = await self.connect()
+            sid = (await ws.wait_for(lambda f: isinstance(f, dict) and f.get("t") == "open"))["id"]
+            ws.push({"t": "opened", "id": sid})
+            await asyncio.sleep(0.05)
+            ah._reset(w)
+            await ws.wait_for(lambda f: isinstance(f, dict) and f.get("t") in ("abort", "end") and f.get("id") == sid)
+        self.run_relay(body)
+
+    def test_wrong_peer_is_closed(self):
+        async def body(relay, ws):
+            r, w = await self.connect()
+            with contextlib.suppress(ConnectionError):
+                self.assertEqual(await asyncio.wait_for(r.read(), 5), b"")
+            self.assertFalse(any(isinstance(f, dict) and f.get("t") == "open" for f in ws.sent))
+        self.run_relay(body, peer="10.200.0.18")   # only the instance's own address may connect
+
+    def test_relay_socket_down_closes_new_connections(self):
+        async def go():
+            relay = ah.Relay(self.host, "wss://hub.example.test/host-agent", "t", addr_of=lambda rec: ("127.0.0.1", "127.0.0.1"))
+            await relay.reload()
+            try:
+                r, w = await self.connect()
+                with contextlib.suppress(ConnectionError):
+                    self.assertEqual(await asyncio.wait_for(r.read(), 5), b"")
+                self.assertEqual(relay.streams, {})
+                # removing the port closes its listener
+                await asyncio.to_thread(self.host.set_relay, {"id": "gamma-farm", "ports": []})
+                await relay.reload()
+                self.assertEqual(relay.servers, {})
+                self.assertEqual(self.host.relay_status, {})
+            finally:
+                for srv, _ in relay.servers.values():
+                    srv.close()
+        asyncio.run(go())
+
+    def test_unbindable_port_is_reported(self):
+        async def go():
+            relay = ah.Relay(self.host, "wss://hub.example.test/host-agent", "t", addr_of=lambda rec: ("192.0.2.123", "192.0.2.124"))
+            await relay.reload()   # an address this machine does not have: like a gateway whose bridge is not up yet
+            self.assertEqual(relay.servers, {})
+            self.assertEqual(list(self.host.relay_status["gamma-farm"]["errors"]), [str(self.port)])
+            self.assertEqual(relay.listeners()[0]["ok"], False)
+        asyncio.run(go())
 
 
 class Tls(unittest.TestCase):

@@ -11,15 +11,19 @@ import { actionsHref } from "./customer/fleetActions";
 import { type EventRef, alertEvent, cameraNameFor } from "./eventOpen";
 import { HubEventDetail, useCameraNames } from "./HubEventDetail";
 import { KIND_LABEL } from "./labels";
-import { consoleHref, consoleTimelineHref, go, inPlace, navigate, serverHref } from "./nav";
+import { consoleHref, consoleTimelineHref, go, inPlace, navigate, serverHref, siteHref } from "./nav";
 import { DigestCard } from "./SitesPage";
 import { siteTimelineHref } from "./timelineLink";
 
 /** Where an alert row points: [in-app href or null, server console href]. */
 function alertLinks(a: Alert): [string | null, string] {
-  const d = a.detail as { id?: number; camera_id?: string };
+  const d = a.detail as { id?: number; camera_id?: string; location_id?: string };
   if (d.id && d.camera_id) {
     return [a.location_id ? siteTimelineHref(a.location_id, a.site_id, d.camera_id, d.id) : null, consoleTimelineHref(a.site_id, { cam: d.camera_id, event: d.id })];
+  }
+  if (a.kind === "bridge_offline") {   // an Axiom Bridge (site_id = the bridge) has no console: its Site's Servers tab lists it
+    const here = siteHref(a.location_id ?? String(d.location_id ?? ""), "servers");
+    return [here, here];
   }
   return [a.location_id ? serverHref(a.location_id, a.site_id) : null, consoleHref(a.site_id, a.kind === "camera_down" ? "cameras" : "")];
 }
@@ -29,7 +33,7 @@ function describe(a: Alert): string {
   return a.kind === "camera_down" ? `${d.name ?? a.key}: ${(d.problems as string[] | undefined)?.join("; ") || "no stream"}`
     : a.kind === "clock" ? `${d.skew_s} s off` : a.kind === "disk" ? String(d.message ?? "low space")
     : a.kind === "detector_fallback" || a.kind === "detector_stalled" || a.kind === "vlm_fallback_active" ? `${d.text ?? ""}${d.error ? ` (${d.error})` : ""}`
-    : a.kind === "storage_failing" ? String(d.text ?? "storage failing")   // the text already names the error
+    : a.kind === "storage_failing" || a.kind === "bridge_offline" ? String(d.text ?? KIND_LABEL[a.kind])   // the text names it already
     : a.kind === "offline" ? `last seen ${ago(d.last_seen_at as number)}` : `${d.name ? `${d.name} · ` : ""}${d.text ?? d.synopsis ?? ""}`;
 }
 
@@ -64,7 +68,7 @@ export function AlertsPage({ org, site }: { org: Org; site?: Site }) {
                   <td><span className={`alert-kind ${a.kind}`}>{KIND_LABEL[a.kind] ?? a.kind}</span></td>
                   <td className="wide">
                     <a href={href ?? out} onClick={click} title={ev ? "Show the clip and synopsis" : undefined}>{describe(a)}</a>
-                    {href && <> <a className="small muted" href={out} title="Open on server">↗</a></>}
+                    {href && href !== out && <> <a className="small muted" href={out} title="Open on server">↗</a></>}
                   </td>
                   <td className="acts">{!a.closed_at && <button className="ghost small" onClick={async () => { try { await api.ack(a.id); load(); } catch (e) { toast.error(e); } }}>Ack</button>}</td>
                 </tr>

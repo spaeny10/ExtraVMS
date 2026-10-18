@@ -48,6 +48,7 @@ How a central host's `axiom_host.py run` talks to the hub. The hub side lives in
              "project_quota": false, "quota_mode": "zfs"}],
   "instances": 4,
   "allocated": {"quota_gb": 16000, "mem_gb": 32, "cpus": 16},
+  "relay": {"port_range": [47000, 47999], "connected": true},
   "work": {
     "at": 1791530000.0,
     "vllm": {"ok": true, "model": "Qwen/Qwen3.8-27B-FP8", "running": 2, "waiting": 0, "waiting_capacity": 0,
@@ -68,6 +69,7 @@ How a central host's `axiom_host.py run` talks to the hub. The hub side lives in
   - `vllm`: one GET of the shared vLLM's Prometheus `/metrics` (no key needed). The address is `vllm_metrics_url` from host.json, else the `vllm_container`'s address on `ai_network` from `docker inspect` (10.201.0.10 with ai/compose.yml; the host is that bridge's gateway) and the port of `vlm_url`. `running` / `waiting` = `vllm:num_requests_running` / `_waiting`; `waiting_capacity` = `vllm:num_requests_waiting_by_reason{reason="capacity"}`; `kv_cache_pct` = `vllm:kv_cache_usage_perc` (older builds: `vllm:gpu_cache_usage_perc`) × 100. `prompt_tps` / `gen_tps` = the increase of `vllm:prompt_tokens_total` / `vllm:generation_tokens_total` per second against the oldest read of the last 2 minutes; `queue_p50_s` / `e2e_p50_s` = the median of the requests that finished in that time, interpolated from the bucket deltas of `vllm:request_queue_time_seconds` (older: `vllm:time_in_queue_requests`) and `vllm:e2e_request_latency_seconds`. Any metric this vLLM does not export, a first read, a counter that went backwards (restart) or no finished request is `null`. `gpu` = `AXIOM_VLM_GPU` from ai.env. `ok` false + `error` when it could not be read; the last good numbers stay, with their `at`.
   - `instances`: per running instance, one `docker exec axiom-<id> python -c ...` that reads its own `GET http://127.0.0.1:8080/api/system` (concurrent across instances, each at most `work_exec_timeout_s`, default 4 s). `verify_q` / `synopsis_q` = its `queues`; `verify_rate_per_min` = events that left verification (every status but `open` / `pending` in its `events` counts) per minute over up to the last 5 minutes (`null` on the first read or after the count went down: retention deleted events); `gpu` = its assigned GPU. An instance that fails, is not running or does not answer in time keeps its last good values with `ok` false, `error` and the `at` of those values; a hung read is not started again until it ends.
   - `gpus[].verify_q`: the sum of `verify_q` over the instances assigned to that GPU (`0` for a GPU with none, `null` when none of its instances has reported).
+- `relay` (agent 0.3.0+): the Axiom Bridge relay's listen port range (host.json `relay_port_range`; the hub allocates 47000-47999 per instance, so the range must contain it) and whether the agent's `/host-relay` socket is up (see below).
 - `disks[].quota_mode`: what a new instance would get with `quota_mode: auto` (`zfs`, `xfs` or `none`); `project_quota` is true only for `xfs`. On ZFS, `total_gb` is the pool's usable size (`used` + `available` of its root dataset) and `free_gb` the `available` of `dataset` (the one mounted at `<root>/recordings`); elsewhere both come from `statvfs` on the root.
 
 ### instance object
@@ -77,7 +79,9 @@ How a central host's `axiom_host.py run` talks to the hub. The hub side lives in
   "state": "running", "cameras": 5, "quota_gb": 4000, "used_gb": 812.4, "gpu": 1, "mode": "vpn",
   "subnets": ["10.20.7.0/24", "192.168.105.0/24"], "public_ips": ["203.0.113.7"], "hosts": ["cam1.example.net"],
   "host_ips": {"cam1.example.net": ["203.0.113.21"]}, "quota_mode": "xfs", "enroll_pending": false,
-  "mem_gb": 8, "cpus": 4, "image": "axiom/instance:latest", "network": "10.200.0.0/28"
+  "mem_gb": 8, "cpus": 4, "image": "axiom/instance:latest", "network": "10.200.0.0/28",
+  "gateway": "10.200.0.1",
+  "relay": {"ip": "10.200.0.1", "ports": [47000, 47001, 47002], "listening": [47000, 47001], "errors": {"47002": "Address already in use"}}
 }
 ```
 - `subnets`, `public_ips`, `hosts`: the instance's camera allow-list (see `set_camera_network`). `mode` no longer decides what is allowed; it says how the site connects (the hub's Peplink sheet).
@@ -88,6 +92,9 @@ How a central host's `axiom_host.py run` talks to the hub. The hub side lives in
 - `gpu`: the host GPU index the instance's YOLO uses, or `null` for CPU.
 - `quota_mode`: `zfs` (per-instance datasets with quotas), `xfs` (project hard limit) or `none` (not enforced: see README).
 - `enroll_pending`: true until the instance has enrolled into its Site with the one-time token.
+- `gateway` (0.3.0+): the instance network's gateway, the host's own address on the instance's bridge `axb<slot>`: where the Axiom Bridge relay listens for it. Its cameras behind a bridge use it as their `public_host`.
+- `relay` (0.3.0+): its relay ports (`set_relay`), the ones the agent's listeners hold now (`listening`) and why the others are not (`errors`, by port). The hub compares `ports` with what it maps and sends `set_relay` again when they differ (at most once a minute).
+- `mode`: `vpn`, `forward` or `bridge` (an Axiom Bridge at the Site: no camera address needed, see `/host-relay`).
 
 ## Hub → agent
 
@@ -99,12 +106,13 @@ How a central host's `axiom_host.py run` talks to the hub. The hub side lives in
 
 | op | args | notes |
 |---|---|---|
-| `create_instance` | `id`, `location` (alias `location_id`), `name`, `mode` (`vpn`\|`forward`), `subnet` (string or list), `public_ip` (string or list; a DNS name here counts as a `hosts` entry), optional `subnets`, `public_ips`, `hosts` (lists, added to the former), `quota_gb`, `gpu` (int, or `null`/`"none"` for CPU), `enroll_token`, `hub_url`, `vlm_url`; optional `vlm_model`, `mem_gb` (default 8), `cpus` (default 4), `image`, `quota_mode` (`auto`\|`zfs`\|`xfs`\|`none`), `dry_run` | Creates dirs, quota, `instance.env`, network, firewall rules, then starts the container. The camera allow-list is the union of all subnets, public IPs and host names, whatever the `mode`, validated as for `set_camera_network`; at least one entry is required. Refused if the id exists, a camera address is already used by another instance, or leftover data for that id exists. |
+| `create_instance` | `id`, `location` (alias `location_id`), `name`, `mode` (`vpn`\|`forward`\|`bridge`), `subnet` (string or list), `public_ip` (string or list; a DNS name here counts as a `hosts` entry), optional `subnets`, `public_ips`, `hosts` (lists, added to the former), `quota_gb`, `gpu` (int, or `null`/`"none"` for CPU), `enroll_token`, `hub_url`, `vlm_url`; optional `vlm_model`, `mem_gb` (default 8), `cpus` (default 4), `image`, `quota_mode` (`auto`\|`zfs`\|`xfs`\|`none`), `dry_run` | Creates dirs, quota, `instance.env`, network, firewall rules, then starts the container. The camera allow-list is the union of all subnets, public IPs and host names, whatever the `mode`, validated as for `set_camera_network`; at least one entry is required, except in `bridge` mode (its cameras come through `set_relay`; the hub sends none). Refused if the id exists, a camera address is already used by another instance, or leftover data for that id exists. |
 | `delete_instance` | `id`, `purge` (default false), `dry_run`; the CLI's `keep_data` is accepted too (`keep_data` wins if both are sent) | Removes the container, network, firewall rules and (XFS) quota limit. On ZFS a purge destroys exactly the instance's two datasets; kept datasets stay with their quotas. Recordings and database **stay on the host** unless `purge` is true; the hub confirms a purge with the admin first. Kept data blocks re-creating the same id. |
 | `set_quota` | `id`, `quota_gb`, `force`, `dry_run` | Refused below current usage unless `force`. |
 | `set_camera_network` | `id`, `subnets`, `public_ips`, `hosts` (each a list or comma-separated string; `[]` empties it; absent or `null` keeps it), `dry_run` | Replaces the instance's camera allow-list, saves the registry and regenerates and loads the whole firewall (one `nft -f`, as on create/delete). Idempotent. `subnets`: IPv4 networks inside 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 or 100.64.0.0/10, /16 or smaller, no host bits set; any protocol. `public_ips`: IPv4 addresses, not loopback, link-local, multicast, unspecified or reserved; TCP only (ports: `forward_tcp_ports` in host.json, default any). `hosts`: DNS names (letters, digits, `-`, two or more labels, lowercased), resolved to IPv4 and re-resolved every 10 minutes; TCP only like `public_ips`; a resolved address that would be refused as a public IP (or is in the pool, the AI network or a hub address) is left out. Nothing may overlap the instance pool, the AI network (`ai_network`, 10.201.0.0/24) or the hub's addresses; another instance's subnet, public IP or host name is refused; at most 32 entries in all. On an `nft` failure the old rules and registry stay. `dry_run` returns `dry_run.firewall` (the ruleset) and changes nothing. The hub sends all three lists. |
 | `restart_instance` | `id`, `recreate` (default false), `image`, `dry_run` | `recreate` or a new `image` removes and re-runs the container (picks up a new image or a scrubbed env file); otherwise `docker restart`. |
 | `set_resources` | `id`, `cpus` (1-64, at most the host's CPU count), `mem_gb` (2-512), `dry_run`; either may be left out (kept) | Saves the new CPU / memory limits in the registry and applies them live with `docker update --cpus --memory --memory-swap` (no recording gap); if that fails, recreates the container with them (`docker rm -f` + `docker run`, the same path as `restart_instance` `recreate`: ~30 s without recording). The same values again change nothing. If the new container does not start, the old limits are restored and the container re-run with them, and the result is not ok. `dry_run` returns the planned commands. |
+| `set_relay` | `id`, `ports` (a list of `{port, label}` or bare port numbers; `[]` closes them all), `dry_run` | Replaces the instance's Axiom Bridge listen ports (agent 0.3.0+; older agents answer `unknown op`). Each port inside `relay_port_range` (default 47000-47999), no duplicates; `label` (for logs and views only, never written into the firewall) one line of at most 80 characters. Saves `relay_ports` in the registry, regenerates and loads the whole firewall with one `nft -f`: in the `input` chain, before the pool's drop, `iifname "axb<slot>" ip saddr <instance ip> ip daddr <gateway> tcp dport { ports } accept` (the instance reaches exactly these ports of its own gateway, nothing else of the host), then reloads the listeners. On an `nft` failure the old rules and registry stay. Idempotent. Result: `instance` (with `gateway` and `relay`). The CLI `set-relay` does the same; the running agent picks it up within a minute. |
 | `list` | none | Result carries `instances`. |
 
 Ids: 1-32 lowercase letters, digits, `-` and `_`, starting and ending with a letter or digit (the hub uses `ci_` + 12 hex). The container and its network are both named `axiom-<id>`; the container hostname uses `-` for `_`. Two ids that differ only by `-` versus `_` cannot coexist on one host (they would share a firewall chain name).
@@ -113,6 +121,25 @@ Ids: 1-32 lowercase letters, digits, `-` and `_`, starting and ending with a let
 - `{"t": "ping"}` → `{"t": "pong"}`
 - `{"t": "error", "detail": "..."}` → logged.
 - anything else (e.g. a `welcome` after hello) → ignored.
+
+## Axiom Bridge relay: `WS /host-relay` (agent 0.3.0+)
+
+A Site with no inbound access runs the Axiom Bridge on a PC there (docs/axiom-bridge-plan.md, the hub's `bridges.py`). Its central instance reaches each camera as through port forwards: the camera's `public_host` is the instance's `gateway` and each `public_*_port` one of the instance's relay ports, which the hub allocates and sends with `set_relay`. The path:
+
+instance → `<gateway>:<relay port>` (a listener of this agent) → `WS /host-relay` → hub → `WS /bridge` → bridge → `camera_ip:port`
+
+- The agent keeps a second WebSocket, `wss://<hub>/host-relay` (the `/host-agent` URL with its last part replaced), with the same `Authorization: Bearer <host token>`, its own reconnect loop (the same backoff, 5 minutes after a 401/403), and ws pings every 20 s. `max_size` is one chunk plus 1 KB.
+- Framing (the hub's tunnelproto, copied into axiom_host.py so a host needs nothing else): JSON text control frames with `"t"`, unknown types and fields ignored; binary frames = 4-byte big-endian stream id + up to 65536 bytes. `end {id}` = half-close (a TCP FIN), `abort {id, reason}` = reset. `credit {id, bytes}` is sent by a receiver only **after** the bytes were written to the TCP socket (drained), never on arrival. Each side may have at most 524288 bytes (the hub's `bridge_window`) unacknowledged per stream. Only the host opens streams here; ids are odd. `end` / `abort` go through the same ordered queue as the stream's data; only `credit` and `ping` / `pong` may jump ahead.
+- Listeners: one per relay port of each instance, bound on that instance's gateway. A connection from any address but the instance's own is closed at once; so is every new connection while the relay socket is down (the instance retries as with any unreachable camera). A port that cannot be bound (the gateway's bridge not up yet at boot) is retried every minute and reported in `relay.errors`.
+
+Host → hub:
+```json
+{"t": "hello", "proto": 1, "version": "0.3.0", "listeners": [{"instance": "ci_1a2b3c", "port": 47000, "ok": true, "error": null}]}
+{"t": "open", "id": 1, "instance": "ci_1a2b3c", "port": 47001, "peer": "10.200.0.2"}
+```
+then chunks, `end`, `abort`, `credit`, `ping`. The host names a listener, never a camera address: the hub looks up which camera (instance, port) relays to, and refuses (`abort`) a listener of another host's instance, an unmapped port, a target that is switched off, a bridge that is offline, at its stream limit (16) or opening too fast (10 per second).
+
+Hub → host: `{"t": "opened", "id": 1}` once the bridge connected to the camera (within 10 s), or `{"t": "abort", "id": 1, "reason": "..."}`; then chunks, `end`, `credit`, `pong`. The agent waits up to 15 s for the answer and reads nothing from the instance's socket before `opened`. On `abort` the connection is closed with a reset (SO_LINGER 0). When the relay socket drops, every open stream is reset.
 
 ## Enrollment of a new instance
 1. The hub mints a one-time enrollment token bound to the Site and sends `create_instance` with `enroll_token`.

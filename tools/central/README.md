@@ -209,7 +209,7 @@ Each instance's firewall lets it reach exactly its **camera addresses**, three l
 | `public_ips` | Public IPs of site routers that port-forward to their cameras (PEPLINK.md, mode 2) | TCP (all ports, or `forward_tcp_ports` in host.json) |
 | `hosts` | Dynamic DNS names of such routers | TCP, to whatever each name resolves to |
 
-`mode` (`vpn` / `forward`) only says how the Site mainly connects (the hub's Peplink sheet); the firewall allows the union of the three lists, so one Site can record cameras on a LAN or VPN subnet and remote cameras behind port forwards at the same time. `create-instance` fills them from `--subnet`, `--public-ip` and `--host`.
+`mode` (`vpn` / `forward` / `bridge`) only says how the Site mainly connects (the hub's Peplink sheet); the firewall allows the union of the three lists, so one Site can record cameras on a LAN or VPN subnet and remote cameras behind port forwards at the same time. `create-instance` fills them from `--subnet`, `--public-ip` and `--host`.
 
 **On the hub, the lists come from two places** (hub `hosts.py` and `central_cameras.py`); the hub sends the host their union with the same `set_camera_network`:
 
@@ -244,6 +244,30 @@ Each list you name replaces that list; the others stay as they are. The registry
 
 The host must actually route to a subnet you add (a LAN on a host interface, or a route via FusionHub for `10.20.0.0/16`); the allow-list only opens the instance's firewall. Docker's default address pools include 192.168.0.0/16: check no Docker network on the host uses a camera subnet (`docker network ls -q | xargs docker network inspect -f '{{.Name}} {{range .IPAM.Config}}{{.Subnet}}{{end}}'`). For a camera behind a port forward, add it on the instance with its LAN address and set its outside address per camera (public host = that router's public IP or DNS name, public RTSP and ONVIF ports): the instance rewrites the addresses the camera hands back (ONVIF, RTSP URIs) to those, exactly as for a forward-mode Site.
 
+### Bridge-mode instances (Axiom Bridge)
+
+For a Site with no way in (Starlink CGNAT, cellular, no static IP, no Peplink): a PC at the Site runs the **Axiom Bridge** (`bridge/`, docs/axiom-bridge-plan.md), which dials the hub over TCP 443 and carries TCP streams to the cameras the hub assigns it. The instance reaches each camera exactly as through port forwards, so nothing in the instance changes:
+
+```
+instance (MediaMTX, ONVIF) → <gateway>:<relay port> (this agent's listener) → WS /host-relay → hub → WS /bridge → bridge → camera_ip:port
+```
+
+1. A hub administrator allocates the instance with **Axiom Bridge** as its connection (Hosts → Allocate instance). `create_instance` gets `mode: bridge` and no subnet or public IP; the instance's firewall then allows its vLLM, DNS and the hub only. By hand: `create-instance ... --mode bridge` (no `--subnet` / `--public-ip` / `--host` needed).
+2. The Site's admins (or a hub administrator) enroll the PC: Site → Servers → Axiom Bridge → **Enroll a bridge…** gives a one-time code (24 h) and the command to run on the PC in an elevated PowerShell (`.\axiom-bridge.exe install --hub wss://hub.axiomvision.ai/bridge --code AXB-…`; bridge/README.md).
+3. They add the camera on the instance's console with its LAN address, username and password, then **Map a camera…** on the bridge (the camera's LAN address and ports, default 554 RTSP, 80 ONVIF / PTZ / events / web page, 555 Milesight SD replay). The hub allocates one relay port per camera port on the instance (47000-47999, unique per instance) and sends the host `set_relay`; the agent opens exactly those ports from the instance to its own gateway (one input rule before the pool's drop) and listens on them there.
+4. **Apply to camera** writes the relay into the instance's camera (public host = the instance's gateway, public RTSP / ONVIF / replay ports = the relay ports; its password and every other setting stay). **Settings…** shows the same values for entering by hand, **Test** has the bridge connect to each port once.
+
+On the host:
+```bash
+axiom_host.py list                                   # each instance's gateway and relay {ports, listening, errors}
+axiom_host.py set-relay --id ci_1a2b3c --port 47000:"Gate RTSP" --port 47001 --dry-run   # repairs only: the hub sends these
+nft list chain inet axiom input                      # the "Axiom Bridge relay (<id>)" rules
+ss -ltnp | grep 470                                  # the agent's listeners on each gateway
+```
+The relay keeps its own WebSocket to `/host-relay` (the host token, same backoff as the agent's) and resets every connection from anything but the instance's own address, and every new connection while that socket is down. A heartbeat whose `relay.ports` differ from what the hub maps (an agent restarted with an older registry) gets `set_relay` again within a minute. Restarting the agent drops the open streams; the instances reconnect by themselves.
+
+Known limits: every ONVIF service on one HTTP port (fine for Milesight); no ONVIF scan or discovery over the bridge (add cameras by hand); a camera turned into a talk-down speaker (Cameras → speaker) keeps its LAN address, which the instance cannot reach. Bandwidth: the hub carries every stream twice (bridge in, host relay out); Hetzner bills egress, about 1.3 TB a month for a 4 Mbit/s camera.
+
 Read-only root: if a library needs to write outside `/tmp`, `/data` or `/recordings`, the instance crash-loops at start (`docker logs`). Set `"read_only": false` in `/etc/axiom/host.json` and `restart-instance --recreate`, then report it so the image can be fixed.
 
 ## 3. Isolation design
@@ -254,6 +278,7 @@ Read-only root: if a library needs to write outside `/tmp`, `/data` or `/recordi
   - the hub's addresses (resolved from the hub host names; re-resolved every 10 minutes): TCP 443 and 3478, UDP 3478 and 49152-49252 (TURN, `hub/coturn`),
   - its own vLLM address, TCP 8000,
   - DNS to the resolvers in `host.json` (`--dns` on the container),
+  - into the host only its own Axiom Bridge relay ports on its own gateway, when the hub mapped some (`set_relay`; input chain, before the drop),
   - everything else dropped, including other instances, other sites, the internet and the host itself (input chain). New connections into the instance pool are dropped too.
   - IPv6 from or to an instance bridge (`axb<slot>`) is dropped in both chains before anything else: every rule above matches IPv4.
   - NTP is not allowed: containers use the host clock; the host runs chrony.

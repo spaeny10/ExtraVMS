@@ -15,7 +15,7 @@ from . import alerts, auth, db
 from .config import settings
 
 log = logging.getLogger("hub.push")
-DEFAULT_KINDS = ["offline", "event_policy", "event_watched", "event_high", "site_link_down", "storage_failing",
+DEFAULT_KINDS = ["offline", "event_policy", "event_watched", "event_high", "site_link_down", "storage_failing", "bridge_offline",
                  "host_offline", "coverage_budget", "host_queue_growing"]   # the last three only ever reach hub administrators (alerts.HUB_KINDS)
 _sender: Callable | None = None   # tests inject a fake
 
@@ -153,10 +153,11 @@ async def notify_alert(org_id: str, site: dict, kind: str, detail: dict) -> int:
              "detector_stalled": f"{name}: event verification stalled", "event_high": f"{name}: high-priority event",
              "event_policy": f"{name}: site rule broken", "event_watched": f"{name}: watched person seen",
              "site_link_down": f"{name}: link to the site down",
-             "storage_failing": f"{name}: events not being stored (disk failing)"}.get(kind, f"{name}: {kind}")
+             "storage_failing": f"{name}: events not being stored (disk failing)",
+             "bridge_offline": f"{name}: Axiom Bridge offline"}.get(kind, f"{name}: {kind}")
     body = detail.get("text") or detail.get("synopsis") or detail.get("name") or ", ".join(detail.get("problems") or []) or ""
     url = f"/s/{site['id']}/#timeline?cam={detail.get('camera_id')}&event={detail.get('id')}" if detail.get("id") and detail.get("camera_id") else f"/s/{site['id']}/"
-    if kind == "site_link_down" and site.get("location_id"):
+    if kind in ("site_link_down", "bridge_offline") and site.get("location_id"):   # a bridge has no console: its Site's servers
         url = f"/sites/{site['location_id']}/servers"
     payload = {"title": title, "body": body[:180], "url": url, "kind": kind, "site_id": site["id"],
                "location_id": site.get("location_id")}

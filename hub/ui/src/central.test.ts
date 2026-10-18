@@ -182,6 +182,7 @@ describe("allocate form", () => {
     expect(allocateFormError({ ...ok, mode: "forward", public_ip: "" }, 8000)).toMatch(/public IP/);
     expect(allocateFormError({ ...ok, mode: "forward", public_ip: "not an address" }, 8000)).toMatch(/IP address or a DNS name/);
     expect(allocateFormError({ ...ok, mode: "forward", public_ip: "yard.dyn.example.net" }, 8000)).toBeNull();
+    expect(allocateFormError({ ...ok, mode: "bridge", subnet: "", public_ip: "" }, 8000)).toBeNull();   // an Axiom Bridge needs neither
   });
   it("splits the firewall into Site networks and the cameras' own addresses", () => {
     const ci = { mode: "vpn" as const, subnet: "10.20.7.0/24", public_ip: null,
@@ -214,6 +215,7 @@ describe("central instance on its server card (Site › Servers)", () => {
     expect(connectionText({ mode: "vpn", subnet: "10.20.7.0/24" })).toBe("VPN · 10.20.7.0/24");
     expect(connectionText({ mode: "vpn", subnet: null })).toBe("VPN · —");
     expect(connectionText({ mode: "forward", subnet: null })).toBe("Port forwarding");
+    expect(connectionText({ mode: "bridge", subnet: null })).toBe("Axiom Bridge");
     expect(limitText(3, 5)).toBe("3 of 5 cameras");
     expect(limitText(undefined, 1)).toBe("0 of 1 camera");
     expect(limitText(6, 5)).toBe("6 of 5 cameras · over");
@@ -222,6 +224,7 @@ describe("central instance on its server card (Site › Servers)", () => {
       camera_network: { subnets: ["10.20.7.0/24"], public_ips: [], hosts: [], auto: { public_ips: [], hosts: ["yard.dyn.example.net"] } } }))
       .toBe("Cameras reachable at: 10.20.7.0/24 · opened for its cameras: yard.dyn.example.net");
     expect(reachableText({ mode: "forward", subnet: null, public_ip: null, camera_network: { subnets: [], public_ips: [], hosts: [] } })).toBe("Cameras reachable at: no Site network");
+    expect(reachableText({ mode: "bridge", subnet: null, public_ip: null, camera_network: { subnets: [], public_ips: [], hosts: [] } })).toMatch(/Axiom Bridge/);
     expect(addCamerasHint(5)).toMatch(/console.*Up to 5 cameras; ask Axiom Vision for more\.$/);
     expect(addCamerasHint(1)).toMatch(/Up to 1 camera;/);
     expect(addCamerasHint(null)).not.toMatch(/Up to/);

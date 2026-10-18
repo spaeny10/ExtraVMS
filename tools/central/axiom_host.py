@@ -4,7 +4,8 @@
 One instance = one customer Site's recording server (the ordinary site server in the `axiom/instance` image),
 in its own container, Docker network, Unix uid, storage quota (its own ZFS datasets, or an XFS project) and
 nftables egress allow-list. The hub drives this agent over a WebSocket (see PROTOCOL.md); the same operations
-work from the command line.
+work from the command line. A second WebSocket, /host-relay (Relay), carries the connections of bridge-mode instances
+to cameras behind a Site's Axiom Bridge: the agent listens on each instance's gateway for its relay ports (set_relay).
 
     axiom_host.py create-instance --id acme-gate --location loc_123 --name "Acme Gate · Central" \
         --mode vpn --subnet 10.20.7.0/24 --quota-gb 4000 --gpu 1 --enroll-token-file /root/t [--dry-run]
@@ -14,6 +15,7 @@ work from the command line.
         --host cam1.example.net [--clear subnets|public-ips|hosts|all] [--dry-run]
     axiom_host.py restart-instance --id acme-gate [--recreate] [--image axiom/instance:2026.10.06]
     axiom_host.py set-resources --id acme-gate --cpus 8 [--mem-gb 16] [--dry-run]
+    axiom_host.py set-relay --id acme-gate --port 47000:"Gate RTSP" --port 47001 [--clear] [--dry-run]
     axiom_host.py list | capacity | work | render-firewall | apply-firewall | reconcile | finish-enroll --id ...
     axiom_host.py run --hub wss://hub.axiomvision.ai/host-agent --token-file /etc/axiom/host-token
 
@@ -37,6 +39,7 @@ import shlex
 import shutil
 import socket
 import ssl
+import struct
 import subprocess
 import sys
 import threading
@@ -46,7 +49,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, wait as futures_wait
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 PROTO = 1
 log = logging.getLogger("axiom-host")
 
@@ -54,7 +57,7 @@ ID_RE = re.compile(r"^[a-z0-9](?:[a-z0-9_-]{0,30}[a-z0-9])?$")   # the hub sends
 TOKEN_RE = re.compile(r"^[A-Za-z0-9._~+/=-]{8,512}$")
 ZFS_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]*(?:/[A-Za-z0-9][A-Za-z0-9_.:-]*)*$")   # no @snap, #bookmark
 QUOTA_MODES = ("auto", "zfs", "xfs", "none")
-MODES = ("vpn", "forward")
+MODES = ("vpn", "forward", "bridge")            # bridge: cameras reached through the Site's Axiom Bridge (Relay)
 # An instance's camera allow-list: LAN/VPN subnets (any protocol), public IPs and DNS names (TCP only)
 CAMERA_KEYS = ("subnets", "public_ips", "hosts")
 MAX_CAMERA_ENTRIES = 32                         # all three lists together, per instance
@@ -94,6 +97,8 @@ DEFAULTS: dict[str, Any] = {
     "vllm_metrics_url": "",                     # "" = http://<vllm_container's address on ai_network>:<vlm_url port>/metrics
     "work_budget_s": 5,                         # one collection pass at most (it runs beside the heartbeat, never in it)
     "work_exec_timeout_s": 4,                   # one instance's docker exec
+    # Axiom Bridge relay: each instance's listen ports on its gateway (the hub allocates 47000-47999 per instance)
+    "relay_port_range": [47000, 47999],
 }
 
 PROBE = ("import json,urllib.request as u\n"
@@ -277,6 +282,18 @@ def _nft_set(items: list[str]) -> str:
     return "{ " + ", ".join(items) + " }"
 
 
+def _relay_rules(instances: list[dict]) -> list[str]:
+    """Input rules for the Axiom Bridge relay: each instance may open exactly its own listen ports on its own gateway,
+    from its own address on its own bridge (before the pool drop; nothing else of the host is reachable)."""
+    L = []
+    for rec in sorted(instances, key=lambda r: r["slot"]):
+        ports = sorted({int(p["port"]) for p in rec.get("relay_ports") or []})
+        if ports:
+            L.append(f"\t\tiifname \"{rec['bridge']}\" ip saddr {rec['ip']} ip daddr {rec['gateway']} tcp dport "
+                     f"{_nft_set([str(p) for p in ports])} accept comment \"Axiom Bridge relay ({rec['id']})\"")
+    return L
+
+
 def render_firewall(instances: list[dict], *, pool: str, hub_ips: list[str], dns: list[str],
                     hub_tcp_ports: list[str], hub_udp_ports: list[str], forward_tcp_ports: list[str],
                     source: str = "registry.json") -> str:
@@ -299,6 +316,7 @@ def render_firewall(instances: list[dict], *, pool: str, hub_ips: list[str], dns
           "\t\ttype filter hook input priority filter - 10; policy accept;",
           f"\t\tmeta nfproto ipv6 iifname \"{BRIDGE_PREFIX}*\" counter drop comment \"instances are IPv4 only\"",
           f"\t\tip saddr {pool} ct state established,related accept",
+          *_relay_rules(instances),
           f"\t\tip saddr {pool} counter drop comment \"instance to host\"",
           "\t}",
           "",
@@ -508,6 +526,29 @@ def check_camera_network(subnets: Any, public_ips: Any, hosts: Any, forbidden: F
     if n > MAX_CAMERA_ENTRIES:
         raise OpError(f"{n} camera addresses: at most {MAX_CAMERA_ENTRIES} per instance")
     return out
+
+
+RELAY_LABEL_RE = re.compile(r"^[^\x00-\x1f\x7f]{0,80}$")
+
+
+def check_relay_ports(ports: Any, port_range: list[int] | tuple[int, int]) -> list[dict]:
+    """set_relay's ports: [{port, label}] (or bare port numbers), each port inside the relay range, no duplicates;
+    labels (for logs and views only, never the firewall) are one line of at most 80 characters. Sorted by port."""
+    lo, hi = int(port_range[0]), int(port_range[1])
+    if not isinstance(ports, list):
+        raise OpError("ports must be a list of {port, label} ([] = none)")
+    out: dict[int, dict] = {}
+    for p in ports:
+        port, label = (p.get("port"), p.get("label", "")) if isinstance(p, dict) else (p, "")
+        if not isinstance(port, int) or isinstance(port, bool) or not lo <= port <= hi:
+            raise OpError(f"relay port {port!r} is outside {lo}-{hi}")
+        if port in out:
+            raise OpError(f"relay port {port} is listed twice")
+        label = "" if label is None else label
+        if not isinstance(label, str) or not RELAY_LABEL_RE.fullmatch(label):
+            raise OpError(f"relay port {port}: the label must be one line of at most 80 characters")
+        out[port] = {"port": port, "label": label}
+    return [out[k] for k in sorted(out)]
 
 
 def resolve_ipv4(name: str) -> list[str]:
@@ -743,6 +784,10 @@ class Host:
         self.probe_cache: dict[str, dict] = {}       # id -> {"at", "cameras", "enrolled"}
         self.du_cache: dict[str, float] = {}         # id -> used GB (hosts without XFS or ZFS quotas)
         self.work = WorkMonitor(self)                # capacity.work: vLLM and per-instance queues
+        # Axiom Bridge relay (the agent's Relay fills these): {id: {"listening": [port], "errors": {port: why}}}
+        self.relay_status: dict[str, dict] = {}
+        self.relay_connected = False
+        self.on_relay_change: Callable[[], None] | None = None   # the agent reloads its listeners
 
     # -- registry
     @property
@@ -762,6 +807,7 @@ class Host:
             for k in CAMERA_KEYS:
                 rec.setdefault(k, [])
             rec.setdefault("host_ips", {})
+            rec.setdefault("relay_ports", [])   # registries from before the Axiom Bridge relay
         return reg
 
     def save(self, reg: dict) -> None:
@@ -992,7 +1038,7 @@ class Host:
             raise OpError("name is required (one line, at most 100 characters)")
         mode = a.get("mode") or "vpn"
         if mode not in MODES:
-            raise OpError("mode must be vpn or forward")
+            raise OpError("mode must be vpn, forward or bridge")
         # the camera allow-list: the hub's single subnet / public_ip, or the lists; a DNS name sent as public_ip
         # (the hub accepts one for a forward-mode Site) is a camera host name
         public: list[str] = []
@@ -1001,7 +1047,7 @@ class Host:
             (public if _is_ip(p) else names).append(p)
         cams = self._validate_cameras({"subnets": [*_ip_list(a.get("subnet")), *_ip_list(a.get("subnets"))],
                                        "public_ips": public, "hosts": names}, reg)
-        if not any(cams.values()):
+        if not any(cams.values()) and mode != "bridge":   # bridge: its cameras come through the relay (set_relay)
             raise OpError("give at least one camera address: --subnet (the camera LAN or VPN subnet, e.g. 10.20.7.0/24), "
                           "--public-ip (a site router's public IP) or --host (its dynamic DNS name)")
         try:
@@ -1058,7 +1104,7 @@ class Host:
                     raise OpError(f"ZFS dataset {ds} already exists (data kept from an earlier instance {iid}?); "
                                   "destroy it or choose another id")
             zfs = {"datasets": datasets, "instance_quota_gb": inst_q}
-        return {"id": iid, "location_id": loc, "name": name, "mode": mode, **cams, "host_ips": {},
+        return {"id": iid, "location_id": loc, "name": name, "mode": mode, **cams, "host_ips": {}, "relay_ports": [],
                 "quota_gb": quota, "gpu": gpu, "mem_gb": mem_gb, "cpus": cpus, "quota_mode": qm, **zfs,
                 "image": check_image(a.get("image") or self.cfg["image"], self.cfg["image_prefix"]), "hub_url": hub_url,
                 "vlm_url": a.get("vlm_url") or self.cfg["vlm_url"],
@@ -1296,6 +1342,8 @@ class Host:
                     if env.exists() and not self.exe.dry_run:
                         self.exe.write(env, scrub_enroll_token(env.read_text(encoding="utf-8")), 0o600)
         self.probe_cache.pop(iid, None)
+        if not self.exe.dry_run:
+            self._relay_changed()   # its relay listeners close
         kept = f"; data kept in {self.inst_dir(iid)} and {self.rec_dir(iid)}" if keep else "; data removed"
         if problems:
             kept = "; " + "; ".join(problems)
@@ -1360,6 +1408,44 @@ class Host:
         if self.exe.dry_run:
             out["dry_run"] = {"firewall": fw, "steps": list(self.exe.plan)}
         return out
+
+    def set_relay(self, a: dict) -> dict:
+        """Replace the instance's Axiom Bridge listen ports (the hub sends every one it maps: [] closes them all). The
+        firewall is regenerated and loaded with one `nft -f` (each port opened from the instance to its own gateway
+        only); on an nft failure the old rules and registry stay. Then the agent's listeners follow (on_relay_change).
+        Idempotent."""
+        ports = check_relay_ports(a.get("ports"), self.cfg["relay_port_range"])
+        with self.locked():
+            reg = self.load()
+            rec = self._get(reg, a)
+            cur = list(rec.get("relay_ports") or [])
+            path = self.root / "firewall.nft"
+            before = self.firewall_text(reg)
+            rec["relay_ports"] = ports
+            try:
+                fw = self.apply_firewall(reg, resolve=False)
+            except CmdError:
+                rec["relay_ports"] = cur
+                if not self.exe.dry_run:   # nft kept the old ruleset; keep the file (loaded at boot) in step with it
+                    with contextlib.suppress(OSError):
+                        self.exe.write(path, before, 0o600)
+                raise
+            self.save(reg)
+        if not self.exe.dry_run:
+            self._relay_changed()
+        nums = [p["port"] for p in ports]
+        unchanged = " (unchanged)" if cur == ports else ""
+        out = {"detail": f"{rec['id']} relay ports: {', '.join(map(str, nums)) or 'none'}{unchanged}", "instance": self.view(rec)}
+        if self.exe.dry_run:
+            out["dry_run"] = {"firewall": fw, "steps": list(self.exe.plan)}
+        return out
+
+    def _relay_changed(self) -> None:
+        if self.on_relay_change is not None:
+            try:
+                self.on_relay_change()
+            except Exception:
+                log.exception("relay listeners not reloaded")
 
     def restart_instance(self, a: dict) -> dict:
         with self.locked():
@@ -1453,7 +1539,7 @@ class Host:
         ops = {"create_instance": self.create_instance, "delete_instance": self.delete_instance,
                "set_quota": self.set_quota, "set_camera_network": self.set_camera_network,
                "restart_instance": self.restart_instance, "set_resources": self.set_resources,
-               "list": self.list_instances}
+               "set_relay": self.set_relay, "list": self.list_instances}
         if op not in ops:
             raise OpError(f"unknown op {op!r}")
         if not isinstance(args, dict):
@@ -1511,7 +1597,11 @@ class Host:
                 "public_ips": rec.get("public_ips", []), "hosts": rec.get("hosts", []),
                 "host_ips": rec.get("host_ips", {}), "quota_mode": rec.get("quota_mode"),
                 "enroll_pending": rec.get("enroll_pending", False), "mem_gb": rec["mem_gb"], "cpus": rec["cpus"],
-                "image": rec["image"], "network": rec["net_subnet"]}
+                "image": rec["image"], "network": rec["net_subnet"], "gateway": rec.get("gateway"),
+                # Axiom Bridge relay: its listen ports on the gateway, and which ones the agent's listeners hold now
+                "relay": {"ip": rec.get("gateway"), "ports": [p["port"] for p in rec.get("relay_ports") or []],
+                          "listening": list((self.relay_status.get(rec["id"]) or {}).get("listening") or []),
+                          "errors": dict((self.relay_status.get(rec["id"]) or {}).get("errors") or {})}}
 
     def capacity(self) -> dict:
         reg = self.load()
@@ -1540,7 +1630,8 @@ class Host:
         out = {"cpus": os.cpu_count(), "load": load, "ram_gb": ram, "gpus": gpus, "disks": disks,
                "instances": len(insts),
                "allocated": {"quota_gb": sum(r["quota_gb"] for r in insts), "mem_gb": sum(r["mem_gb"] for r in insts),
-                             "cpus": sum(r["cpus"] for r in insts)}}
+                             "cpus": sum(r["cpus"] for r in insts)},
+               "relay": {"port_range": list(self.cfg["relay_port_range"]), "connected": self.relay_connected}}
         work = self.work.snapshot()   # the last collection (WorkMonitor.collect runs beside the heartbeat)
         if work is not None:
             ids = set(reg["instances"])
@@ -1859,6 +1950,7 @@ class Agent:
         self.outbox: collections.deque = collections.deque(maxlen=200)   # results that could not be sent yet
         self._send_lock = asyncio.Lock()
         self._tasks: set[asyncio.Task] = set()
+        self.relay: Relay | None = None   # the Axiom Bridge relay (run_forever starts it)
 
     def hello(self) -> dict:
         return {"t": "hello", "proto": PROTO, "hostname": socket.gethostname(), "version": VERSION,
@@ -1976,6 +2068,8 @@ class Agent:
                 if now - last_du > self.DU_S:
                     last_du = now
                     await asyncio.to_thread(self.host.refresh_du)
+                if self.relay is not None:   # a listener whose gateway was not up yet (boot) binds now; CLI set-relay
+                    await self.relay.reload()
             except Exception:
                 log.exception("maintenance pass failed")
             await asyncio.sleep(self.MAINT_S)
@@ -1987,6 +2081,11 @@ class Agent:
         except ImportError:
             raise SystemExit("agent mode needs websockets>=13 (pip install websockets certifi)")
         ctx = ssl_context(self.hub_url, self.insecure)
+        relay = self.relay = Relay(self.host, self.hub_url, self.token, self.insecure)
+        loop = asyncio.get_running_loop()
+        # set_relay / delete_instance run in a worker thread: the listeners are reloaded in this loop
+        self.host.on_relay_change = lambda: loop.call_soon_threadsafe(relay.schedule_reload)
+        relayed = asyncio.create_task(relay.run_forever())
         maint = asyncio.create_task(self.maintenance())
         work = asyncio.create_task(self.work_loop())
         backoff = 1.0
@@ -2019,6 +2118,370 @@ class Agent:
         finally:
             maint.cancel()
             work.cancel()
+            relayed.cancel()
+
+
+# ---------------------------------------------------------------- Axiom Bridge relay (WS /host-relay)
+#
+# Framing copied from the hub's tunnelproto, so a host needs nothing but this file: JSON text control frames with "t"
+# (unknown types and fields ignored), binary frames = 4-byte big-endian stream id + up to RELAY_CHUNK bytes.
+
+RELAY_CHUNK = 64 * 1024
+RELAY_WINDOW = 512 * 1024          # bytes either side may have unacknowledged per stream (the hub's bridge_window)
+RELAY_OPEN_TIMEOUT_S = 15.0        # the hub answers within its own 10 s
+RELAY_MAX_STREAMS = 256
+_RELAY_HDR = struct.Struct(">I")
+
+
+def relay_frame(frame: dict) -> str:
+    return json.dumps(frame, separators=(",", ":"), ensure_ascii=False)
+
+
+def relay_chunk(sid: int, data: bytes) -> bytes:
+    return _RELAY_HDR.pack(sid) + data
+
+
+def relay_parse(msg: str | bytes) -> dict | tuple[int, bytes] | None:
+    """A control frame (dict), a chunk (stream id, bytes), or None for anything malformed."""
+    if isinstance(msg, (bytes, bytearray, memoryview)):
+        b = bytes(msg)
+        return (_RELAY_HDR.unpack(b[:4])[0], b[4:]) if len(b) >= 4 else None
+    try:
+        f = json.loads(msg)
+    except ValueError:
+        return None
+    return f if isinstance(f, dict) else None
+
+
+def relay_url(hub_url: str) -> str:
+    """The relay socket next to the agent's: wss://hub/host-agent -> wss://hub/host-relay (the same host token)."""
+    u = urllib.parse.urlsplit(hub_url)
+    path = u.path[:-len("/host-agent")] if u.path.endswith("/host-agent") else u.path.rstrip("/")
+    return urllib.parse.urlunsplit((u.scheme, u.netloc, path + "/host-relay", "", ""))
+
+
+def _reset(writer: asyncio.StreamWriter) -> None:
+    """Close a TCP connection with a reset (SO_LINGER 0), as an `abort` means: no FIN, nothing more delivered."""
+    with contextlib.suppress(Exception):
+        sock = writer.get_extra_info("socket")
+        if sock is not None:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("HH" if os.name == "nt" else "ii", 1, 0))
+    with contextlib.suppress(Exception):
+        writer.transport.abort()
+
+
+class RelayWindow:
+    """Bytes this side may still send on one stream; the hub's credit frames give them back."""
+
+    def __init__(self, n: int) -> None:
+        self.n = n
+        self.closed = False
+        self._cond = asyncio.Condition()
+
+    async def take(self, k: int) -> bool:
+        async with self._cond:
+            while self.n < k and not self.closed:
+                await self._cond.wait()
+            self.n -= k
+            return not self.closed
+
+    async def give(self, k: int) -> None:
+        async with self._cond:
+            self.n += k
+            self._cond.notify_all()
+
+    async def close(self) -> None:
+        async with self._cond:
+            self.closed = True
+            self._cond.notify_all()
+
+
+class RelayStream:
+    """One instance connection: its id on /host-relay, its socket, the window towards the hub and the hub's bytes not
+    yet written to the socket."""
+
+    def __init__(self, sid: int, iid: str, port: int, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        self.id, self.iid, self.port, self.reader, self.writer = sid, iid, port, reader, writer
+        self.window = RelayWindow(RELAY_WINDOW)
+        self.inbox: asyncio.Queue = asyncio.Queue()    # bytes, None = the hub half-closed
+        self.inbox_bytes = 0
+        self.answer: asyncio.Future = asyncio.get_running_loop().create_future()   # None = opened, else why refused
+        self.closed = False
+        self.ended = 0                                 # directions finished (FIN passed on)
+        self.tasks: list[asyncio.Task] = []
+
+
+class Relay:
+    """The host's side of the Axiom Bridge (PROTOCOL.md /host-relay): a TCP listener per relay port of each instance on
+    that instance's gateway, and its own WebSocket to the hub's /host-relay (the host token) with its own reconnect
+    loop. A connection from the instance's own address becomes a stream: `open {id, instance, port, peer}` (the host
+    names its listener, never a camera address), then bytes both ways once the hub answers `opened`. Bytes from the hub
+    are credited only after they were written to the instance's socket (drained); bytes to the hub wait for its credit.
+    Another peer, the hub socket being down, a refusal or the hub's `abort` close the connection (a reset)."""
+
+    def __init__(self, host: Host, hub_url: str, token: str, insecure: bool = False,
+                 addr_of: Callable[[dict], tuple[str, str]] | None = None) -> None:
+        self.host, self.url, self.token, self.insecure = host, relay_url(hub_url), token, insecure
+        # (bind address, the only peer allowed) of an instance's listeners: its gateway and its own address
+        self.addr_of = addr_of or (lambda rec: (rec["gateway"], rec["ip"]))
+        self.ws: Any = None
+        self.servers: dict[tuple[str, int], tuple[asyncio.AbstractServer, str]] = {}
+        self.peers: dict[str, str] = {}               # instance id -> the address its connections must come from
+        self.streams: dict[int, RelayStream] = {}
+        self._next_id = 1                             # the host opens the streams on /host-relay: odd ids
+        self._send_lock = asyncio.Lock()
+        self._reload_lock = asyncio.Lock()
+        self._tasks: set[asyncio.Task] = set()
+
+    # -- listeners
+    def schedule_reload(self) -> None:
+        t = asyncio.get_running_loop().create_task(self.reload())
+        self._tasks.add(t)
+        t.add_done_callback(self._tasks.discard)
+
+    async def reload(self) -> None:
+        """Listeners follow the registry's relay_ports: new ones bound, removed ones closed (with their connections).
+        A port that cannot be bound (its gateway not up yet) is retried on the next reload; host.relay_status says."""
+        async with self._reload_lock:
+            reg = await asyncio.to_thread(self.host.load)
+            want: dict[tuple[str, int], str] = {}
+            peers: dict[str, str] = {}
+            for rec in reg["instances"].values():
+                if not rec.get("relay_ports"):
+                    continue
+                bind, peer = self.addr_of(rec)
+                peers[rec["id"]] = peer
+                for p in rec["relay_ports"]:
+                    want[(rec["id"], int(p["port"]))] = bind
+            self.peers = peers
+            for key, (srv, bind) in list(self.servers.items()):
+                if want.get(key) != bind:
+                    srv.close()
+                    del self.servers[key]
+                    for st in [s for s in self.streams.values() if (s.iid, s.port) == key]:
+                        await self._kill(st, "the relay port was closed", tell_hub=True)
+            errors: dict[tuple[str, int], str] = {}
+            for key, bind in want.items():
+                if key in self.servers:
+                    continue
+                try:
+                    srv = await asyncio.start_server(lambda r, w, k=key: self._accept(k, r, w), host=bind, port=key[1],
+                                                     reuse_address=True)
+                except OSError as e:
+                    errors[key] = (e.strerror or str(e))[:200]
+                    continue
+                self.servers[key] = (srv, bind)
+            status: dict[str, dict] = {}
+            for iid, port in sorted(want):
+                s = status.setdefault(iid, {"listening": [], "errors": {}})
+                if (iid, port) in self.servers:
+                    s["listening"].append(port)
+                else:
+                    s["errors"][str(port)] = errors.get((iid, port), "not listening")
+            self.host.relay_status = status
+            for (iid, port), why in errors.items():
+                log.warning("relay %s:%s not listening on %s: %s", iid, port, want[(iid, port)], why)
+
+    def listeners(self) -> list[dict]:
+        out = []
+        for iid, s in sorted(self.host.relay_status.items()):
+            out += [{"instance": iid, "port": p, "ok": True, "error": None} for p in s.get("listening") or []]
+            out += [{"instance": iid, "port": int(p), "ok": False, "error": why} for p, why in (s.get("errors") or {}).items()]
+        return out
+
+    def _new_id(self) -> int:
+        while True:
+            sid = self._next_id
+            self._next_id = (self._next_id + 2) & 0xFFFFFFFF or 1
+            if sid not in self.streams:
+                return sid
+
+    # -- one instance connection
+    async def _accept(self, key: tuple[str, int], reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        iid, port = key
+        peer = writer.get_extra_info("peername")
+        peer_ip = peer[0] if isinstance(peer, tuple) and peer else None
+        if peer_ip != self.peers.get(iid):
+            log.warning("relay %s:%s: refused a connection from %s (not the instance)", iid, port, peer_ip)
+            _reset(writer)
+            return
+        if self.ws is None or len(self.streams) >= RELAY_MAX_STREAMS:
+            _reset(writer)   # the hub cannot be reached now: the instance retries like with any unreachable camera
+            return
+        st = RelayStream(self._new_id(), iid, port, reader, writer)
+        self.streams[st.id] = st
+        try:
+            await self.send({"t": "open", "id": st.id, "instance": iid, "port": port, "peer": peer_ip})
+            why = await asyncio.wait_for(asyncio.shield(st.answer), RELAY_OPEN_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            await self._kill(st, "no answer from the hub", tell_hub=True)
+            return
+        except Exception:
+            await self._kill(st, "the relay socket went away", tell_hub=False)
+            return
+        if why is not None or st.closed:
+            log.info("relay %s:%s: the hub refused the stream: %s", iid, port, why)
+            await self._kill(st, why or "refused", tell_hub=False)
+            return
+        st.tasks = [asyncio.create_task(self._up(st)), asyncio.create_task(self._down(st))]
+
+    async def _up(self, st: RelayStream) -> None:
+        """Instance → hub, under the hub's credit; the instance's FIN becomes `end` after the last chunk."""
+        try:
+            while True:
+                data = await st.reader.read(RELAY_CHUNK)
+                if not data:
+                    break
+                if not await st.window.take(len(data)) or st.closed:
+                    return
+                await self.send_bytes(relay_chunk(st.id, data))
+            await self.send({"t": "end", "id": st.id})
+            self._ended(st)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            await self._kill(st, f"instance connection: {type(e).__name__}", tell_hub=True)
+
+    async def _down(self, st: RelayStream) -> None:
+        """Hub → instance; each chunk is credited once it is drained into the socket; the hub's `end` is a FIN."""
+        try:
+            while True:
+                data = await st.inbox.get()
+                if data is None:
+                    break
+                st.writer.write(data)
+                await st.writer.drain()
+                st.inbox_bytes -= len(data)
+                await self.send({"t": "credit", "id": st.id, "bytes": len(data)})
+            if st.writer.can_write_eof():
+                st.writer.write_eof()
+            self._ended(st)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            await self._kill(st, f"instance connection: {type(e).__name__}", tell_hub=True)
+
+    def _ended(self, st: RelayStream) -> None:
+        st.ended += 1
+        if st.ended == 2 and not st.closed:   # both directions closed and drained: a normal close
+            st.closed = True
+            self.streams.pop(st.id, None)
+            with contextlib.suppress(Exception):
+                st.writer.close()
+
+    async def _kill(self, st: RelayStream, reason: str, tell_hub: bool) -> None:
+        if st.closed:
+            return
+        st.closed = True
+        self.streams.pop(st.id, None)
+        await st.window.close()
+        if not st.answer.done():
+            st.answer.set_result(reason)
+        if tell_hub and self.ws is not None:
+            with contextlib.suppress(Exception):
+                await self.send({"t": "abort", "id": st.id, "reason": reason[:200]})
+        _reset(st.writer)
+        me = asyncio.current_task()
+        for t in st.tasks:
+            if t is not me and not t.done():
+                t.cancel()
+
+    # -- the hub socket
+    async def send(self, frame: dict) -> None:
+        ws = self.ws
+        if ws is None:
+            raise ConnectionError("the relay socket is down")
+        async with self._send_lock:
+            await ws.send(relay_frame(frame))
+
+    async def send_bytes(self, data: bytes) -> None:
+        ws = self.ws
+        if ws is None:
+            raise ConnectionError("the relay socket is down")
+        async with self._send_lock:
+            await ws.send(data)
+
+    async def handle(self, raw: str | bytes) -> None:
+        f = relay_parse(raw)
+        if f is None:
+            return
+        if isinstance(f, tuple):
+            sid, data = f
+            st = self.streams.get(sid)
+            if st is None or st.closed:
+                return   # a stream just closed: its last chunks are dropped
+            st.inbox_bytes += len(data)
+            if st.inbox_bytes > RELAY_WINDOW + RELAY_CHUNK:
+                await self._kill(st, "the hub sent more than the window", tell_hub=True)
+                return
+            st.inbox.put_nowait(data)
+            return
+        t, sid = f.get("t"), f.get("id")
+        st = self.streams.get(sid) if isinstance(sid, int) and not isinstance(sid, bool) else None
+        if t == "opened" and st is not None and not st.answer.done():
+            st.answer.set_result(None)
+        elif t == "abort" and st is not None:
+            await self._kill(st, str(f.get("reason") or "the hub aborted it"), tell_hub=False)
+        elif t == "end" and st is not None:
+            st.inbox.put_nowait(None)
+        elif t == "credit" and st is not None:
+            n = f.get("bytes")
+            if isinstance(n, int) and not isinstance(n, bool) and 0 < n <= RELAY_WINDOW:
+                await st.window.give(n)
+        elif t == "ping":
+            await self.send({"t": "pong", "ts": f.get("ts")})
+
+    async def serve(self, ws: Any) -> None:
+        """One connection: hello (with the listeners), then frames until it closes; its streams end with it."""
+        self.ws = ws
+        self.host.relay_connected = True
+        try:
+            await self.send({"t": "hello", "proto": PROTO, "version": VERSION, "listeners": self.listeners()})
+            async for raw in ws:
+                await self.handle(raw)
+        finally:
+            self.ws = None
+            self.host.relay_connected = False
+            for st in list(self.streams.values()):
+                await self._kill(st, "the relay socket closed", tell_hub=False)
+
+    async def run_forever(self) -> None:
+        """Listeners up, then the hub socket with the same backoff as the agent's (401/403: every 5 minutes)."""
+        try:
+            from websockets.asyncio.client import connect
+            from websockets.exceptions import InvalidStatus
+        except ImportError:
+            raise SystemExit("agent mode needs websockets>=13 (pip install websockets certifi)")
+        ctx = ssl_context(self.url, self.insecure)
+        backoff = 1.0
+        while True:
+            started = time.monotonic()
+            try:
+                await self.reload()
+                async with connect(self.url, additional_headers={"Authorization": f"Bearer {self.token}"},
+                                   ssl=ctx, open_timeout=20, ping_interval=20, ping_timeout=40, close_timeout=5,
+                                   max_size=RELAY_CHUNK + 1024, user_agent_header=f"axiom-host/{VERSION}") as ws:
+                    log.info("relay connected to %s", self.url)
+                    await self.serve(ws)
+                log.info("hub closed the relay connection")
+            except InvalidStatus as e:
+                code = e.response.status_code
+                if code in (401, 403):
+                    log.error("hub refused the host token on the relay (HTTP %s); retrying in 5 min", code)
+                    await asyncio.sleep(300)
+                    continue
+                log.warning("hub answered HTTP %s on the relay", code)
+            except asyncio.CancelledError:
+                raise
+            except (OSError, asyncio.TimeoutError) as e:
+                log.warning("hub relay unreachable: %s", e)
+            except Exception as e:
+                log.warning("relay connection lost: %s: %s", type(e).__name__, e)
+            if time.monotonic() - started > 60:
+                backoff = 1.0
+            delay = random.uniform(0, backoff)   # full jitter
+            backoff = min(backoff * 2, 60.0)
+            await asyncio.sleep(max(delay, 0.5))
 
 
 # ---------------------------------------------------------------- CLI
@@ -2102,6 +2565,12 @@ def main(argv: list[str] | None = None) -> int:
     sr.add_argument("--mem-gb", type=float, help="memory limit in GB (docker --memory, no swap), 2-512")
     sr.add_argument("--dry-run", action="store_true", help="print the new docker run; change nothing")
 
+    rl = sub.add_parser("set-relay", help="replace an instance's Axiom Bridge listen ports (the hub sends them; for repairs)")
+    rl.add_argument("--id", required=True)
+    rl.add_argument("--port", action="append", help="PORT or PORT:LABEL, inside relay_port_range (repeatable)")
+    rl.add_argument("--clear", action="store_true", help="no relay ports at all")
+    rl.add_argument("--dry-run", action="store_true", help="print the new ruleset; change nothing")
+
     sub.add_parser("list")
     sub.add_parser("capacity")
     w = sub.add_parser("work", help="what the GPUs are working through (capacity.work): vLLM and each instance's queues")
@@ -2153,6 +2622,22 @@ def main(argv: list[str] | None = None) -> int:
             _print(host.restart_instance({"id": ns.id, "recreate": ns.recreate, "image": ns.image}) | _plan(host))
         elif ns.cmd == "set-resources":
             _print(host.set_resources({"id": ns.id, "cpus": ns.cpus, "mem_gb": ns.mem_gb}))
+        elif ns.cmd == "set-relay":
+            if not ns.port and not ns.clear:
+                raise OpError("give --port (repeatable) or --clear")
+            ports = []
+            for v in ns.port or []:
+                num, _, label = v.partition(":")
+                if not num.strip().isdigit():
+                    raise OpError(f"--port {v}: PORT or PORT:LABEL")
+                ports.append({"port": int(num), "label": label.strip()})
+            out = host.set_relay({"id": ns.id, "ports": ports})
+            fw = out.pop("dry_run", {}).get("firewall")
+            _print(out)
+            if fw:
+                _print("\n# dry run: nothing changed. The ruleset this would load:\n" + fw)
+            elif not host.exe.dry_run:
+                print("the running agent opens the listeners within a minute", file=sys.stderr)
         elif ns.cmd == "list":
             _print(host.list_instances()["instances"])
         elif ns.cmd == "capacity":

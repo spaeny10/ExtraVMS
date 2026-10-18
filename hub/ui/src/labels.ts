@@ -7,6 +7,8 @@ export const KIND_LABEL: Record<string, string> = {
   site_link_down: "Site link down",
   // the server's database / data disk can't be written: events are not being stored
   storage_failing: "Storage failing",
+  // an Axiom Bridge at the Site stopped heartbeating: the cameras behind it are not recorded
+  bridge_offline: "Bridge offline",
   // hub administrators only: a central recording host stopped heartbeating
   host_offline: "Central host offline",
   // hub administrators only: the CoverageMap monthly unit budget is used up (automatic coverage refreshes stopped)

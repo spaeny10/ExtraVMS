@@ -22,7 +22,7 @@ from . import find as find_mod
 from . import camera_groups as groups_mod
 from . import layouts as layouts_mod
 from . import camweb, site_ask, talkdown_voice, viewing
-from . import central_cameras, coverage, geocode, hosts, lan_certs, security, soc, soc_reports, stills, telemetry
+from . import bridges, bridges_api, central_cameras, coverage, geocode, hosts, lan_certs, security, soc, soc_reports, stills, telemetry
 from fastapi.responses import StreamingResponse
 from .agents import registry
 from .config import settings
@@ -64,6 +64,7 @@ async def _sweeper() -> None:
         try:
             await registry.sweep()
             await hosts.registry.sweep()
+            await bridges.registry.sweep()   # Axiom Bridges: silent ones closed, bridge_offline opened
             central_cameras.sweep()   # central instances whose camera addresses wait for their host
             alerts.expire_event_alerts()
             db.run(sa.delete(db.sessions).where(db.sessions.c.expires_at < time.time()))
@@ -1077,8 +1078,12 @@ def _servers_of(u: dict, loc: dict) -> set[str]:
     return {s["id"] for s in auth.visible_sites(u, loc["org_id"]) if s.get("location_id") == loc["id"]}
 
 
-def _alert_rows(u: dict, org: str, open: bool, limit: int, within: set[str] | None = None) -> list[dict]:
+def _alert_rows(u: dict, org: str, open: bool, limit: int, within: set[str] | None = None, within_locs: set[str] | None = None) -> list[dict]:
     site_ids = [s["id"] for s in auth.visible_sites(u, org) if within is None or s["id"] in within]
+    # Axiom Bridge rows (bridge_offline: site_id = the bridge) of the Sites this user sees (within_locs: just these)
+    seen = {loc["id"] for loc in auth.visible_locations(u, org)}
+    bridged = bridges.visible_ids(org, seen if within_locs is None else seen & within_locs)
+    site_ids += list(bridged)
     if open:
         rows = alerts.open_for_org(org, site_ids, limit)
     else:
@@ -1086,21 +1091,22 @@ def _alert_rows(u: dict, org: str, open: bool, limit: int, within: set[str] | No
     names = {s["id"]: s["name"] for s in db.rows(sa.select(db.sites.c.id, db.sites.c.name).where(db.sites.c.org_id == org))}
     tags = _location_tags(org)
     for r in rows:
-        r["site_name"] = names.get(r["site_id"], r["site_id"])
-        r |= tags.get(r["site_id"], {"location_id": None, "location_name": None})
+        b = bridged.get(r["site_id"])
+        r["site_name"] = b["name"] if b else names.get(r["site_id"], r["site_id"])
+        r |= tags.get(f"l:{b['location_id']}" if b else r["site_id"], {"location_id": None, "location_name": None})
     return rows
 
 
 @app.get("/api/alerts")
 async def list_alerts(org: str, open: bool = True, limit: int = Query(200, le=1000), location: str | None = None, u: dict = Depends(user)):
     auth.require_role(u, org, "viewer")
-    return _alert_rows(u, org, open, limit, _location_scope(u, org, location))
+    return _alert_rows(u, org, open, limit, _location_scope(u, org, location), {location} if location else None)
 
 
 @app.get("/api/locations/{location_id}/alerts")
 async def location_alerts(location_id: str, open: bool = True, limit: int = Query(200, le=1000), u: dict = Depends(user)):
     loc, _ = auth.location_access(u, location_id)
-    return _alert_rows(u, loc["org_id"], open, limit, _servers_of(u, loc))
+    return _alert_rows(u, loc["org_id"], open, limit, _servers_of(u, loc), {loc["id"]})
 
 
 @app.get("/api/locations/{location_id}/events")
@@ -1503,7 +1509,9 @@ async def ack_alert(alert_id: int, u: dict = Depends(user)):
         raise HTTPException(404)
     auth.require_role(u, a["org_id"], "viewer")
     see = auth.scope_filter(u, a["org_id"])
-    if see is not None and not see({"site_id": a["site_id"]}):
+    # a bridge_offline row names the bridge, not a server: its Site (detail.location_id) decides
+    where = {"location_id": (a.get("detail") or {}).get("location_id")} if a["kind"] == bridges.BRIDGE_ALERT else {"site_id": a["site_id"]}
+    if see is not None and not see(where):
         raise HTTPException(404)   # a server on a Site this member isn't granted: as if it didn't exist
     alerts.ack(alert_id, u["id"])
     return {"ok": True}
@@ -1685,7 +1693,7 @@ async def all_central(include_deleted: bool = False, u: dict = Depends(user)):
 
 class CentralIn(BaseModel):
     host_id: str | None = Field(None, max_length=24)     # None = the hub picks the host with the most room
-    mode: Literal["vpn", "forward"] = "vpn"
+    mode: Literal["vpn", "forward", "bridge"] = "vpn"   # bridge: the cameras are reached through an Axiom Bridge (bridges.py)
     subnet: str | None = Field(None, max_length=43)      # VPN mode: default 10.20.<site number>.0/24
     public_ip: str | None = Field(None, max_length=253)  # port-forward mode: the BR1's public address
     quota_gb: int = Field(ge=10, le=1_000_000)   # the host agent refuses less than 10 GB
@@ -2394,6 +2402,18 @@ async def host_agent(ws: WebSocket):
     await hosts.registry.serve(ws)
 
 
+@app.websocket("/bridge")
+async def bridge_socket(ws: WebSocket):
+    """Axiom Bridges at Sites (bridges.py): Enroll <code> once, then Bearer <device token>; carries TCP streams to cameras."""
+    await bridges.registry.serve_bridge(ws)
+
+
+@app.websocket("/host-relay")
+async def host_relay(ws: WebSocket):
+    """A central host's relay socket (bridges.py; the /host-agent token): its instances' connections to bridged cameras."""
+    await bridges.registry.serve_relay(ws)
+
+
 @app.get("/s/{site_id}/api/turn")
 async def site_turn(site_id: str, request: Request):
     """ICE servers for a browser watching this site through the hub (answered here, not by the site)."""
@@ -2440,6 +2460,7 @@ async def telemetry_live_stats(server: str = Query(min_length=1, max_length=64),
 
 app.include_router(vlm_proxy.router)
 app.include_router(soc_api.router)   # SOC: staff, monitoring/arming, contacts, procedures
+app.include_router(bridges_api.router)   # Axiom Bridge: a Site's bridges, enrollment codes, bridged cameras
 app.include_router(proxy.router)
 app.include_router(camweb.router)   # camera web pages: sessions, Caddy's on-demand TLS ask
 

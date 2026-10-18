@@ -6,7 +6,8 @@
  * Instances are allocated here only ("Allocate instance…" on a host: customer, Site, connection, storage, camera limit)
  * and changed here (storage, CPU/memory, camera limit, Site networks, removal); a Site's page shows its instance
  * read-only. Once allocated, the Site's admins add cameras on the instance's console and their addresses open on its
- * firewall by themselves.
+ * firewall by themselves. An "Axiom Bridge" connection needs no address here: the Site's admins enroll the bridge and map
+ * its cameras on the Site's Servers tab (site/BridgesCard.tsx).
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { confirmDialog, promptDialog, toast } from "@site/ui";
@@ -56,7 +57,7 @@ export function HostsPage() {
                 <td>{c.org_name ?? c.org_id}</td>
                 <td>{c.host_name ?? c.host_id}{c.host_online === false ? <span className="muted small"> (offline)</span> : null}</td>
                 <td className="small" data-label="Network" title={c.camera_network?.sync_error ? `Camera addresses not on the host: ${c.camera_network.sync_error}` : undefined}>
-                  {c.mode === "vpn" ? `VPN · ${c.subnet ?? "—"}` : `Port forward · ${c.public_ip ?? "—"}`}
+                  {c.mode === "vpn" ? `VPN · ${c.subnet ?? "—"}` : c.mode === "bridge" ? "Axiom Bridge" : `Port forward · ${c.public_ip ?? "—"}`}
                   {c.camera_network?.pending ? <span className="bad"> · camera addresses not applied yet</span> : null}</td>
                 <td className="small" data-label="GPU">{c.gpu != null ? `${c.gpu}${c.gpu_name ? ` · ${shortGpu(c.gpu_name)}` : ""}` : "CPU"}
                   {(c.cpus != null || c.mem_gb != null) && <span className="muted"> · {resourcesText(c.cpus, c.mem_gb)}</span>}</td>
@@ -240,12 +241,16 @@ function AllocateDialog({ host, central, onClose, onDone }: { host: Host; centra
           <div className="segmented small-seg">
             <button type="button" className={mode === "vpn" ? "active" : ""} onClick={() => setMode("vpn")}>SpeedFusion VPN</button>
             <button type="button" className={mode === "forward" ? "active" : ""} onClick={() => setMode("forward")}>Port forwarding</button>
+            <button type="button" className={mode === "bridge" ? "active" : ""} onClick={() => setMode("bridge")}>Axiom Bridge</button>
           </div>
-          <span className="muted small">{mode === "vpn" ? "Encrypted, no camera port exposed. The BR1's LAN gets its own subnet: the Site's camera network." : "No VPN to run, but video and ONVIF travel unencrypted; forwards are locked to the datacenter's IP."}</span>
+          <span className="muted small">{mode === "vpn" ? "Encrypted, no camera port exposed. The BR1's LAN gets its own subnet: the Site's camera network."
+            : mode === "bridge" ? "No way in needed (Starlink, cellular): a PC at the Site runs the Axiom Bridge, and the Site's admins map its cameras on the Site page."
+            : "No VPN to run, but video and ONVIF travel unencrypted; forwards are locked to the datacenter's IP."}</span>
         </div>
         {mode === "vpn"
           ? <label className="field"><span>Camera network (the BR1's LAN)</span><input value={subnet} placeholder="10.20.7.0/24" onChange={(e) => setSubnet(e.target.value)} /></label>
-          : <label className="field"><span>The Site router's public IP or DNS name</span><input value={publicIp} placeholder="e.g. 93.184.216.34 or yard.dyndns.example.net" onChange={(e) => setPublicIp(e.target.value)} /></label>}
+          : mode === "forward" ? <label className="field"><span>The Site router's public IP or DNS name</span><input value={publicIp} placeholder="e.g. 93.184.216.34 or yard.dyndns.example.net" onChange={(e) => setPublicIp(e.target.value)} /></label>
+          : null}
         <label className="field"><span>Storage (GB) {room != null && <span className="muted small">room on this host: {fmtGB(Math.max(0, room))}</span>}</span>
           <input inputMode="numeric" value={quota} onChange={(e) => setQuota(e.target.value.replace(/[^0-9]/g, ""))} /></label>
         <label className="field"><span>Camera limit <span className="muted small">blank = no limit</span></span>

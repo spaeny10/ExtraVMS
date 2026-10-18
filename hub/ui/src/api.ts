@@ -64,7 +64,8 @@ export type Server = {
 export type CentralUsage = { id: string; mode: CentralMode; quota_gb: number; used_gb: number | null; site_number: number | null; state: string };
 
 // ---- Central recording (hub/hub/hosts.py): datacenter hosts and the per-Site server instances on them
-export type CentralMode = "vpn" | "forward";
+/** vpn: SpeedFusion; forward: port forwards on the Site's router; bridge: through an Axiom Bridge at the Site (hub bridges.py). */
+export type CentralMode = "vpn" | "forward" | "bridge";
 /** `instances`: central instances assigned to the GPU for YOLO; `verify_q`: their verify queues summed (agent 0.2.0+). */
 export type HostGpu = { index: number; name: string; mem_total_mb?: number; mem_used_mb?: number; util?: number; instances?: number; verify_q?: number | null };
 /**
@@ -129,6 +130,33 @@ export type CentralInstance = {
 };
 /** Read-only on a Site page; `can_manage` (hub administrators) shows the link to the Hosts page, where instances are managed. */
 export type LocationCentral = { instances: CentralInstance[]; can_provision?: boolean; can_manage?: boolean };
+/** An Axiom Bridge at a Site (hub bridges.py). lan / caps / agent_ip / arch: the Site's admins only. */
+export type SiteBridge = {
+  id: string; name: string; location_id: string; online: boolean; last_seen_at: number | null; created_at: number; version: string | null;
+  os: string | null; hostname: string | null; streams: number; uptime_s: number | null; bytes_up: number | null; bytes_down: number | null;
+  arch?: string | null; lan?: { if: string | null; addr: string }[]; caps?: string[]; agent_ip?: string | null;
+};
+/** A camera port carried by the bridge; `listen` (the Site's admins): the instance's relay port for it. */
+export type BridgePort = { port: number; label: string | null; listen?: number };
+export type BridgeProbe = { at: number; ports: { port: number; ok: boolean; ms: number | null; error: string | null }[] };
+/** A camera behind a bridge, relayed to the Site's central instance. host / instance_id / applied_at: the Site's admins only. */
+export type BridgeTarget = {
+  id: string; bridge_id: string; name: string; enabled: boolean; camera_id: string | null; ports: BridgePort[];
+  /** the bridge's last heartbeat: camera port -> why it could not connect */
+  errors: Record<string, string>; probe: BridgeProbe | null; host?: string; instance_id?: string; applied_at?: number | null;
+};
+export type BridgeCode = { id: string; name: string | null; created_at: number; created_by_email: string | null; expires_at: number };
+/** The code itself is in this answer only (the hub keeps a hash). */
+export type NewBridgeCode = BridgeCode & { code: string; install: string; hub_url: string };
+/** The Site's central instance as the bridges see it: its relay address (gateway) and listeners on its host. */
+export type BridgeInstance = {
+  id: string; name: string; mode: CentralMode; server_id: string | null; gateway: string | null; listening: number[];
+  relay_errors: Record<string, string>; host_online: boolean; relay_connected: boolean;
+};
+/** GET /api/locations/{id}/bridges: everyone who sees the Site; codes / hub_url / instance for its admins (can_manage). */
+export type SiteBridges = { bridges: SiteBridge[]; targets: BridgeTarget[]; can_manage: boolean; codes?: BridgeCode[]; hub_url?: string; instance?: BridgeInstance | null };
+export type BridgeApplied = { camera_id: string; public_host: string; public_rtsp_port: number; public_onvif_port: number; public_replay_port: number | null; public_web_port: number | null };
+export type BridgeTargetBody = { name?: string; host?: string; ports?: number[]; camera_id?: string | null; enabled?: boolean };
 export type CentralBody = { host_id?: string | null; mode: CentralMode; subnet?: string | null; public_ip?: string | null; quota_gb: number; gpu?: number | null; name?: string | null; camera_limit?: number | null };
 /**
  * `urls`: candidate base URLs of the server itself (`local` = only works from a browser on that machine, e.g.
@@ -495,6 +523,26 @@ export const api = {
   /** purge also deletes the recordings on the host; force forgets the instance at the hub when its host can't. */
   removeCentral: (loc: string, ci: string, o: { purge?: boolean; force?: boolean } = {}) =>
     req<CentralInstance>(`/api/locations/${loc}/central/${ci}?${qs({ purge: o.purge || undefined, force: o.force || undefined })}`, { method: "DELETE" }),
+  // Axiom Bridge (hub bridges.py): status for everyone who sees the Site; codes, bridges and bridged cameras for its admins
+  siteBridges: (loc: string) => req<SiteBridges>(`/api/locations/${loc}/bridges`),
+  newBridgeCode: (loc: string, name: string | null) => req<NewBridgeCode>(`/api/locations/${loc}/bridges/codes`, json("POST", { name })),
+  revokeBridgeCode: (loc: string, id: string) => req(`/api/locations/${loc}/bridges/codes/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  renameBridge: (loc: string, id: string, name: string) => req<SiteBridge>(`/api/locations/${loc}/bridges/${encodeURIComponent(id)}`, json("PATCH", { name })),
+  rotateBridge: (loc: string, id: string) => req(`/api/locations/${loc}/bridges/${encodeURIComponent(id)}/rotate-token`, { method: "POST" }),
+  /** Disconnects the bridge for good and unmaps its cameras. */
+  retireBridge: (loc: string, id: string) => req<{ ok: boolean; relay_pending: string[] }>(`/api/locations/${loc}/bridges/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  mapBridgeCamera: (loc: string, bridge: string, b: BridgeTargetBody & { name: string; host: string }) =>
+    req<BridgeTarget>(`/api/locations/${loc}/bridges/${encodeURIComponent(bridge)}/targets`, json("POST", b)),
+  updateBridgeCamera: (loc: string, bridge: string, t: string, b: BridgeTargetBody) =>
+    req<BridgeTarget>(`/api/locations/${loc}/bridges/${encodeURIComponent(bridge)}/targets/${encodeURIComponent(t)}`, json("PATCH", b)),
+  unmapBridgeCamera: (loc: string, bridge: string, t: string) =>
+    req<{ ok: boolean; relay_pending: string | null }>(`/api/locations/${loc}/bridges/${encodeURIComponent(bridge)}/targets/${encodeURIComponent(t)}`, { method: "DELETE" }),
+  /** Test: the bridge opens a TCP connection to each of the camera's ports. */
+  testBridgeCamera: (loc: string, bridge: string, t: string) =>
+    req<BridgeProbe>(`/api/locations/${loc}/bridges/${encodeURIComponent(bridge)}/targets/${encodeURIComponent(t)}/test`, { method: "POST" }),
+  /** Apply to camera: the instance's camera gets the relay address and ports (its password and other settings stay). */
+  applyBridgeCamera: (loc: string, bridge: string, t: string, camera_id: string | null) =>
+    req<BridgeApplied>(`/api/locations/${loc}/bridges/${encodeURIComponent(bridge)}/targets/${encodeURIComponent(t)}/apply`, json("POST", { camera_id })),
   // SOC monitoring per Site: config for customer admins and SOC supervisors, arm/disarm now for operators of either side
   coverage: (loc: string) => req<SiteCoverage>(`/api/locations/${loc}/coverage`),
   refreshCoverage: (loc: string) => req<SiteCoverage>(`/api/locations/${loc}/coverage/refresh`, { method: "POST" }),
