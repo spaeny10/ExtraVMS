@@ -48,6 +48,18 @@ class TargetIn(BaseModel):
     host: str = Field(min_length=1, max_length=64)                      # the camera's LAN IPv4 address
     ports: list[int] | None = Field(None, max_length=bridges.MAX_PORTS)  # None = 554, 80, 555
     camera_id: str | None = Field(None, max_length=64)                  # the instance's camera (Apply to camera)
+    # the one-step Add: also create the camera on the instance with this login (passed through, never stored here)
+    login: "CameraLogin | None" = None
+
+
+class CameraLogin(BaseModel):
+    username: str = Field("admin", min_length=1, max_length=64)
+    password: str = Field("", max_length=128)
+    main_path: str | None = Field(None, max_length=200)
+    sub_path: str | None = Field(None, max_length=200)
+
+
+TargetIn.model_rebuild()
 
 
 class TargetPatch(BaseModel):
@@ -119,14 +131,36 @@ async def retire_bridge(location_id: str, bridge_id: str, u: dict = Depends(user
 
 @router.post("/api/locations/{location_id}/bridges/{bridge_id}/targets")
 async def create_target(location_id: str, bridge_id: str, body: TargetIn, u: dict = Depends(user)):
-    """Map a camera behind the bridge to the Site's central instance (listen ports on its host; 502 if the host can't)."""
+    """Map a camera behind the bridge to the Site's central instance (listen ports on its host; 502 if the host can't).
+    With `login`, also add it to the instance's recording in the same step (add_to_instance); the mapping stays when
+    that part fails, and the answer says why (`add_error`) so it can be retried with Apply to camera."""
     loc = _site_admin(u, location_id)
     try:
         b = bridges.site_bridge(location_id, bridge_id)
         t = await bridges.create_target(loc, b, body.name, body.host, body.ports, body.camera_id, u)
     except (bridges.Refused, hosts.HostError) as e:
         raise _err(e)
-    return bridges.target_out(t, b, True)
+    out = bridges.target_out(t, b, True)
+    if body.login is not None:
+        try:
+            out["camera_id"] = await bridges.add_to_instance(loc, b, t, body.login.model_dump(), u)
+            out["added"] = True
+        except (bridges.Refused, bridges.BridgeError) as e:
+            out["added"], out["add_error"] = False, getattr(e, "detail", None) or str(e)
+    return out
+
+
+@router.post("/api/locations/{location_id}/bridges/{bridge_id}/targets/{target_id}/add")
+async def add_target_camera(location_id: str, bridge_id: str, target_id: str, body: CameraLogin, u: dict = Depends(user)):
+    """Add an already mapped camera to the instance's recording (the one-step Add's second half, for a camera mapped
+    without a login): created at its LAN address with the relay address filled in; the password passed through."""
+    loc = _site_admin(u, location_id)
+    try:
+        b = bridges.site_bridge(location_id, bridge_id)
+        t = bridges.site_target(location_id, bridge_id, target_id)
+        return {"camera_id": await bridges.add_to_instance(loc, b, t, body.model_dump(), u)}
+    except (bridges.Refused, bridges.BridgeError) as e:
+        raise _err(e)
 
 
 @router.patch("/api/locations/{location_id}/bridges/{bridge_id}/targets/{target_id}")

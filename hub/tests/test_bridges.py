@@ -593,6 +593,69 @@ def test_relay_address_needs_this_instances_listen_ports(world):
     world.root.delete(f"/api/locations/{world.farm['id']}/bridges/{bid}")
 
 
+def test_a_bridged_camera_is_added_by_its_lan_address(world):
+    """Shawn, 2026-10-18: the instance's New camera dialog with the camera's LAN address (no outside address) was
+    refused as "a private address and this Site has no camera network". Mapped on the bridge, the hub now fills in the
+    relay address and ports on the way through; not mapped, it says to map it first."""
+    bid, _ = _new_bridge(world, name="LAN add PC")
+    t = _target(world, bid, host="192.168.1.70", name="Yard").json()
+    rtsp, onvif, replay = (p["listen"] for p in t["ports"])
+    cam = {"id": "yard", "name": "Yard", "host": "192.168.1.70", "onvif_port": 80, "rtsp_port": 554, "username": "admin",
+           "password": CAM_PW, "main_path": "/main", "sub_path": "/sub", "public_host": ""}
+    r = world.root.put(f"/s/{world.sid}/api/cameras/yard", json=cam)
+    assert r.status_code == 200, r.text
+    put = world.site.st["puts"][-1]
+    assert put["host"] == "192.168.1.70" and put["had_password"] is True    # the camera itself is as typed
+    assert (put["public_host"], put["public_rtsp_port"], put["public_onvif_port"], put["public_replay_port"]) == (GATEWAY, rtsp, onvif, replay)
+    # an outside address set by hand is left alone (and checked as before)
+    r = world.root.put(f"/s/{world.sid}/api/cameras/yard", json={**cam, "public_host": "192.168.1.70"})
+    assert r.status_code == 400
+    # a LAN address the bridge doesn't carry: told to map it first
+    r = world.root.put(f"/s/{world.sid}/api/cameras/other", json={**cam, "id": "other", "host": "192.168.1.71"})
+    assert r.status_code == 400 and "Add a camera" in r.json()["detail"]
+    world.site.st["cameras"].pop("yard", None)
+    world.root.delete(f"/api/locations/{world.farm['id']}/bridges/{bid}")
+
+
+def test_one_step_add_maps_and_adds_the_camera(world):
+    """Add a camera… with a login: mapped on the bridge and created on the instance, relay address filled in, the
+    password passed through to the instance only (never in the hub's answer, database or audit)."""
+    bid, _ = _new_bridge(world, name="One step PC")
+    r = world.users["farmadmin"].post(f"/api/locations/{world.farm['id']}/bridges/{bid}/targets",
+                                      json={"name": "North Gate", "host": "192.168.1.80", "login": {"username": "admin", "password": CAM_PW}})
+    assert r.status_code == 200, r.text
+    t = r.json()
+    assert t["added"] is True and t["camera_id"] == "north_gate" and CAM_PW not in r.text
+    rtsp, onvif, replay = (p["listen"] for p in t["ports"])
+    put = world.site.st["puts"][-1]
+    assert put["had_password"] is True and put["host"] == "192.168.1.80" and put["name"] == "North Gate"
+    assert (put["public_host"], put["public_rtsp_port"], put["public_onvif_port"], put["public_replay_port"]) == (GATEWAY, rtsp, onvif, replay)
+    assert world.site.st["cameras"]["north_gate"]["password"] == CAM_PW
+    row = db.one(sa.select(db.bridge_targets).where(db.bridge_targets.c.id == t["id"]))
+    assert row["camera_id"] == "north_gate" and row["applied_at"]
+    assert CAM_PW not in json.dumps(db.rows(sa.select(db.audit_log)), default=str)
+    # the same address again: mapping refused (already bridged); a second camera at a new address that the instance
+    # already has under another target: the add part says so and the mapping stays
+    r = world.users["farmadmin"].post(f"/api/locations/{world.farm['id']}/bridges/{bid}/targets",
+                                      json={"name": "Again", "host": "192.168.1.80", "login": {"username": "admin", "password": "x"}})
+    assert r.status_code == 409
+    world.site.st["cameras"]["preexisting"] = {**world.site.st["cameras"]["north_gate"], "id": "preexisting", "host": "192.168.1.81"}
+    r = world.users["farmadmin"].post(f"/api/locations/{world.farm['id']}/bridges/{bid}/targets",
+                                      json={"name": "Shed", "host": "192.168.1.81", "login": {"username": "admin", "password": "x"}})
+    assert r.status_code == 200 and r.json()["added"] is False and "already has" in r.json()["add_error"]
+    # a camera mapped without a login (Porch, 2026-10-18), added to recording from its row afterwards
+    m = world.users["farmadmin"].post(f"/api/locations/{world.farm['id']}/bridges/{bid}/targets", json={"name": "Porch", "host": "192.168.1.82"}).json()
+    assert m["camera_id"] is None and "added" not in m
+    add = f"/api/locations/{world.farm['id']}/bridges/{bid}/targets/{m['id']}/add"
+    assert world.users["viewer"].post(add, json={"username": "admin", "password": CAM_PW}).status_code == 403
+    r = world.users["farmadmin"].post(add, json={"username": "admin", "password": CAM_PW})
+    assert r.status_code == 200 and r.json() == {"camera_id": "porch"} and world.site.st["cameras"]["porch"]["public_host"] == GATEWAY
+    assert world.users["farmadmin"].post(add, json={"username": "admin", "password": CAM_PW}).status_code == 409   # it's there now
+    for k in ("north_gate", "preexisting", "porch"):
+        world.site.st["cameras"].pop(k, None)
+    world.root.delete(f"/api/locations/{world.farm['id']}/bridges/{bid}")
+
+
 def test_apply_to_camera(world):
     bid, _ = _new_bridge(world, name="Apply PC")
     t = _target(world, bid, host="192.168.1.50", name="Gate", camera_id="gate").json()

@@ -57,7 +57,7 @@ export function BridgesCard({ site }: { site: Site }) {
               <span className="muted small">{bridgeStatus(b)}</span>
               <span className="spacer" />
               {admin && <>
-                <button className="ghost small" disabled={!inst} title={inst ? "Relay a camera behind this bridge to the central instance" : "No central instance"} onClick={() => setMapping(b)}>Map a camera…</button>
+                <button className="ghost small" disabled={!inst} title={inst ? "Relay a camera behind this bridge to the central instance" : "No central instance"} onClick={() => setMapping(b)}>Add a camera…</button>
                 <button className="ghost small" onClick={async () => {
                   const n = (await promptDialog("Rename bridge", { initial: b.name, confirmLabel: "Rename" }))?.trim();
                   if (n) await act(() => api.renameBridge(loc, b.id, n))();
@@ -113,6 +113,7 @@ function TargetRow({ t, bridge, admin, loc, cameras, gateway, onChanged, onSheet
 }) {
   const [cam, setCam] = useState(t.camera_id ?? "");
   const [busy, setBusy] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
   const run = (what: string, f: () => Promise<void>) => async () => { setBusy(what); try { await f(); } catch (e) { toast.error(e); } finally { setBusy(null); } };
   const errs = targetErrorText(t);
   const probe = probeText(t.probe);
@@ -147,17 +148,51 @@ function TargetRow({ t, bridge, admin, loc, cameras, gateway, onChanged, onSheet
       {admin && (
         <td><div className="central-row-actions">
           <button className="ghost small" disabled={!bridge?.online || !!busy} title={bridge?.online ? "The bridge connects to each port once" : "The bridge is offline"} onClick={test}>{busy === "test" ? "Testing…" : "Test"}</button>
-          <select className="small" value={cam} onChange={(e) => setCam(e.target.value)} aria-label="The instance's camera">
-            <option value="">{cameras.length ? "Instance camera…" : "No cameras on the instance yet"}</option>
-            {cameras.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-            {cam && !cameras.some((c) => c.id === cam) && <option value={cam}>{cam}</option>}
-          </select>
-          <button className="ghost small" disabled={!cam || !!busy} title="Write the relay address and ports into the instance's camera" onClick={apply}>{busy === "apply" ? "Applying…" : "Apply to camera"}</button>
+          {!t.camera_id && <button className="small" disabled={!!busy} title="Add this camera to the central recording (its username and password go to the instance only)" onClick={() => setAdding(true)}>Add to recording…</button>}
+          {(t.camera_id || cameras.length > 0) && <>
+            <select className="small" value={cam} onChange={(e) => setCam(e.target.value)} aria-label="The instance's camera">
+              <option value="">Instance camera…</option>
+              {cameras.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+              {cam && !cameras.some((c) => c.id === cam) && <option value={cam}>{cam}</option>}
+            </select>
+            <button className="ghost small" disabled={!cam || !!busy} title="Write the relay address and ports into an existing camera of the instance" onClick={apply}>{busy === "apply" ? "Applying…" : "Apply to camera"}</button>
+          </>}
           <button className="ghost small" onClick={onSheet}>Settings…</button>
           <button className="ghost small" disabled={!!busy} onClick={remove}>Unmap…</button>
-        </div></td>
+        </div>
+        {adding && <AddLoginDialog loc={loc} t={t} onClose={() => setAdding(false)} onDone={() => { setAdding(false); onChanged(); }} />}</td>
       )}
     </tr>
+  );
+}
+
+/** Add an already mapped camera to the central recording: its login, passed through to the instance. */
+function AddLoginDialog({ loc, t, onClose, onDone }: { loc: string; t: BridgeTarget; onClose: () => void; onDone: () => void }) {
+  const [username, setUsername] = useState("admin");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      const r = await api.addBridgeCameraToRecording(loc, t.bridge_id, t.id, { username: username.trim() || "admin", password });
+      toast.success(`${t.name} added to recording (camera ${r.camera_id})`);
+      onDone();
+    } catch (er) { toast.error(er); } finally { setBusy(false); }
+  };
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <form className="modal central-dialog central-form" onClick={(e) => e.stopPropagation()} onSubmit={submit} style={{ maxWidth: 420 }}>
+        <header className="modal-head"><h2>Add {t.name} to recording</h2><button type="button" className="ghost" onClick={onClose} aria-label="Close">✕</button></header>
+        <p className="muted small">{t.host}, through the bridge. The password goes straight to the recording instance; the hub doesn't keep it.</p>
+        <label className="field"><span>Username</span><input value={username} autoComplete="off" onChange={(e) => setUsername(e.target.value)} /></label>
+        <label className="field"><span>Password</span><input type="password" value={password} autoComplete="new-password" autoFocus onChange={(e) => setPassword(e.target.value)} /></label>
+        <div className="row">
+          <button type="submit" disabled={busy || !password}>{busy ? "Adding…" : "Add camera"}</button>
+          <button type="button" className="ghost" onClick={onClose}>Cancel</button>
+        </div>
+      </form>
+    </div>
   );
 }
 
@@ -182,48 +217,60 @@ function CodeBox({ code, hubUrl, onClose }: { code: NewBridgeCode; hubUrl: strin
           <li>On the Site's PC (Windows 10 or later, always on, on the cameras' LAN), copy <code>axiom-bridge.exe</code> to a folder and run, in PowerShell opened as administrator in that folder:<br />
             <code>{cmd}</code> <button className="ghost small" onClick={() => copy(cmd)}>Copy</button></li>
         )}
-        <li>It installs the AxiomBridge service and appears here within a minute. Then map its cameras (Map a camera…).</li>
+        <li>It installs the AxiomBridge service and appears here within a minute. Then add its cameras (Add a camera…): name, LAN address and login, and the hub does the rest.</li>
       </ol>
     </div>
   );
 }
 
-/** Map a camera behind the bridge: its LAN address and ports; optionally the instance camera to Apply to. */
-function MapDialog({ loc, bridge, cameras, onClose, onDone }: { loc: string; bridge: SiteBridge; cameras: { id: string; name: string }[]; onClose: () => void; onDone: () => void }) {
+/**
+ * Add a camera behind the bridge in one step (Shawn, 2026-10-18): its name, LAN address and login. The hub maps it
+ * (relay ports on the instance's host, the bridge told) and adds it to the instance's recording with the relay address
+ * filled in. Unticked, it only maps it (for a camera added on the instance's console, then Apply to camera).
+ */
+function MapDialog({ loc, bridge, onClose, onDone }: { loc: string; bridge: SiteBridge; cameras: { id: string; name: string }[]; onClose: () => void; onDone: () => void }) {
   const [name, setName] = useState("");
   const [host, setHost] = useState("");
+  const [username, setUsername] = useState("admin");
+  const [password, setPassword] = useState("");
   const [ports, setPorts] = useState("554, 80, 555");
-  const [cam, setCam] = useState("");
+  const [record, setRecord] = useState(true);
   const [busy, setBusy] = useState(false);
-  const err = mapFormError({ name, host, ports }, (bridge.lan ?? []).map((l) => l.addr));
+  const err = mapFormError({ name, host, ports }, (bridge.lan ?? []).map((l) => l.addr)) ?? (record && !password ? "enter the camera's password" : null);
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     const p = parsePorts(ports);
     if (!p.ports) return;
     setBusy(true);
     try {
-      const t = await api.mapBridgeCamera(loc, bridge.id, { name: name.trim(), host: host.trim(), ports: p.ports, camera_id: cam || null });
-      toast.success(`${t.name} mapped: ${portsText(t.ports)}`);
+      const t = await api.mapBridgeCamera(loc, bridge.id, { name: name.trim(), host: host.trim(), ports: p.ports,
+        ...(record ? { login: { username: username.trim() || "admin", password } } : {}) });
+      if (!record) toast.success(`${t.name} mapped: ${portsText(t.ports)}`);
+      else if (t.added) toast.success(`${t.name} added: recording through ${bridge.name}`);
+      else toast.error(`${t.name} is mapped, but not added to recording: ${t.add_error ?? "unknown error"}. Fix it and use Apply to camera, or add it on the instance's console.`);
       onDone();
     } catch (er) { toast.error(er); } finally { setBusy(false); }
   };
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <form className="modal central-dialog central-form" onClick={(e) => e.stopPropagation()} onSubmit={submit} style={{ maxWidth: 520 }}>
-        <header className="modal-head"><h2>Map a camera via {bridge.name}</h2><button type="button" className="ghost" onClick={onClose} aria-label="Close">✕</button></header>
+        <header className="modal-head"><h2>Add a camera via {bridge.name}</h2><button type="button" className="ghost" onClick={onClose} aria-label="Close">✕</button></header>
         <label className="field"><span>Name</span><input value={name} maxLength={120} placeholder="Gate" onChange={(e) => setName(e.target.value)} /></label>
         <label className="field"><span>Camera's LAN address <span className="muted small">a fixed address on the PC's network</span></span>
           <input value={host} placeholder="192.168.1.50" onChange={(e) => setHost(e.target.value)} /></label>
-        <label className="field"><span>Camera ports <span className="muted small">RTSP, ONVIF (also PTZ, events, its web page), SD replay</span></span>
-          <input value={ports} onChange={(e) => setPorts(e.target.value)} /></label>
-        <label className="field"><span>The instance's camera <span className="muted small">optional: for Apply to camera</span></span>
-          <select value={cam} onChange={(e) => setCam(e.target.value)}>
-            <option value="">{cameras.length ? "Choose later" : "None yet: add it on the instance's console first"}</option>
-            {cameras.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-          </select></label>
-        <p className="muted small">The hub opens a relay port on the instance's host for each camera port; the bridge dials only these. Add the camera on the instance's console with its LAN address, username and password, then Apply to camera.</p>
+        <div className="row" style={{ gap: 8 }}>
+          <label className="field" style={{ flex: 1 }}><span>Username</span><input value={username} autoComplete="off" disabled={!record} onChange={(e) => setUsername(e.target.value)} /></label>
+          <label className="field" style={{ flex: 1 }}><span>Password</span><input type="password" value={password} autoComplete="new-password" disabled={!record} onChange={(e) => setPassword(e.target.value)} /></label>
+        </div>
+        <details className="small"><summary>Ports and options</summary>
+          <label className="field"><span>Camera ports <span className="muted small">RTSP, ONVIF (also PTZ, events, its web page), SD replay</span></span>
+            <input value={ports} onChange={(e) => setPorts(e.target.value)} /></label>
+          <label className="row small" style={{ gap: 6 }}><input type="checkbox" checked={record} onChange={(e) => setRecord(e.target.checked)} />
+            Add it to the central recording now (untick to only relay it, and add it on the instance's console later)</label>
+        </details>
+        <p className="muted small">The bridge relays only this camera's ports. The password goes straight to the recording instance; the hub doesn't keep it.</p>
         <div className="row">
-          <button type="submit" disabled={busy || !!err}>Map</button>
+          <button type="submit" disabled={busy || !!err}>{busy ? "Adding…" : record ? "Add camera" : "Map"}</button>
           <button type="button" className="ghost" onClick={onClose}>Cancel</button>
           {err && <span className="muted small">{err}</span>}
         </div>

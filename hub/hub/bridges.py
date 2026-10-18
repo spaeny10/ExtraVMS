@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import contextlib
 import ipaddress
 import json
 import logging
@@ -292,6 +293,41 @@ def relay_address(ci: dict) -> str | None:
     return gw if isinstance(gw, str) and hosts._is_ip(gw) else None
 
 
+def bridge_fill(ci: dict, kind: str, path: str, raw: bytes | None) -> bytes | None:
+    """A camera added or saved on the instance with a LAN address that this Site's Bridge carries for it, and no outside
+    address of its own (public_host empty or absent): the relay address and listen ports are filled in on the way
+    through, so adding a bridged camera is just its LAN address, username and password (no Apply step). None = leave
+    the body as it is (not a camera write, an outside address set by hand, not a bridged address, a port not bridged)."""
+    if kind != "camera" or not raw:
+        return None
+    try:
+        body = json.loads(raw.decode())
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(body, dict) or (body.get("public_host") or "").strip():
+        return None
+    host, gw = str(body.get("host") or "").strip(), relay_address(ci)
+    if not host or not gw:
+        return None
+    t = next((t for t in targets_of(instance_id=ci["id"]) if t["enabled"] and t["host"] == host), None)
+    if t is None:
+        return None
+    rtsp, onvif = listen_of(t, _int_or(body.get("rtsp_port"), 554)), listen_of(t, _int_or(body.get("onvif_port"), 80))
+    if rtsp is None or onvif is None:
+        return None   # central_cameras refuses it with the reason
+    web = _int_or(body.get("web_port"), None)
+    body |= {"public_host": gw, "public_rtsp_port": rtsp, "public_onvif_port": onvif, "public_replay_port": listen_of(t, 555),
+             "public_web_port": listen_of(t, web) if web and web != _int_or(body.get("onvif_port"), 80) else None}
+    return json.dumps(body).encode()
+
+
+def _int_or(v, default):
+    try:
+        return int(v) if v not in (None, "") else default
+    except (TypeError, ValueError):
+        return default
+
+
 def check_camera_host(addr: str, bridge: dict | None = None) -> str:
     """A camera's LAN address as the bridge dials it: a private (RFC 1918) IPv4 address, not one of the bridge PC's own
     interface addresses (the bridge refuses the rest too: bridge/internal/policy)."""
@@ -481,6 +517,71 @@ async def create_target(loc: dict, bridge: dict, name: str, host: str, ports, ca
                  {"location_id": loc["id"], "bridge_id": bridge["id"], "target_id": t["id"], "instance_id": ci["id"], "host": addr,
                   "ports": t["ports"], "camera_id": cid})
     return t
+
+
+def _camera_id(name: str, taken: set[str]) -> str:
+    """The instance camera id for a new bridged camera: its name as [a-z0-9_] (CameraIn's pattern), made unique."""
+    base = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")[:24] or "cam"
+    cid, n = base, 2
+    while cid in taken:
+        cid, n = f"{base}_{n}", n + 1
+    return cid
+
+
+async def add_to_instance(loc: dict, bridge: dict, target: dict, login: dict, user: dict) -> str:
+    """The one-step Add (Shawn, 2026-10-18: mapping a camera means it is to be recorded): create the camera on the
+    Site's central instance at its LAN address with the relay address and ports filled in (bridge_fill), through its
+    tunnel, and remember which camera the target feeds. `login` = {username, password, main_path?, sub_path?}: the
+    password goes straight to the instance (as from its console) and is never stored or logged on the hub."""
+    from . import central_cameras   # (central_cameras imports this module)
+    from .agents import registry as tunnels
+    ci = hosts.get_instance(target["instance_id"])
+    if not ci or ci["state"] in ("deleting", "deleted") or not ci["server_id"]:
+        raise Refused(409, "the central instance is not running yet")
+    conn = tunnels.get(ci["server_id"])
+    if conn is None:
+        raise BridgeError("the central instance is offline")
+    headers = {"x-hub-user": user.get("email") or "hub", "x-hub-role": "admin"}
+    try:
+        status, raw = await conn.call("GET", "/api/cameras", "", dict(headers), None, FETCH_TIMEOUT_S)
+        cams = json.loads(raw.decode() or "null") if status == 200 else None
+    except Exception as e:
+        raise BridgeError(f"could not read the instance's cameras: {e}") from None
+    if not isinstance(cams, list):
+        raise BridgeError("could not read the instance's cameras")
+    existing = next((c for c in cams if isinstance(c, dict) and c.get("host") == target["host"]), None)
+    if existing is not None:
+        raise Refused(409, f"the instance already has {existing.get('name') or existing.get('id')} at {target['host']}: use Apply to camera")
+    ports = {p["port"] for p in target["ports"]}
+    cid = _camera_id(target["name"], {str(c.get("id")) for c in cams if isinstance(c, dict)})
+    body = {"id": cid, "name": target["name"], "host": target["host"], "rtsp_port": 554 if 554 in ports else min(ports),
+            "onvif_port": 80 if 80 in ports else min(ports - {554} or ports), "username": (login.get("username") or "admin").strip(),
+            "password": login.get("password") or "", "main_path": login.get("main_path") or "/main",
+            "sub_path": login.get("sub_path") or "/sub", "public_host": ""}
+    raw = bridge_fill(ci, "camera", f"/api/cameras/{cid}", json.dumps(body).encode())
+    if raw is None:
+        raise Refused(409, "the camera's RTSP and ONVIF ports must both be bridged")
+    path = f"/api/cameras/{quote(cid, safe='')}"
+    try:
+        await central_cameras.check(ci, "camera", path, raw)
+    except central_cameras.Refused as e:
+        raise Refused(e.status, e.detail) from None
+    try:
+        status, out = await conn.call("PUT", path, "", {**headers, "content-type": "application/json"}, raw, FETCH_TIMEOUT_S)
+    except Exception as e:
+        raise BridgeError(f"the instance did not take the camera: {e}") from None
+    if status >= 400:
+        detail = ""
+        with contextlib.suppress(ValueError, UnicodeDecodeError, AttributeError, TypeError):
+            detail = json.loads(out.decode()).get("detail") or ""
+        raise Refused(status if status < 500 else 502, f"the instance refused the camera: {detail or status}")
+    now = time.time()
+    with db.engine().begin() as c:
+        c.execute(sa.update(db.bridge_targets).where(db.bridge_targets.c.id == target["id"]).values(camera_id=cid, applied_at=now, updated_at=now))
+    target.update(camera_id=cid, applied_at=now)
+    hosts._audit(user, loc["org_id"], ci["server_id"], f"bridged camera added to recording: {target['name']} -> camera {cid}",
+                 {"location_id": loc["id"], "bridge_id": bridge["id"], "target_id": target["id"], "instance_id": ci["id"], "camera_id": cid})
+    return cid
 
 
 async def update_target(loc: dict, bridge: dict, target: dict, vals: dict, user: dict) -> dict:

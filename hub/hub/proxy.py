@@ -71,14 +71,16 @@ async def proxy_api(site_id: str, path: str, request: Request):
     central = central_cameras.instance_for_server(site_id) if central_cameras.changes_cameras(request.method, api_path) else None
     reserved: list[str] = []
     kind = central_cameras.write_kind(request.method, api_path) if central else None
+    body = await request.body() if request.method in ("POST", "PUT", "PATCH") else None
     if kind:
+        from . import bridges   # a camera at a LAN address the Site's Axiom Bridge carries gets its relay address here
+        body = bridges.bridge_fill(central, kind, api_path, body) or body
         try:
-            reserved = await central_cameras.check(central, kind, api_path, await request.body())
+            reserved = await central_cameras.check(central, kind, api_path, body)
         except central_cameras.Refused as e:
             raise HTTPException(e.status, e.detail)
     headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP and not k.lower().startswith("x-hub-")}
     headers.update(_identity(u, role, site, conn, request, request.url.scheme))
-    body = await request.body() if request.method in ("POST", "PUT", "PATCH") else None
     t0 = time.time()
     try:
         s = await conn.request(request.method, api_path, request.url.query, headers, body)

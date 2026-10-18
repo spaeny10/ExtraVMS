@@ -158,6 +158,8 @@ export type BridgeInstance = {
 export type SiteBridges = { bridges: SiteBridge[]; targets: BridgeTarget[]; can_manage: boolean; codes?: BridgeCode[]; hub_url?: string; instance?: BridgeInstance | null };
 export type BridgeApplied = { camera_id: string; public_host: string; public_rtsp_port: number; public_onvif_port: number; public_replay_port: number | null; public_web_port: number | null };
 export type BridgeTargetBody = { name?: string; host?: string; ports?: number[]; camera_id?: string | null; enabled?: boolean };
+/** the one-step Add: the camera's login for the instance (passed through by the hub, never stored there) */
+export type CameraLogin = { username: string; password: string; main_path?: string; sub_path?: string };
 export type CentralBody = { host_id?: string | null; mode: CentralMode; subnet?: string | null; public_ip?: string | null; quota_gb: number; gpu?: number | null; name?: string | null; camera_limit?: number | null };
 /**
  * `urls`: candidate base URLs of the server itself (`local` = only works from a browser on that machine, e.g.
@@ -535,10 +537,12 @@ export const api = {
   /** The Bridge release the hub serves (bridge/publish.ps1); null when none is published. */
   bridgeRelease: () => fetch("/downloads/bridge/latest.json", { cache: "no-store" })
     .then((r) => (r.ok ? r.json() as Promise<BridgeRelease> : null)).catch(() => null),
-  mapBridgeCamera: (loc: string, bridge: string, b: BridgeTargetBody & { name: string; host: string }) =>
-    req<BridgeTarget>(`/api/locations/${loc}/bridges/${encodeURIComponent(bridge)}/targets`, json("POST", b)),
+  mapBridgeCamera: (loc: string, bridge: string, b: BridgeTargetBody & { name: string; host: string; login?: CameraLogin }) =>
+    req<BridgeTarget & { added?: boolean; add_error?: string }>(`/api/locations/${loc}/bridges/${encodeURIComponent(bridge)}/targets`, json("POST", b)),
   updateBridgeCamera: (loc: string, bridge: string, t: string, b: BridgeTargetBody) =>
     req<BridgeTarget>(`/api/locations/${loc}/bridges/${encodeURIComponent(bridge)}/targets/${encodeURIComponent(t)}`, json("PATCH", b)),
+  addBridgeCameraToRecording: (loc: string, bridge: string, t: string, login: CameraLogin) =>
+    req<{ camera_id: string }>(`/api/locations/${loc}/bridges/${encodeURIComponent(bridge)}/targets/${encodeURIComponent(t)}/add`, json("POST", login)),
   unmapBridgeCamera: (loc: string, bridge: string, t: string) =>
     req<{ ok: boolean; relay_pending: string | null }>(`/api/locations/${loc}/bridges/${encodeURIComponent(bridge)}/targets/${encodeURIComponent(t)}`, { method: "DELETE" }),
   /** Test: the bridge opens a TCP connection to each of the camera's ports. */
