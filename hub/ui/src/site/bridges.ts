@@ -22,6 +22,28 @@ export function installCommand(hubUrl: string, code: string): string {
   return `.\\axiom-bridge.exe install --hub ${hubUrl} --code ${code}`;
 }
 
+/** The hub's /downloads/bridge/latest.json (bridge/publish.ps1 writes it). */
+export type BridgeRelease = { version: string; windows?: { file: string; sha256: string } };
+
+/**
+ * The same install as one line for an administrator PowerShell, downloading the exe from the hub first: TLS 1.2 on
+ * (Windows PowerShell 5.1 may not offer it), no progress bar (it makes iwr crawl on 5.1), the SHA-256 from
+ * latest.json checked before anything runs. null when the hub has no Windows release published.
+ */
+export function oneLineInstall(origin: string, hubUrl: string, code: string, release: BridgeRelease | null): string | null {
+  const w = release?.windows;
+  if (!w || !/^[0-9a-f]{64}$/i.test(w.sha256) || !/^[A-Za-z0-9._/-]+$/.test(w.file)) return null;
+  const url = `${origin.replace(/\/+$/, "")}/downloads/bridge/${w.file}`;
+  return [
+    "[Net.ServicePointManager]::SecurityProtocol = 'Tls12'",
+    "$ProgressPreference = 'SilentlyContinue'",
+    "$f = \"$env:TEMP\\axiom-bridge.exe\"",
+    `iwr -UseBasicParsing ${url} -OutFile $f`,
+    `if ((Get-FileHash $f -Algorithm SHA256).Hash -ne '${w.sha256.toUpperCase()}') { Remove-Item $f; throw 'axiom-bridge.exe: checksum mismatch' }`,
+    `& $f install --hub ${hubUrl} --code ${code}`,
+  ].join("; ");
+}
+
 export type SheetRow = { field: string; label: string; value: string };
 
 const listenOf = (ports: BridgePort[], port: number | null | undefined) => (port ? ports.find((p) => p.port === port)?.listen ?? null : null);

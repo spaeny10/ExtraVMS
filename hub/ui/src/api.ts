@@ -3,6 +3,7 @@ import type { NvrEvent, SavedFindView } from "@site/api";
 import type { Spoken, VoiceEngines, VoiceSetting } from "@site/talkdownVoice";
 import type { ActionCardData, ActionExtras, ActionPlanCore, ActionResult } from "@site/ActionCard";
 import { type AddressParts, type GeoHit, type GeocodeSource, type MapConfig, setMapConfig } from "./place";
+import type { BridgeRelease } from "./site/bridges";
 import type { CameraGroup, Dashboard, DashboardConfig, DashboardList, FleetEvent, FleetEvents } from "@site/dashboard/types";
 export type { CameraGroup, Dashboard, DashboardConfig, DashboardList, FleetEvent, FleetEvents, Widget, WidgetProps, DashboardWidgetType } from "@site/dashboard/types";
 /** /api/fleet/ws. `site_id` on the wire is the server id (the hub kept the name; see the tenancy plan's Naming). */
@@ -531,6 +532,9 @@ export const api = {
   rotateBridge: (loc: string, id: string) => req(`/api/locations/${loc}/bridges/${encodeURIComponent(id)}/rotate-token`, { method: "POST" }),
   /** Disconnects the bridge for good and unmaps its cameras. */
   retireBridge: (loc: string, id: string) => req<{ ok: boolean; relay_pending: string[] }>(`/api/locations/${loc}/bridges/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  /** The Bridge release the hub serves (bridge/publish.ps1); null when none is published. */
+  bridgeRelease: () => fetch("/downloads/bridge/latest.json", { cache: "no-store" })
+    .then((r) => (r.ok ? r.json() as Promise<BridgeRelease> : null)).catch(() => null),
   mapBridgeCamera: (loc: string, bridge: string, b: BridgeTargetBody & { name: string; host: string }) =>
     req<BridgeTarget>(`/api/locations/${loc}/bridges/${encodeURIComponent(bridge)}/targets`, json("POST", b)),
   updateBridgeCamera: (loc: string, bridge: string, t: string, b: BridgeTargetBody) =>

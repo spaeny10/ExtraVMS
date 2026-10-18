@@ -395,6 +395,7 @@ a.icon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px
 .queue-cell { white-space: nowrap; }
 .token-box { border-color: var(--accent); }
 .token-box code.token { word-break: break-all; user-select: all; }
+.token-box code.wrap-code { display: block; margin: 4px 0; padding: 6px 8px; white-space: pre-wrap; word-break: break-all; user-select: all; }
 .central-form { display: grid; gap: 8px; margin-top: 10px; max-width: 560px; }
 .central-form .field { margin: 0; }
 .central-form .field > span { display: block; }

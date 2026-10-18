@@ -25,3 +25,6 @@ hub/.env
 # auto-generated local TLS material (backend serves https on the LAN with it)
 backend/auto.crt
 backend/auto.key
+
+# the hub's /downloads/ folder (bridge/publish.ps1 uploads there; never committed)
+hub/downloads/

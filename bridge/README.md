@@ -20,8 +20,11 @@ name. An owner can narrow it further with `--allow`.
 
 1. On the hub, create a **Bridge enrollment code** for the Site (hub admins and the Customer's Site admins can).
    The code (`AXB-XXXX-XXXX-XXXX`) is good for 24 hours and for one bridge.
-2. Copy `axiom-bridge.exe` to the PC (for example to `Downloads`).
-3. Open PowerShell **as administrator** (right-click → *Run as administrator*) and run, with your code:
+2. **Easiest:** the code's dialog on the hub shows a **one-line install**. Open PowerShell **as administrator** on the
+   PC and paste it: it downloads the published release from the hub (`/downloads/bridge/`), checks its SHA-256 and runs
+   the install below with your code. Nothing to copy by hand.
+3. **Or by hand:** copy `axiom-bridge.exe` to the PC (for example to `Downloads`), open PowerShell **as administrator**
+   (right-click → *Run as administrator*) and run, with your code:
 
    ```powershell
    & "$env:USERPROFILE\Downloads\axiom-bridge.exe" install --code AXB-XXXX-XXXX-XXXX
@@ -166,3 +169,15 @@ Go 1.26, no cgo; dependencies `github.com/coder/websocket` and `golang.org/x/sys
 (`internal/fakehub`) and never contact a real hub. `go test -race` needs cgo (a C compiler) on Windows; run it on
 Linux or with a toolchain installed. The golden wire vectors in `internal/proto/testdata/golden.json` come from the
 Python `tunnelproto` (`testdata/gen_golden.py`; rerun it from the repo root if the protocol changes).
+
+## Publishing a release to the hub
+
+```powershell
+cd bridge
+.\publish.ps1 -Version 0.1.1 -Key C:\path\to\ssh-key     # build, upload dist\* to the hub, then replace latest.json
+```
+
+The hub serves `hub/downloads/` (outside the image: no hub rebuild) at `https://hub.axiomvision.ai/downloads/`:
+`bridge/<version>/axiom-bridge.exe` (and the Linux builds) are immutable once published, so a new build needs a new
+version; `bridge/latest.json` (`version`, and `file` + `sha256` per platform) is what the enrollment dialog reads.
+

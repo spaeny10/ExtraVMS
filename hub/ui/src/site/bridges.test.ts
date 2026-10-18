@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { BridgeTarget } from "../api";
 import {
-  DEFAULT_BRIDGE_PORTS, bridgeStatus, fmtBytes, fmtUptime, installCommand, isLanAddress, mapFormError, parsePorts, portsText, probeText,
+  DEFAULT_BRIDGE_PORTS, bridgeStatus, fmtBytes, fmtUptime, installCommand, isLanAddress, mapFormError, oneLineInstall, parsePorts, portsText, probeText,
   relaySheet, sheetText, targetErrorText,
 } from "./bridges";
 
@@ -11,6 +11,25 @@ describe("installCommand (hub bridges.install_command prints the same)", () => {
   it("is the exe, the hub's /bridge URL and the one-time code", () => {
     expect(installCommand("wss://hub.axiomvision.ai/bridge", "AXB-ABCD-EFGH-JKLM"))
       .toBe(".\\axiom-bridge.exe install --hub wss://hub.axiomvision.ai/bridge --code AXB-ABCD-EFGH-JKLM");
+  });
+});
+
+describe("oneLineInstall (download from the hub, check the SHA-256, install)", () => {
+  const sha = "1c713eba5a184f00d6b8a0e4add3f9f656170104f2e8cc89258de466c33218b4";
+  const rel = { version: "0.1.0", windows: { file: "0.1.0/axiom-bridge.exe", sha256: sha } };
+  it("downloads that version from this hub, refuses a wrong checksum, then installs with the code", () => {
+    const c = oneLineInstall("https://hub.axiomvision.ai/", "wss://hub.axiomvision.ai/bridge", "AXB-ABCD-EFGH-JKLM", rel)!;
+    expect(c).toContain("[Net.ServicePointManager]::SecurityProtocol = 'Tls12'");
+    expect(c).toContain("iwr -UseBasicParsing https://hub.axiomvision.ai/downloads/bridge/0.1.0/axiom-bridge.exe -OutFile $f");
+    expect(c).toContain(`-ne '${sha.toUpperCase()}') { Remove-Item $f; throw`);
+    expect(c.endsWith("& $f install --hub wss://hub.axiomvision.ai/bridge --code AXB-ABCD-EFGH-JKLM")).toBe(true);
+    expect(c).not.toContain("\n");
+  });
+  it("is null without a usable release (none published, a bad hash or file name)", () => {
+    expect(oneLineInstall("https://h", "wss://h/bridge", "X", null)).toBeNull();
+    expect(oneLineInstall("https://h", "wss://h/bridge", "X", { version: "1" })).toBeNull();
+    expect(oneLineInstall("https://h", "wss://h/bridge", "X", { version: "1", windows: { file: "a.exe", sha256: "abc" } })).toBeNull();
+    expect(oneLineInstall("https://h", "wss://h/bridge", "X", { version: "1", windows: { file: "a.exe; calc", sha256: sha } })).toBeNull();
   });
 });
 

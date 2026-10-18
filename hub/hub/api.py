@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 import secrets
 import time
 from pathlib import Path
@@ -2476,6 +2477,27 @@ async def healthz():
 async def api_health():
     """The UI's "is the server there" probe (OfflineBanner): cheap, no sign-in, same answer shape as the NVR's."""
     return {"ok": True}
+
+
+DOWNLOAD_PART = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$")
+
+
+@app.get("/downloads/{path:path}")
+async def download(path: str):
+    """Public downloads (no sign-in: nothing secret in them), e.g. the Axiom Bridge's latest.json and each version's
+    files, so the enrollment dialog's one-line install fetches the exe from here and checks its SHA-256. Only plain
+    names under settings.downloads_dir; a version's files never change (cached), latest.json always revalidates."""
+    parts = path.split("/")
+    if not parts or len(parts) > 3 or not all(DOWNLOAD_PART.match(p) and ".." not in p for p in parts):
+        raise HTTPException(404)
+    root = settings.downloads_dir.resolve()
+    target = root.joinpath(*parts).resolve()
+    if root not in target.parents or not target.is_file():
+        raise HTTPException(404)
+    if target.name == "latest.json":
+        return FileResponse(target, media_type="application/json", headers={"Cache-Control": "no-cache"})
+    return FileResponse(target, media_type="application/octet-stream", filename=target.name,
+                        headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
 
 @app.get("/{full_path:path}")

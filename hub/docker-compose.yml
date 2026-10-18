@@ -74,6 +74,8 @@ services:
       HUB_LAN_ACME_DIRECTORY: ${HUB_LAN_ACME_DIRECTORY:-https://acme-v02.api.letsencrypt.org/directory}
       HUB_LAN_ACME_EMAIL: ${HUB_LAN_ACME_EMAIL:-}
       HUB_LAN_CERT_WEEKLY_CAP: ${HUB_LAN_CERT_WEEKLY_CAP:-30}
+    # downloads served at /downloads/ (the Axiom Bridge: bridge/publish.ps1 puts each version here); read-only inside
+    volumes: ["./downloads:/srv/downloads:ro"]
     depends_on:
       postgres: { condition: service_healthy }
     expose: ["8000"]

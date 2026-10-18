@@ -10,7 +10,8 @@ import { useCallback, useEffect, useState } from "react";
 import { confirmDialog, promptDialog, toast } from "@site/ui";
 import { type BridgeTarget, type NewBridgeCode, type Site, type SiteBridge, type SiteBridges, ago, api, fmtTime } from "../api";
 import {
-  bridgeStatus, fmtBytes, installCommand, mapFormError, parsePorts, portsText, probeText, relaySheet, sheetText, targetErrorText,
+  type BridgeRelease, bridgeStatus, fmtBytes, installCommand, mapFormError, oneLineInstall, parsePorts, portsText, probeText,
+  relaySheet, sheetText, targetErrorText,
 } from "./bridges";
 
 const copy = (t: string) => navigator.clipboard?.writeText(t).then(() => toast.success("Copied"), () => toast.error("Copy failed: select and copy it by hand"));
@@ -163,14 +164,24 @@ function TargetRow({ t, bridge, admin, loc, cameras, gateway, onChanged, onSheet
 /** The one-time code, shown once, with the command to run on the PC. */
 function CodeBox({ code, hubUrl, onClose }: { code: NewBridgeCode; hubUrl: string; onClose: () => void }) {
   const cmd = installCommand(hubUrl, code.code);
+  const [release, setRelease] = useState<BridgeRelease | null | undefined>(undefined);
+  useEffect(() => { api.bridgeRelease().then(setRelease); }, []);
+  const oneLine = release === undefined ? null : oneLineInstall(location.origin, hubUrl, code.code, release);
   return (
     <div className="card token-box">
       <div className="row"><h4 style={{ margin: 0 }}>Enrollment code{code.name ? ` for ${code.name}` : ""}</h4><span className="spacer" /><button className="ghost small" onClick={onClose}>Done</button></div>
       <p className="small">Shown only now: the hub keeps a hash. It enrolls one bridge, until {fmtTime(code.expires_at)}.</p>
       <ol className="small">
         <li>Code: <code className="token">{code.code}</code> <button className="ghost small" onClick={() => copy(code.code)}>Copy</button></li>
-        <li>On the Site's PC (Windows 10 or later, always on, on the cameras' LAN), copy <code>axiom-bridge.exe</code> to a folder and run, in PowerShell opened as administrator in that folder:<br />
-          <code>{cmd}</code> <button className="ghost small" onClick={() => copy(cmd)}>Copy</button></li>
+        {oneLine ? (
+          <li>On the Site's PC (Windows 10 or later, always on, on the cameras' LAN), open PowerShell <b>as administrator</b> and paste this one line: it downloads Axiom Bridge {release?.version} from this hub, checks its SHA-256, installs the service and enrolls it.<br />
+            <code className="wrap-code">{oneLine}</code> <button className="ghost small" onClick={() => copy(oneLine)}>Copy</button>
+            <details className="small"><summary>Or with the exe copied over by hand</summary>
+              In PowerShell opened as administrator in its folder: <code>{cmd}</code> <button className="ghost small" onClick={() => copy(cmd)}>Copy</button></details></li>
+        ) : (
+          <li>On the Site's PC (Windows 10 or later, always on, on the cameras' LAN), copy <code>axiom-bridge.exe</code> to a folder and run, in PowerShell opened as administrator in that folder:<br />
+            <code>{cmd}</code> <button className="ghost small" onClick={() => copy(cmd)}>Copy</button></li>
+        )}
         <li>It installs the AxiomBridge service and appears here within a minute. Then map its cameras (Map a camera…).</li>
       </ol>
     </div>

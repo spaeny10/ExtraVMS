@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     public_url: str = "https://hub.axiomvision.ai"
     site_ui_dir: Path = ROOT / "frontend" / "dist"   # the site UI bundle, served under /s/<site>/
     ui_dir: Path = HERE.parent / "ui" / "dist"        # the hub's own pages
+    downloads_dir: Path = Path("/srv/downloads")      # /downloads/<product>/…: the Axiom Bridge (bridge/publish.ps1)
     cookie_secure: bool = True
     session_days: int = 14
     offline_after_s: float = 90.0             # three missed heartbeats
