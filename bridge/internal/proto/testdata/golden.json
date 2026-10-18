@@ -1,0 +1,68 @@
+{
+ "chunk_size": 65536,
+ "to_hub": {
+  "hello": "{\"t\":\"hello\",\"proto\":1,\"version\":\"0.1.0\",\"os\":\"windows\",\"arch\":\"amd64\",\"hostname\":\"B\u00fcro-PC\",\"lan\":[{\"if\":\"Ethernet\",\"addr\":\"192.168.1.20/24\"}],\"caps\":[\"tcp\",\"probe\"]}",
+  "heartbeat": "{\"t\":\"heartbeat\",\"streams\":2,\"bytes_up\":123456789,\"bytes_down\":4321,\"uptime_s\":3600,\"target_errors\":{\"bt_x:554\":\"connection refused\"}}",
+  "heartbeat_empty": "{\"t\":\"heartbeat\",\"streams\":0,\"bytes_up\":0,\"bytes_down\":0,\"uptime_s\":5,\"target_errors\":{}}",
+  "opened": "{\"t\":\"opened\",\"id\":1}",
+  "end": "{\"t\":\"end\",\"id\":3}",
+  "abort": "{\"t\":\"abort\",\"id\":5,\"reason\":\"policy: <loopback> & co\"}",
+  "credit": "{\"t\":\"credit\",\"id\":4294967295,\"bytes\":65536}",
+  "probe_ok": "{\"t\":\"probe_result\",\"id\":7,\"ok\":true,\"ms\":12,\"error\":null}",
+  "probe_fail": "{\"t\":\"probe_result\",\"id\":\"p1\",\"ok\":false,\"ms\":5000,\"error\":\"timeout\"}",
+  "rotated": "{\"t\":\"rotated\"}",
+  "pong": "{\"t\":\"pong\",\"ts\":1760000000.25}",
+  "pong_bare": "{\"t\":\"pong\"}"
+ },
+ "from_hub": {
+  "welcome": "{\"t\":\"welcome\",\"bridge_id\":\"br_abc\",\"name\":\"Gate PC\",\"site\":{\"id\":\"loc_1\",\"name\":\"Ranch\"},\"heartbeat_s\":30,\"max_streams\":16,\"window\":524288,\"future\":\"ignored\"}",
+  "welcome_site_str": "{\"t\":\"welcome\",\"bridge_id\":\"br_abc\",\"name\":\"Gate PC\",\"site\":\"Ranch B\u00fcro\"}",
+  "targets": "{\"t\":\"targets\",\"rev\":3,\"items\":[{\"id\":\"bt_1\",\"host\":\"192.168.1.50\",\"ports\":[554,80,555],\"label\":\"Gate\"}]}",
+  "open": "{\"t\":\"open\",\"id\":1,\"target\":\"bt_1\",\"host\":\"192.168.1.50\",\"port\":554,\"extra\":[1,2]}",
+  "probe": "{\"t\":\"probe\",\"id\":9,\"target\":\"bt_1\",\"host\":\"192.168.1.50\",\"port\":80}",
+  "rotate": "{\"t\":\"rotate\",\"token\":\"tok_new\"}",
+  "revoked": "{\"t\":\"revoked\",\"reason\":\"retired by admin\"}",
+  "enrolled": "{\"t\":\"enrolled\",\"bridge_id\":\"br_abc\",\"token\":\"tok_1\"}",
+  "end": "{\"t\":\"end\",\"id\":3}",
+  "abort": "{\"t\":\"abort\",\"id\":5,\"reason\":\"host closed\"}",
+  "credit": "{\"t\":\"credit\",\"id\":7,\"bytes\":65536}",
+  "ping": "{\"t\":\"ping\",\"ts\":1760000000.5}",
+  "unknown": "{\"t\":\"turn\",\"urls\":[\"turn:x\"]}"
+ },
+ "chunks": [
+  {
+   "id": 1,
+   "data": "68656c6c6f",
+   "frame": "0000000168656c6c6f"
+  },
+  {
+   "id": 0,
+   "data": "",
+   "frame": "00000000"
+  },
+  {
+   "id": 4294967295,
+   "data": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+   "frame": "ffffffff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"
+  }
+ ],
+ "split": {
+  "id": 7,
+  "len": 150000,
+  "mod": 251,
+  "frames": [
+   {
+    "len": 65540,
+    "sha256": "bf1b38aafa335de07b896e5a7a0398ada76b4f54656764a8cdffce783e7c7b9b"
+   },
+   {
+    "len": 65540,
+    "sha256": "72329fd6cf48c2ec20ea4cca5bea0c51cf24284e63a1e9d98762b12963fcaf4c"
+   },
+   {
+    "len": 18932,
+    "sha256": "24fc9aae9967c3974e11bf6e094ca6ea32e9946f9f3a36cf8240f2b8ff81f737"
+   }
+  ]
+ }
+}
