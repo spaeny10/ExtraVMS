@@ -104,8 +104,10 @@ main { flex: 1; padding: 16px; }
 /* one column on a big screen (a Site with one camera): the tile's height comes from its width (4:3, or HD's shape), so
    cap the width to what fits the window's height and centre it; --live-chrome = the page above and the tile's bar */
 @media (min-width: 900px) {
-  .live-grid.one > .tile { width: min(100%, calc((100dvh - var(--live-chrome, 230px)) * 4 / 3)); justify-self: center; }
-  .live-grid.one > .tile:has(.player.hd) { width: min(100%, calc((100dvh - var(--live-chrome, 230px)) * 2592 / 1520)); }
+  .live-grid.one > .tile, .live-grid.one > .site-live-cell {   /* the hub wraps each tile in a .site-live-cell */
+    width: min(100%, calc((100dvh - var(--live-chrome, 230px)) * 4 / 3)); justify-self: center; }
+  .live-grid.one > .tile:has(.player.hd), .live-grid.one > .site-live-cell:has(.player.hd) {
+    width: min(100%, calc((100dvh - var(--live-chrome, 230px)) * 2592 / 1520)); }
 }
 .tile { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
 .tile.alerting { border-color: var(--vehicle); box-shadow: 0 0 0 1px var(--vehicle); }
