@@ -837,7 +837,7 @@ function PhoneLive({ tiles, activity, picker, ...common }: TileCommon & { tiles:
             ))}
           </div>
         )}
-        <p className="muted small center">Swipe the picture or tap a thumbnail to switch cameras.</p>
+        {tiles.length > 1 && <p className="muted small center">Swipe the picture or tap a thumbnail to switch cameras.</p>}
         {activity}
       </div>
     </LiveBudgetProvider>

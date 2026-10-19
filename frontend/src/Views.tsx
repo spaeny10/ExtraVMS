@@ -281,7 +281,7 @@ export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: n
               ))}
             </div>
           )}
-          <p className="muted small center">Swipe the picture or tap a thumbnail to switch cameras.</p>
+          {cameras.length > 1 && <p className="muted small center">Swipe the picture or tap a thumbnail to switch cameras.</p>}
           <aside className="live-feed">
             <h3>Latest activity</h3>
             <RegionNote cameras={cameras} />
