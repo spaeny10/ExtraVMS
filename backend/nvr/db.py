@@ -11,7 +11,7 @@ from typing import Any, Iterable
 
 import sqlite_vec
 
-from . import diskguard
+from . import diskguard, ruleevents
 from .config import settings
 
 log = logging.getLogger("nvr.db")
@@ -348,6 +348,8 @@ MIGRATIONS = [
     ("cameras", "web_scheme", "TEXT"),
     ("cameras", "web_port", "INTEGER"),
     ("cameras", "public_web_port", "INTEGER"),
+    # "Open events for" (ruleevents.opens): JSON ["person", "vehicle", "motion"] subset; NULL = all of them
+    ("cameras", "event_labels", "TEXT"),
 ]
 JSON_FIELDS = ("path", "rules", "detections", "synopsis_json", "synopsis_original", "feedback", "anomaly_json", "areas", "policy", "migrated_from")
 
@@ -647,6 +649,7 @@ class Database:
             c["zones"] = json.loads(c["zones"])
             c["retention_policy"] = json.loads(c["retention_policy"]) if c.get("retention_policy") else None
             c["synopsis_labels"] = json.loads(c["synopsis_labels"]) if c.get("synopsis_labels") else None
+            c["event_labels"] = ruleevents.event_labels(json.loads(c["event_labels"])) if c.get("event_labels") else None
             c["policies"] = json.loads(c["policies"]) if c.get("policies") else []
             c["ptz_config"] = json.loads(c["ptz_config"]) if c.get("ptz_config") else None
             c["streams"] = json.loads(c["streams"]) if c.get("streams") else None
@@ -660,8 +663,11 @@ class Database:
         cols = ["id", "name", "host", "onvif_port", "rtsp_port", "username", "password",
                 "main_path", "sub_path", "enabled", "zones", "retention_days", "scene_notes", "retention_policy",
                 "synopsis_labels", "policies", "public_host", "public_rtsp_port", "public_onvif_port", "public_replay_port", "record_stream",
-                "event_source", "motion_events", "web_scheme", "web_port", "public_web_port"]
+                "event_source", "motion_events", "web_scheme", "web_port", "public_web_port", "event_labels"]
         data = {**cam, "zones": json.dumps(cam.get("zones", []))}
+        if "event_labels" in data:   # unknown labels dropped, all of them = NULL (a label added later opens events too)
+            labels = ruleevents.event_labels(data["event_labels"])
+            data["event_labels"] = json.dumps(labels) if labels is not None else None
         if "event_source" in data:
             data["event_source"] = data["event_source"] if data["event_source"] in ("auto", "metadata", "onvif_events") else "auto"
         if "motion_events" in data:

@@ -19,6 +19,7 @@ import { yoloFallbackText, yoloState } from "./yoloStatus";
 import { vlmSub, vlmValue } from "./vlmStatus";
 import { sdStatusText } from "./sdcard";
 import { detectionsText, livePath } from "./cameraStreams";
+import { checkingText, feedCards } from "./liveFeed";
 import { TalkdownPanel } from "./TalkdownPanel";
 import { speakersByCamera, type TalkSpeaker } from "./talkdown";
 import { SpeakersSection } from "./Speakers";
@@ -221,6 +222,8 @@ export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: n
     ? [...new Map([...scopedEvents, ...recent].map((e) => [e.id, e])).values()].sort((a, b) => b.start_ts - a.start_ts)
     : recent;
   const feed = pool.filter((e) => !scoped || (regionMap[e.camera_id] && regionPass(e, regionMap[e.camera_id])));
+  // vehicles still being verified are counted, not shown (liveFeed.ts); the tiles' badge still reads `recent`
+  const { cards, checking } = feedCards(feed);
   const [feedShown, showMore] = useFeedCount(paintedKey);   // back to 12 when the painted cameras change, not per stroke
   const [open, setOpen] = useState<number | null>(null);
   // SD = the sub stream (light); HD = the recorded main stream. A camera the viewer never picked for is on Auto
@@ -284,11 +287,12 @@ export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: n
           {cameras.length > 1 && <p className="muted small center">Swipe the picture or tap a thumbnail to switch cameras.</p>}
           <aside className="live-feed">
             <h3>Latest activity</h3>
+            {checking > 0 && <p className="muted small">{checkingText(checking)}</p>}
             <RegionNote cameras={cameras} />
             {recent.length === 0 && <p className="muted">Nothing yet.</p>}
             {recent.length > 0 && feed.length === 0 && <p className="muted">Nothing recent on that camera passed through the painted region.</p>}
-            {feed.slice(0, feedShown).map((e) => <EventCard key={e.id} e={e} cameraName={name(e.camera_id)} onOpen={() => setOpen(e.id)} />)}
-            <FeedMore shown={feedShown} total={feed.length} onMore={showMore} />
+            {cards.slice(0, feedShown).map((e) => <EventCard key={e.id} e={e} cameraName={name(e.camera_id)} onOpen={() => setOpen(e.id)} />)}
+            <FeedMore shown={feedShown} total={cards.length} onMore={showMore} />
           </aside>
           {open !== null && <EventDetail id={open} cameraName={name} onClose={() => setOpen(null)} />}
         </div>
@@ -329,13 +333,14 @@ export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: n
         </div>
         <aside className="live-feed">
           <h3>Latest activity</h3>
+          {checking > 0 && <p className="muted small">{checkingText(checking)}</p>}
           <RegionNote cameras={cameras} />
           {recent.length === 0 && <p className="muted">Nothing yet.</p>}
           {recent.length > 0 && feed.length === 0 && <p className="muted">Nothing recent on that camera passed through the painted region.</p>}
-          {feed.slice(0, feedShown).map((e) => (
+          {cards.slice(0, feedShown).map((e) => (
             <EventCard key={e.id} e={e} cameraName={name(e.camera_id)} onOpen={() => setOpen(e.id)} />
           ))}
-          <FeedMore shown={feedShown} total={feed.length} onMore={showMore} />
+          <FeedMore shown={feedShown} total={cards.length} onMore={showMore} />
         </aside>
         {open !== null && <EventDetail id={open} cameraName={name} onClose={() => setOpen(null)} />}
       </div>

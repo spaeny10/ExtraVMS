@@ -278,6 +278,10 @@ class Pipeline:
         db.update_event(event_id, clip=str(clip.relative_to(settings.data_dir)), error=None, **result)
         if reid:
             db.set_reid(event_id, reid)
+        if result["status"] == "rejected":
+            # a parked car that keeps being "seen": its track opens no new event while it stays put (tracker.rejected),
+            # held where the camera's own path left it (e, as the tracker closed it)
+            self.tracker.rejected(e)
         label = result.get("camera_class") or e["camera_class"]   # a "motion" event takes the class YOLO found
         if result["status"] == "verified" and label == "vehicle":
             clip = await self.get_clip()
@@ -872,15 +876,15 @@ class Pipeline:
         return n
 
     def recover(self) -> None:
-        """Requeue work interrupted by a restart, and describe verified events whose camera now wants Qwen."""
-        for r in db.all("SELECT id, status FROM events WHERE status IN ('open','pending') "
+        """Requeue work interrupted by a restart, and describe verified events whose camera now wants Qwen. Events
+        still open from before the restart have no track any more: closed at their last sample and verified (the
+        tracker's sweep does the same for one whose track is lost while running)."""
+        self.tracker.close_orphans(0)
+        for r in db.all("SELECT id, status FROM events WHERE status='pending' "
                         "OR (status='verified' AND synopsis IS NULL AND error IS NULL)"):
             if r["status"] == "verified" and not self.wants_synopsis(db.event(r["id"])):
                 continue
-            if r["status"] == "open":
-                db.update_event(r["id"], status="pending",
-                                end_ts=db.one("SELECT start_ts FROM events WHERE id=?", [r["id"]])["start_ts"])
-            if r["status"] in ("open", "pending"):
+            if r["status"] == "pending":
                 self.verify_q.put_nowait(r["id"])
             else:
                 self.queue_synopsis(r["id"])

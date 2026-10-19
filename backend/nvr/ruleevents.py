@@ -82,11 +82,35 @@ def classify(topic: str, data: dict | None) -> tuple[str, str] | None:
 
 
 def wanted(label: str, cam: dict | None) -> bool:
-    """Person, vehicle and motion always (YOLO verifies every label, like metadata events); anything else (animals,
+    """Person, vehicle and motion unless the camera's "Open events for" leaves them out (opens); anything else (animals,
     packages) only where the camera's synopsis_labels name it: YOLO here verifies people and vehicles only."""
     if label in VERIFIABLE or label == "motion":
-        return True
+        return opens(label, cam)
     return label in ((cam or {}).get("synopsis_labels") or [])
+
+
+# Per camera "Open events for" (cameras.event_labels): which of these open events, from its metadata tracks and its
+# ONVIF events alike. NULL = all of them (as before). A camera whose own vehicle detection fires on nothing (cam6's
+# VehicleDetect, 2026-10-19: 186 rejected vehicle events in 6 h) is set to people only. Motion still also needs the
+# camera's motion_events. Other labels (animals, packages) keep their synopsis_labels rule.
+EVENT_LABELS = ("person", "vehicle", "motion")
+
+
+def event_labels(value) -> list[str] | None:
+    """The stored form of an "Open events for" choice: the chosen labels, sorted, or None for all of them (anything
+    that isn't a list, too, so a bad value never silences a camera)."""
+    if not isinstance(value, (list, tuple)):
+        return None
+    chosen = sorted({v for v in value if v in EVENT_LABELS})
+    return None if len(chosen) == len(EVENT_LABELS) else chosen
+
+
+def opens(label: str, cam: dict | None) -> bool:
+    """Does this label open events on the camera (its "Open events for")? Labels the choice doesn't cover always do."""
+    chosen = (cam or {}).get("event_labels")
+    if not isinstance(chosen, list) or label not in EVENT_LABELS:
+        return True
+    return label in chosen
 
 
 def setting(cam: dict | None) -> str:

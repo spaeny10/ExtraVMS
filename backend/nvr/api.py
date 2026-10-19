@@ -568,9 +568,11 @@ async def hub_configure(body: HubIn):
 PUBLIC_CAMERA_FIELDS = ("id", "name", "host", "onvif_port", "rtsp_port", "username", "main_path",
                         "sub_path", "enabled", "zones", "retention_days", "scene_notes", "retention_policy",
                         "synopsis_labels", "policies", "ptz_config", "public_host", "public_rtsp_port", "public_onvif_port", "public_replay_port",
-                        "record_stream", "event_source", "motion_events", "web_scheme", "web_port", "public_web_port")
+                        "record_stream", "event_source", "motion_events", "web_scheme", "web_port", "public_web_port",
+                        "event_labels")
 CAMERA_KEPT_FIELDS = ("public_host", "public_rtsp_port", "public_onvif_port", "public_replay_port", "record_stream",
-                      "event_source", "motion_events", "web_scheme", "web_port", "public_web_port")   # omitted on PUT = unchanged
+                      "event_source", "motion_events", "web_scheme", "web_port", "public_web_port",
+                      "event_labels")   # omitted on PUT = unchanged
 
 
 def public_camera(c: dict) -> dict:
@@ -626,6 +628,9 @@ class CameraIn(BaseModel):
     # (Reolink PeopleDetect) when it sends no objects; omitted on update = keep what is stored
     event_source: Literal["auto", "metadata", "onvif_events"] = "auto"
     motion_events: bool = False   # ONVIF events mode: motion topics open events too (YOLO must confirm a person/vehicle)
+    # "Open events for" (ruleevents.opens): the labels that open events here, from the camera's metadata tracks and its
+    # ONVIF events alike (["person"]: a camera whose vehicle detection fires on nothing); None = all; omitted = keep
+    event_labels: list[Literal["person", "vehicle", "motion"]] | None = Field(None, max_length=3)
 
     @model_validator(mode="before")
     @classmethod

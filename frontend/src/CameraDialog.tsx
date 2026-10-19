@@ -9,7 +9,8 @@ import { PtzSettings } from "./PtzControl";
 import { CameraDevicePanel } from "./DeviceSettings";
 import { confirmDialog, errorText, toast, useIsPhone } from "./ui";
 import { detectionsText, streamsText, streamsTitle, suggestText } from "./cameraStreams";
-import { CAMERA_TABS, cameraWebUrl, dirtyTabs, headerSummary, openingTab, visibleTabs, type CameraDraft, type CameraTab } from "./cameraEdit";
+import { CAMERA_TABS, cameraWebUrl, dirtyTabs, headerSummary, openedLabels, openingTab, setEventLabel, setMotionLabel, visibleTabs,
+  type CameraDraft, type CameraTab } from "./cameraEdit";
 
 export const blankCamera: CameraDraft = {
   id: "", name: "", host: "", onvif_port: 80, rtsp_port: 554, username: "admin", main_path: "/main",
@@ -249,10 +250,33 @@ export function CameraDialog({ draft, cameras, sitePolicy, reload, onClose, onEd
             })()}
             {(edit.event_source ?? "auto") !== "metadata" && (
               <label className="row small">
-                <input type="checkbox" checked={Boolean(edit.motion_events)} onChange={(e) => setEdit({ ...edit, motion_events: e.target.checked })} />
+                <input type="checkbox" checked={Boolean(edit.motion_events)}
+                  onChange={(e) => setEdit({ ...edit, motion_events: e.target.checked, event_labels: setMotionLabel(edit.event_labels, e.target.checked) })} />
                 Open events on the camera's motion alarms too (YOLO must confirm a person or vehicle)
               </label>
             )}
+            {(() => {
+              const opened = openedLabels(edit.event_labels);
+              return (
+                <div className="field" role="group" aria-labelledby={`${uid}-opens`} aria-describedby={`${uid}-opens-hint`}>
+                  <span id={`${uid}-opens`}>Open events for</span>
+                  <div className="row">
+                    {(["person", "vehicle"] as const).map((l) => (
+                      <label key={l} className="row small">
+                        <input type="checkbox" checked={opened.has(l)}
+                          onChange={(e) => setEdit({ ...edit, event_labels: setEventLabel(edit.event_labels, l, e.target.checked) })} />
+                        {l === "person" ? "People" : "Vehicles"}
+                      </label>
+                    ))}
+                  </div>
+                  <Hint id={`${uid}-opens-hint`}
+                    text={opened.has("person") || opened.has("vehicle")
+                      ? "A label left out opens no events here, from the camera's metadata or its ONVIF events."
+                      : "No people or vehicle events open on this camera (it still records)."}
+                    more="A label left out opens no events on this camera, from its object metadata or its ONVIF events alike; the other labels are verified by YOLO as before. Leave vehicles out on a camera whose own vehicle detection fires on parked cars or on nothing." />
+                </div>
+              );
+            })()}
             <div className="field" role="group" aria-labelledby={`${uid}-qwen`} aria-describedby={`${uid}-qwen-hint`}>
               <span id={`${uid}-qwen`}>Qwen describes</span>
               <div className="row">

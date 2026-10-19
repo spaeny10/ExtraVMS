@@ -35,6 +35,15 @@ class Settings(BaseSettings):
     track_min_seconds: float = 1.0          # camera track must persist this long to become an event
     track_end_gap: float = 2.0              # seconds without the object before the track is closed
     track_max_seconds: float = 60.0         # long tracks are split so synopses stay timely
+    # Parked vehicles in the tracker: a vehicle track whose event the verifier rejected, or that the track_max_seconds
+    # split closed while it went on, opens no new event while it stays where it was (T-304's NW PTZ, 2026-10-19: 644
+    # rejected events in 6 h, one a minute from each parked car). It opens one again once it moves, or after the hold.
+    parked_track_move: float = 0.05         # its box centre moved this share of the frame: it is driving off
+    parked_track_iou: float = 0.3           # ...or its box overlaps the held position by less than this
+    parked_track_hold_s: float = 1800.0     # ...or this long has passed (a person may since have come to it)
+    # An open event no live track owns any more (its track was lost without closing it) is closed and verified this
+    # long after its last sample; at start-up every open event left from before the restart is closed that way at once
+    orphan_event_after_s: float = 120.0
     # Cameras without object metadata (ruleevents.py): an event opened by an ONVIF detection (e.g. Reolink PeopleDetect)
     # whose state=false never comes is closed this long after the last state=true
     rule_event_on_timeout: float = 120.0

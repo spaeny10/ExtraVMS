@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { NvrEvent } from "@site/api";
 import type { FleetEvent } from "@site/dashboard/types";
 import { NBYTES, cellIndex, encodeCells, setCell } from "@site/region";
-import { alertEvent, applyLiveEvent, cameraNameFor, mergePool, poolKey, regionFeed, removeLiveEvent, siteRegionKeys, tagServer,
-  timelineTargetHref } from "./eventOpen";
+import { alertEvent, applyLiveEvent, cameraNameFor, checkingText, feedCards, mergePool, poolKey, regionFeed, removeLiveEvent, siteRegionKeys,
+  tagServer, timelineTargetHref } from "./eventOpen";
 
 const ev = (server: string, id: number, cam: string, start: number, extra: Partial<FleetEvent> = {}): FleetEvent =>
   ({ id, camera_id: cam, start_ts: start, end_ts: start + 5, status: "verified", camera_class: "person", site_id: server, site_name: server.toUpperCase(), ...extra }) as FleetEvent;
@@ -60,6 +60,24 @@ describe("activity pool", () => {
     expect(applyLiveEvent(pool, ev("srvB", 1, "cam1", 50, { status: "rejected" })).map(poolKey)).toEqual(["srvA/2", "srvA/1"]);
     expect(applyLiveEvent(pool, ev("srvA", 2, "cam1", 200, { status: "masked" })).map(poolKey)).toEqual(["srvA/1", "srvB/1"]);
     expect(removeLiveEvent(pool, "srvB", 1).map(poolKey)).toEqual(["srvA/2", "srvA/1"]);
+  });
+  it("cards: an unverified vehicle waits (counted) but stays in the pool for the tile badge; people show at once", () => {
+    let pool: FleetEvent[] = [];
+    pool = applyLiveEvent(pool, ev("srvA", 1, "cam1", 100, { camera_class: "vehicle", status: "open" }));
+    pool = applyLiveEvent(pool, ev("srvB", 1, "cam2", 110, { camera_class: "person", status: "open" }));
+    pool = applyLiveEvent(pool, ev("srvA", 2, "cam1", 120, { camera_class: "vehicle", status: "pending" }));
+    pool = applyLiveEvent(pool, ev("srvA", 3, "cam3", 130, { camera_class: "vehicle", status: "verified" }));
+    expect(pool.map(poolKey)).toEqual(["srvA/3", "srvA/2", "srvB/1", "srvA/1"]);   // activeOf reads all of these
+    let feed = feedCards(pool);
+    expect(feed.cards.map(poolKey)).toEqual(["srvA/3", "srvB/1"]);
+    expect(checkingText(feed.checking)).toBe("Checking 2 vehicles…");
+    // one verifies, the other is rejected: the first becomes a card, the second never was one
+    pool = applyLiveEvent(pool, ev("srvA", 1, "cam1", 100, { camera_class: "vehicle", status: "verified" }));
+    pool = applyLiveEvent(pool, ev("srvA", 2, "cam1", 120, { camera_class: "vehicle", status: "rejected" }));
+    feed = feedCards(pool);
+    expect(feed.cards.map(poolKey)).toEqual(["srvA/3", "srvB/1", "srvA/1"]);
+    expect(feed.checking).toBe(0);
+    expect(checkingText(feed.checking)).toBeNull();
   });
   it("merges the painted cameras' history under the recent list (recent wins)", () => {
     const scoped = [ev("srvA", 1, "cam1", 100, { synopsis: "old" }), ev("srvA", 3, "cam1", 10)];

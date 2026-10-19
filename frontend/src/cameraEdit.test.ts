@@ -1,7 +1,8 @@
 import { expect, test } from "vitest";
 import type { Camera } from "./api";
 import type { CameraStreams, StreamProfile } from "./cameraStreams";
-import { FIELD_TAB, cameraWebUrl, changedFields, dirtyTabs, headerSummary, openingTab, visibleTabs, type CameraDraft } from "./cameraEdit";
+import { FIELD_TAB, cameraWebUrl, changedFields, dirtyTabs, headerSummary, openedLabels, openingTab, setEventLabel, setMotionLabel,
+  visibleTabs, type CameraDraft } from "./cameraEdit";
 
 const cam: Camera = {
   id: "cam1", name: "Side Yard", host: "10.0.0.5", onvif_port: 80, rtsp_port: 554, username: "admin", main_path: "/main",
@@ -94,4 +95,23 @@ test("web page fields are edited on the Connection tab", () => {
   // an unset scheme and http are the same (no unsaved-changes dot)
   expect(changedFields({ ...cam, web_scheme: null }, { ...cam, web_scheme: "http" })).toEqual([]);
   expect(changedFields(cam, { ...cam, web_port: 8080 })).toEqual(["web_port"]);
+});
+
+test("Open events for: all by default, people only for a camera whose vehicle detection fires on nothing", () => {
+  expect([...openedLabels(null)].sort()).toEqual(["motion", "person", "vehicle"]);
+  expect([...openedLabels(undefined)].sort()).toEqual(["motion", "person", "vehicle"]);
+  const peopleOnly = setEventLabel(null, "vehicle", false);
+  expect(peopleOnly).toEqual(["person", "motion"]);
+  expect(setEventLabel(peopleOnly, "vehicle", true)).toBeNull();          // every label ticked again: the default
+  expect(setEventLabel(setEventLabel(peopleOnly, "person", false), "person", false)).toEqual(["motion"]);
+  // the motion alarms box takes motion in and out of a stored choice; the default stays the default
+  expect(setMotionLabel(null, false)).toBeNull();
+  expect(setMotionLabel(["person"], true)).toEqual(["person", "motion"]);
+  expect(setMotionLabel(["person", "motion"], false)).toEqual(["person"]);
+  expect(setMotionLabel(["person", "vehicle"], true)).toBeNull();
+  // on the Detection tab; null and every label spelled out are the same
+  expect(FIELD_TAB.event_labels).toBe("detection");
+  expect(changedFields(cam, { ...cam, event_labels: ["vehicle", "person", "motion"] })).toEqual([]);
+  expect(changedFields(cam, { ...cam, event_labels: ["person"] })).toEqual(["event_labels"]);
+  expect(dirtyTabs(cam, { ...cam, event_labels: ["person"] })).toEqual(new Set(["detection"]));
 });

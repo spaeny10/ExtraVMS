@@ -50,7 +50,7 @@ import { Icon, confirmDialog, promptDialog, swipeHandlers, toast, useDismiss, us
 import { useStill } from "@site/useStill";
 import { type Camera as RegistryCam, type Fleet, type Org, type Server, type Site, type SiteCameraGroup, type SiteLayout, api, lastPictureText,
   stillUrl } from "./api";
-import { type EventRef, applyLiveEvent, cameraNameFor, mergePool, regionFeed, removeLiveEvent, siteRegionKeys, tagServer } from "./eventOpen";
+import { type EventRef, applyLiveEvent, cameraNameFor, checkingText, feedCards, mergePool, regionFeed, removeLiveEvent, siteRegionKeys, tagServer } from "./eventOpen";
 import { HubEventDetail } from "./HubEventDetail";
 import { canTalkDown } from "./access";
 import { useDirect, useDirectVersion } from "./direct";
@@ -644,12 +644,14 @@ function SiteActivity({ site, servers, tiles, multi, activity: a, onShowAll }: {
   const feed = fk
     ? a.pool.filter((e) => camKey(e.site_id, e.camera_id) === fk && (!a.regionMap[fk] || regionPass(e, a.regionMap[fk])))
     : regionFeed(a.pool, a.regionMap, a.regionKeys);
+  const { cards, checking } = feedCards(feed);   // unverified vehicles: counted, not shown (activeOf still sees them)
   const [shown, showMore] = useFeedCount(`${a.regionKeys.join(",")}|${fk ?? ""}`);
   const offline = a.offline.map((id) => servers.find((s) => s.id === id)?.name ?? id);
   return (
     <>
       <aside className="live-feed">
         <h3>Latest activity</h3>
+        {checking > 0 && <p className="muted small">{checkingText(checking)}</p>}
         {fk && (
           <p className="muted small">Only {label(fk)} ·{" "}
             <button type="button" className="linkish" onClick={onShowAll}>Show all cameras</button></p>
@@ -659,12 +661,12 @@ function SiteActivity({ site, servers, tiles, multi, activity: a, onShowAll }: {
         {a.recent === null && <p className="muted">Loading…</p>}
         {a.recent !== null && a.pool.length === 0 && <p className="muted">Nothing yet.</p>}
         {a.pool.length > 0 && feed.length === 0 && <p className="muted">{fk && !a.regionMap[fk] ? "Nothing recent on this camera." : "Nothing recent on that camera passed through the painted region."}</p>}
-        {feed.slice(0, shown).map((e) => (
+        {cards.slice(0, shown).map((e) => (
           <EventCard key={`${e.site_id}-${e.id}`} e={e} cameraName={names.get(camKey(e.site_id, e.camera_id)) ?? e.camera_id}
             site={mediaApi(e.site_id)} siteName={multi ? e.site_name : undefined}
             onOpen={() => setOpen({ server: e.site_id, id: e.id, location: site.id })} />
         ))}
-        <FeedMore shown={shown} total={feed.length} onMore={showMore} />
+        <FeedMore shown={shown} total={cards.length} onMore={showMore} />
       </aside>
       {/* a sibling of the column, as in LiveView, so the column's scroll and card styles don't reach the viewer */}
       {open && <HubEventDetail ev={open} cameraName={cameraNameFor(names, open.server)} onClose={() => setOpen(null)} />}

@@ -3,7 +3,7 @@
  * unit-tested: the one-line header summary, which tab each saved field is edited on (the "unsaved changes" dots), and
  * which tab the dialog opens on.
  */
-import type { Camera } from "./api";
+import type { Camera, EventLabel } from "./api";
 import { profileSize } from "./cameraStreams";
 
 export type CameraTab = "general" | "connection" | "device" | "recording" | "detection" | "journeys" | "ptz" | "rules";
@@ -40,7 +40,7 @@ export const FIELD_TAB: Partial<Record<keyof CameraDraft, CameraTab>> = {
   public_host: "connection", public_onvif_port: "connection", public_rtsp_port: "connection", public_replay_port: "connection",
   web_scheme: "connection", web_port: "connection", public_web_port: "connection",
   record_stream: "recording", retention_days: "recording", retention_policy: "recording",
-  event_source: "detection", motion_events: "detection", synopsis_labels: "detection", zones: "detection",
+  event_source: "detection", motion_events: "detection", event_labels: "detection", synopsis_labels: "detection", zones: "detection",
   policies: "rules",
 };
 
@@ -54,9 +54,32 @@ function norm(k: keyof CameraDraft, v: unknown): unknown {
     case "event_source": return v ?? "auto";
     case "web_scheme": return v || "http";
     case "synopsis_labels": return [...((v as string[] | null | undefined) ?? ["person"])].sort();
+    case "event_labels": return [...openedLabels(v as EventLabel[] | null | undefined)].sort();
     case "policies": case "zones": return v ?? [];
     default: return v ?? null;
   }
+}
+
+/** "Open events for": every label the backend lets a camera choose (ruleevents.EVENT_LABELS). */
+export const EVENT_LABELS: readonly EventLabel[] = ["person", "vehicle", "motion"];
+
+/** The labels that open events on the camera: its choice, or all of them when it has none (null, the default). */
+export function openedLabels(v: EventLabel[] | null | undefined): Set<EventLabel> {
+  return new Set(v ?? EVENT_LABELS);
+}
+
+/** The value saved after ticking or unticking one label: null again once every label is ticked (the default, so a
+ *  label added later opens events too). Motion follows the "motion alarms" box (setMotionLabel), so ticking that box
+ *  is never undone by a stored choice that leaves motion out. */
+export function setEventLabel(v: EventLabel[] | null | undefined, label: EventLabel, on: boolean): EventLabel[] | null {
+  const s = openedLabels(v);
+  if (on) s.add(label); else s.delete(label);
+  return EVENT_LABELS.every((l) => s.has(l)) ? null : EVENT_LABELS.filter((l) => s.has(l));
+}
+
+/** The "motion alarms" box changed: a stored choice takes motion in or out with it (null stays null). */
+export function setMotionLabel(v: EventLabel[] | null | undefined, on: boolean): EventLabel[] | null {
+  return v == null ? null : setEventLabel(v, "motion", on);
 }
 
 /** The form fields that differ between the camera as the dialog opened and the draft now. */

@@ -121,6 +121,9 @@ export type Camera = {
   event_source?: EventSource;
   /** ONVIF events mode: motion topics open events too (YOLO must confirm a person or vehicle) */
   motion_events?: number | boolean;
+  /** "Open events for" (backend ruleevents.opens): the labels that open events here, from the camera's metadata and
+   *  its ONVIF events alike; null = all of them */
+  event_labels?: EventLabel[] | null;
   status?: {
     stream_ready: boolean;
     recording: boolean;
@@ -143,6 +146,7 @@ export type Camera = {
 };
 
 export type EventSource = "auto" | "metadata" | "onvif_events";
+export type EventLabel = "person" | "vehicle" | "motion";
 
 /** PTZ camera state and settings (backend/nvr/ptz.py). */
 export type PtzConfig = { home_token: string | null; home_name: string | null; return_home_min: number; relay_label: string; input_label: string };

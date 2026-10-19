@@ -60,6 +60,12 @@ export function applyLiveEvent(pool: FleetEvent[], e: FleetEvent): FleetEvent[] 
   return [e, ...rest].sort((a, b) => b.start_ts - a.start_ts).slice(0, FEED_POOL_MAX);
 }
 
+/**
+ * The column's cards: vehicles still being verified are left out and counted ("Checking 3 vehicles…"), as in the
+ * server UI's LiveView (@site/liveFeed). They stay in the pool, so a tile still lights "vehicle" while one is open.
+ */
+export { checkingText, feedCards } from "@site/liveFeed";
+
 export const removeLiveEvent = (pool: FleetEvent[], server: string, id: number): FleetEvent[] =>
   pool.filter((x) => !(x.site_id === server && x.id === id));
 

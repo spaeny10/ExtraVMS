@@ -7,14 +7,22 @@ while a track is alive are attached to it.
 
 Cameras that send no object metadata (ruleevents.py): their ONVIF detection events (Reolink PeopleDetect true/false)
 open and close events themselves, without boxes; the verifier finds the object with YOLO.
+
+Parked vehicles: a vehicle track whose event the verifier rejected, or whose event the track_max_seconds split closed
+while the track went on, is held: it opens no new event while it stays where it was (parked_track_move / _iou), until
+parked_track_hold_s has passed. Before this a parked car opened, and lost, an event every minute all day.
+
+An open event that no live track owns any more is closed by the sweep after orphan_event_after_s (and at start-up),
+so it is verified instead of staying "open" for ever.
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass, field
 
-from . import ingest, ruleevents, zones
+from . import ingest, parked, ruleevents, zones
 from .config import settings
 from . import cells
 from .db import db
@@ -26,6 +34,32 @@ log = logging.getLogger("nvr.tracker")
 CLASS_MAP = {"human": "person", "person": "person", "face": "person",
              "vehicle": "vehicle", "car": "vehicle", "truck": "vehicle", "bus": "vehicle",
              "motorcycle": "vehicle", "bicycle": "vehicle", "nonmotor": "vehicle"}
+HELD_LABELS = {"vehicle"}   # a person standing still is never "parked": their tracks are never held
+ORPHAN_CHECK_S = 30.0       # how often the sweep looks for open events no track owns
+
+
+def moved(held_box, box) -> bool:
+    """The vehicle left the position it was held at: its box centre moved parked_track_move of the frame, or the
+    boxes overlap less than parked_track_iou (camera boxes jitter a little around a parked car; this is more)."""
+    (x1, y1), (x2, y2) = parked._center(held_box), parked._center(box)
+    far = max(abs(x2 - x1), abs(y2 - y1)) > settings.parked_track_move
+    return far or parked.iou(held_box, box) < settings.parked_track_iou
+
+
+def last_sample(path, default: float) -> float:
+    """The time of the last point of an event's path, or `default` when it has none."""
+    for p in reversed(path or []):
+        if isinstance(p, (list, tuple)) and p and isinstance(p[0], (int, float)):
+            return float(p[0])
+    return default
+
+
+@dataclass
+class Hold:
+    """A vehicle track that opens no new event while it stays at `box` (normalized l, t, r, b)."""
+    box: tuple
+    since: float      # wall time it was held (renewed by a later rejection)
+    why: str          # "rejected" | "split"
 
 
 @dataclass
@@ -48,6 +82,11 @@ class Track:
     # rule-event track: the camera's detectors (topic|rule) that said true and not false yet. Two topics can name one
     # label (Reolink PeopleDetect and FaceDetect): the track is on while any of them is, off when the last one says false
     states: set = field(default_factory=set)
+    # rule-event track: wall time the camera's detector turned on (kept across the track_max_seconds split), and when
+    # an event of this streak was rejected while the detector stayed on (0: not held). There is no box to tell a
+    # parked car from a new one, so this hold lasts only while the camera keeps saying "on".
+    streak: float = 0.0
+    hold_since: float = 0.0
 
 
 class Tracker:
@@ -66,6 +105,9 @@ class Tracker:
         # the metadata" as "the camera sends none" only while the reader is connected (a 401 must not look like that)
         self.metadata_reader = ingest.metadata_since
         self.watch = ruleevents.SourceWatch()
+        self.holds: dict[tuple[str, str], Hold] = {}   # (camera, camera track id): parked vehicles (see moved)
+        self._retired: list[Track] = []   # tracks whose id the camera gave to another kind of object: the sweep closes them
+        self._orphans_at = time.time()    # the first orphan check waits a round: start-up closes the old ones (recover)
 
     def set_zones(self, camera_id: str, zone_list: list[dict]) -> None:
         self.zones[camera_id] = zones.normalize(zone_list)
@@ -73,19 +115,66 @@ class Tracker:
     def _zone_hit(self, camera_id: str, box) -> bool:
         return zones.allowed(zones.foot(box), self.zones.get(camera_id, []))
 
+    # ---- parked vehicles
+    def hold(self, camera_id: str, object_id: str, box, why: str, now: float | None = None) -> None:
+        """This vehicle track opens no new event while it stays at `box` (see moved), for parked_track_hold_s."""
+        key = (camera_id, object_id)
+        if key not in self.holds:
+            log.info("[%s] vehicle track %s held where it is (%s): no new event until it moves", camera_id, object_id, why)
+        self.holds[key] = Hold(tuple(box), now or time.time(), why)
+
+    def _held(self, key: tuple[str, str], box, now: float) -> bool:
+        h = self.holds.get(key)
+        if h is None:
+            return False
+        if now - h.since >= settings.parked_track_hold_s:
+            del self.holds[key]
+            log.info("[%s] vehicle track %s held for %.0f min: it may open an event again", key[0], key[1], (now - h.since) / 60)
+            return False
+        if moved(h.box, box):
+            del self.holds[key]
+            log.info("[%s] vehicle track %s moved off where it was held", key[0], key[1])
+            return False
+        return True
+
+    def rejected(self, e: dict, now: float | None = None) -> None:
+        """The verifier rejected a vehicle event (for any reason: parked, 0 hits...). Its camera track is held where
+        the event left it; a rule-event vehicle (no box) is held while the camera's detector stays on."""
+        if not e or e.get("camera_class") not in HELD_LABELS:
+            return
+        now = now or time.time()
+        if ruleevents.is_rule_event(e):
+            t = self.tracks.get((e["camera_id"], ruleevents.TRACK_PREFIX + e["camera_class"]))
+            # only the detector streak that event belongs to: after a false and a fresh true it is a new detection
+            if t is not None and t.source == ruleevents.SOURCE and t.on and e["start_ts"] >= t.streak - 1:
+                if not t.hold_since:
+                    log.info("[%s] %s ONVIF event %s rejected while the camera still says it's there: no new event "
+                             "until it says it's gone", e["camera_id"], e["camera_class"], e["id"])
+                t.hold_since = now
+            return
+        box = next((p[1:5] for p in reversed(e.get("path") or []) if isinstance(p, (list, tuple)) and len(p) >= 5), None)
+        if box is not None and e.get("track_id") is not None:
+            self.hold(e["camera_id"], str(e["track_id"]), box, "rejected", now)
+
     def on_frame(self, f: MetaFrame) -> None:
         now = time.time()
         if any(CLASS_MAP.get(o.cls.lower()) for o in f.objects):
             self.watch.objects(f.camera_id, now)
         else:
             self.watch.heard(f.camera_id, now)
+        cam = self.camera(f.camera_id) if f.objects else None
         for o in f.objects:
             label = CLASS_MAP.get(o.cls.lower())
-            if not label:
-                continue
+            if not label or not ruleevents.opens(label, cam):
+                continue   # not a label we know, or one this camera opens no events for ("Open events for")
             key = (f.camera_id, o.object_id)
             t = self.tracks.get(key)
             if t is None or t.label != label:
+                if t is not None and t.event_id is not None:
+                    # The camera gave this object id to another kind of object (T-304's NW PTZ reuses its ids for
+                    # cars and people alike). Replacing the track used to drop its event, which then stayed "open"
+                    # for ever: it is closed and verified on the next sweep like any track that ended.
+                    self._retired.append(t)
                 t = self.tracks[key] = Track(f.camera_id, o.object_id, label, f.ts, f.ts, now)
             t.last_ts, t.last_wall = f.ts, now
             t.max_conf = max(t.max_conf, o.conf)
@@ -95,6 +184,11 @@ class Tracker:
                 t.away = away
             # zones are drawn for the home view: while the camera is turned away, record everything it sees
             t.in_zone = t.in_zone or away is not None or self._zone_hit(f.camera_id, o.box)
+            if t.event_id is None and t.label in HELD_LABELS and self._held(key, o.box, now):
+                # a parked vehicle that was rejected (or already had its event): it counts again from the frame it
+                # moves on, so the event that follows starts when it drove off, not when it parked
+                t.first_ts, t.path = f.ts, t.path[-1:]
+                continue
             if t.event_id is None and t.in_zone and t.last_ts - t.first_ts >= settings.track_min_seconds:
                 if self._rule_event_open(f.camera_id):
                     # never both: the camera's ONVIF event already opened this visit's event (auto mode had switched
@@ -193,7 +287,7 @@ class Tracker:
                 t = self._upgrade_motion(m, key, label)
         if t is None:
             t = Track(cid, key[1], label, now, now, now, source=ruleevents.SOURCE, in_zone=True,
-                      on=not pulse, last_on=now, away=self.away_preset(cid))
+                      on=not pulse, last_on=now, away=self.away_preset(cid), streak=now)
             if not pulse:
                 t.states.add(src)
             t.path.append(ruleevents.point(now))
@@ -239,9 +333,58 @@ class Tracker:
         except Exception:  # noqa: BLE001 - a UI push must not stop the tracker
             log.exception("publishing event %s failed", t.event_id)
 
+    async def _close(self, t: Track) -> None:
+        """The track ended (or was split): its event goes to verification."""
+        rule = t.source == ruleevents.SOURCE
+        if rule and (not t.path or t.path[-1][0] < round(t.last_ts, 3)):
+            t.path.append(ruleevents.point(t.last_ts))   # the path spans the whole event
+        # a camera that moved during the track can't be trusted against zones drawn for home
+        away = self.away_between(t.camera_id, t.first_ts, t.last_ts) or t.away
+        db.update_event(t.event_id, end_ts=t.last_ts, path=t.path, rules=t.rules,
+                        camera_conf=t.max_conf, status="pending", cells=cells.for_event(t.path),
+                        **({"ptz_preset": away} if away else {}))
+        log.info("[%s] event %s closed after %.1fs (%d samples)", t.camera_id, t.event_id,
+                 t.last_ts - t.first_ts, len(t.path))
+        await self.on_closed(t.event_id)
+
+    def close_orphans(self, older_than: float, now: float | None = None) -> list[int]:
+        """Close open events that no live track owns any more, once their last sample is `older_than` seconds old:
+        end_ts = that sample, status pending. Returns their ids; the caller sends them to verification. At start-up
+        (older_than 0) that is every open event left from before the restart."""
+        now = now or time.time()
+        owned = {t.event_id for t in [*self.tracks.values(), *self._retired] if t.event_id is not None}
+        out = []
+        for r in db.all("SELECT id, camera_id, start_ts, created_at, path FROM events WHERE status='open'"):
+            if r["id"] in owned:
+                continue
+            try:
+                path = json.loads(r["path"]) if isinstance(r["path"], str) else r["path"]
+            except ValueError:
+                path = None
+            last = max(last_sample(path, r["start_ts"]), r["start_ts"])
+            # a camera clock ahead of this PC's would keep its event "recent" for ever: count from when it was opened
+            seen = last if last <= now else (r["created_at"] or now)
+            if now - seen < older_than:
+                continue
+            db.update_event(r["id"], end_ts=last, status="pending")
+            log.warning("[%s] event %s was still open with no track (last seen %.0fs ago): closed for verification",
+                        r["camera_id"], r["id"], now - seen)
+            out.append(r["id"])
+        return out
+
     async def sweep(self) -> None:
-        """Close tracks that went quiet or ran too long. Call about once a second."""
+        """Close tracks that went quiet or ran too long, and events no track owns. Call about once a second."""
         now = time.time()
+        retired, self._retired = self._retired, []
+        for t in retired:   # their id now names another kind of object: closed as if they had ended
+            await self._close(t)
+        if now - self._orphans_at >= ORPHAN_CHECK_S:
+            self._orphans_at = now
+            for eid in self.close_orphans(settings.orphan_event_after_s, now):
+                await self.on_closed(eid)
+            for key, h in list(self.holds.items()):
+                if now - h.since >= settings.parked_track_hold_s:
+                    del self.holds[key]   # its track is long gone (or will open an event again when seen)
         for key, t in list(self.tracks.items()):
             rule = t.source == ruleevents.SOURCE
             if rule and t.on:
@@ -255,19 +398,19 @@ class Tracker:
                 too_long = t.last_ts - t.first_ts > settings.track_max_seconds
             if not (quiet or too_long):
                 continue
+            if rule and t.event_id is None and not quiet:
+                # held after a rejection (see rejected) and the camera still says it's there: keep following it without
+                # an event, or open one again once the hold has run out
+                t.first_ts, t.path, t.rules = now, [ruleevents.point(now)], t.rules[-1:]
+                if now - t.hold_since >= settings.parked_track_hold_s:
+                    t.hold_since = 0.0
+                    t.away = self.away_preset(t.camera_id)
+                    self._open_rule_event(t)
+                continue
             del self.tracks[key]
             if t.event_id is None:
                 continue  # too short / never entered a zone: noise
-            if rule and (not t.path or t.path[-1][0] < round(t.last_ts, 3)):
-                t.path.append(ruleevents.point(t.last_ts))   # the path spans the whole event
-            # a camera that moved during the track can't be trusted against zones drawn for home
-            away = self.away_between(t.camera_id, t.first_ts, t.last_ts) or t.away
-            db.update_event(t.event_id, end_ts=t.last_ts, path=t.path, rules=t.rules,
-                            camera_conf=t.max_conf, status="pending", cells=cells.for_event(t.path),
-                            **({"ptz_preset": away} if away else {}))
-            log.info("[%s] event %s closed after %.1fs (%d samples)", t.camera_id, t.event_id,
-                     t.last_ts - t.first_ts, len(t.path))
-            await self.on_closed(t.event_id)
+            await self._close(t)
             if too_long and not quiet and (t.on or not rule):
                 # keep following the same object as a new event (a rule-event track only while the camera still says
                 # it's there: after its state=false the next true opens a new event the usual way)
@@ -276,8 +419,18 @@ class Tracker:
                 # every 60 s event after it, highway traffic included. A rule-event track has no positions: it keeps it.
                 nt = self.tracks[key] = Track(t.camera_id, t.object_id, t.label, t.last_ts, t.last_ts, t.last_wall,
                                               in_zone=t.in_zone if rule else False, source=t.source, on=t.on,
-                                              last_on=t.last_on, states=set(t.states))
-                if rule:   # the camera still says it's there: the next event opens now, like the first one did
+                                              last_on=t.last_on, states=set(t.states), streak=t.streak,
+                                              hold_since=t.hold_since)
+                if rule:
                     nt.away = self.away_preset(t.camera_id)
                     nt.path.append(ruleevents.point(nt.first_ts))
-                    self._open_rule_event(nt)
+                    if t.hold_since and now - t.hold_since < settings.parked_track_hold_s:
+                        log.info("[%s] %s ONVIF event still on after a rejected event: followed without a new event",
+                                 t.camera_id, t.label)
+                    else:   # the camera still says it's there: the next event opens now, like the first one did
+                        nt.hold_since = 0.0
+                        self._open_rule_event(nt)
+                elif t.label in HELD_LABELS and (box := next((p[1:5] for p in reversed(t.path) if len(p) >= 5), None)):
+                    # a vehicle still there after its event: one event for it, not one a minute while it stays parked
+                    # (merge folded verified ones only up to merge_max_seconds; rejected ones every minute, all day)
+                    self.hold(t.camera_id, t.object_id, box, "split", now)
