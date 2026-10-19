@@ -211,7 +211,7 @@ class HostRegistry:
             if not isinstance(inst, dict) or not inst.get("id"):
                 continue
             info = {k: inst.get(k) for k in ("state", "used_gb", "quota_gb", "gpu", "mode", "location_id", "name", "host_ips",
-                                             "cpus", "mem_gb", "gateway", "relay")}
+                                             "cpus", "mem_gb", "gateway", "relay", "image", "image_id")}
             # only this host's own instances: a host can never report on (or overwrite) another host's rows
             db.run(sa.update(db.central_instances).where(db.central_instances.c.id == str(inst["id"])[:24],
                                                          db.central_instances.c.host_id == conn.host_id).values(info=info, info_at=now))
@@ -1175,6 +1175,7 @@ def _names(rows: list[dict]) -> dict:
         "org": {r["id"]: r["name"] for r in db.rows(sa.select(db.orgs.c.id, db.orgs.c.name).where(db.orgs.c.id.in_(orgs)))} if orgs else {},
         "host": {r["id"]: r for r in db.rows(sa.select(db.hosts).where(db.hosts.c.id.in_(hosts)))} if hosts else {},
         "server": {r["id"]: r for r in db.rows(sa.select(db.sites.c.id, db.sites.c.online, db.sites.c.last_seen_at).where(db.sites.c.id.in_(servers)))} if servers else {},
+        "trend": {h: work_trend(h) for h in hosts},   # the queues' 15-minute trend per host (in memory)
     }
 
 
@@ -1193,13 +1194,17 @@ def instance_out(ci: dict, names: dict, hub_admin: bool) -> dict:
     host = names["host"].get(ci["host_id"]) or {}
     server = names["server"].get(ci["server_id"]) if ci["server_id"] else None
     gpu_name = next((g.get("name") for g in _gpus(host.get("capacity")) if g["index"] == ci["gpu"]), None)
+    cap = host.get("capacity") if isinstance(host.get("capacity"), dict) else {}
+    work = ((cap.get("work") or {}).get("instances") or {}).get(ci["id"]) if isinstance(cap.get("work"), dict) else None
+    cams = (names.get("cams") or {}).get(ci["server_id"] or "", (0, 0))
     out = {"id": ci["id"], "location_id": ci["location_id"], "location_name": names["loc"].get(ci["location_id"]),
            "org_id": ci["org_id"], "org_name": names["org"].get(ci["org_id"]), "server_id": ci["server_id"],
            "server_online": bool(server and server["online"]), "name": ci["name"], "mode": ci["mode"], "subnet": ci["subnet"],
            "public_ip": ci["public_ip"], "site_number": ci["site_number"], "quota_gb": ci["quota_gb"],
            "used_gb": info.get("used_gb") if isinstance(info.get("used_gb"), (int, float)) else None,
            "state": ci["state"], "phase": phase(ci), "created_at": ci["created_at"], "ready_at": ci.get("ready_at"), "info_at": ci.get("info_at"),
-           "camera_limit": ci.get("camera_limit"), "camera_count": (names.get("cams") or {}).get(ci["server_id"] or "", (0, 0))[0],
+           # enabled cameras (not missing), and how many of them stream now (0 while its server is offline)
+           "camera_limit": ci.get("camera_limit"), "camera_count": cams[0], "cameras_online": cams[1],
            # subnets / public_ips / hosts: the Site networks; auto: the public addresses its cameras use (the firewall
            # allows both; auto_on false = a row from before automatic addresses, see applied_state); resolved: {DNS
            # name: [IPv4]} as the host last resolved them (the firewall allows exactly those)
@@ -1210,7 +1215,16 @@ def instance_out(ci: dict, names: dict, hub_admin: bool) -> dict:
         out |= {"host_id": ci["host_id"], "host_name": host.get("name"), "host_online": registry.online(ci["host_id"]),
                 "gpu": ci["gpu"], "gpu_name": gpu_name, "last_error": ci["last_error"], "host_state": info.get("state"),
                 # its CPU / memory limits on the host, as last reported (set_resources changes them)
-                "cpus": _num(info.get("cpus")), "mem_gb": _num(info.get("mem_gb"))}
+                "cpus": _num(info.get("cpus")), "mem_gb": _num(info.get("mem_gb")), "host_cpus": _num(cap.get("cpus")),
+                # the image it runs and the one its host creates new instances from: tags for display, Docker image IDs
+                # to compare (agent 0.3.1+; None = not reported): instances run git-rev tags while `latest` is retagged
+                "image": info.get("image") if isinstance(info.get("image"), str) else None,
+                "image_id": info.get("image_id") if isinstance(info.get("image_id"), str) else None,
+                "host_image": cap.get("image") if isinstance(cap.get("image"), str) else None,
+                "host_image_id": cap.get("image_id") if isinstance(cap.get("image_id"), str) else None,
+                # its queues from the host's capacity.work (agent 0.2.0+) and whether the verify queue is growing
+                "work": work if isinstance(work, dict) else None,
+                "queue_growing": bool(((names.get("trend") or {}).get(ci["host_id"]) or {}).get("instances", {}).get(ci["id"], {}).get("growing"))}
         # not on the host yet: waiting for the next sync, or the last one failed (sync_error says why)
         out["camera_network"] |= {"pending": state == "pending" or bool(cn.get("sync_error")), "sync_error": cn.get("sync_error")}
     return out
@@ -1240,7 +1254,8 @@ def instances(where=None, hub_admin: bool = True, include_deleted: bool = False)
         q = q.where(db.central_instances.c.state != "deleted")
     rows = db.rows(q)
     names = _names(rows)
-    names["cams"] = cameras.counts([r["server_id"] for r in rows if r["server_id"]], set())   # enabled, not missing
+    online = {sid for sid, s in names["server"].items() if s["online"]}
+    names["cams"] = cameras.counts([r["server_id"] for r in rows if r["server_id"]], online)   # enabled, not missing; streaming
     return [instance_out(r, names, hub_admin) for r in rows]
 
 

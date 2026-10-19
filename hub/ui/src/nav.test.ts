@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SITE_TABS, consoleHref, consoleTimelineHref, fullBleed, incidentHref, matchRoute, reportHref, serverHref, settingsHref, siteAskHref, siteHref, socHref, topNav } from "./nav";
+import { SITE_TABS, consoleHref, consoleTimelineHref, fullBleed, hostHref, incidentHref, matchRoute, reportHref, serverHref, settingsHref, siteAskHref, siteHref, socHref, topNav } from "./nav";
 
 describe("invite route", () => {
   it("is public and carries the code", () => {
@@ -138,6 +138,9 @@ describe("topNav", () => {
     expect(labels("/")).not.toContain("Hosts");
     expect(matchRoute("/hub/hosts")).toEqual({ page: "hosts" });
     expect(matchRoute("/hub")).toEqual({ page: "hosts", redirect: "/hub/hosts" });
+    expect(matchRoute("/hub/hosts/h_ab%2Fc")).toEqual({ page: "hosts", hostId: "h_ab/c" });   // one host's page
+    expect(hostHref("h_ab/c")).toBe("/hub/hosts/h_ab%2Fc");
+    expect(hostHref()).toBe("/hub/hosts");
     expect(topNav("hosts", false, true).find((n) => n.label === "Hosts")!.pages).toContain("hosts");
   });
 

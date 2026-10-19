@@ -94,6 +94,14 @@ export type WorkTrend = {
 };
 /** An open host_queue_growing alert (key verify:<instance id> or vllm); `text` says which queue, where. */
 export type QueueAlert = { key: string; opened_at: number; text?: string; queue?: string; instance_id?: string; site?: string };
+/** What needs attention on a host (hub hostlist.py): its agent is not connected, older than the fleet's newest, or a queue alert is open. */
+export type HostProblem = "offline" | "agent" | "queue";
+/**
+ * What needs attention on an instance (hub hostlist.py): down (failed, its container stopped, or its server not connected
+ * while the host is up), storage (90 % of its quota or more), queue (YOLO verify queue backing up), image (its container
+ * runs another Docker image ID than its host creates new instances from), cameras (some not streaming).
+ */
+export type InstanceProblem = "down" | "storage" | "queue" | "image" | "cameras";
 /** `offline_since`: when its open host_offline alert opened (null = none open). */
 export type Host = {
   id: string; name: string; created_at: number; online: boolean; last_seen_at: number | null; hostname: string | null; version: string | null;
@@ -101,7 +109,20 @@ export type Host = {
   /** GB a new instance's quota may take: the largest disk's free space minus what its instances may still grow into. */
   room_gb?: number;
   work_history?: WorkSample[]; work_trend?: WorkTrend; queue_alerts?: QueueAlert[];
+  /** newer hubs */
+  problems?: HostProblem[];
 };
+/** The attention strip's counts (GET /api/hub/fleet-summary); `host_index`: every host by name, for the host filter. */
+export type FleetSummary = {
+  hosts: { total: number; online: number } & Record<HostProblem, number>;
+  instances: { total: number; any: number } & Record<InstanceProblem, number>;
+  cameras_down: number; newest_agent: string | null; healthy: boolean;
+  /** some instance and its host both report Docker image IDs (agent 0.3.1+): without that, "image" never counts */
+  images_reported: boolean;
+  host_index: { id: string; name: string; online: boolean }[];
+};
+export type HostListParams = { q?: string; status?: string; sort?: string; order?: string; limit?: number; offset?: number };
+export type CentralListParams = { q?: string; state?: string; host?: string; mode?: string; problem?: string; sort?: string; order?: string; limit?: number; offset?: number };
 /** What the Peplink settings sheet shows (central.ts lays out the port-forward table from the bases). */
 /** `forward_addresses`: the routers' public IPs and DNS names the port-forward table applies to (from the camera network). */
 export type Peplink = { mode: CentralMode; subnet: string | null; lan_gateway: string | null; public_ip: string | null; forward_addresses?: string[]; fusionhub: string | null; datacenter_ip: string | null; rtsp_base: number; onvif_base: number };
@@ -128,6 +149,12 @@ export type CentralInstance = {
   host_id?: string; host_name?: string | null; host_online?: boolean; gpu?: number | null; gpu_name?: string | null; last_error?: string | null; host_state?: string | null;
   /** Its CPU and memory limits on the host, as last reported (null until a 0.2.0+ agent reports them). */
   cpus?: number | null; mem_gb?: number | null;
+  /** Newer hubs, hub administrators: cameras streaming now, the host's CPU count, the image it runs and the one its host
+   *  creates new instances from (tags to show, e.g. axiom/instance:2096ed5 and :latest; Docker image IDs to compare; null =
+   *  not reported), its queues from the host's heartbeat, and what needs attention. */
+  cameras_online?: number; host_cpus?: number | null; image?: string | null; host_image?: string | null;
+  image_id?: string | null; host_image_id?: string | null;
+  work?: InstanceWork | null; queue_growing?: boolean; problems?: InstanceProblem[];
 };
 /** Read-only on a Site page; `can_manage` (hub administrators) shows the link to the Hosts page, where instances are managed. */
 export type LocationCentral = { instances: CentralInstance[]; can_provision?: boolean; can_manage?: boolean };
@@ -515,6 +542,11 @@ export const api = {
   removeHost: (id: string) => req(`/api/hub/hosts/${encodeURIComponent(id)}`, { method: "DELETE" }),
   rotateHost: (id: string) => req<{ token: string; install: string }>(`/api/hub/hosts/${encodeURIComponent(id)}/rotate-token`, { method: "POST" }),
   hubCentral: () => req<CentralInstance[]>("/api/hub/central"),
+  /** One page of the instances, filtered and sorted at the hub (hub hostlist.py). */
+  hubCentralPage: (p: CentralListParams) => req<{ items: CentralInstance[]; total: number; limit: number; offset: number }>(`/api/hub/central?${qs(p)}`),
+  hostsPage: (p: HostListParams) => req<{ hosts: Host[]; total: number; install: string; host_agent_url: string }>(`/api/hub/hosts?${qs(p)}`),
+  host: (id: string) => req<Host>(`/api/hub/hosts/${encodeURIComponent(id)}`),
+  fleetSummary: () => req<FleetSummary>("/api/hub/fleet-summary"),
   locationCentral: (loc: string) => req<LocationCentral>(`/api/locations/${loc}/central`),
   provisionCentral: (loc: string, b: CentralBody) => req<CentralInstance>(`/api/locations/${loc}/central`, json("POST", b)),
   /** Storage quota and / or camera limit (null = no limit); hub administrators. */

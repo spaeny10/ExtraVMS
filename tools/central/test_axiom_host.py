@@ -403,6 +403,30 @@ class Isolation(unittest.TestCase):
         self.assertEqual(out["containers_started"], [])                 # exited ones are left alone
         self.assertEqual(len(self.exe.cmds("docker run")), before)
 
+    def test_image_ids(self):
+        """What runs is compared by Docker image ID: instances run git-rev tags, host.json `latest` is retagged per build."""
+        a, b = "sha256:" + "a" * 64, "sha256:" + "b" * 64
+        self.exe.answers["docker ps -a"] = "acme-gate\trunning\nbeta-yard\texited\n"
+        self.exe.answers["docker inspect --format"] = f"acme-gate\t{a}\nbeta-yard\tnot-an-id\n"
+        self.exe.answers["docker image inspect"] = b + "\n"
+        views = {v["id"]: v for v in self.host.list_instances()["instances"]}
+        self.assertEqual((views["acme-gate"]["image_id"], views["beta-yard"]["image_id"]), (a, None))
+        self.assertTrue(views["acme-gate"]["image"].startswith("axiom/instance:"))           # the tag stays, for display
+        inspect = self.exe.cmds("docker inspect --format")[-1]
+        self.assertEqual(sorted(inspect[-2:]), ["axiom-acme-gate", "axiom-beta-yard"])       # one call for all
+        cap = self.host.capacity()
+        self.assertEqual(cap["image_id"], b)
+        n = len(self.exe.cmds("docker image inspect"))
+        self.host.capacity()
+        self.assertEqual(len(self.exe.cmds("docker image inspect")), n)                       # cached
+        self.host._image_id = (b, 1.0)                                                         # stale: read again
+        self.exe.answers["docker image inspect"] = ""                                          # and quietly unknown
+        self.assertIsNone(self.host.capacity()["image_id"])
+        self.assertEqual(len(self.exe.cmds("docker image inspect")), n + 1)
+        self.assertEqual(ah.image_id_of(" " + a + "\n"), a)
+        self.assertIsNone(ah.image_id_of("axiom/instance:latest"))
+        self.assertEqual(self.host.container_images([]), {})
+
     def test_list_view(self):
         self.exe.answers["docker ps -a"] = "acme-gate\trunning\n"
         views = {v["id"]: v for v in self.host.list_instances()["instances"]}
@@ -1118,9 +1142,15 @@ class Work(unittest.TestCase):
         for t in range(90, 600, 30):
             r = ah.rate_per_min(d, t, 101, 300)
         self.assertEqual(r, 0.0)                                   # the window slid past the one event
-        self.assertIsNone(ah.rate_per_min(d, 630, 50, 300))       # retention deleted events: start over
-        self.assertEqual(ah.rate_per_min(d, 690, 51, 300), 1.0)
+        self.assertEqual(ah.rate_per_min(d, 630, 50, 300), 0.0)    # retention deleted events: no progress, the rate goes on
+        self.assertEqual(ah.rate_per_min(d, 690, 51, 300), 0.2)    # one more in the 5 minutes since 390
         self.assertIsNone(ah.rate_per_min(d, 720, None, 300))
+        # a busy instance whose merges drop the count every reading: still a rate (the work done between drops)
+        d = __import__("collections").deque()
+        self.assertIsNone(ah.rate_per_min(d, 0, 500, 300))
+        for t, v in ((30, 504), (60, 503), (90, 507), (120, 506)):   # +4, a merge (-2) with +1, +4, a merge with +1
+            r = ah.rate_per_min(d, t, v, 300)
+        self.assertEqual(r, 4.0)                                    # 8 counted up in 2 minutes; the drops cost nothing
         self.assertEqual(ah.events_done({"verified": 5, "rejected": 2, "error": 1, "masked": 1, "pending": 9, "open": 3}), 9)
         self.assertIsNone(ah.events_done(None))
 

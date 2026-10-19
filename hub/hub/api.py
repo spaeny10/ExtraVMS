@@ -23,7 +23,7 @@ from . import find as find_mod
 from . import camera_groups as groups_mod
 from . import layouts as layouts_mod
 from . import camweb, site_ask, talkdown_voice, viewing
-from . import bridges, bridges_api, central_cameras, coverage, geocode, hosts, lan_certs, security, soc, soc_reports, stills, telemetry
+from . import bridges, bridges_api, central_cameras, coverage, geocode, hostlist, hosts, lan_certs, security, soc, soc_reports, stills, telemetry
 from fastapi.responses import StreamingResponse
 from .agents import registry
 from .config import settings
@@ -1636,10 +1636,43 @@ def _host_or_404(host_id: str) -> dict:
     return h
 
 
+# the Hosts page's lists (hostlist.py): filters, sorts and paging done at the hub
+HostStatus = Literal["online", "offline", "agent", "attention"]
+HostSort = Literal["name", "load", "free", "instances"]
+SortOrder = Literal["asc", "desc"]
+CentralState = Literal["provisioning", "running", "failed", "deleting", "deleted"]
+CentralSort = Literal["created", "site", "customer", "host", "storage", "cameras", "queue"]
+CentralProblem = Literal["any", "down", "storage", "queue", "image", "cameras"]
+
+
 @app.get("/api/hub/hosts")
-async def list_hosts(u: dict = Depends(user)):
+async def list_hosts(q: str | None = Query(None, max_length=200), status: HostStatus | None = None, sort: HostSort | None = None,
+                     order: SortOrder | None = None, limit: int | None = Query(None, ge=1, le=500), offset: int = Query(0, ge=0),
+                     u: dict = Depends(user)):
+    """Hosts by name (or `sort`), each with its `problems` (hostlist.py); q / status filter, limit / offset page (no limit:
+    all of them, as before). total: how many match."""
     auth.require_super(u)
-    return {"hosts": hosts.list_hosts(), "install": hosts.install_command(), "host_agent_url": hosts.host_agent_url()}
+    rows = [h for h in hostlist.annotate_hosts(hosts.list_hosts()) if hostlist.match_host(h, q, status)]
+    items, total = hostlist.page(hostlist.sort_hosts(rows, sort, order), limit, offset)
+    return {"hosts": items, "total": total, "install": hosts.install_command(), "host_agent_url": hosts.host_agent_url()}
+
+
+@app.get("/api/hub/hosts/{host_id}")
+async def get_host(host_id: str, u: dict = Depends(user)):
+    """One host (its own page), with `problems` against the rest of the fleet."""
+    auth.require_super(u)
+    h = next((x for x in hostlist.annotate_hosts(hosts.list_hosts()) if x["id"] == host_id), None)
+    if not h:
+        raise HTTPException(404, "unknown host")
+    return h
+
+
+@app.get("/api/hub/fleet-summary")
+async def fleet_summary(u: dict = Depends(user)):
+    """The Hosts page's attention strip: hosts offline or behind, instances not running, nearly full, backed up, on
+    another image or with cameras down (hostlist.summary), without sending every row."""
+    auth.require_super(u)
+    return hostlist.summary(hostlist.annotate_hosts(hosts.list_hosts()), hostlist.annotate_instances(hosts.instances()))
 
 
 @app.post("/api/hub/hosts")
@@ -1687,9 +1720,22 @@ async def rotate_host_token(host_id: str, u: dict = Depends(user)):
 
 
 @app.get("/api/hub/central")
-async def all_central(include_deleted: bool = False, u: dict = Depends(user)):
+async def all_central(include_deleted: bool = False, q: str | None = Query(None, max_length=200), state: CentralState | None = None,
+                      host: str | None = Query(None, max_length=24), mode: Literal["vpn", "forward", "bridge"] | None = None,
+                      problem: CentralProblem | None = None, sort: CentralSort | None = None, order: SortOrder | None = None,
+                      limit: int | None = Query(None, ge=1, le=500), offset: int | None = Query(None, ge=0), u: dict = Depends(user)):
+    """Every Site's central instance, each with its `problems` (hostlist.py). Without any of q / state / host / mode /
+    problem / sort / order / limit / offset: the whole list, newest first (as before). With any of them: {items, total,
+    limit, offset}, filtered and sorted at the hub, `limit` (default 50) from `offset`."""
     auth.require_super(u)
-    return hosts.instances(include_deleted=include_deleted)
+    items = hostlist.annotate_instances(hosts.instances(include_deleted=include_deleted or state == "deleted"))
+    params = (q, state, host, mode, problem, sort, order, limit, offset)
+    if all(v is None for v in params):
+        return items
+    rows = [c for c in items if hostlist.match_instance(c, q, state, host, mode, problem)]
+    limit = limit or 50
+    out, total = hostlist.page(hostlist.sort_instances(rows, sort, order), limit, offset or 0)
+    return {"items": out, "total": total, "limit": limit, "offset": offset or 0}
 
 
 class CentralIn(BaseModel):

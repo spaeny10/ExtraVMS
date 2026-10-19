@@ -49,6 +49,7 @@ How a central host's `axiom_host.py run` talks to the hub. The hub side lives in
   "instances": 4,
   "allocated": {"quota_gb": 16000, "mem_gb": 32, "cpus": 16},
   "relay": {"port_range": [47000, 47999], "connected": true},
+  "image": "axiom/instance:latest", "image_id": "sha256:4f1c…",
   "work": {
     "at": 1791530000.0,
     "vllm": {"ok": true, "model": "Qwen/Qwen3.8-27B-FP8", "running": 2, "waiting": 0, "waiting_capacity": 0,
@@ -67,8 +68,9 @@ How a central host's `axiom_host.py run` talks to the hub. The hub side lives in
 - `load` is `null` and `ram_gb` values `null` where the OS doesn't provide them.
 - `work` (agent 0.2.0+; absent from older agents and until the first collection after the agent starts): what the GPUs are working through, collected beside the heartbeat (never inside it) in at most `work_budget_s` (host.json, default 5 s):
   - `vllm`: one GET of the shared vLLM's Prometheus `/metrics` (no key needed). The address is `vllm_metrics_url` from host.json, else the `vllm_container`'s address on `ai_network` from `docker inspect` (10.201.0.10 with ai/compose.yml; the host is that bridge's gateway) and the port of `vlm_url`. `running` / `waiting` = `vllm:num_requests_running` / `_waiting`; `waiting_capacity` = `vllm:num_requests_waiting_by_reason{reason="capacity"}`; `kv_cache_pct` = `vllm:kv_cache_usage_perc` (older builds: `vllm:gpu_cache_usage_perc`) × 100. `prompt_tps` / `gen_tps` = the increase of `vllm:prompt_tokens_total` / `vllm:generation_tokens_total` per second against the oldest read of the last 2 minutes; `queue_p50_s` / `e2e_p50_s` = the median of the requests that finished in that time, interpolated from the bucket deltas of `vllm:request_queue_time_seconds` (older: `vllm:time_in_queue_requests`) and `vllm:e2e_request_latency_seconds`. Any metric this vLLM does not export, a first read, a counter that went backwards (restart) or no finished request is `null`. `gpu` = `AXIOM_VLM_GPU` from ai.env. `ok` false + `error` when it could not be read; the last good numbers stay, with their `at`.
-  - `instances`: per running instance, one `docker exec axiom-<id> python -c ...` that reads its own `GET http://127.0.0.1:8080/api/system` (concurrent across instances, each at most `work_exec_timeout_s`, default 4 s). `verify_q` / `synopsis_q` = its `queues`; `verify_rate_per_min` = events that left verification (every status but `open` / `pending` in its `events` counts) per minute over up to the last 5 minutes (`null` on the first read or after the count went down: retention deleted events); `gpu` = its assigned GPU. An instance that fails, is not running or does not answer in time keeps its last good values with `ok` false, `error` and the `at` of those values; a hung read is not started again until it ends.
+  - `instances`: per running instance, one `docker exec axiom-<id> python -c ...` that reads its own `GET http://127.0.0.1:8080/api/system` (concurrent across instances, each at most `work_exec_timeout_s`, default 4 s). `verify_q` / `synopsis_q` = its `queues`; `verify_rate_per_min` = events that left verification (every status but `open` / `pending` in its `events` counts) per minute over up to the last 5 minutes (`null` on the first read; a count that went down, as merges and retention delete events, counts as no progress since the read before: agents older than 0.3.1 restarted the rate there instead, so a busy instance showed none); `gpu` = its assigned GPU. An instance that fails, is not running or does not answer in time keeps its last good values with `ok` false, `error` and the `at` of those values; a hung read is not started again until it ends.
   - `gpus[].verify_q`: the sum of `verify_q` over the instances assigned to that GPU (`0` for a GPU with none, `null` when none of its instances has reported).
+- `image` / `image_id` (agent 0.3.1+): host.json `image`, what new instances are created from, and its Docker image ID (`docker image inspect --format {{.Id}}`, read at most every 5 minutes; `null` when Docker can't say). The hub's Hosts page flags an instance whose container runs another image ID. Tags are not compared: instances run git-rev tags (`axiom/instance:2096ed5`) while `latest` is retagged to the same build after every rebuild.
 - `relay` (agent 0.3.0+): the Axiom Bridge relay's listen port range (host.json `relay_port_range`; the hub allocates 47000-47999 per instance, so the range must contain it) and whether the agent's `/host-relay` socket is up (see below).
 - `disks[].quota_mode`: what a new instance would get with `quota_mode: auto` (`zfs`, `xfs` or `none`); `project_quota` is true only for `xfs`. On ZFS, `total_gb` is the pool's usable size (`used` + `available` of its root dataset) and `free_gb` the `available` of `dataset` (the one mounted at `<root>/recordings`); elsewhere both come from `statvfs` on the root.
 
@@ -79,13 +81,14 @@ How a central host's `axiom_host.py run` talks to the hub. The hub side lives in
   "state": "running", "cameras": 5, "quota_gb": 4000, "used_gb": 812.4, "gpu": 1, "mode": "vpn",
   "subnets": ["10.20.7.0/24", "192.168.105.0/24"], "public_ips": ["203.0.113.7"], "hosts": ["cam1.example.net"],
   "host_ips": {"cam1.example.net": ["203.0.113.21"]}, "quota_mode": "xfs", "enroll_pending": false,
-  "mem_gb": 8, "cpus": 4, "image": "axiom/instance:latest", "network": "10.200.0.0/28",
+  "mem_gb": 8, "cpus": 4, "image": "axiom/instance:2096ed5", "image_id": "sha256:4f1c…", "network": "10.200.0.0/28",
   "gateway": "10.200.0.1",
   "relay": {"ip": "10.200.0.1", "ports": [47000, 47001, 47002], "listening": [47000, 47001], "errors": {"47002": "Address already in use"}}
 }
 ```
 - `subnets`, `public_ips`, `hosts`: the instance's camera allow-list (see `set_camera_network`). `mode` no longer decides what is allowed; it says how the site connects (the hub's Peplink sheet).
 - `host_ips`: each name in `hosts` → the IPv4 addresses it last resolved to (what the firewall allows for it; `[]` = not resolved yet). Re-resolved every 10 minutes with the hub names.
+- `image`: the tag the container was created from (host.json `image`, or `restart-instance --image`); `image_id` (0.3.1+): the image ID the container runs (`.Image` of one batched `docker inspect` per heartbeat), `null` when unreadable.
 - `state`: Docker's container state (`running`, `restarting`, `exited`, `created`, `paused`, `dead`), or `missing` when the container is gone; `created`/`planned` in a command's own result.
 - `cameras`: from the instance's own `/api/cameras`, refreshed every 5 minutes; `null` until known.
 - `used_gb`: recordings + database + event media. Exact and free to read on ZFS (`used` of the instance's two datasets) and XFS (the project quota); on other filesystems from `du` every 30 minutes, `null` until the first pass. On ZFS `quota_gb` limits the recordings dataset only (the instance dir has its own, host-wide quota), so `used_gb` can exceed `quota_gb` by up to that amount.

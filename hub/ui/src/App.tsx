@@ -113,7 +113,7 @@ export default function App() {
         {page === "customer" && current && <CustomerPage org={current} me={me} tab={(route.tab ?? "sites") as CustomerTab} onChanged={reload} />}
         {page === "audit" && current && <AuditPage org={current} />}
         {page === "account" && <AccountPage me={me} onChanged={reload} />}
-        {page === "hosts" && (me.user.is_super ? <HostsPage /> : <p className="muted">Hosts are managed by hub administrators.</p>)}
+        {page === "hosts" && (me.user.is_super ? <HostsPage hostId={route.hostId} /> : <p className="muted">Hosts are managed by hub administrators.</p>)}
         {page === "soc" && (soc ? <SocRouter me={me} route={route} /> : <p className="muted">You're not in the SOC. Ask a hub administrator.</p>)}
         {!current && page !== "account" && page !== "soc" && page !== "hosts" && !landing && <p className="muted">You're not a member of any customer yet. {me.user.is_super ? "Create one under Customer." : "Ask an owner to add you."}</p>}
       </main>

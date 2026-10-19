@@ -1,193 +1,211 @@
 /**
  * /hub/hosts (hub administrators): the datacenter machines that run central recording instances, each with its
- * axiom-host agent dialing the hub (online, CPU/RAM/GPU/disk, instances, and what its GPUs are working through: the
- * shared Qwen's requests and the instances' YOLO verify queues, with ~30 min sparklines), and every Site's central
- * instance across customers with its queues. Adding a host shows its token once, with the command that starts the agent.
- * Instances are allocated here only ("Allocate instance…" on a host: customer, Site, connection, storage, camera limit)
- * and changed here (storage, CPU/memory, camera limit, Site networks, removal); a Site's page shows its instance
- * read-only. Once allocated, the Site's admins add cameras on the instance's console and their addresses open on its
- * firewall by themselves. An "Axiom Bridge" connection needs no address here: the Site's admins enroll the bridge and map
- * its cameras on the Site's Servers tab (site/BridgesCard.tsx).
+ * axiom-host agent dialing the hub, and every Site's central instance across customers. Built for a hundred hosts with
+ * hundreds of instances: the hub filters, sorts and pages both lists (hub hostlist.py) and counts what needs attention
+ * (GET /api/hub/fleet-summary) for the strip at the top, whose lines open the list they count.
+ *   Hosts tab      one row per host: status, agent version, instances, CPU / RAM / GPU / disk bars, alerts; a row
+ *                  opens the host's own page
+ *   Instances tab  every instance in one table (InstancesTable.tsx): search, filters, sorts, a ⋯ menu per row, and
+ *                  bulk changes for the safe ones (camera limit, raising storage)
+ *   /hub/hosts/:id the host's card (capacity bars, what its GPUs are working through with ~30 min sparklines, rename,
+ *                  FusionHub, notes, rotate token, remove), "Allocate instance…" and its instances
+ * The tab and filters ride in the URL's query (fleetList.ts), so reload, Back and a pasted link keep them. Adding a host
+ * shows its token once, with the command that starts the agent. Instances are allocated here only (customer, Site,
+ * connection, storage, camera limit) and changed here; a Site's page shows its instance read-only. Once allocated, the
+ * Site's admins add cameras on the instance's console and their addresses open on its firewall by themselves. An "Axiom
+ * Bridge" connection needs no address here: the Site's admins enroll the bridge and map its cameras on the Site's
+ * Servers tab (site/BridgesCard.tsx).
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { confirmDialog, promptDialog, toast } from "@site/ui";
-import { type CentralInstance, type CentralMode, type Host, type HubSitesOrg, ago, api, fmtTime } from "../api";
+import { type CentralInstance, type CentralMode, type FleetSummary, type Host, type HubSitesOrg, ago, api, fmtTime } from "../api";
 import {
-  PHASE_LABEL, allocateFormError, camerasText, capacityBars, defaultSubnet, fmtGB, instanceWork, nextSiteNumber, overLimit, parseCameraLimit,
-  queueText, queueTitle, quotaText, resourcesFormError, resourcesText, seriesMax, settling, shortGpu, sitesWithoutCentral, sparkPath, workRows,
+  allocateFormError, capacityBars, defaultSubnet, fmtGB, nextSiteNumber, parseCameraLimit, seriesMax, sitesWithoutCentral, sparkPath, workRows,
 } from "../central";
-import { go, siteHref } from "../nav";
-import { SiteNetworks } from "./SiteNetworks";
+import { go, hostHref, navigate } from "../nav";
+import {
+  type AttentionItem, HOST_PROBLEM_LABEL, HOST_SORTS, HOST_SORT_LABEL, HOST_STATUSES, HOST_STATUS_LABEL, type HostsTab, type ListQuery, type MiniBar,
+  activeAttention, attentionItems, barTone, defaultOrder, hostMiniBars, hostParams, parseQuery, querySearch, tabQuery, withQuery,
+} from "./fleetList";
+import { InstancesTable, Pager, SortPick } from "./InstancesTable";
 
-export function HostsPage() {
-  const [hosts, setHosts] = useState<Host[] | null>(null);
-  const [install, setInstall] = useState("");
-  const [central, setCentral] = useState<CentralInstance[]>([]);
+/** The URL's query string, followed through Back / Forward and our own navigate() calls (nav.ts usePath reads only the path). */
+function useSearch(): string {
+  const [s, setS] = useState(location.search);
+  useEffect(() => { const on = () => setS(location.search); addEventListener("popstate", on); return () => removeEventListener("popstate", on); }, []);
+  return s;
+}
+
+export function HostsPage({ hostId }: { hostId?: string }) {
+  const search = useSearch();
+  const fixedTab: HostsTab | undefined = hostId ? "instances" : undefined;
+  const query = useMemo(() => parseQuery(search, fixedTab), [search, fixedTab]);
+  // a filter typed or picked replaces the URL; a tab, a page or an attention line is a step Back can undo
+  const setQuery = useCallback((q: ListQuery, push = false) => navigate(location.pathname + querySearch(q, fixedTab), !push), [fixedTab]);
+  const [summary, setSummary] = useState<FleetSummary | null>(null);
+  const loadSummary = useCallback(() => { api.fleetSummary().then(setSummary).catch(() => {}); }, []);
+  useEffect(() => { loadSummary(); const t = setInterval(loadSummary, 15000); return () => clearInterval(t); }, [loadSummary]);
+  if (hostId) return <HostPage key={hostId} id={hostId} query={query} setQuery={setQuery} onChanged={loadSummary} />;
+  return <Overview query={query} setQuery={setQuery} summary={summary} onChanged={loadSummary} />;
+}
+
+function Overview({ query, setQuery, summary, onChanged }: { query: ListQuery; setQuery: (q: ListQuery, push?: boolean) => void; summary: FleetSummary | null; onChanged: () => void }) {
   const [issued, setIssued] = useState<{ name: string; token: string; install: string } | null>(null);
-  const [allocating, setAllocating] = useState<Host | null>(null);
-  const [networks, setNetworks] = useState<CentralInstance | null>(null);
-  const [removing, setRemoving] = useState<CentralInstance | null>(null);
-  const [resizing, setResizing] = useState<CentralInstance | null>(null);
-  const load = useCallback(() => {
-    api.hosts().then((r) => { setHosts(r.hosts); setInstall(r.install); }).catch((e) => toast.error(e));
-    api.hubCentral().then(setCentral).catch(() => setCentral([]));
-  }, []);
-  // while an instance is coming up (or going away) the page follows it closely
-  const busy = central.some(settling);
-  useEffect(() => { load(); const t = setInterval(load, busy ? 3000 : 15000); return () => clearInterval(t); }, [load, busy]);
+  const [reloadKey, setReloadKey] = useState(0);
+  const tabs: { tab: HostsTab; label: string; n?: number }[] = [
+    { tab: "hosts", label: "Hosts", n: summary?.hosts.total }, { tab: "instances", label: "Instances", n: summary?.instances.total }];
   return (
     <>
       <h2>Hosts <span className="muted small">datacenter machines running central recording, one server instance per customer Site</span></h2>
       {issued && <TokenBox {...issued} onClose={() => setIssued(null)} />}
-      <AddHost onAdded={(r, name) => { setIssued({ name, token: r.token, install: r.install }); load(); }} />
-      {hosts === null ? <p className="muted">Loading…</p> : hosts.length === 0 ? (
-        <p className="muted">No hosts yet. Add one, then run its agent with the token: <code>{install}</code></p>
-      ) : (
-        <div className="host-grid">{hosts.map((h) => <HostCard key={h.id} h={h} onChanged={load} onToken={(t) => setIssued({ name: h.name, ...t })} onAllocate={() => setAllocating(h)} />)}</div>
-      )}
-      <div className="card">
-        <h3 style={{ marginTop: 0 }}>Central instances <span className="muted small">{central.length} across every customer</span></h3>
-        {central.length === 0 ? <p className="muted small">None yet: use "Allocate instance…" on a host.</p> : (
-          <table className="hub-table stack">
-            <thead><tr><th>Site</th><th>Customer</th><th>Host</th><th>Network</th><th>GPU</th><th>Storage</th><th>Cameras</th><th>Queues</th><th>State</th><th /></tr></thead>
-            <tbody>{central.map((c) => { const q = instanceWork(hosts, c); return (
-              <tr key={c.id}>
-                <td className="lead"><a href={siteHref(c.location_id, "servers")} onClick={go(siteHref(c.location_id, "servers"))}>{c.location_name ?? c.location_id}</a>
-                  {c.site_number != null && <span className="muted small"> · site #{c.site_number}</span>}</td>
-                <td>{c.org_name ?? c.org_id}</td>
-                <td>{c.host_name ?? c.host_id}{c.host_online === false ? <span className="muted small"> (offline)</span> : null}</td>
-                <td className="small" data-label="Network" title={c.camera_network?.sync_error ? `Camera addresses not on the host: ${c.camera_network.sync_error}` : undefined}>
-                  {c.mode === "vpn" ? `VPN · ${c.subnet ?? "—"}` : c.mode === "bridge" ? "Axiom Bridge" : `Port forward · ${c.public_ip ?? "—"}`}
-                  {c.camera_network?.pending ? <span className="bad"> · camera addresses not applied yet</span> : null}</td>
-                <td className="small" data-label="GPU">{c.gpu != null ? `${c.gpu}${c.gpu_name ? ` · ${shortGpu(c.gpu_name)}` : ""}` : "CPU"}
-                  {(c.cpus != null || c.mem_gb != null) && <span className="muted"> · {resourcesText(c.cpus, c.mem_gb)}</span>}</td>
-                <td className="small" data-label="Storage">{quotaText(c.used_gb, c.quota_gb)}</td>
-                <td className={`small ${overLimit(c.camera_count, c.camera_limit) ? "bad" : ""}`} data-label="Cameras">{camerasText(c.camera_count, c.camera_limit)}</td>
-                <td className={`small queue-cell ${q.growing ? "warn" : !q.work ? "muted" : q.work.ok ? "" : "bad"}`} data-label="Queues" title={queueTitle(q.work, q.growing)}>
-                  {queueText(q.work)}{q.growing ? " ↑" : ""}</td>
-                <td className="small" title={c.last_error ?? undefined}>{PHASE_LABEL[c.phase] ?? c.phase}{c.state === "failed" && c.last_error ? `: ${c.last_error.slice(0, 80)}` : ""}</td>
-                <td><InstanceActions ci={c} onChanged={load} onNetworks={() => setNetworks(c)} onResources={() => setResizing(c)} onRemove={() => setRemoving(c)} /></td>
-              </tr>); })}
-            </tbody>
-          </table>
-        )}
+      <AddHost onAdded={(r, name) => { setIssued({ name, token: r.token, install: r.install }); setReloadKey((k) => k + 1); onChanged(); }} />
+      <AttentionStrip summary={summary} query={query} onPick={(q) => setQuery(q, true)} />
+      <div className="segmented site-tabs hosts-tabs" role="tablist">
+        {tabs.map((t) => (
+          <button key={t.tab} role="tab" aria-selected={query.tab === t.tab} className={query.tab === t.tab ? "active" : ""} onClick={() => setQuery(tabQuery(t.tab), true)}>
+            {t.label}{t.n != null && <span className="muted small"> {t.n}</span>}
+          </button>))}
       </div>
-      {allocating && <AllocateDialog host={allocating} central={central} onClose={() => setAllocating(null)} onDone={() => { setAllocating(null); load(); }} />}
-      {networks && <SiteNetworks ci={networks} onClose={() => setNetworks(null)} onSaved={() => { setNetworks(null); load(); }} />}
-      {removing && <RemoveDialog ci={removing} onClose={() => setRemoving(null)} onDone={() => { setRemoving(null); load(); }} />}
-      {resizing && <ResourcesDialog ci={resizing} hostCpus={hosts?.find((h) => h.id === resizing.host_id)?.capacity?.cpus ?? null}
-        onClose={() => setResizing(null)} onDone={() => { setResizing(null); load(); }} />}
+      {query.tab === "hosts"
+        ? <HostsTable query={query} setQuery={setQuery} reloadKey={reloadKey} />
+        : <InstancesTable query={query} setQuery={setQuery} hosts={summary?.host_index ?? []} onChanged={onChanged} />}
     </>
   );
 }
 
-/** Storage, CPU/memory, camera limit, Site networks and removal of one instance (the table's last column). */
-function InstanceActions({ ci, onChanged, onNetworks, onResources, onRemove }: { ci: CentralInstance; onChanged: () => void; onNetworks: () => void; onResources: () => void; onRemove: () => void }) {
-  const site = ci.location_name ?? ci.location_id;
-  const live = ci.state !== "deleting" && ci.state !== "deleted";
-  const offline = ci.host_online === false;
-  const storage = async () => {
-    const v = await promptDialog(`Storage for ${site} (GB)`, { initial: String(ci.quota_gb), label: "GB",
-      message: "The instance's disk quota on its host, at least 10 GB. Below what it uses, it deletes its oldest recordings." });
-    if (v == null) return;
-    const q = Number(v.trim());
-    if (!/^\d+$/.test(v.trim()) || q < 10) { toast.error("The storage quota is a whole number of GB, at least 10"); return; }
-    try { await api.updateCentral(ci.location_id, ci.id, { quota_gb: q }); toast.success(`Storage set to ${fmtGB(q)}`); onChanged(); } catch (e) { toast.error(e); }
-  };
-  const limit = async () => {
-    const count = ci.camera_count ?? 0;
-    const v = await promptDialog(`Camera limit for ${site}`, { initial: ci.camera_limit == null ? "" : String(ci.camera_limit), label: "Cameras (blank = no limit)",
-      message: `It has ${count} camera${count === 1 ? "" : "s"}. Cameras beyond the limit are refused when they are added.` });
-    if (v == null) return;
-    const lim = parseCameraLimit(v);
-    if (lim.error) { toast.error(lim.error); return; }
-    if (lim.value != null && lim.value < count && !(await confirmDialog(`Lower the limit below its ${count} cameras?`, {
-      message: "The cameras it has keep recording; new ones are refused until it has fewer than the limit.", confirmLabel: "Lower it" }))) return;
-    try {
-      await api.updateCentral(ci.location_id, ci.id, { camera_limit: lim.value });
-      toast.success(lim.value == null ? "No camera limit" : `Camera limit set to ${lim.value}`);
-      onChanged();
-    } catch (e) { toast.error(e); }
-  };
+/** What needs attention, one clickable line each (it opens the list it counts; clicked again, the filter goes), or one calm line. */
+function AttentionStrip({ summary, query, onPick }: { summary: FleetSummary | null; query: ListQuery; onPick: (q: ListQuery) => void }) {
+  if (!summary || !summary.hosts.total) return null;
+  const items = attentionItems(summary);
+  if (!items.length) return <p className="attention-ok small"><span className="dot ok" /> All hosts healthy</p>;
+  const pick = (it: AttentionItem, on: boolean) => onPick(on ? tabQuery(it.to.tab) : it.to);
   return (
-    <div className="central-row-actions">
-      <button className="ghost small" disabled={!live || offline} title={offline ? "The host is offline" : undefined} onClick={storage}>Change storage…</button>
-      <button className="ghost small" disabled={!live || offline} title={offline ? "The host is offline" : "CPU and memory limits (the instance restarts)"} onClick={onResources}>Change CPU/memory…</button>
-      <button className="ghost small" disabled={!live} onClick={limit}>Change camera limit…</button>
-      <button className="ghost small" disabled={!live || offline} title={offline ? "The host is offline" : undefined} onClick={onNetworks}>Site networks…</button>
-      <button className="ghost small" disabled={ci.state === "deleted"} onClick={onRemove}>Remove…</button>
+    <div className="attention-strip" role="group" aria-label="Needs attention">
+      {items.map((it) => {
+        const on = activeAttention(it, query);
+        return <button key={it.key} type="button" className={`chip attention-chip ${it.tone} ${on ? "active" : ""}`} aria-pressed={on} title={it.title} onClick={() => pick(it, on)}>{it.text}</button>;
+      })}
     </div>
   );
 }
 
-/** CPU and memory limits of an instance: applied live by its host (docker update), recreated only if that fails. */
-function ResourcesDialog({ ci, hostCpus, onClose, onDone }: { ci: CentralInstance; hostCpus: number | null; onClose: () => void; onDone: () => void }) {
-  const [cpus, setCpus] = useState(ci.cpus != null ? String(ci.cpus) : "");
-  const [mem, setMem] = useState(ci.mem_gb != null ? String(ci.mem_gb) : "");
-  const [busy, setBusy] = useState(false);
-  const site = ci.location_name ?? ci.location_id;
-  const err = resourcesFormError(cpus, mem, hostCpus);
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const body: { cpus?: number; mem_gb?: number } = {};
-    if (cpus.trim() && Number(cpus) !== ci.cpus) body.cpus = Number(cpus);
-    if (mem.trim() && Number(mem) !== ci.mem_gb) body.mem_gb = Number(mem);
-    if (!Object.keys(body).length) { toast.success("Nothing changed"); onClose(); return; }
-    setBusy(true);
-    try {
-      const r = await api.setCentralResources(ci.location_id, ci.id, body);
-      toast.success(`${site}: ${resourcesText(r.cpus ?? body.cpus, r.mem_gb ?? body.mem_gb)}`);
-      onDone();
-    } catch (er) { toast.error(er); } finally { setBusy(false); }
+/** One row per host (the hub filters, sorts and pages); a row opens the host's page. */
+function HostsTable({ query, setQuery, reloadKey }: { query: ListQuery; setQuery: (q: ListQuery, push?: boolean) => void; reloadKey: number }) {
+  const [data, setData] = useState<{ hosts: Host[]; total: number; install: string } | null>(null);
+  const params = JSON.stringify(hostParams(query));
+  const load = useCallback(() => {
+    api.hostsPage(JSON.parse(params)).then((r) => setData({ hosts: r.hosts, total: r.total, install: r.install })).catch((e) => toast.error(e));
+  }, [params, reloadKey]);   // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { const t = setTimeout(load, 250); return () => clearTimeout(t); }, [load]);
+  useEffect(() => { const t = setInterval(load, 15000); return () => clearInterval(t); }, [load]);
+  const set = (change: Partial<ListQuery>) => setQuery(withQuery(query, change));
+  const filtered = !!(query.q || query.status);
+  const sort = query.sort || "name";
+  const order = query.order || defaultOrder(sort);
+  const open = (h: Host) => (e: React.MouseEvent) => {
+    if ((e.target as HTMLElement).closest("a, button, input, select")) return;
+    navigate(hostHref(h.id));
   };
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <form className="modal central-dialog central-form" onClick={(e) => e.stopPropagation()} onSubmit={submit} style={{ maxWidth: 460 }}>
-        <header className="modal-head"><h2>CPU and memory for {site}</h2><button type="button" className="ghost" onClick={onClose} aria-label="Close">✕</button></header>
-        <p className="small muted">Now: {resourcesText(ci.cpus, ci.mem_gb)}{hostCpus ? ` · the host has ${hostCpus} CPUs` : ""}. Blank keeps the current value.</p>
-        <label className="field"><span>CPUs <span className="muted small">1-64</span></span>
-          <input inputMode="decimal" value={cpus} placeholder="e.g. 8" onChange={(e) => setCpus(e.target.value.replace(/[^0-9.]/g, ""))} /></label>
-        <label className="field"><span>Memory (GB) <span className="muted small">2-512</span></span>
-          <input inputMode="decimal" value={mem} placeholder="e.g. 16" onChange={(e) => setMem(e.target.value.replace(/[^0-9.]/g, ""))} /></label>
-        <p className="small">Applied to the running instance, with no break in recording. Only if the host can't apply them live (for example less memory than the instance uses now) does it restart the instance: about 30 seconds without recording.</p>
-        <div className="row">
-          <button type="submit" disabled={busy || !!err}>{busy ? "Restarting…" : "Apply and restart"}</button>
-          <button type="button" className="ghost" onClick={onClose}>Cancel</button>
-          {err && <span className="muted small">{err}</span>}
-        </div>
-      </form>
-    </div>
-  );
-}
-
-/** Remove an instance: deleted on its host (recordings kept unless ticked), its server retired in the Site. */
-function RemoveDialog({ ci, onClose, onDone }: { ci: CentralInstance; onClose: () => void; onDone: () => void }) {
-  const [purge, setPurge] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const site = ci.location_name ?? ci.location_id;
-  const remove = async () => {
-    setBusy(true);
-    try { await api.removeCentral(ci.location_id, ci.id, { purge }); toast.success(`Central recording removed from ${site}`); onDone(); }
-    catch (e) {
-      toast.error(e);
-      if (await confirmDialog("Remove it anyway?", { message: "The hub forgets the instance even though its host could not delete it (it may keep running there until removed by hand).", confirmLabel: "Remove anyway", danger: true })) {
-        try { await api.removeCentral(ci.location_id, ci.id, { purge, force: true }); toast.success("Removed at the hub"); onDone(); } catch (e2) { toast.error(e2); }
-      }
-    } finally { setBusy(false); }
-  };
-  return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal central-dialog" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 520 }}>
-        <header className="modal-head"><h2>Remove central recording for {site}?</h2><button type="button" className="ghost" onClick={onClose} aria-label="Close">✕</button></header>
-        <p className="small">The instance is deleted on {ci.host_name ?? "its host"} and its server is retired in the Site. {purge ? <strong>All its recordings are deleted too. This cannot be undone.</strong> : "Its recordings and database stay on the host."}</p>
-        <label className="small row"><input type="checkbox" checked={purge} onChange={(e) => setPurge(e.target.checked)} /> delete recordings too</label>
-        <div className="row">
-          <button className="danger" disabled={busy} onClick={remove}>Remove</button>
-          <button className="ghost" onClick={onClose}>Cancel</button>
-        </div>
+    <div className="card">
+      <div className="row list-toolbar">
+        <input type="search" className="list-search" value={query.q} placeholder="Search hosts" aria-label="Search hosts" onChange={(e) => set({ q: e.target.value })} />
+        <select value={query.status} aria-label="Status" onChange={(e) => set({ status: e.target.value })}>
+          <option value="">Any status</option>
+          {HOST_STATUSES.map((s) => <option key={s} value={s}>{HOST_STATUS_LABEL[s]}</option>)}
+        </select>
+        <SortPick sorts={HOST_SORTS} labels={HOST_SORT_LABEL} sort={sort} order={order}
+          onChange={(s, o) => set({ sort: s === "name" ? "" : s, order: o === defaultOrder(s) ? "" : o })} />
       </div>
+      {data === null ? <p className="muted small">Loading…</p> : data.total === 0 ? (
+        filtered ? <p className="muted small">No host matches. <button className="linkish" onClick={() => setQuery({ ...query, q: "", status: "", page: 1 })}>Clear the filters</button></p>
+          : <p className="muted">No hosts yet. Add one, then run its agent with the token: <code>{data.install}</code></p>
+      ) : (
+        <>
+          <table className="hub-table stack hosts-table">
+            <thead><tr><th>Host</th><th>Agent</th><th>Instances</th><th>CPU</th><th>RAM</th><th>GPU</th><th>Disk</th><th>Alerts</th></tr></thead>
+            <tbody>{data.hosts.map((h) => {
+              const bars = hostMiniBars(h.capacity);
+              return (
+                <tr key={h.id} className={`click-row ${h.online ? "" : "offline-row"}`} onClick={open(h)}>
+                  <td className="lead">
+                    <span className={`dot ${h.online ? "ok" : "bad"}`} title={h.online ? "Online" : `Offline · last seen ${ago(h.last_seen_at)}`} />{" "}
+                    <a href={hostHref(h.id)} onClick={go(hostHref(h.id))}><strong>{h.name}</strong></a>
+                    {h.hostname && <span className="muted small"> · {h.hostname}</span>}
+                  </td>
+                  <td className={`small ${h.problems?.includes("agent") ? "warn-text" : ""}`} data-label="Agent">{h.version ?? "—"}</td>
+                  <td className="small" data-label="Instances">{h.instances}</td>
+                  <td className="small" data-label="CPU"><Mini bar={bars.cpu} /></td>
+                  <td className="small" data-label="RAM"><Mini bar={bars.ram} /></td>
+                  <td className="small" data-label="GPU"><Mini bar={bars.gpu} /></td>
+                  <td className="small" data-label="Disk"><Mini bar={bars.disk} />{h.room_gb != null && <span className="muted nowrap"> · room {fmtGB(Math.max(0, h.room_gb))}</span>}</td>
+                  <td className="small"><HostAlerts h={h} /></td>
+                </tr>);
+            })}</tbody>
+          </table>
+          <Pager page={query.page} shown={data.hosts.length} total={data.total} onPage={(page) => setQuery({ ...query, page }, true)} />
+        </>
+      )}
     </div>
   );
+}
+
+function Mini({ bar }: { bar: MiniBar | null }) {
+  if (!bar) return <span className="muted">—</span>;
+  return (
+    <span className="mini-bar" title={bar.text}>
+      <span className={`cap-bar ${barTone(bar.pct)}`}><span style={{ width: `${bar.pct}%` }} /></span>
+      <span className="muted">{bar.pct}%</span>
+    </span>
+  );
+}
+
+function HostAlerts({ h }: { h: Host }) {
+  const probs = h.problems ?? [];
+  if (!probs.length) return null;
+  const queues = h.queue_alerts ?? [];
+  return (
+    <span className="problem-badges">{probs.map((p) => (
+      <span key={p} className={`alert-kind host-problem-${p}`}
+        title={p === "offline" ? (h.last_seen_at ? `Last seen ${ago(h.last_seen_at)}` : "Never connected") : p === "queue" ? queues.map((a) => a.text).filter(Boolean).join("\n") : undefined}>
+        {p === "queue" && queues.length > 1 ? `${queues.length} queue alerts` : HOST_PROBLEM_LABEL[p]}</span>))}
+    </span>
+  );
+}
+
+/** One host's page: its card (everything about the machine and its actions) and its instances. */
+function HostPage({ id, query, setQuery, onChanged }: { id: string; query: ListQuery; setQuery: (q: ListQuery, push?: boolean) => void; onChanged: () => void }) {
+  const [host, setHost] = useState<Host | null | "gone">(null);
+  const [issued, setIssued] = useState<{ token: string; install: string } | null>(null);
+  const [allocating, setAllocating] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+  const load = useCallback(() => {
+    api.host(id).then(setHost).catch((e) => { if (String(e instanceof Error ? e.message : e).startsWith("404")) setHost("gone"); else toast.error(e); });
+  }, [id]);
+  useEffect(() => { load(); const t = setInterval(load, 15000); return () => clearInterval(t); }, [load]);
+  const changed = () => { load(); onChanged(); };
+  const name = host && host !== "gone" ? host.name : id;
+  return (
+    <>
+      <h2 className="host-crumbs"><a href={hostHref()} onClick={go(hostHref())}>Hosts</a> <span className="crumb-sep">›</span> {name}</h2>
+      {host === null ? <p className="muted">Loading…</p> : host === "gone" ? <p className="muted">No such host (removed?). <a href={hostHref()} onClick={go(hostHref())}>All hosts</a></p> : (
+        <>
+          {issued && <TokenBox name={host.name} {...issued} onClose={() => setIssued(null)} />}
+          <HostCard h={host} onChanged={changed} onRemoved={() => { onChanged(); navigate(hostHref()); }} onToken={setIssued} onAllocate={() => setAllocating(true)} />
+          <h3 className="host-instances-head">Instances on {host.name}</h3>
+          <InstancesTable query={query} setQuery={setQuery} fixedHost={id} hosts={[]} onChanged={changed} reloadKey={reloadKey} />
+          {allocating && <AllocateLoader host={host} onClose={() => setAllocating(false)} onDone={() => { setAllocating(false); setReloadKey((k) => k + 1); changed(); }} />}
+        </>
+      )}
+    </>
+  );
+}
+
+/** The allocate form needs every live instance (the Sites that already have one, the next site number): read once on opening. */
+function AllocateLoader({ host, onClose, onDone }: { host: Host; onClose: () => void; onDone: () => void }) {
+  const [central, setCentral] = useState<CentralInstance[] | null>(null);
+  useEffect(() => { api.hubCentral().then(setCentral).catch((e) => { toast.error(e); onClose(); }); }, []);   // eslint-disable-line react-hooks/exhaustive-deps
+  return central ? <AllocateDialog host={host} central={central} onClose={onClose} onDone={onDone} /> : null;
 }
 
 /** Allocate an instance on this host for one customer's Site: connection, storage (the host's room shown), camera limit. */
@@ -256,7 +274,7 @@ function AllocateDialog({ host, central, onClose, onDone }: { host: Host; centra
         <label className="field"><span>Camera limit <span className="muted small">blank = no limit</span></span>
           <input inputMode="numeric" value={limit} placeholder="no limit" onChange={(e) => setLimit(e.target.value.replace(/[^0-9]/g, ""))} /></label>
         <label className="field"><span>Server name in the Site</span><input value={name} maxLength={120} onChange={(e) => setName(e.target.value)} /></label>
-        <p className="muted small">Once it runs, the Site's admins add cameras on its console; their addresses open on its firewall by themselves. More networks: "Site networks…" in the list below.</p>
+        <p className="muted small">Once it runs, the Site's admins add cameras on its console; their addresses open on its firewall by themselves. More networks: "Site networks…" in its row's ⋯ menu.</p>
         <div className="row">
           <button type="submit" disabled={busy || !!err}>Allocate</button>
           <button type="button" className="ghost" onClick={onClose}>Cancel</button>
@@ -361,7 +379,10 @@ function Work({ h }: { h: Host }) {
   );
 }
 
-function HostCard({ h, onChanged, onToken, onAllocate }: { h: Host; onChanged: () => void; onToken: (t: { token: string; install: string }) => void; onAllocate: () => void }) {
+/** The host's own page: the machine, its agent, capacity and work, and what can be done to it. */
+function HostCard({ h, onChanged, onRemoved, onToken, onAllocate }: {
+  h: Host; onChanged: () => void; onRemoved: () => void; onToken: (t: { token: string; install: string }) => void; onAllocate: () => void;
+}) {
   const act = (f: () => Promise<unknown>, done?: string) => async () => { try { await f(); if (done) toast.success(done); onChanged(); } catch (e) { toast.error(e); } };
   const edit = async (field: "name" | "fusionhub" | "notes", title: string) => {
     const v = await promptDialog(title, { initial: (h[field] as string | null) ?? "", label: title });
@@ -369,7 +390,7 @@ function HostCard({ h, onChanged, onToken, onAllocate }: { h: Host; onChanged: (
     await act(() => api.updateHost(h.id, { [field]: v.trim() || null }))();
   };
   return (
-    <div className={`site-card ${h.online ? "" : "offline"}`}>
+    <div className={`site-card host-card ${h.online ? "" : "offline"}`}>
       <div className="head">
         <span className={`dot ${h.online ? "ok" : "bad"}`} title={h.online ? "Online" : `Offline · last seen ${ago(h.last_seen_at)}`} />
         <strong>{h.name}</strong>
@@ -396,8 +417,11 @@ function HostCard({ h, onChanged, onToken, onAllocate }: { h: Host; onChanged: (
           if (!(await confirmDialog(`Rotate ${h.name}'s token?`, { message: "The host disconnects at once and stays offline until its agent runs with the new token. Its instances keep recording.", confirmLabel: "Rotate" }))) return;
           try { onToken(await api.rotateHost(h.id)); onChanged(); } catch (e) { toast.error(e); }
         }}>Rotate token</button>
-        <button className="ghost small" disabled={h.instances > 0} title={h.instances > 0 ? "Remove its instances first (Central instances below)" : undefined}
-          onClick={async () => { if (await confirmDialog(`Remove host ${h.name}?`, { message: "Its token stops working. Nothing on the machine is deleted.", confirmLabel: "Remove", danger: true })) await act(() => api.removeHost(h.id), `${h.name} removed`)(); }}>Remove</button>
+        <button className="ghost small" disabled={h.instances > 0} title={h.instances > 0 ? "Remove its instances first (the list below)" : undefined}
+          onClick={async () => {
+            if (!(await confirmDialog(`Remove host ${h.name}?`, { message: "Its token stops working. Nothing on the machine is deleted.", confirmLabel: "Remove", danger: true }))) return;
+            try { await api.removeHost(h.id); toast.success(`${h.name} removed`); onRemoved(); } catch (e) { toast.error(e); }
+          }}>Remove</button>
       </div>
     </div>
   );

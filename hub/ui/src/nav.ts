@@ -85,6 +85,8 @@ export type Route = {
   section?: SettingsSection; socTab?: SocTab; incidentId?: string; report?: SocReport;
   /** Site › Ask: the open conversation (/sites/:id/ask/:thread) */
   threadId?: string;
+  /** Hosts: one host's own page (/hub/hosts/:id) */
+  hostId?: string;
 };
 
 const isOneOf = <T extends string>(list: readonly T[], v: string | undefined): v is T => !!v && (list as readonly string[]).includes(v);
@@ -134,13 +136,15 @@ export function matchRoute(path: string): Route {
     case "audit": return { page: "audit" };
     case "account": return { page: "account" };
     // hub-wide administration (hub administrators only; App shows a notice to anyone else)
-    case "hub": return a === "hosts" ? { page: "hosts" } : { page: "hosts", redirect: "/hub/hosts" };
+    case "hub": return a === "hosts" ? (b ? { page: "hosts", hostId: b } : { page: "hosts" }) : { page: "hosts", redirect: "/hub/hosts" };
     // public: the accept page works signed out (App renders it before the sign-in check)
     case "invite": return a ? { page: "invite", code: a } : { page: "home", redirect: "/" };
     default: return { page: "home" };
   }
 }
 
+/** The Hosts page (its tab and filters ride in the query, hosts/fleetList.ts) and one host's own page. */
+export const hostHref = (hostId?: string | null) => (hostId ? `/hub/hosts/${encodeURIComponent(hostId)}` : "/hub/hosts");
 export const siteHref = (siteId: string, tab: SiteTab = "live") => `/sites/${encodeURIComponent(siteId)}/${tab}`;
 /** Site › Ask: a conversation (or a new one), optionally with a question prefilled in the box (?q=; never sent by itself). */
 export function siteAskHref(siteId: string, threadId?: string | number | null, q?: string): string {

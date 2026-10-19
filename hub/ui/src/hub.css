@@ -605,6 +605,55 @@ button.sa-ref-row:hover, .sa-ref-row.hot { background: var(--panel-2); border-co
 .modal.central-dialog > :not(.modal-head) { margin-left: 16px; margin-right: 16px; }
 .modal.central-dialog .field > span { display: block; }
 .central-row-actions { display: flex; flex-wrap: wrap; gap: 4px; }
+/* Hosts page at fleet scale (hosts/HostsPage.tsx, hosts/InstancesTable.tsx): the attention strip, the two tabs' toolbars
+   and tables, a host's page */
+.attention-strip { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; }
+.attention-chip { cursor: pointer; }
+.attention-chip.bad { border-color: var(--bad); color: var(--bad); }
+.attention-chip.warn { border-color: var(--vehicle); color: var(--vehicle); }   /* the theme's amber */
+.attention-chip.active { background: var(--panel); box-shadow: inset 0 0 0 1px currentColor; font-weight: 600; }
+.attention-ok { display: flex; align-items: center; gap: 6px; margin: 0 0 12px; color: var(--muted); }
+.list-toolbar { margin: 0 0 8px; gap: 8px; }
+.list-search { flex: 1 1 220px; max-width: 360px; min-width: 0; }
+.sort-pick { display: inline-flex; align-items: center; gap: 2px; }
+.hosts-table tr.click-row { cursor: pointer; }
+.hosts-table tr.click-row:hover td { background: var(--panel-2); }
+.hosts-table tr.offline-row td { opacity: .85; }
+.hosts-table td { white-space: nowrap; }
+.hosts-table td.lead, .hosts-table td:last-child { white-space: normal; }
+.hosts-table td.lead a { white-space: nowrap; }
+.mini-bar { display: inline-flex; align-items: center; gap: 6px; }
+.mini-bar .cap-bar { width: 56px; flex: none; }
+.problem-badges { display: inline-flex; flex-wrap: wrap; gap: 4px; margin-left: 6px; vertical-align: middle; }
+.alert-kind.problem-down, .alert-kind.host-problem-offline { border-color: var(--bad); color: var(--bad); }
+.alert-kind.problem-queue, .alert-kind.problem-image, .alert-kind.problem-cameras,
+.alert-kind.host-problem-agent, .alert-kind.host-problem-queue { border-color: var(--vehicle); color: var(--vehicle); }
+.instances-table td.acts { width: 1%; white-space: nowrap; }
+.instances-table tr.ticked td { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.instances-table .row-tick { margin: 0 4px 0 0; vertical-align: middle; }
+.bulk-bar { gap: 8px; margin: 0 0 8px; padding: 6px 10px; border: 1px solid var(--accent); border-radius: 8px; background: var(--panel-2); }
+/* a dialog that fills a phone's screen keeps its fields at the top (the grid would spread them over the height) */
+.modal.central-form { align-content: start; }
+.bulk-list { max-height: 40vh; overflow: auto; margin: 4px 0 8px; padding-left: 18px; overflow-wrap: anywhere; }
+.menu-pop.instance-menu-pop { min-width: 200px; }
+.menu-pop button:disabled { opacity: .5; cursor: default; background: transparent; }
+.menu-pop button:focus-visible { background: var(--panel-2); outline: none; }
+.pager { margin: 8px 0 0; gap: 8px; }
+.host-crumbs a { color: var(--muted); text-decoration: none; font-weight: 500; }
+.host-crumbs a:hover { color: var(--accent); }
+.host-card { margin-bottom: 12px; }
+.host-instances-head { margin: 16px 0 8px; }
+/* between a phone and a wide screen the instances' many columns wrap their text rather than push the page sideways */
+@media (max-width: 1100px) {
+  .instances-table .queue-cell { white-space: normal; }
+  .hosts-table td { white-space: normal; }
+}
+@media (max-width: 700px) {
+  .list-search { max-width: none; flex-basis: 100%; }
+  .list-toolbar select { flex: 1 1 40%; min-width: 0; }
+  .instances-table td.acts { width: auto; }
+  .hosts-table tr.click-row:hover td { background: none; }
+}
 /* Customer → Servers (customer/ServersBox.tsx): toolbar, Site groups, one console link and a ⋯ menu per server */
 .servers-box > .card { background: var(--panel-2); margin: 10px 0 0; }
 .servers-toolbar { margin: 10px 0 4px; gap: 8px; }

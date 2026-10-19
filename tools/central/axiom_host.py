@@ -49,7 +49,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, wait as futures_wait
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 PROTO = 1
 log = logging.getLogger("axiom-host")
 
@@ -748,11 +748,16 @@ def parse_instance_work(out: str) -> dict:
 
 def rate_per_min(series: collections.deque, t: float, v: int | None, window_s: float) -> float | None:
     """Append (t, v) to `series` and return the increase per minute over up to `window_s`. A count that went down
-    (retention deleted old events, merges) restarts the series: no rate until the next reading."""
+    counts as no progress since the last reading: the earlier readings are lowered by the drop, so the rate goes on.
+    A busy instance's count drops all the time: a merge (merge.py) deletes the newer fragment and sends the older one
+    back to pending, two fewer finished events at once, and retention deletes old masked rows. Restarting the series
+    on every drop (as before 0.3.1) left the Hosts page at "—/min" on exactly the instances doing the most work."""
     if v is None:
         return None
     if series and v < series[-1][1]:
-        series.clear()
+        drop = series[-1][1] - v
+        for i, (ti, vi) in enumerate(series):
+            series[i] = (ti, vi - drop)
     series.append((t, v))
     while len(series) > 2 and t - series[1][0] >= window_s:
         series.popleft()
@@ -770,7 +775,18 @@ def _http_get(url: str, timeout: float) -> str:
 
 # ---------------------------------------------------------------- the host
 
+_IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
+
+
+def image_id_of(text: str | None) -> str | None:
+    """A Docker image ID ("sha256:<64 hex>") from one line of `docker ... --format` output, None for anything else."""
+    t = (text or "").strip()
+    return t if _IMAGE_ID.fullmatch(t) else None
+
+
 class Host:
+    IMAGE_ID_TTL_S = 300   # how long the ID of host.json `image` is reused (a rebuild retags `latest` to a new ID)
+
     def __init__(self, cfg: dict | None = None, exe: Exec | None = None,
                  resolver: Callable[[str], list[str]] | None = None) -> None:
         self.cfg = {**DEFAULTS, **(cfg or {})}
@@ -788,6 +804,7 @@ class Host:
         self.relay_status: dict[str, dict] = {}
         self.relay_connected = False
         self.on_relay_change: Callable[[], None] | None = None   # the agent reloads its listeners
+        self._image_id: tuple[str | None, float] = (None, 0.0)   # (ID of cfg image, when read)
 
     # -- registry
     @property
@@ -1532,7 +1549,8 @@ class Host:
     def list_instances(self, a: dict | None = None) -> dict:
         reg = self.load()
         states = self.docker_states()
-        views = [self.view(r, states) for r in sorted(reg["instances"].values(), key=lambda r: r["slot"])]
+        images = self.container_images([i for i in reg["instances"] if i in states])
+        views = [self.view(r, states, images) for r in sorted(reg["instances"].values(), key=lambda r: r["slot"])]
         return {"detail": f"{len(views)} instance(s)", "instances": views}
 
     def dispatch(self, op: str, args: dict) -> dict:
@@ -1558,6 +1576,32 @@ class Host:
             if iid:
                 out[iid] = state.strip()
         return out
+
+    def container_images(self, ids: list[str]) -> dict[str, str]:
+        """instance id -> the image ID its container runs (docker inspect .Image), one call for all of them. The tag
+        (rec image, e.g. axiom/instance:2096ed5) says what was asked for; the ID is what runs, comparable with
+        image_id(). Unreadable or missing containers are left out (a missing one fails the call, the rest still print)."""
+        if not ids:
+            return {}
+        r = self.exe.query(["docker", "inspect", "--format", '{{index .Config.Labels "axiom.instance"}}	{{.Image}}',
+                            *[self.cname(i) for i in ids]], timeout=10)
+        out = {}
+        for line in (r.out or "").splitlines():
+            iid, _, img = line.partition("	")
+            if iid.strip() and image_id_of(img):
+                out[iid.strip()] = image_id_of(img)
+        return out
+
+    def image_id(self) -> str | None:
+        """The image ID of host.json `image` (what new instances are created from; `latest` is retagged after every
+        rebuild), read at most every IMAGE_ID_TTL_S; None when Docker can't say (not pulled, no Docker)."""
+        val, at = self._image_id
+        if at and time.time() - at < self.IMAGE_ID_TTL_S:
+            return val
+        r = self.exe.query(["docker", "image", "inspect", "--format", "{{.Id}}", self.cfg["image"]], timeout=10)
+        val = image_id_of((r.out or "").strip().splitlines()[0] if r.rc == 0 and (r.out or "").strip() else None)
+        self._image_id = (val, time.time())
+        return val
 
     def zfs_used_gb(self, names: list[str]) -> float | None:
         """Sum of `zfs get -Hp used` over the datasets (data + snapshots + children), None if any is unreadable."""
@@ -1588,7 +1632,7 @@ class Host:
             if r.rc == 0:
                 self.du_cache[rec["id"]] = round(sum(int(l.split()[0]) for l in r.out.splitlines() if l.strip()) / 1e9, 1)
 
-    def view(self, rec: dict, states: dict[str, str] | None = None) -> dict:
+    def view(self, rec: dict, states: dict[str, str] | None = None, images: dict[str, str] | None = None) -> dict:
         probe = self.probe_cache.get(rec["id"], {})
         state = (states or {}).get(rec["id"], "missing") if states is not None else ("planned" if self.exe.dry_run else "created")
         return {"id": rec["id"], "location_id": rec["location_id"], "name": rec["name"], "state": state,
@@ -1597,7 +1641,8 @@ class Host:
                 "public_ips": rec.get("public_ips", []), "hosts": rec.get("hosts", []),
                 "host_ips": rec.get("host_ips", {}), "quota_mode": rec.get("quota_mode"),
                 "enroll_pending": rec.get("enroll_pending", False), "mem_gb": rec["mem_gb"], "cpus": rec["cpus"],
-                "image": rec["image"], "network": rec["net_subnet"], "gateway": rec.get("gateway"),
+                "image": rec["image"], "image_id": (images or {}).get(rec["id"]),
+                "network": rec["net_subnet"], "gateway": rec.get("gateway"),
                 # Axiom Bridge relay: its listen ports on the gateway, and which ones the agent's listeners hold now
                 "relay": {"ip": rec.get("gateway"), "ports": [p["port"] for p in rec.get("relay_ports") or []],
                           "listening": list((self.relay_status.get(rec["id"]) or {}).get("listening") or []),
@@ -1631,7 +1676,10 @@ class Host:
                "instances": len(insts),
                "allocated": {"quota_gb": sum(r["quota_gb"] for r in insts), "mem_gb": sum(r["mem_gb"] for r in insts),
                              "cpus": sum(r["cpus"] for r in insts)},
-               "relay": {"port_range": list(self.cfg["relay_port_range"]), "connected": self.relay_connected}}
+               "relay": {"port_range": list(self.cfg["relay_port_range"]), "connected": self.relay_connected},
+               # the image new instances are created from (host.json `image`) and its Docker image ID: the hub flags
+               # instances whose container runs another ID (the tags differ by design: instances run git-rev tags)
+               "image": self.cfg["image"], "image_id": self.image_id()}
         work = self.work.snapshot()   # the last collection (WorkMonitor.collect runs beside the heartbeat)
         if work is not None:
             ids = set(reg["instances"])
