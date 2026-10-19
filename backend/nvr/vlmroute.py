@@ -21,6 +21,9 @@ its own gate. Every local request goes to the primary, except:
 Interactive work (Ask, clip chat, briefings, footage search, the hub's digests) stays on the primary unless it is
 down. Each instance is always called with its own loaded num_ctx, so a request never makes Ollama reload a model.
 With no fallback configured everything goes to the primary exactly as before.
+
+Every request is metered (aischedule.meter: its kind, in or out of the Site's AI schedule, seconds at the model, and
+the tokens the answer reports). The router never refuses work for the AI schedule: its callers decide (pipeline).
 """
 from __future__ import annotations
 
@@ -28,6 +31,7 @@ import asyncio
 from collections import Counter, deque
 import base64
 import contextlib
+import contextvars
 import datetime as dt
 import json
 import logging
@@ -37,6 +41,7 @@ from typing import AsyncIterator, Callable
 
 import httpx
 
+from . import aischedule
 from .config import settings
 from .db import db
 
@@ -159,6 +164,21 @@ def parse_json(content: str) -> dict:
 # ---------------------------------------------------------------- backends
 # messages: [{"role": "system"|"user"|"assistant", "content": str, "images": [jpeg bytes]}]
 
+# The meter of the router request in progress (aischedule.meter): each backend call adds its seconds at the model and
+# the token counts its answer carries. A context variable, so test fakes and other callers need no extra argument.
+USAGE: contextvars.ContextVar[dict | None] = contextvars.ContextVar("vlm_usage", default=None)
+
+
+def note_usage(t0: float, prompt=None, completion=None) -> None:
+    u = USAGE.get()
+    if u is None:
+        return
+    u["seconds"] += max(0.0, time.time() - t0)
+    for k, v in (("prompt", prompt), ("completion", completion)):
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            u[k] += int(v)
+
+
 
 def no_think(body: dict) -> dict:
     """Ask a remote OpenAI-compatible model to answer directly (Qwen3.x otherwise spends the budget thinking).
@@ -202,30 +222,42 @@ class OllamaBackend:
         # Ollama ignores the flag for models without a thinking mode (Qwen2.5-VL)
         body = {"model": self.model, "messages": self._messages(messages), "format": schema, "stream": False, "think": False,
                 "options": self.options(temperature, num_predict)}
-        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10)) as c:
-            r = await c.post(f"{self.inst.url}/api/chat", json=body)
-            if r.status_code >= 400:
-                raise LocalHTTPError(r.status_code, r.text)
-            return parse_json(r.json()["message"]["content"])
+        t0 = time.time()
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10)) as c:
+                r = await c.post(f"{self.inst.url}/api/chat", json=body)
+                if r.status_code >= 400:
+                    raise LocalHTTPError(r.status_code, r.text)
+                j = r.json()
+        except BaseException:
+            note_usage(t0)
+            raise
+        note_usage(t0, j.get("prompt_eval_count"), j.get("eval_count"))
+        return parse_json(j["message"]["content"])
 
     async def stream(self, messages: list[dict], num_predict: int, temperature: float,
                      first_token_timeout: float) -> AsyncIterator[str]:
         body = {"model": self.model, "messages": self._messages(messages), "stream": True, "think": False,
                 "options": self.options(temperature, num_predict)}
-        async with httpx.AsyncClient(timeout=httpx.Timeout(240, connect=10)) as c:
-            async with c.stream("POST", f"{self.inst.url}/api/chat", json=body) as r:
-                if r.status_code >= 400:
-                    raise LocalHTTPError(r.status_code, (await r.aread()).decode())
-                async for line in r.aiter_lines():
-                    if not line:
-                        continue
-                    msg = json.loads(line)
-                    if msg.get("error"):
-                        raise RuntimeError(msg["error"])
-                    if chunk := msg.get("message", {}).get("content", ""):
-                        yield chunk
-                    if msg.get("done"):
-                        break
+        t0, counts = time.time(), (None, None)
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(240, connect=10)) as c:
+                async with c.stream("POST", f"{self.inst.url}/api/chat", json=body) as r:
+                    if r.status_code >= 400:
+                        raise LocalHTTPError(r.status_code, (await r.aread()).decode())
+                    async for line in r.aiter_lines():
+                        if not line:
+                            continue
+                        msg = json.loads(line)
+                        if msg.get("error"):
+                            raise RuntimeError(msg["error"])
+                        if chunk := msg.get("message", {}).get("content", ""):
+                            yield chunk
+                        if msg.get("done"):
+                            counts = (msg.get("prompt_eval_count"), msg.get("eval_count"))
+                            break
+        finally:
+            note_usage(t0, *counts)
 
 
 class OpenAIBackend:
@@ -260,30 +292,46 @@ class OpenAIBackend:
         body = no_think({"model": self.model, "messages": self._messages(messages), "max_tokens": num_predict,
                          "temperature": temperature,
                          "response_format": {"type": "json_schema", "json_schema": {"name": "answer", "schema": schema}}})
-        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=15)) as c:
-            r = await c.post(self._url(), json=body, headers=self._headers())
-            if r.status_code >= 400:
-                raise RuntimeError(f"remote VLM {r.status_code}: {r.text[:300]}")
-            return parse_json(r.json()["choices"][0]["message"]["content"] or "")
+        t0 = time.time()
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=15)) as c:
+                r = await c.post(self._url(), json=body, headers=self._headers())
+                if r.status_code >= 400:
+                    raise RuntimeError(f"remote VLM {r.status_code}: {r.text[:300]}")
+                j = r.json()
+        except BaseException:
+            note_usage(t0)
+            raise
+        u = j.get("usage") if isinstance(j.get("usage"), dict) else {}
+        note_usage(t0, u.get("prompt_tokens"), u.get("completion_tokens"))
+        return parse_json(j["choices"][0]["message"]["content"] or "")
 
     async def stream(self, messages: list[dict], num_predict: int, temperature: float,
                      first_token_timeout: float) -> AsyncIterator[str]:
+        # include_usage: the last chunk carries the token counts (for the meter)
         body = no_think({"model": self.model, "messages": self._messages(messages), "max_tokens": num_predict,
-                         "temperature": temperature, "stream": True})
+                         "temperature": temperature, "stream": True, "stream_options": {"include_usage": True}})
         timeout = httpx.Timeout(connect=15, read=first_token_timeout, write=30, pool=15)
-        async with httpx.AsyncClient(timeout=timeout) as c:
-            async with c.stream("POST", self._url(), json=body, headers=self._headers()) as r:
-                if r.status_code >= 400:
-                    raise RuntimeError(f"remote VLM {r.status_code}: {(await r.aread()).decode()[:300]}")
-                async for line in r.aiter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if data == "[DONE]":
-                        break
-                    delta = (json.loads(data).get("choices") or [{}])[0].get("delta", {}).get("content")
-                    if delta:
-                        yield delta
+        t0, counts = time.time(), (None, None)
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as c:
+                async with c.stream("POST", self._url(), json=body, headers=self._headers()) as r:
+                    if r.status_code >= 400:
+                        raise RuntimeError(f"remote VLM {r.status_code}: {(await r.aread()).decode()[:300]}")
+                    async for line in r.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            break
+                        j = json.loads(data)
+                        if isinstance(j.get("usage"), dict):
+                            counts = (j["usage"].get("prompt_tokens"), j["usage"].get("completion_tokens"))
+                        delta = (j.get("choices") or [{}])[0].get("delta", {}).get("content")
+                        if delta:
+                            yield delta
+        finally:
+            note_usage(t0, *counts)
 
 
 class TimeToFirstToken(Exception):
@@ -309,6 +357,7 @@ class Router:
         self._sem: asyncio.Semaphore | None = None
         self.last_latency: float | None = None
         self.task_calls: Counter = Counter()   # calls per task since start-up (Optimize my system)
+        self.remote_queue = 0             # remote requests in flight + waiting for a slot (idle() for catch-up work)
 
     # -- configuration
     @property
@@ -430,6 +479,11 @@ class Router:
         if m.fails >= FAIL_RESTART and m.state == "ready" and self.on_unresponsive is not None:
             self.on_unresponsive(role)
 
+    def idle(self) -> bool:
+        """No Qwen request in flight or waiting here, local or remote (the hub's shared-AI requests included): catch-up
+        descriptions outside the AI schedule only start then."""
+        return self.remote_queue == 0 and all(m.queue == 0 for m in self.models.values())
+
     def routed_to_fallback_last_hour(self) -> int:
         cutoff = time.time() - 3600
         return sum(1 for t in self.fallback_served if t >= cutoff)
@@ -495,14 +549,35 @@ class Router:
         raise RuntimeError("no local model")   # unreachable: plan() is never empty
 
     # -- calls
+    @staticmethod
+    def _meter(task: str, inside: bool, usage: dict) -> None:
+        """One request into aischedule.meter: its kind (the task, or the job it runs in), in or out of the AI
+        schedule (as it was when the request started), its seconds at the model and tokens."""
+        try:
+            aischedule.meter.record(aischedule.kind_of(task), inside, usage["seconds"], usage["prompt"], usage["completion"])
+        except Exception:  # noqa: BLE001 - counting must never fail a request
+            log.exception("Qwen meter")
+
     async def chat_json(self, task: str, system: str, text: str, images: list[bytes], schema: dict,
                         num_predict: int = 300, temperature: float = 0.1, priority: str = "background") -> dict:
-        """Structured answer; the result carries "_model" (which model wrote it)."""
+        """Structured answer; the result carries "_model" (which model wrote it). Metered (aischedule.meter)."""
+        usage = {"seconds": 0.0, "prompt": 0, "completion": 0}
+        inside = aischedule.full()
+        token = USAGE.set(usage)
+        try:
+            return await self._chat_json(task, system, text, images, schema, num_predict, temperature, priority)
+        finally:
+            USAGE.reset(token)
+            self._meter(task, inside, usage)
+
+    async def _chat_json(self, task: str, system: str, text: str, images: list[bytes], schema: dict,
+                         num_predict: int, temperature: float, priority: str) -> dict:
         self.task_calls[task] += 1
         messages = [{"role": "system", "content": system}, {"role": "user", "content": text, "images": images}]
         if self.use_remote(task):
             timeout = settings.remote_interactive_timeout_s * 2 if priority == "chat" else settings.remote_background_timeout_s
             t0 = time.time()
+            self.remote_queue += 1
             try:
                 async with self.sem:
                     t0 = time.time()
@@ -516,6 +591,8 @@ class Router:
                 self._fail(task, e, mark_down=not (priority == "chat" and isinstance(e, httpx.TimeoutException)))
                 if not settings.local_vlm_enabled:
                     raise self._no_local(task, e) from e
+            finally:
+                self.remote_queue -= 1
         if not settings.local_vlm_enabled:
             raise self._no_local(task)
         return await self._local_json(task, messages, schema, num_predict, temperature, priority)
@@ -523,12 +600,32 @@ class Router:
     async def stream(self, task: str, messages: list[dict], num_predict: int = 500, temperature: float = 0.3,
                      priority: str = "chat") -> AsyncIterator[tuple[str, str]]:
         """Yields ("model", name) once, then ("delta", text) chunks. If the remote hasn't produced its first
-        token within remote_interactive_timeout_s (cold start), the local model answers instead."""
+        token within remote_interactive_timeout_s (cold start), the local model answers instead. Metered."""
+        usage = {"seconds": 0.0, "prompt": 0, "completion": 0}
+        inside = aischedule.full()
+        # set, not a token reset: an async generator may be finished from another context (aclose by the loop)
+        prev = USAGE.get()
+        USAGE.set(usage)
+        gen = self._stream(task, messages, num_predict, temperature, priority)
+        try:
+            async for item in gen:
+                yield item
+                USAGE.set(usage)   # the caller ran in between (its own requests set and reset theirs)
+        finally:
+            USAGE.set(usage)
+            with contextlib.suppress(Exception):
+                await gen.aclose()   # a reader that stopped early: the request ends (and is counted) now, not at GC
+            USAGE.set(prev)
+            self._meter(task, inside, usage)
+
+    async def _stream(self, task: str, messages: list[dict], num_predict: int, temperature: float,
+                      priority: str) -> AsyncIterator[tuple[str, str]]:
         self.task_calls[task] += 1
         if self.use_remote(task):
             t0 = time.time()
             gen = self.remote.stream(messages, num_predict, temperature, settings.remote_interactive_timeout_s)
             first = None
+            self.remote_queue += 1
             try:
                 async with self.sem:
                     t0 = time.time()
@@ -552,6 +649,10 @@ class Router:
                 if not settings.local_vlm_enabled:
                     raise self._no_local(task, e) from e
                 yield ("fallback", "remote waking up" if cold else "remote unavailable")
+            finally:
+                self.remote_queue -= 1
+                with contextlib.suppress(Exception):
+                    await gen.aclose()   # the reader stopped early: end the remote request now (and count it)
         if not settings.local_vlm_enabled:
             raise self._no_local(task)
         order = self.plan(task)
@@ -587,12 +688,22 @@ class Router:
         asyncio.create_task(self._warm())
         return {"state": "waking"}
 
+    async def _metered_remote(self, messages: list[dict], schema: dict, num_predict: int) -> dict:
+        """A tiny remote request outside chat_json (warm-up, the Test button), metered as kind "test"."""
+        usage = {"seconds": 0.0, "prompt": 0, "completion": 0}
+        inside = aischedule.full()
+        token = USAGE.set(usage)
+        try:
+            return await self.remote.chat_json(messages, schema, num_predict, 0.0, settings.remote_background_timeout_s)
+        finally:
+            USAGE.reset(token)
+            self._meter("test", inside, usage)
+
     async def _warm(self) -> None:
         t0 = time.time()
         try:
-            await self.remote.chat_json([{"role": "user", "content": "Reply with {\"ok\": true}"}],
-                                        {"type": "object", "properties": {"ok": {"type": "boolean"}}}, 5, 0.0,
-                                        settings.remote_background_timeout_s)
+            await self._metered_remote([{"role": "user", "content": "Reply with {\"ok\": true}"}],
+                                       {"type": "object", "properties": {"ok": {"type": "boolean"}}}, 5)
             self._record(t0, time.time())
             self.last_ok_end, self.last_latency = time.time(), round(time.time() - t0, 2)
             log.info("remote VLM warm after %.1fs", time.time() - t0)
@@ -607,9 +718,8 @@ class Router:
         was = self.state()
         t0 = time.time()
         try:
-            r = await self.remote.chat_json([{"role": "user", "content": "Say hello in three words as JSON."}],
-                                            {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
-                                            20, 0.0, settings.remote_background_timeout_s)
+            r = await self._metered_remote([{"role": "user", "content": "Say hello in three words as JSON."}],
+                                           {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}, 20)
             self._record(t0, time.time())
             self.last_ok_end, self.last_latency = time.time(), round(time.time() - t0, 2)
             self.down_until = 0

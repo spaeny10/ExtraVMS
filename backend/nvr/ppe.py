@@ -26,7 +26,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from . import zones
+from . import aischedule, zones
 from .config import ROOT, settings
 
 log = logging.getLogger("nvr.ppe")
@@ -244,8 +244,14 @@ def decide(required: list[str], detector: dict, vlm: dict | None, vlm_first: boo
     return {"items": items, "violation": missing, "verdict": verdict, "overruled": overruled}
 
 
+def vlm_all() -> bool:
+    """NVR_PPE_VLM_ALL ("Qwen checks every person"), which counts as off outside the Site's AI schedule: there Qwen
+    takes only the second looks the detector asks for (aischedule)."""
+    return settings.ppe_vlm_all and aischedule.full()
+
+
 def needs_vlm(detector: dict) -> bool:
-    return settings.ppe_vlm_all or any(v != "present" for v in detector.values())
+    return vlm_all() or any(v != "present" for v in detector.values())
 
 
 # ---------------------------------------------------------------- frames for the check (GPU thread)
@@ -398,7 +404,7 @@ async def check_event(event: dict, zone_list: list[dict] | None, run_gpu, detect
         vlm = None
         if found["crops"] and settings.ppe_vlm_confirm and vlm_ready:
             vlm = await confirm_with_vlm(found["crops"])
-        final = decide(c["required"], found["detector"], vlm, vlm_first=settings.ppe_vlm_all)
+        final = decide(c["required"], found["detector"], vlm, vlm_first=vlm_all())
         res = {"zone": c["zone"], "required": c["required"], "priority": c["priority"], "dwell_s": c["dwell_s"],
                "window": c["window"], **final, "detector": found["detector"], "vlm": vlm,
                "frames": found["frames"], "model": settings.ppe_model, "seconds": round(time.time() - t0, 2),

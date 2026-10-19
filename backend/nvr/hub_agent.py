@@ -11,7 +11,8 @@ System; when the owner enters it at the hub, the hub answers `enrolled` with a d
 in the settings table and used as `Authorization: Bearer` from then on. A central recording instance instead
 presents `Authorization: Enroll <NVR_HUB_ENROLL_TOKEN>` (a one-time token bound to a hub Site) and the hub
 answers `enrolled` at once; a token the hub refuses (HTTP 401/403) falls back to the claim code. The hub also pushes shared-AI
-(`vlm`) and TURN configuration, which are applied at runtime and remembered.
+(`vlm`) and TURN configuration, which are applied at runtime and remembered, and the Site's AI schedule (`ai_schedule`,
+aischedule.py: when Qwen does all its work); the site reports its Qwen use (`ai_usage`) every USAGE_S.
 """
 from __future__ import annotations
 
@@ -34,13 +35,14 @@ import websockets
 
 from tunnelproto import CHUNK, HEARTBEAT_S, PING_S, PROTO, WINDOW, Stream, chunk, decode, encode, split
 
-from . import __version__
+from . import __version__, aischedule
 from .config import settings
 from .db import db
 
 log = logging.getLogger("nvr.hub")
 
 CLAIM_TTL_S = 15 * 60
+USAGE_S = 600.0   # Qwen use (aischedule.meter) goes to the hub this often ("ai_usage")
 # remote-VLM settings the operator pinned in .env (captured before the hub ever assigns them at runtime)
 _ENV_PINNED = frozenset(settings.model_fields_set) & {"remote_vlm_url", "remote_vlm_key", "remote_vlm_model"}
 CLAIM_ALPHABET = string.ascii_uppercase.replace("O", "").replace("I", "") + "23456789"
@@ -258,6 +260,7 @@ class HubAgent:
         if unenrol:
             for k in ("hub_token", "hub_site_id", "hub_vlm", "hub_turn", "hub_claim", "hub_lan_retry_at"):
                 db.set_setting(k, None)
+            aischedule.apply(None)   # the old hub's AI schedule goes too: full time until a hub says otherwise
             self._known_token = None
             self.enrolled, self.site_id, self.org = False, None, None
             self.location = self.location_id = None
@@ -354,7 +357,9 @@ class HubAgent:
                      # camweb: camera web pages (/api/camweb/<camera>) and WebSockets through the tunnel ("ws" requests);
                      # talk: live talk-down from the browser's microphone (WebSocket /api/speakers/<id>/talk)
                      # lan_cert: asks for a trusted certificate for its Direct-on-LAN names (lan_cert.py)
-                     "caps": ["events", "turn", "vlm", "camweb", "talk", *(["direct", "lan_cert"] if settings.direct_enabled else [])]}
+                     # ai_schedule: follows the Site's AI schedule ("ai_schedule" frames) and reports Qwen use ("ai_usage")
+                     "caps": ["events", "turn", "vlm", "camweb", "talk", "ai_schedule",
+                              *(["direct", "lan_cert"] if settings.direct_enabled else [])]}
             try:
                 hello["cameras"] = [{"id": c["id"], "name": c["name"]} for c in db.cameras(enabled_only=True)]
             except sqlite3.Error:
@@ -406,11 +411,14 @@ class HubAgent:
             self._tasks = [asyncio.create_task(self._heartbeat_loop(hb), name="hub-heartbeat"),
                            asyncio.create_task(self._event_loop(), name="hub-events"),
                            asyncio.create_task(self._ping_loop(), name="hub-ping"),
-                           asyncio.create_task(self._still_loop(), name="hub-stills")]
+                           asyncio.create_task(self._still_loop(), name="hub-stills"),
+                           asyncio.create_task(self._usage_loop(), name="hub-ai-usage")]
             if self._lan_name:
                 self._tasks.append(asyncio.create_task(self._lan_cert_loop(), name="hub-lan-cert"))
             if "vlm" in m:
                 self._apply_vlm(m["vlm"])
+            if "ai_schedule" in m:
+                aischedule.apply(m["ai_schedule"])
             try:
                 if self.site_id:
                     db.set_setting("hub_site_id", self.site_id)
@@ -444,6 +452,8 @@ class HubAgent:
             self._apply_vlm(m.get("vlm"))
         elif t == "turn":
             self._apply_turn(m.get("turn"))
+        elif t == "ai_schedule":   # the Site's AI schedule changed at the hub (or this server reported another one)
+            aischedule.apply(m.get("ai_schedule"))
         elif t == "lan_cert":
             await self._on_lan_cert(m)
         elif t == "req":
@@ -631,6 +641,21 @@ class HubAgent:
             except Exception as e:
                 log.warning("hub heartbeat failed: %s", e)
             await asyncio.sleep(every)
+
+    async def _usage_loop(self) -> None:
+        """Qwen use (aischedule.meter: per UTC day, kind, in/out of the AI schedule) to the hub, which keeps daily rows
+        per server for billing and the Hosts page: soon after connecting, then every USAGE_S. Each report repeats the
+        last REPORT_DAYS days, so the hub's totals are whole again after an outage."""
+        await asyncio.sleep(5)
+        while True:
+            try:
+                aischedule.meter.flush()
+                await self._send({"t": "ai_usage", "now": time.time(), "rows": aischedule.meter.rows()})
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.warning("hub: Qwen usage report failed: %s", e)
+            await asyncio.sleep(USAGE_S)
 
     async def _event_loop(self) -> None:
         q: asyncio.Queue = asyncio.Queue()

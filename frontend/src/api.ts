@@ -270,6 +270,7 @@ export type NvrEvent = {
   yolo_conf: number | null;
   yolo_hits: number | null;
   synopsis_pending?: boolean; // Qwen is queued or writing the synopsis right now
+  synopsis_deferred?: boolean; // outside the Site's AI hours: written once Qwen is free (backend aischedule.py)
   policy?: BrokenRule | null; // the site rule this event breaks (policy.py)
   snapshot: string | null;
   clip: string | null;

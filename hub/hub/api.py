@@ -22,7 +22,7 @@ from . import fleet as fleet_mod
 from . import find as find_mod
 from . import camera_groups as groups_mod
 from . import layouts as layouts_mod
-from . import camweb, site_ask, talkdown_voice, viewing
+from . import ai_schedule, camweb, site_ask, talkdown_voice, viewing
 from . import bridges, bridges_api, central_cameras, coverage, geocode, hostlist, hosts, lan_certs, security, soc, soc_reports, stills, telemetry
 from fastapi.responses import StreamingResponse
 from .agents import registry
@@ -679,6 +679,7 @@ async def update_site(site_id: str, body: SiteIn, u: dict = Depends(user)):
                 c.execute(sa.update(db.central_instances).where(db.central_instances.c.server_id == site_id).values(location_id=target["id"]))
         registry.refresh(site_id)   # broadcasts and proxy headers use the live connection's copy
     if target:
+        ai_schedule.push_soon(target["id"], registry)   # it follows its new Site's AI schedule from now on
         _audit(u, site["org_id"], site_id, f"server moved: {site['name']} -> {target['name']}", {"location_id": target["id"]})
     return _site_card(db.one(sa.select(db.sites).where(db.sites.c.id == site_id)))
 
@@ -950,6 +951,8 @@ async def update_location(location_id: str, body: LocationPatch, u: dict = Depen
     if vals:
         db.run(sa.update(db.locations).where(db.locations.c.id == location_id).values(**vals, updated_at=time.time()))
         registry.refresh_location(location_id)   # welcome/proxy/broadcasts carry the Site name
+        if "timezone" in vals and vals["timezone"] != loc.get("timezone"):
+            ai_schedule.push_soon(location_id, registry)   # the servers evaluate the Site's SOC hours in its timezone
         _audit(u, loc["org_id"], None, f"site updated: {vals.get('name', loc['name'])}", {"location_id": location_id})
         if "address" in vals and (vals["address"] or "").strip() and vals.get("lat", loc.get("lat")) is None:
             geocode.locate_soon(location_id)
@@ -1476,6 +1479,68 @@ async def put_talkdown_voice(location_id: str, body: TalkdownVoiceIn, u: dict = 
                 "failed": [p["server_id"] for p in pushed if not p["ok"] and not p.get("skipped")]})
     _, role = auth.location_access(u, location_id)
     return {**_talkdown_voice(loc, role), "pushed": pushed}
+
+
+# ---- a Site's AI schedule (ai_schedule.py): when Qwen does all its work, a pricing tier set by hub administrators only;
+# the Site's customer admins read it with the Site's Qwen use (this month and last)
+
+class AiScheduleIn(BaseModel):
+    mode: Literal["full", "soc"]
+    outside: Literal["catchup", "skip"] | None = None   # None = unchanged (it only matters for "soc")
+
+
+def _ai_schedule(u: dict, loc: dict) -> dict:
+    now = time.time()
+    return {"location_id": loc["id"], "mode": ai_schedule.mode_of(loc), "outside": ai_schedule.outside_of(loc),
+            "timezone": loc.get("timezone"), "monitored": bool(loc.get("monitored")),
+            "effective": ai_schedule.effective(loc, now), "now": now,
+            "servers": ai_schedule.servers_status(loc, registry.get),
+            "usage": {"this_month": ai_schedule.site_month(loc["id"], ai_schedule.month_of(now)),
+                      "last_month": ai_schedule.site_month(loc["id"], ai_schedule.month_of(now, 1))},
+            "can_edit": bool(u.get("is_super"))}
+
+
+@app.get("/api/locations/{location_id}/ai")
+async def get_ai_schedule(location_id: str, u: dict = Depends(user)):
+    """{mode: full | soc, outside: catchup | skip, effective: {qwen: on | limited, reason, until}, servers: [per server:
+    online, supported, in_sync, qwen, until], usage: {this_month, last_month: {total, in, out, kinds: [...]}}, can_edit}.
+    Hub administrators and the customer's own admins (not SOC staff: it is the customer's bill)."""
+    loc, _ = auth.location_access(u, location_id)
+    auth.require_customer_role(u, loc["org_id"], "admin")
+    return _ai_schedule(u, loc)
+
+
+@app.put("/api/locations/{location_id}/ai")
+async def put_ai_schedule(location_id: str, body: AiScheduleIn, u: dict = Depends(user)):
+    """Hub administrators only (full-time AI is a paid upgrade): store the Site's AI schedule and push it to every
+    connected server of the Site (`pushed`: the servers it went to); an offline one takes it when it reconnects."""
+    loc, _ = auth.location_access(u, location_id)
+    auth.require_super(u)
+    before = (ai_schedule.mode_of(loc), ai_schedule.outside_of(loc))
+    loc = ai_schedule.put(loc, body.mode, body.outside)
+    after = (ai_schedule.mode_of(loc), ai_schedule.outside_of(loc))
+    registry.refresh_location(location_id)   # connections cache their Site row (heartbeat re-push, welcome)
+    pushed = await ai_schedule.push_location(location_id, registry)
+    if after != before:
+        label = "full time" if after[0] == "full" else f"SOC hours ({'catch up when idle' if after[1] == 'catchup' else 'skip descriptions'} outside them)"
+        _audit(u, loc["org_id"], None, f"AI schedule set: {label} ({loc['name']})",
+               {"location_id": location_id, "mode": after[0], "outside": after[1],
+                "before": {"mode": before[0], "outside": before[1]}, "pushed": pushed})
+    return {**_ai_schedule(u, loc), "pushed": pushed}
+
+
+@app.get("/api/hub/ai-usage")
+async def hub_ai_usage(month: str | None = Query(None, pattern=r"^\d{4}-(0[1-9]|1[0-2])$"), format: Literal["json", "csv"] = "json",
+                       u: dict = Depends(user)):
+    """Hub administrators: every Site's Qwen use in one UTC month (default this one) for billing: requests, tokens,
+    seconds (in / out of its AI schedule, per kind) and its AI schedule now. ?format=csv for a spreadsheet."""
+    auth.require_super(u)
+    month = month or ai_schedule.month_of()
+    rows = ai_schedule.billing(month)
+    if format == "csv":
+        return Response(ai_schedule.billing_csv(rows), media_type="text/csv",
+                        headers={"Content-Disposition": f'attachment; filename="axiom-ai-usage-{month}.csv"'})
+    return {"month": month, "sites": rows}
 
 
 @app.post("/api/locations/{location_id}/ask")

@@ -13,7 +13,7 @@ import cv2
 import httpx
 import numpy as np
 
-from . import baseline, cells, detector, frames, identities, journeys, policy, ppe, retention, vlmroute, weaponcheck, zones, merge
+from . import aischedule, baseline, cells, detector, frames, identities, journeys, policy, ppe, retention, vlmroute, weaponcheck, zones, merge
 from . import synopsis as vlm
 from .config import settings
 from .db import db
@@ -69,6 +69,11 @@ class Pipeline:
         self.synopsis_hold: dict[int, float] = {}  # verified events waiting for a possible follow-on fragment (merge.py)
         self.synopsis_times: deque[float] = deque(maxlen=50)  # seconds per synopsis, for Optimize my system
         self.synopsis_failed_at = 0.0    # last synopsis that ended in an error (retry_loop backs off from it)
+        # Outside the Site's AI schedule (aischedule.py): descriptions set to "catch up when idle" wait here, (priority,
+        # seq, event_id) like synopsis_q, and catchup_loop writes them one at a time while Qwen has nothing else to do
+        self.catchup_q: asyncio.PriorityQueue[tuple[int, int, int]] = asyncio.PriorityQueue()
+        self.synopsis_deferred: set[int] = set()   # in catchup_q; the UI says it waits for Qwen to be free
+        self.synopsis_user: set[int] = set()       # asked for by a person (Generate with Qwen): never deferred
         self.journey_q: asyncio.Queue[int] = asyncio.Queue()
         self.tracker = Tracker(self.verify_q.put)
         self.tracker.camera = self.camera_row        # event_source / motion_events / metadata Analytics flag
@@ -126,17 +131,43 @@ class Pipeline:
     def annotate(self, e: dict) -> dict:
         """Add live pipeline state the DB doesn't hold."""
         e["synopsis_pending"] = e["id"] in self.synopsis_pending
+        e["synopsis_deferred"] = e["id"] in self.synopsis_deferred
         return e
 
-    def queue_synopsis(self, event_id: int) -> bool:
-        """Ask Qwen for a synopsis once; a second request while it's queued or running is ignored."""
+    def queue_synopsis(self, event_id: int, user: bool = False) -> bool:
+        """Ask Qwen for a synopsis once; a second request while it's queued or running is ignored. `user`: a person
+        asked (Generate with Qwen): it goes first and is written whatever the AI schedule says."""
         if event_id in self.synopsis_pending:
             return False
         self.synopsis_pending.add(event_id)
+        self.synopsis_deferred.discard(event_id)   # waiting for catch-up: catchup_loop skips it now
+        if user:
+            self.synopsis_user.add(event_id)
         row = db.one("SELECT camera_class FROM events WHERE id=?", [event_id])
         self._synopsis_seq += 1
-        self.synopsis_q.put_nowait((0 if row and row["camera_class"] == "person" else 1, self._synopsis_seq, event_id))
+        prio = -1 if user else 0 if row and row["camera_class"] == "person" else 1
+        self.synopsis_q.put_nowait((prio, self._synopsis_seq, event_id))
         return True
+
+    def defer_synopsis(self, event_id: int, prio: int = 1) -> None:
+        """Outside the AI schedule: the description waits for an idle Qwen (catch-up) or is never written (skip,
+        marked in detections so the card says why and nothing retries it)."""
+        self.synopsis_pending.discard(event_id)
+        if aischedule.outside() == "skip":
+            self.skip_synopsis(event_id)
+        else:
+            self.synopsis_deferred.add(event_id)
+            self._synopsis_seq += 1
+            self.catchup_q.put_nowait((max(0, prio), self._synopsis_seq, event_id))
+        self.publish(event_id)
+
+    @staticmethod
+    def skip_synopsis(event_id: int) -> None:
+        e = db.event(event_id)
+        if e and not e["synopsis"]:
+            db.update_event(event_id, detections={**(e.get("detections") or {}), "synopsis_skipped": aischedule.SKIP_NOTE,
+                                                  "ai_hours": "skipped"})
+            log.info("event %s: no synopsis (outside AI hours)", event_id)
 
     def publish(self, event_id: int) -> None:
         e = db.event(event_id)
@@ -187,6 +218,7 @@ class Pipeline:
         asyncio.create_task(self._cells_backfill(), name="cells-backfill")
         asyncio.create_task(self.hold_loop(), name="synopsis-hold")
         asyncio.create_task(self.retry_loop(), name="synopsis-retry")
+        asyncio.create_task(self.catchup_loop(), name="synopsis-catchup")
         while True:
             event_id = await self.verify_q.get()
             try:
@@ -342,27 +374,77 @@ class Pipeline:
                 await asyncio.sleep(5)
                 await self.synopsis_q.put(item)
                 continue
-            try:
-                await self._synopsis(event_id)
-                self.vlm_timeouts = 0
-            except (httpx.TimeoutException, asyncio.TimeoutError) as ex:
-                self.vlm_timeouts += 1
-                log.warning("synopsis %s timed out (%s in a row): %s", event_id, self.vlm_timeouts, type(ex).__name__)
-                self.synopsis_pending.discard(event_id)
-                # with a fallback model the router already retried there and restarts whichever instance failed
-                if self.vlm_timeouts >= 2 and self.vlm_ready and not settings.fallback_vlm_enabled:
-                    asyncio.create_task(self.restart_vlm(), name="vlm-restart")
-                self.queue_synopsis(event_id)   # not the event's fault: it goes back to the queue (behind the restart)
+            user = event_id in self.synopsis_user
+            if not user and not aischedule.full():
+                self.defer_synopsis(event_id, item[0])   # outside the Site's AI hours: catch up when idle, or skip
                 continue
-            except Exception as ex:
-                log.exception("synopsis %s failed", event_id)
-                self.synopsis_failed_at = time.time()
-                db.update_event(event_id, error=synopsis_error(db.event(event_id), ex))
-            finally:
+            await self._run_synopsis(event_id, requeue=lambda: self.queue_synopsis(event_id, user=user))
+
+    async def _run_synopsis(self, event_id: int, requeue) -> None:
+        """One description (a worker's or catch-up's), then the journey link; a timeout puts it back with requeue()."""
+        try:
+            await self._synopsis(event_id)
+            self.vlm_timeouts = 0
+        except (httpx.TimeoutException, asyncio.TimeoutError) as ex:
+            self.vlm_timeouts += 1
+            log.warning("synopsis %s timed out (%s in a row): %s", event_id, self.vlm_timeouts, type(ex).__name__)
+            self.synopsis_pending.discard(event_id)
+            self.synopsis_user.discard(event_id)
+            # with a fallback model the router already retried there and restarts whichever instance failed
+            if self.vlm_timeouts >= 2 and self.vlm_ready and not settings.fallback_vlm_enabled:
+                asyncio.create_task(self.restart_vlm(), name="vlm-restart")
+            requeue()   # not the event's fault: it goes back to the queue (behind the restart)
+            return
+        except Exception as ex:
+            log.exception("synopsis %s failed", event_id)
+            self.synopsis_failed_at = time.time()
+            db.update_event(event_id, error=synopsis_error(db.event(event_id), ex))
+        self.synopsis_pending.discard(event_id)
+        self.synopsis_user.discard(event_id)
+        self.publish(event_id)
+        # Link across cameras after the synopsis, so Qwen can also compare both descriptions.
+        await self.journey_q.put(event_id)
+
+    # ---- outside the AI schedule (aischedule.py)
+    async def catchup_ready(self) -> bool:
+        """Qwen has nothing else to do here: ready, no live description queued or being written, no request in flight
+        (local or remote), and on a central instance the shared vLLM is not busy either."""
+        if not self.vlm_ready or not self.synopsis_q.empty() or self.synopsis_pending or not vlmroute.router.idle():
+            return False
+        return not await aischedule.shared.busy()
+
+    async def journey_ok(self) -> bool:
+        """Journeys (same-person checks, narratives) may ask Qwen now: inside the AI schedule, or outside it at idle
+        when the Site catches up (with "skip" they wait for the schedule)."""
+        if aischedule.full():
+            return True
+        return aischedule.outside() == "catchup" and await self.catchup_ready()
+
+    async def catchup_loop(self) -> None:
+        """Deferred descriptions, one at a time, each once Qwen is idle (catchup_ready). An event described meanwhile
+        (Generate with Qwen) is dropped from the line; with the Site switched to "skip" while outside its hours, the
+        waiting ones are marked skipped instead."""
+        while True:
+            item = await self.catchup_q.get()
+            event_id = item[2]
+            try:
+                while event_id in self.synopsis_deferred and not await self.catchup_ready():
+                    if not aischedule.full() and aischedule.outside() == "skip":
+                        self.synopsis_deferred.discard(event_id)
+                        self.skip_synopsis(event_id)
+                        self.publish(event_id)
+                        break
+                    await asyncio.sleep(settings.catchup_poll_s)
+                if event_id not in self.synopsis_deferred:
+                    continue
+                self.synopsis_deferred.discard(event_id)
+                self.synopsis_pending.add(event_id)
+                self.publish(event_id)
+                with aischedule.job("catchup"):
+                    await self._run_synopsis(event_id, requeue=lambda: self.defer_synopsis(event_id, item[0]))
+            except Exception:  # keep the loop alive
+                log.exception("catch-up synopsis %s failed", event_id)
                 self.synopsis_pending.discard(event_id)
-            self.publish(event_id)
-            # Link across cameras after the synopsis, so Qwen can also compare both descriptions.
-            await self.journey_q.put(event_id)
 
     RETRY_MAX = 3            # attempts per event before it stays undescribed (the error is shown on the card)
     RETRY_BACKOFF_S = 300    # after a failure, wait this long before trying the backlog again
@@ -387,10 +469,13 @@ class Pipeline:
         return n
 
     def retry_due(self, now: float | None = None) -> bool:
-        """Retry only when the model is ready, the live queue is idle, nothing failed recently, and (remote AI) the
-        router's circuit breaker is not open. Keeps a dead remote from being hammered and live events first."""
+        """Retry only when the model is ready, the live queue is idle, nothing failed recently, (remote AI) the
+        router's circuit breaker is not open, and the Site's AI schedule has Qwen on (retries wait for its hours).
+        Keeps a dead remote from being hammered and live events first."""
         now = now or time.time()
         if not self.vlm_ready or self.synopsis_pending or now - self.synopsis_failed_at < self.RETRY_BACKOFF_S:
+            return False
+        if not aischedule.full():
             return False
         return now >= vlmroute.router.down_until
 
@@ -408,6 +493,8 @@ class Pipeline:
             event_id = await self.journey_q.get()
             while not self.vlm_ready:
                 await asyncio.sleep(5)
+            while not await self.journey_ok():   # outside the AI schedule: at idle (catch-up) or when it starts again
+                await asyncio.sleep(settings.catchup_poll_s)
             try:
                 if await journeys.link_event(self.gate, event_id):
                     for m in db.all("SELECT id FROM events WHERE journey_id=(SELECT journey_id FROM events WHERE id=?)", [event_id]):
@@ -716,8 +803,11 @@ class Pipeline:
     def wants_synopsis(self, e: dict | None, gate: bool = True) -> bool:
         """Qwen describes a verified event if its label is chosen for the camera and, when the camera has include
         zones, YOLO confirmed it inside one (never for something only seen outside the zones), and (gate) YOLO is
-        sure enough of it (synopsis_gate)."""
+        sure enough of it (synopsis_gate). An event skipped outside the AI schedule ("skip") stays undescribed: no
+        retry, restart or camera change brings it back (Generate with Qwen still does)."""
         if not e or e["status"] != "verified" or e["camera_class"] not in self.synopsis_labels(e["camera_id"]):
+            return False
+        if (e.get("detections") or {}).get("ai_hours") == "skipped":
             return False
         if gate and self.synopsis_gate(e):
             return False

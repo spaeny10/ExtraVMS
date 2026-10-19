@@ -22,3 +22,10 @@ test("an event below the Qwen confidence gate says so instead of 'Writing synops
   expect(placeholder({ ...e, synopsis_pending: true })).toBe("Qwen is writing a synopsis…");   // Generate with Qwen
   expect(placeholder(ev({ status: "verified", camera_class: "person" }))).toBe("Writing synopsis…");
 });
+
+test("outside the Site's AI hours: waiting for an idle Qwen, or skipped", () => {
+  const e = ev({ status: "verified", camera_class: "person" });
+  expect(placeholder({ ...e, synopsis_deferred: true })).toBe("Outside AI hours: described when Qwen is free");
+  const skipped = { ...e, detections: { samples: [], keyframes: [], needed: 2, synopsis_skipped: "No description (outside AI hours)" } };
+  expect(placeholder(skipped)).toBe("No description (outside AI hours)");
+});

@@ -29,7 +29,7 @@ import sqlalchemy as sa
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
-from . import auth, db, geocode, soc, soc_reports
+from . import ai_schedule, auth, db, geocode, soc, soc_reports
 from .agents import registry
 from .roles import allows
 
@@ -192,6 +192,8 @@ def _holiday_json(h: HolidayIn) -> dict:
 def _changed(location_id: str) -> None:
     registry.refresh_location(location_id)   # connections cache their Site row
     soc.invalidate()
+    # a Site on "SOC hours" AI follows its monitoring and arming: its servers get the new schedule now
+    ai_schedule.push_soon(location_id, registry)
     loc = db.one(sa.select(db.locations).where(db.locations.c.id == location_id))
     if loc:
         # the SOC's Sites board and arming banners follow without polling

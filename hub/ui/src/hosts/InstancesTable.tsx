@@ -2,7 +2,7 @@
  * The Hosts page's instance list (the Instances tab across every host, and one host's page with `fixedHost`): one
  * page of the hub's filtered, sorted list (GET /api/hub/central with paging, hub hostlist.py), its filters in the URL
  * (fleetList.ts), a ⋯ menu per row with what used to be its five buttons (storage, CPU/memory, camera limit, Site
- * networks, removal), and checkboxes for the changes that are safe on many at once: the camera limit, and raising the
+ * networks, removal), its server's Qwen seconds per day (the A40's shared vLLM), and checkboxes for the changes that are safe on many at once: the camera limit, and raising the
  * storage quota (never lowering it, and never Remove). A bulk change lists the instances in a dialog before it runs.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -16,6 +16,8 @@ import {
   type BulkAction, INSTANCE_MODES, INSTANCE_PROBLEMS, INSTANCE_SORTS, INSTANCE_SORT_LABEL, INSTANCE_STATES, type ListQuery, MODE_LABEL, PROBLEM_LABEL,
   STATE_LABEL, bulkPlan, bulkValueError, camerasDown, defaultOrder, downText, imageTitle, instanceParams, lastPage, pageText, rowProblems, withQuery,
 } from "./fleetList";
+import { qwenText, qwenTitle } from "../site/aiSchedule";
+import { QwenBars } from "./QwenBars";
 import { SiteNetworks } from "./SiteNetworks";
 
 type Props = {
@@ -96,7 +98,7 @@ export function InstancesTable({ query, setQuery, fixedHost, hosts, onChanged, r
           <table className="hub-table stack instances-table">
             <thead><tr>
               <th><input type="checkbox" className="row-tick" aria-label="Select every instance on this page" checked={allTicked}
-                onChange={(e) => setSelected(e.target.checked ? new Map(items.map((c) => [c.id, c])) : new Map())} /> Site</th><th>Customer</th>{!fixedHost && <th>Host</th>}<th>Network</th><th>GPU</th><th>Storage</th><th>Cameras</th><th>Queues</th><th>State</th><th />
+                onChange={(e) => setSelected(e.target.checked ? new Map(items.map((c) => [c.id, c])) : new Map())} /> Site</th><th>Customer</th>{!fixedHost && <th>Host</th>}<th>Network</th><th>GPU</th><th>Storage</th><th>Cameras</th><th>Queues</th><th>Qwen</th><th>State</th><th />
             </tr></thead>
             <tbody>{items.map((c) => (
               <Row key={c.id} c={c} showHost={!fixedHost} ticked={selected.has(c.id)} onTick={(on) => tick(c, on)} onChanged={changed}
@@ -144,6 +146,8 @@ function Row({ c, showHost, ticked, onTick, onChanged, onNetworks, onResources, 
         {down > 0 && <span className="warn-text"> · {down} down</span>}</td>
       <td className={`small queue-cell ${c.queue_growing ? "warn" : !w ? "muted" : w.ok ? "" : "bad"}`} data-label="Queues" title={queueTitle(w, !!c.queue_growing)}>
         {queueText(w)}{c.queue_growing ? " ↑" : ""}</td>
+      {/* its server's Qwen seconds per UTC day (hub ai_schedule.server_days): its share of the host's shared vLLM */}
+      <td className="small qwen-cell" data-label="Qwen" title={qwenTitle(c.qwen)}>{c.qwen ? <><QwenBars q={c.qwen} /> {qwenText(c.qwen)}</> : "—"}</td>
       <td className="small" title={c.last_error ?? undefined}>{PHASE_LABEL[c.phase] ?? c.phase}{c.state === "failed" && c.last_error ? `: ${c.last_error.slice(0, 80)}` : ""}
         {probs.length > 0 && (
           <span className="problem-badges">{probs.map((p) => (

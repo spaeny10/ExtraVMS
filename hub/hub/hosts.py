@@ -54,7 +54,7 @@ import time
 import sqlalchemy as sa
 from fastapi import WebSocket, WebSocketDisconnect
 
-from . import alerts, cameras, db
+from . import ai_schedule, alerts, cameras, db
 from .config import settings
 
 log = logging.getLogger("hub.hosts")
@@ -321,7 +321,8 @@ def hub_agent_url() -> str:
     return _ws_base() + "/agent"
 
 
-def host_out(h: dict, instances: list[dict] | None = None, open_alerts: dict | None = None, queue_alerts: dict | None = None) -> dict:
+def host_out(h: dict, instances: list[dict] | None = None, open_alerts: dict | None = None, queue_alerts: dict | None = None,
+             qwen: dict | None = None) -> dict:
     mine = [i for i in (instances or []) if i["host_id"] == h["id"] and i["state"] in LIVE_STATES]
     return {"id": h["id"], "name": h["name"], "created_at": h["created_at"], "online": bool(h["online"]) and registry.online(h["id"]),
             "last_seen_at": h["last_seen_at"], "hostname": h["hostname"], "version": h["version"], "capacity": h["capacity"] or None,
@@ -332,7 +333,9 @@ def host_out(h: dict, instances: list[dict] | None = None, open_alerts: dict | N
             "offline_since": (open_alerts or {}).get(h["id"]),
             # capacity.work over time (the sparklines) and what is growing; queue_alerts: open host_queue_growing rows
             "work_history": work_history(h["id"]), "work_trend": work_trend(h["id"]),
-            "queue_alerts": (queue_alerts or {}).get(h["id"], [])}
+            "queue_alerts": (queue_alerts or {}).get(h["id"], []),
+            # Qwen seconds per day of all its instances together (what the shared vLLM did for them)
+            "qwen": ai_schedule.sum_days([(qwen or {}).get(i["server_id"]) for i in mine if i.get("server_id")])}
 
 
 def list_hosts() -> list[dict]:
@@ -346,11 +349,13 @@ def list_hosts() -> list[dict]:
             open_alerts[r["site_id"]] = r["opened_at"]
         else:
             queue_alerts.setdefault(r["site_id"], []).append({**(r["detail"] or {}), "key": r["key"], "opened_at": r["opened_at"]})
-    return [host_out(h, inst, open_alerts, queue_alerts) for h in hosts]
+    qwen = ai_schedule.server_days([i["server_id"] for i in inst if i.get("server_id")], QWEN_DAYS)
+    return [host_out(h, inst, open_alerts, queue_alerts, qwen) for h in hosts]
 
 
 # ---------------------------------------------------------------- work queues (capacity.work): trends and alerts
 
+QWEN_DAYS = 7                # days of Qwen seconds per instance and host on the Hosts page (ai_schedule.server_days)
 QUEUE_KIND = "host_queue_growing"
 WORK_HISTORY = 60            # samples kept per host: ~30 min at one heartbeat per 30 s
 GROW_WINDOW_S = 15 * 60      # an instance's verify queue compared with this long ago...
@@ -1224,7 +1229,9 @@ def instance_out(ci: dict, names: dict, hub_admin: bool) -> dict:
                 "host_image_id": cap.get("image_id") if isinstance(cap.get("image_id"), str) else None,
                 # its queues from the host's capacity.work (agent 0.2.0+) and whether the verify queue is growing
                 "work": work if isinstance(work, dict) else None,
-                "queue_growing": bool(((names.get("trend") or {}).get(ci["host_id"]) or {}).get("instances", {}).get(ci["id"], {}).get("growing"))}
+                "queue_growing": bool(((names.get("trend") or {}).get(ci["host_id"]) or {}).get("instances", {}).get(ci["id"], {}).get("growing")),
+                # {days: [{day, seconds, requests}] the last QWEN_DAYS UTC days, today_s, total_s} (ai_schedule.server_days)
+                "qwen": (names.get("qwen") or {}).get(ci["server_id"] or "")}
         # not on the host yet: waiting for the next sync, or the last one failed (sync_error says why)
         out["camera_network"] |= {"pending": state == "pending" or bool(cn.get("sync_error")), "sync_error": cn.get("sync_error")}
     return out
@@ -1256,6 +1263,8 @@ def instances(where=None, hub_admin: bool = True, include_deleted: bool = False)
     names = _names(rows)
     online = {sid for sid, s in names["server"].items() if s["online"]}
     names["cams"] = cameras.counts([r["server_id"] for r in rows if r["server_id"]], online)   # enabled, not missing; streaming
+    if hub_admin:   # Qwen seconds per day of each instance's server (its share of the host's shared vLLM)
+        names["qwen"] = ai_schedule.server_days([r["server_id"] for r in rows if r["server_id"]], QWEN_DAYS)
     return [instance_out(r, names, hub_admin) for r in rows]
 
 

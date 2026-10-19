@@ -13,7 +13,7 @@ import time
 
 import httpx
 
-from . import backup, detector, direct, health, mediamtx, retention, talkdown, tts, vlmroute
+from . import aischedule, backup, detector, direct, health, mediamtx, retention, talkdown, tts, vlmroute
 from .config import settings
 from .db import db
 
@@ -92,6 +92,9 @@ async def site_summary(state, since: float | None = None, version: str = "") -> 
         # the talk-down voice (tts.summary: the setting, installed voice ids, engines): the hub pushes its Site's voice
         # when this differs and shows which servers have it
         "talkdown_voice": _talkdown_voice(),
+        # the AI schedule this server follows ({key, mode, qwen: on | limited, reason, until, outside}): the hub pushes
+        # its Site's again when the key differs, and shows each server's state
+        "ai_schedule": aischedule.summary(),
     }
 
 
@@ -120,6 +123,8 @@ def minimal_summary(state, version: str = "", error: str = "") -> dict:
             alerts += part()
     out = {"now": now, "version": version, "uptime_s": round(now - STARTED_AT), "degraded": True, "error": error[:200],
            "storage": dict(db.storage), "retention_alert": retention.alert, "health_alerts": alerts}
+    with contextlib.suppress(Exception):   # kept in memory: needs no database once loaded
+        out["ai_schedule"] = aischedule.summary()
     with contextlib.suppress(OSError):
         rec = shutil.disk_usage(settings.recordings_dir)
         out["disk"] = {"free_gb": round(rec.free / 1e9), "total_gb": round(rec.total / 1e9)}

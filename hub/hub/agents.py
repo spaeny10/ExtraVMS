@@ -7,7 +7,8 @@ with `Authorization: Enroll <token>`: a valid single-use token makes it a server
 `Authorization: Bearer <device token>` and gets `welcome`. Requests from the proxy become `req` streams
 (odd ids); the site answers `res` + binary chunks + `end`, paced by the tunnelproto credit window.
 A heartbeat whose cameras stream differently from the last one is pushed to /api/fleet/ws as `server_status` (the
-pages refetch on it instead of polling); `still` frames carry each camera's latest picture (stills.py).
+pages refetch on it instead of polling); `still` frames carry each camera's latest picture (stills.py). The Site's AI
+schedule goes down in `welcome` and `ai_schedule` frames, the server's Qwen use comes up in `ai_usage` (ai_schedule.py).
 """
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from tunnelproto import CHUNK, WINDOW, Stream, chunk, decode, encode, split
 
-from . import alerts, cameras, central_cameras, db, hosts, lan_certs, soc, stills, talkdown_voice, turn
+from . import ai_schedule, alerts, cameras, central_cameras, db, hosts, lan_certs, soc, stills, talkdown_voice, turn
 from .config import settings
 
 log = logging.getLogger("hub.agents")
@@ -239,6 +240,22 @@ def _still(conn: "AgentConn", frame: dict) -> None:
         log.exception("still from %s", conn.site_id)
 
 
+def _ai_schedule(conn: "AgentConn") -> None:
+    """The server follows another AI schedule than its Site's: push the Site's (ai_schedule.py); never breaks the tunnel."""
+    try:
+        ai_schedule.on_heartbeat(conn)
+    except Exception:
+        log.exception("AI schedule for %s", conn.site_id)
+
+
+def _ai_usage(conn: "AgentConn", frame: dict) -> None:
+    """The server's Qwen use per day (ai_schedule.on_usage); trouble storing it never breaks the tunnel."""
+    try:
+        ai_schedule.on_usage(conn, frame)
+    except Exception:
+        log.exception("Qwen usage from %s", conn.site_id)
+
+
 def _talkdown_voice(conn: "AgentConn") -> None:
     """The server reports another talk-down voice than its Site's: push the Site's (talkdown_voice.py); never breaks the tunnel."""
     try:
@@ -370,6 +387,7 @@ class AgentRegistry:
                     alerts.on_heartbeat(conn.site, conn.summary, skew)
                     _soc(conn, soc.on_attention, conn.summary.get("attention"))
                     _talkdown_voice(conn)
+                    _ai_schedule(conn)
                     await self._refresh_turn(conn)
                     if after is not None and after != before:
                         # site and server pages refetch on this instead of polling (hub/ui useFleetRefresh)
@@ -385,6 +403,9 @@ class AgentRegistry:
             elif t == "still":
                 if conn.site:
                     _still(conn, frame)
+            elif t == "ai_usage":
+                if conn.site:
+                    _ai_usage(conn, frame)
             elif t == "lan_csr":
                 if conn.site:   # a certificate for its Direct-on-LAN names (lan_certs.py); answered with a lan_cert frame
                     await lan_certs.on_csr(conn, frame)
@@ -444,6 +465,8 @@ class AgentRegistry:
                    "turn": cred,
                    "stills": True,   # send each camera's latest picture (stills.py); older agents ignore it
                    "vlm": self.vlm_config(org, conn.token, conn.site_id),
+                   # the Site's AI schedule (ai_schedule.py) with its SOC windows and timezone; older agents ignore it
+                   "ai_schedule": ai_schedule.config(conn.location),
                    **lan_certs.welcome(conn)}   # {"lan_cert": {"name"}}: this server may ask for its LAN certificate
         await conn.send(welcome)
         alerts.close(conn.site, "offline")

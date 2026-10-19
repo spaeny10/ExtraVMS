@@ -281,14 +281,17 @@ async def write_narrative(gate, journey_id: int) -> str | None:
 
 
 async def narrative_loop(pipeline) -> None:
-    """Write (or rewrite) a journey's narrative once it has been quiet for QUIET_S."""
+    """Write (or rewrite) a journey's narrative once it has been quiet for QUIET_S (outside the Site's AI schedule:
+    only while Qwen is idle, or not at all with "skip"; pipeline.journey_ok)."""
     while True:
         await asyncio.sleep(15)
-        if not pipeline.vlm_ready:
+        if not pipeline.vlm_ready or not await pipeline.journey_ok():
             continue
         for j in db.all("SELECT id, synopsis AS summary FROM journeys WHERE dirty=1 AND updated_at < ?", [time.time() - QUIET_S]):
             if j["summary"] and time.time() - _last_narrative.get(j["id"], 0) < NARRATIVE_MIN_S:
                 continue  # it has a narrative; the rewrite for its newest sightings can wait
+            if not await pipeline.journey_ok():
+                break     # other work came in (outside the AI schedule): the rest waits for the next idle moment
             try:
                 _last_narrative[j["id"]] = time.time()
                 await write_narrative(pipeline.gate, j["id"])

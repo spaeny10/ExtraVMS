@@ -137,6 +137,13 @@ class Settings(BaseSettings):
     remote_rate_usd_per_s: float = 0.0  # your endpoint's per-second GPU price; 0 = don't enforce the budget
     remote_idle_s: float = 300          # the endpoint's idle timeout (billed after each request)
 
+    # The Site's AI schedule (aischedule.py, pushed by the hub): outside the Site's SOC hours, descriptions set to
+    # "catch up when idle" run one at a time once Qwen has nothing else to do here. On a server without a local Qwen
+    # (a central instance) they also wait while the shared vLLM is busy, read from its Prometheus /metrics:
+    catchup_vllm_metrics_url: str = ""      # "" = NVR_REMOTE_VLM_URL without /v1, plus /metrics; "off" = don't ask
+    catchup_vllm_busy_running: int = 2      # busy with this many requests running there (or any waiting)
+    catchup_poll_s: float = 5.0             # how often a waiting catch-up description looks again
+
     # Retention: the policy (continuous days, what to keep, free-space floor) lives in the database and is
     # edited in the UI (System → Retention); see nvr/keep.py for defaults.
     retention_dry_run: bool = False     # NVR_RETENTION_DRY_RUN=1: log decisions, delete nothing

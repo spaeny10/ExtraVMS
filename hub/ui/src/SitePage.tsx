@@ -12,6 +12,7 @@ import { canCheckCoverage, canEditMonitoring, canOpenCameraWeb, isAdmin, isSocUs
 import { Breadcrumbs } from "./Breadcrumbs";
 import { SETTINGS_SECTIONS, SITE_TABS, type SettingsSection, type SiteTab, consoleHref, go, navigate, serverHref, settingsHref, siteHref } from "./nav";
 import { AddressBox } from "./site/AddressBox";
+import { AiScheduleCard } from "./site/AiScheduleCard";
 import { BridgesCard } from "./site/BridgesCard";
 import { CentralDetails, CentralPlaceholder, CentralStats, useCentral } from "./site/CentralCard";
 import { CoverageCard } from "./site/CoverageCard";
@@ -162,7 +163,8 @@ function SiteHeader({ org, site, server, servers, admin, onChanged, cov }: {
  * The Site's servers as cards. A central recording instance is its own server's card (the Site's admins and hub
  * administrators see its connection, limit, camera addresses and Peplink sheet there; site/CentralCard.tsx); one whose
  * server has not enrolled yet is a placeholder card with its progress. Below them, the Site's Axiom Bridges and bridged
- * cameras (site/BridgesCard.tsx).
+ * cameras (site/BridgesCard.tsx), and for the Site's admins and hub administrators its AI schedule and Qwen use
+ * (site/AiScheduleCard.tsx; hub administrators change the schedule).
  */
 function ServersTab({ site, admin, onChanged }: { site: Site; admin: boolean; onChanged: () => void }) {
   const [sites, setSites] = useState<Site[]>([]);
@@ -193,6 +195,8 @@ function ServersTab({ site, admin, onChanged }: { site: Site; admin: boolean; on
       )}
       {/* Axiom Bridge: read-only for everyone who sees the Site, managed by its admins (hidden while there is none to show) */}
       <BridgesCard key={site.id} site={site} />
+      {/* when Qwen does all its work here, and how much it did: the hub refuses anyone but customer and hub admins */}
+      {admin && <AiScheduleCard key={`ai-${site.id}`} site={site} />}
     </>
   );
 }

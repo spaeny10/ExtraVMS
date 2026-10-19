@@ -29,7 +29,7 @@ from . import assistant, backup, baseline, cells, footage, frames, health, ident
 from . import synopsis as vlm
 from . import advisor, ai_serve, detector, direct, hub_agent, lan_cert, lan_guard, sdbackfill, site_actions, siteconfig
 from . import camweb, device_api, speakers_api, talkdown
-from . import vlmroute
+from . import aischedule, vlmroute
 from . import summary as summary_mod
 from .config import ROOT, settings
 from .db import JOURNEY_CAMS_SQL, LOCKED_SQL, PRIORITY_RANK_SQL, db, event_filters
@@ -1351,9 +1351,12 @@ async def generate_synopsis(event_id: int):
     e = _require_event(event_id)
     if not (e.get("detections") or {}).get("keyframes"):
         raise HTTPException(400, "no keyframes for this event; reprocess it first")
+    det = dict(e.get("detections") or {})
+    if det.pop("ai_hours", None):   # skipped outside the AI schedule: asked for now, so written now
+        det.pop("synopsis_skipped", None)
     db.update_event(event_id, synopsis=None, synopsis_json=None, synopsis_original=None, corrected_at=None,
-                    threat=None, error=None)
-    state.pipeline.queue_synopsis(event_id)
+                    threat=None, error=None, detections=det)
+    state.pipeline.queue_synopsis(event_id, user=True)   # a person asked: written whatever the AI schedule says
     state.pipeline.publish(event_id)
     return {"ok": True}
 
@@ -2390,6 +2393,8 @@ async def system():
         # both local models (NVR_FALLBACK_VLM_MODEL): {primary: {model, gpu, state, queue, ...}, fallback: {...} | null,
         # routed_to_fallback_last_hour}; vlm_model / vlm_state above stay the primary's
         "vlm": vlmroute.router.vlm_status() if settings.local_vlm_enabled else None,
+        # the Site's AI schedule as the hub pushed it (aischedule.py): {mode, qwen: on | limited, reason, until, outside}
+        "ai_schedule": aischedule.summary(),
         **detector.yolo_status(state.pipeline),   # yolo_ready, yolo_device, yolo_fallback (Hailo -> CPU)
         "yolo_model": settings.yolo_model,
         "health_alerts": _health_alerts(),

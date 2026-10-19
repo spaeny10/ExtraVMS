@@ -689,3 +689,14 @@ button.sa-ref-row:hover, .sa-ref-row.hot { background: var(--panel-2); border-co
   .server-table td.acts { width: auto; }
   .cams-down { max-width: none; white-space: normal; }
 }
+/* Site › Servers › AI (site/AiScheduleCard.tsx): the schedule, then this month's and last month's Qwen use side by side */
+.ai-card .field { margin: 8px 0 0; }
+.ai-usage { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border); }
+.ai-usage-month { display: grid; gap: 4px; align-content: start; min-width: 0; }
+.ai-usage-table td, .ai-usage-table th { padding: 3px 6px; }
+/* the Hosts page's Qwen seconds per day (hosts/HostsPage.tsx QwenBars, the instances' Qwen column) */
+.qwen-bars { display: inline-flex; align-items: flex-end; gap: 2px; height: 20px; vertical-align: middle; }
+.qwen-bars > span { width: 8px; min-height: 1px; background: var(--accent); border-radius: 1px; }
+.qwen-bars > span.zero { background: var(--border); }
+.qwen-cell { white-space: nowrap; }
+@media (max-width: 1100px) { .instances-table .qwen-cell { white-space: normal; } }

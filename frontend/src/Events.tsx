@@ -31,11 +31,13 @@ export function rejectedReason(e: Pick<NvrEvent, "status" | "detections">): stri
   return r ? (r.charAt(0).toUpperCase() + r.slice(1)).replace(/, /g, " · ") : null;
 }
 
-/** What to show in place of a synopsis: Qwen's progress, why Qwen skipped it (YOLO below the site's confidence gate,
- * backend pipeline.synopsis_gate), or the YOLO result for labels Qwen skips. */
+/** What to show in place of a synopsis: Qwen's progress, a description waiting for Qwen to be free outside the Site's
+ * AI hours (backend aischedule.py), why Qwen skipped it (YOLO below the site's confidence gate, pipeline.synopsis_gate,
+ * or "No description (outside AI hours)"), or the YOLO result for labels Qwen skips. */
 export function placeholder(e: NvrEvent): string {
   if (e.status === "verified") {
     if (e.synopsis_pending) return "Qwen is writing a synopsis…";
+    if (e.synopsis_deferred) return "Outside AI hours: described when Qwen is free";
     if (e.detections?.synopsis_skipped) return e.detections.synopsis_skipped;
     if (e.camera_class !== "person") return e.error ?? `${e.yolo_class ?? e.camera_class} confirmed by YOLO in ${e.yolo_hits ?? 0} frames.`;
     return e.error ?? "Writing synopsis…";

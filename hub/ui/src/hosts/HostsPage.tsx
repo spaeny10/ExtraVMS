@@ -7,8 +7,9 @@
  *                  opens the host's own page
  *   Instances tab  every instance in one table (InstancesTable.tsx): search, filters, sorts, a ⋯ menu per row, and
  *                  bulk changes for the safe ones (camera limit, raising storage)
- *   /hub/hosts/:id the host's card (capacity bars, what its GPUs are working through with ~30 min sparklines, rename,
- *                  FusionHub, notes, rotate token, remove), "Allocate instance…" and its instances
+ *   /hub/hosts/:id the host's card (capacity bars, what its GPUs are working through with ~30 min sparklines, Qwen time
+ *                  per day of its instances, rename, FusionHub, notes, rotate token, remove), "Allocate instance…" and
+ *                  its instances (each with its own Qwen time per day)
  * The tab and filters ride in the URL's query (fleetList.ts), so reload, Back and a pasted link keep them. Adding a host
  * shows its token once, with the command that starts the agent. Instances are allocated here only (customer, Site,
  * connection, storage, camera limit) and changed here; a Site's page shows its instance read-only. Once allocated, the
@@ -18,7 +19,8 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { confirmDialog, promptDialog, toast } from "@site/ui";
-import { type CentralInstance, type CentralMode, type FleetSummary, type Host, type HubSitesOrg, ago, api, fmtTime } from "../api";
+import { type CentralInstance, type CentralMode, type FleetSummary, type Host, type HubSitesOrg, type QwenDays, ago, api, fmtTime, qs } from "../api";
+import { dayShare, monthOf, qwenText, qwenTitle } from "../site/aiSchedule";
 import {
   allocateFormError, capacityBars, defaultSubnet, fmtGB, nextSiteNumber, parseCameraLimit, seriesMax, sitesWithoutCentral, sparkPath, workRows,
 } from "../central";
@@ -28,6 +30,7 @@ import {
   activeAttention, attentionItems, barTone, defaultOrder, hostMiniBars, hostParams, parseQuery, querySearch, tabQuery, withQuery,
 } from "./fleetList";
 import { InstancesTable, Pager, SortPick } from "./InstancesTable";
+import { QwenBars } from "./QwenBars";
 
 /** The URL's query string, followed through Back / Forward and our own navigate() calls (nav.ts usePath reads only the path). */
 function useSearch(): string {
@@ -57,6 +60,9 @@ function Overview({ query, setQuery, summary, onChanged }: { query: ListQuery; s
   return (
     <>
       <h2>Hosts <span className="muted small">datacenter machines running central recording, one server instance per customer Site</span></h2>
+      {/* billing: every Site's Qwen use this month (hub ai_schedule.billing), also last month's */}
+      <p className="small muted">Qwen use by Site for billing: <a href={`/api/hub/ai-usage?${qs({ format: "csv", month: monthOf(0) })}`}>this month (CSV)</a>
+        {" · "}<a href={`/api/hub/ai-usage?${qs({ format: "csv", month: monthOf(1) })}`}>last month (CSV)</a></p>
       {issued && <TokenBox {...issued} onClose={() => setIssued(null)} />}
       <AddHost onAdded={(r, name) => { setIssued({ name, token: r.token, install: r.install }); setReloadKey((k) => k + 1); onChanged(); }} />
       <AttentionStrip summary={summary} query={query} onPick={(q) => setQuery(q, true)} />
@@ -358,10 +364,11 @@ function Spark({ values, label }: { values: (number | null)[]; label: string }) 
   );
 }
 
-/** The host's Work section: Qwen (vLLM) on the A40, YOLO per GPU, sparklines; open queue alerts. */
+/** The host's Work section: Qwen (vLLM) on the A40, YOLO per GPU, sparklines; open queue alerts; Qwen time per day. */
 function Work({ h }: { h: Host }) {
   const rows = workRows(h.capacity, h.work_trend);
-  if (!rows) return <p className="muted small work-none">Work: no data{h.online ? " (its agent is older than 0.2.0, or just started)" : ""}</p>;
+  const qwen = h.qwen ? <QwenDaysRow q={h.qwen} /> : null;
+  if (!rows) return <>{qwen && <div className="work">{qwen}</div>}<p className="muted small work-none">Work: no data{h.online ? " (its agent is older than 0.2.0, or just started)" : ""}</p></>;
   const hist = h.work_history ?? [];
   return (
     <div className="work">
@@ -370,11 +377,23 @@ function Work({ h }: { h: Host }) {
         <div key={r.key} className={`work-row small ${r.state}`} title={r.title}>
           <span className="cap-label muted">{r.label}</span><span>{r.text}</span>
         </div>))}
+      {qwen}
       {hist.length > 1 && (
         <div className="sparks">
           <Spark label="Qwen waiting" values={hist.map((s) => s.vllm_waiting)} />
           <Spark label="YOLO queue" values={hist.map((s) => s.verify_q)} />
         </div>)}
+    </div>
+  );
+}
+
+/** Qwen time per UTC day of the host's instances together (what the shared vLLM did for them; per instance below). */
+function QwenDaysRow({ q }: { q: QwenDays }) {
+  const busiest = Math.max(0, ...q.days.map((d) => d.seconds));
+  return (
+    <div className="work-row small" title={qwenTitle(q)}>
+      <span className="cap-label muted">Qwen per day</span>
+      <span><QwenBars q={q} /> {qwenText(q)}{busiest > 0 ? <span className="muted"> · busiest day {dayShare(busiest)}% of 24 h</span> : null}</span>
     </div>
   );
 }

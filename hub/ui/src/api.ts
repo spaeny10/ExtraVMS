@@ -111,6 +111,8 @@ export type Host = {
   work_history?: WorkSample[]; work_trend?: WorkTrend; queue_alerts?: QueueAlert[];
   /** newer hubs */
   problems?: HostProblem[];
+  /** Qwen seconds per UTC day of all its instances together (what the shared vLLM did for them); null = no instances */
+  qwen?: QwenDays | null;
 };
 /** The attention strip's counts (GET /api/hub/fleet-summary); `host_index`: every host by name, for the host filter. */
 export type FleetSummary = {
@@ -155,7 +157,11 @@ export type CentralInstance = {
   cameras_online?: number; host_cpus?: number | null; image?: string | null; host_image?: string | null;
   image_id?: string | null; host_image_id?: string | null;
   work?: InstanceWork | null; queue_growing?: boolean; problems?: InstanceProblem[];
+  /** Newer hubs, hub administrators: its server's Qwen seconds per UTC day (hub ai_schedule.server_days) */
+  qwen?: QwenDays | null;
 };
+/** Qwen use per UTC day, oldest first (zeros filled in), with today's and the whole span's seconds. */
+export type QwenDays = { days: { day: string; seconds: number; requests: number }[]; today_s: number; total_s: number };
 /** Read-only on a Site page; `can_manage` (hub administrators) shows the link to the Hosts page, where instances are managed. */
 export type LocationCentral = { instances: CentralInstance[]; can_provision?: boolean; can_manage?: boolean };
 /** An Axiom Bridge at a Site (hub bridges.py). lan / caps / agent_ip / arch: the Site's admins only. */
@@ -339,6 +345,23 @@ export type HubAdmin = { id: string; email: string; totp_enabled: boolean; last_
 export type HubSitesOrg = { org: { id: string; name: string }; locations: Site[]; unassigned: Server[] };
 export type PushInfo = { public_key: string; subscriptions: { endpoint: string; kinds: string[]; ua: string }[]; kinds: string[] };
 export type ClaimPreview = { code: string; hint: { hostname?: string; cameras?: { id: string; name: string }[]; version?: string }; agent_ip: string | null; waiting: boolean };
+
+// ---- A Site's AI schedule and Qwen use (hub/hub/ai_schedule.py)
+export type AiMode = "full" | "soc";
+export type AiOutside = "catchup" | "skip";
+/** The hub's verdict now: Qwen on or limited, why (soc.compute_armed's reason, or full_time), until when (null = no change ahead). */
+export type AiEffective = { mode: AiMode; outside: AiOutside; qwen: "on" | "limited"; reason: string; until: number | null };
+export type AiUsageTotals = { requests: number; prompt_tokens: number; completion_tokens: number; seconds: number };
+/** One job kind's month: `out_seconds` the part outside the AI schedule. */
+export type AiUsageKind = AiUsageTotals & { kind: string; out_seconds: number };
+export type AiUsageMonth = { month: string; total: AiUsageTotals; in: AiUsageTotals; out: AiUsageTotals; kinds: AiUsageKind[] };
+/** Per server: `supported` = reports an AI schedule (new enough), `in_sync` = follows this Site's, qwen / until = its own state. */
+export type AiServer = { server_id: string; server_name: string; online: boolean; supported: boolean; in_sync: boolean; qwen: "on" | "limited" | null; until: number | null };
+/** GET /api/locations/{id}/ai (the Site's customer admins and hub administrators; `can_edit`: hub administrators only). */
+export type AiSchedule = {
+  location_id: string; mode: AiMode; outside: AiOutside; timezone: string | null; monitored: boolean; effective: AiEffective; now: number;
+  servers: AiServer[]; usage: { this_month: AiUsageMonth; last_month: AiUsageMonth }; can_edit: boolean; pushed?: string[];
+};
 
 // ---- SOC monitoring of a Site (hub/hub/soc_api.py). Times are "HH:MM" in the Site's timezone.
 /** One weekly window: `dow` 0 = Monday … 6 = Sunday; `to <= from` runs overnight into the next day. */
@@ -588,6 +611,9 @@ export const api = {
   refreshCoverage: (loc: string) => req<SiteCoverage>(`/api/locations/${loc}/coverage/refresh`, { method: "POST" }),
   coverageCheck: (b: { lat?: number; lon?: number; address?: string; org_id?: string }) => req<CoverageCheck>("/api/coverage/check", json("POST", b)),
   hubCoverage: () => req<CoverageUsage>("/api/hub/coverage"),
+  /** The Site's AI schedule with its Qwen use; setting it is for hub administrators only (a pricing tier). */
+  aiSchedule: (loc: string) => req<AiSchedule>(`/api/locations/${loc}/ai`),
+  setAiSchedule: (loc: string, b: { mode: AiMode; outside?: AiOutside }) => req<AiSchedule>(`/api/locations/${loc}/ai`, json("PUT", b)),
   monitoring: (loc: string) => req<Monitoring>(`/api/locations/${loc}/monitoring`),
   setMonitoring: (loc: string, b: MonitoringConfig) => req<Monitoring>(`/api/locations/${loc}/monitoring`, json("PUT", b)),
   /** `until` epoch seconds, at most 24 h ahead (the hub refuses more); a reason is required. */

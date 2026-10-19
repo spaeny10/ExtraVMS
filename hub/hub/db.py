@@ -81,7 +81,11 @@ locations = Table("locations", metadata,
                   # where the Site is (geocode.py): `address` stays the one-line address people read; these locate it
                   Column("lat", Float, nullable=True), Column("lon", Float, nullable=True),
                   Column("address_parts", sa.JSON, nullable=True),   # {house_number, street, city, county, state, state_code, postcode, country, country_code, display_name}
-                  Column("geocoded_at", Float, nullable=True), Column("geocode_source", String(32), nullable=True))   # nominatim | geocoder | marker | manual
+                  Column("geocoded_at", Float, nullable=True), Column("geocode_source", String(32), nullable=True),   # nominatim | geocoder | marker | manual
+                  # the Site's AI schedule (ai_schedule.py), set by hub administrators: NULL = full time (every Site until
+                  # switched) | "soc" (full Qwen only while its SOC monitoring is armed); outside those hours descriptions
+                  # catch up when Qwen is idle (NULL) or are skipped ("skip")
+                  Column("ai_mode", String(8), nullable=True), Column("ai_outside", String(8), nullable=True))
 location_grants = Table("location_grants", metadata,
                         Column("user_id", String(24), primary_key=True), Column("location_id", String(24), primary_key=True))
 cameras = Table("cameras", metadata,
@@ -397,6 +401,19 @@ lan_challenges = Table("lan_challenges", metadata,
                        Column("name", String(253), primary_key=True), Column("value", String(128), primary_key=True),
                        Column("expires_at", Float, nullable=False))
 
+# ---- Qwen use per server and UTC day (ai_schedule.py): each server reports its totals per job kind and in/out of the
+# Site's AI schedule; a report replaces the rows it names. The Site is the one the server belonged to when reporting.
+# Kept KEEP_DAYS (13 months and a bit) for billing (GET /api/hub/ai-usage) and the Hosts page.
+ai_usage_daily = Table("ai_usage_daily", metadata,
+                       Column("server_id", String(24), primary_key=True), Column("day", String(10), primary_key=True),
+                       Column("kind", String(24), primary_key=True), Column("sched", String(3), primary_key=True),   # in | out
+                       Column("location_id", String(24), nullable=True, index=True), Column("org_id", String(24), nullable=False, index=True),
+                       Column("requests", Integer, nullable=False, default=0),
+                       Column("prompt_tokens", sa.BigInteger, nullable=False, default=0),
+                       Column("completion_tokens", sa.BigInteger, nullable=False, default=0),
+                       Column("seconds", Float, nullable=False, default=0.0), Column("updated_at", Float, nullable=False),
+                       sa.Index("ix_ai_usage_daily_day", "day"))
+
 _engine: Engine | None = None
 
 
@@ -420,7 +437,7 @@ ADDED_COLUMNS = [("sites", "retired_at"), ("sites", "location_id"), ("membership
                  ("locations", "arm_override"), ("locations", "soc_group_minutes"),
                  ("locations", "lat"), ("locations", "lon"), ("locations", "address_parts"), ("locations", "geocoded_at"),
                  ("locations", "geocode_source"), ("users", "totp_last_step"), ("central_instances", "camera_network"),
-                 ("central_instances", "camera_limit")]
+                 ("central_instances", "camera_limit"), ("locations", "ai_mode"), ("locations", "ai_outside")]
 
 
 def upgrade(eng: Engine) -> None:
