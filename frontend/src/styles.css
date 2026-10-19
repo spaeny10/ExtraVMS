@@ -101,6 +101,12 @@ main { flex: 1; padding: 16px; }
 .player-state { position: absolute; inset: 0; display: grid; place-items: center; color: #aaa; font-size: 13px; }
 .live-layout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 16px; }
 .live-grid { display: grid; gap: 8px; align-content: start; }
+/* one column on a big screen (a Site with one camera): the tile's height comes from its width (4:3, or HD's shape), so
+   cap the width to what fits the window's height and centre it; --live-chrome = the page above and the tile's bar */
+@media (min-width: 900px) {
+  .live-grid.one > .tile { width: min(100%, calc((100dvh - var(--live-chrome, 230px)) * 4 / 3)); justify-self: center; }
+  .live-grid.one > .tile:has(.player.hd) { width: min(100%, calc((100dvh - var(--live-chrome, 230px)) * 2592 / 1520)); }
+}
 .tile { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
 .tile.alerting { border-color: var(--vehicle); box-shadow: 0 0 0 1px var(--vehicle); }
 .tile-bar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; }

@@ -229,8 +229,10 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
       <div className={`live-layout ${showFeed ? "" : "site-live-solo"} ${compact ? "site-live-compact" : ""}`}>
         <div className="live-main">
           {slot === undefined && toolbar}
-          <div ref={gridRef} className={`live-grid ${focused ? "expanded" : ""}`}
+          <div ref={gridRef} className={`live-grid ${focused ? "expanded" : layoutCols(layout, grid.length) === 1 ? "one" : ""}`}
             style={{ gridTemplateColumns: `repeat(${focused ? 1 : layoutCols(layout, grid.length)}, minmax(0, 1fr))`,
+              // a lone tile fits the window (styles.css .live-grid.one): the hub's header, tabs and toolbar above it
+              ...({ "--live-chrome": "260px" } as React.CSSProperties),
               // an expanded tile on Auto goes HD (unless its HD can't play here): size the box for that
               ...(focused && fit ? { "--expand-h": `${fit}px`, "--expand-ar": q(focused.key) === "sd" ? 4 / 3 : 2592 / 1520 } as React.CSSProperties : {}) }}>
             {grid.map((t) => (

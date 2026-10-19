@@ -309,7 +309,7 @@ export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: n
                 title="Full-resolution main stream (a camera whose HD this browser can't play stays on SD)">All HD</button>
             </div>
           </div>
-          <div className="live-grid" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
+          <div className={`live-grid${cols === 1 ? " one" : ""}`} style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
             {shown.map((c) => {
               const active = recent.find((e) => e.camera_id === c.id && (e.status === "open" || e.status === "pending"));
               return (
