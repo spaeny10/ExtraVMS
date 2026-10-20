@@ -37,3 +37,41 @@ export function parseClassFilter(raw: string | null | undefined): ClassFilter {
   const pick = (k: keyof ClassFilter) => (typeof o[k] === "boolean" ? (o[k] as boolean) : DEFAULT_CLASS_FILTER[k]);
   return { person: pick("person"), vehicle: pick("vehicle"), ppe: pick("ppe") };
 }
+
+/**
+ * The pills as filters for the feed's fetches, so "Latest activity" lists the latest MATCHING events rather than the
+ * few matches among the latest events of every kind (2026-10-20: People off showed 3 vehicle cards). One class on
+ * narrows to that class; PPE on asks for PPE violations only. null: nothing to narrow (the defaults, or both classes
+ * off, which only lets other labels through: the unfiltered recent list carries those). The cards still go through
+ * classPass, so a server or hub that ignores a param shows nothing it shouldn't.
+ */
+export type FeedNarrow = { label: "person" | "vehicle" | null; ppe: boolean };
+
+export function feedNarrow(f: ClassFilter): FeedNarrow | null {
+  const label = f.person && !f.vehicle ? "person" : f.vehicle && !f.person ? "vehicle" : null;
+  return label || f.ppe ? { label, ppe: f.ppe } : null;
+}
+
+/** For a server's GET /api/events (EventQuery): label= and flags=ppe. */
+export function nvrFeedQuery(n: FeedNarrow | null): { label?: string; flags?: string[] } {
+  if (!n) return {};
+  return { ...(n.label ? { label: n.label } : {}), ...(n.ppe ? { flags: ["ppe"] } : {}) };
+}
+
+/** For the hub's GET /api/locations/{id}/events: classes= and ppe=true. */
+export function hubFeedQuery(n: FeedNarrow | null): { classes?: string[]; ppe?: boolean } {
+  if (!n) return {};
+  return { ...(n.label ? { classes: [n.label] } : {}), ...(n.ppe ? { ppe: true } : {}) };
+}
+
+/** A stable key for effect dependencies ("" when nothing is narrowed). */
+export const feedNarrowKey = (n: FeedNarrow | null): string => (n ? `${n.label ?? ""}|${n.ppe ? "ppe" : ""}` : "");
+
+/** The muted line under the pills when they hide something ("Showing vehicles only"); null at the defaults. */
+export function filterSummary(f: ClassFilter): string | null {
+  if (!f.person && !f.vehicle) return "People and vehicles hidden";
+  if (f.ppe) return f.person ? "Showing PPE violations only" : "Showing vehicle PPE violations only";
+  if (!f.person) return "Showing vehicles only";
+  if (!f.vehicle) return "Showing people only";
+  return null;
+}

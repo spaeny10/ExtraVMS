@@ -27,6 +27,15 @@ describe("regionFetchPlan (per-camera region fetches)", () => {
     expect(none.keep.size).toBe(0);
   });
 
+  it("a new variant (the feed's pills) refetches every camera, keeping their events meanwhile", () => {
+    const key = regionFetchKey(["a", "b"], { a: a1, b: b1 });
+    expect(regionFetchPlan(have, key, "vehicle|").stale).toEqual([["a", encodeCells(a1)], ["b", encodeCells(b1)]]);
+    expect(regionFetchPlan(have, key, "vehicle|").keep).toBe(have);
+    const fetched: RegionResults<number> = new Map([["a", { region: encodeCells(a1), items: [1], variant: "vehicle|" }]]);
+    expect(regionFetchPlan(fetched, regionFetchKey(["a"], { a: a1 }), "vehicle|").stale).toEqual([]);
+    expect(regionFetchPlan(fetched, regionFetchKey(["a"], { a: a1 })).stale).toEqual([["a", encodeCells(a1)]]);   // back to no pills
+  });
+
   it("hub keys (server/camera) survive the key round trip", () => {
     expect(regionFetchPlan(new Map(), regionFetchKey(["srv1/cam 2"], { "srv1/cam 2": b1 })).stale).toEqual([["srv1/cam 2", encodeCells(b1)]]);
   });

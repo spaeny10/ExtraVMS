@@ -87,6 +87,17 @@ def test_each_flag():
         assert ex.status_code == 400
 
 
+def test_live_feed_filters():
+    """Live's "Latest activity" pills fetch the latest matches: one class as label=, PPE violations as flags=ppe."""
+    setup()
+    live = {"status": "open,pending,verified"}
+    assert ids(browse(label="vehicle", **live)) == {IDS["tow"]}
+    assert IDS["tow"] not in ids(browse(label="person", **live)) and IDS["rejected"] not in ids(browse(label="person", **live))
+    assert ids(browse(flags="ppe", **live)) == {IDS["ppe"]}
+    assert ids(browse(flags="ppe", label="person", **live)) == {IDS["ppe"]}
+    assert browse(flags="ppe", label="vehicle", **live) == []
+
+
 def test_priority_and_sort():
     setup()
     assert ids(browse(priority="medium")) == {IDS["ppe"], IDS["tow"]}

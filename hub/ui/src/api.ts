@@ -483,9 +483,9 @@ export const api = {
   /** location narrows to one Site's servers (same rows as locationAlerts). */
   alerts: (org: string, open = true, location?: string) => req<Alert[]>(`/api/alerts?${qs({ org, open, location })}`),
   locationAlerts: (id: string, open = true, limit?: number) => req<Alert[]>(`/api/locations/${id}/alerts?${qs({ open, limit })}`),
-  /** The latest events across one Site's servers (same params and shape as fleetEvents). */
-  locationEvents: (id: string, p: { cameras?: { site: string; camera: string }[]; classes?: string[]; limit?: number; since?: number } = {}) =>
-    req<FleetEvents>(`/api/locations/${id}/events?${qs({ cameras: p.cameras?.map((c) => `${c.site}:${c.camera}`).join(","), classes: p.classes?.join(","), limit: p.limit, since: p.since })}`),
+  /** The latest events across one Site's servers (same params and shape as fleetEvents). ppe: PPE violations only. */
+  locationEvents: (id: string, p: { cameras?: { site: string; camera: string }[]; classes?: string[]; limit?: number; since?: number; ppe?: boolean } = {}) =>
+    req<FleetEvents>(`/api/locations/${id}/events?${qs({ cameras: p.cameras?.map((c) => `${c.site}:${c.camera}`).join(","), classes: p.classes?.join(","), limit: p.limit, since: p.since, ppe: p.ppe || undefined })}`),
   /** A Site's Find tab: one page of events (browse) or search hits across its servers; `next` goes back as `cursor`. */
   locationFindEvents: (id: string, p: Record<string, string | number | boolean | undefined>) => req<SiteFindPage>(`/api/locations/${id}/find/events?${qs(p)}`),
   locationFindSearch: (id: string, p: Record<string, string | number | boolean | undefined>) => req<SiteFindPage>(`/api/locations/${id}/find/search?${qs(p)}`),

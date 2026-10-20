@@ -19,7 +19,9 @@ import { yoloFallbackText, yoloState } from "./yoloStatus";
 import { vlmSub, vlmValue } from "./vlmStatus";
 import { sdStatusText } from "./sdcard";
 import { detectionsText, livePath } from "./cameraStreams";
-import { type ClassFilter, FEED_FILTER_KEY, checkingText, feedCards, loadFeedFilter, saveFeedFilter } from "./liveFeed";
+import { type ClassFilter, DEFAULT_CLASS_FILTER, FEED_FILTER_KEY, checkingText, feedCards, loadFeedFilter, saveFeedFilter } from "./liveFeed";
+import { feedNarrow, feedNarrowKey, filterSummary, nvrFeedQuery } from "./classFilter";
+import { useResync } from "./resync";
 import { TalkdownPanel } from "./TalkdownPanel";
 import { DeterrencePanel } from "./DeterrencePanel";
 import { hasDeterrence } from "./deterrence";
@@ -218,18 +220,27 @@ export function useFeedFilter(key: string = FEED_FILTER_KEY): [ClassFilter, (pat
 }
 
 /** The Timeline's "Show [People] [Vehicles] [PPE violations]" pills at the top of the activity column (cards only:
- *  the tiles' badges are not filtered). */
+ *  the tiles' badges are not filtered). A pill that is on carries a ✓; when they hide something, a muted line says
+ *  what shows ("Showing vehicles only") with "Show all" back to the defaults. */
 export function FeedFilterChips({ filter, onChange }: { filter: ClassFilter; onChange: (patch: Partial<ClassFilter>) => void }) {
+  const pill = (on: boolean, cls: string, text: string, patch: Partial<ClassFilter>, title?: string) => (
+    <button type="button" className={`chip ${on ? cls : ""}`} aria-pressed={on} onClick={() => onChange(patch)} title={title}>
+      {on && <span className="chip-check" aria-hidden="true">✓</span>}{text}</button>
+  );
+  const summary = filterSummary(filter);
   return (
-    <div className="feed-filters" role="group" aria-label="Show">
-      <span className="muted small">Show</span>
-      <button type="button" className={`chip ${filter.person ? "on-person" : ""}`} aria-pressed={filter.person}
-        onClick={() => onChange({ person: !filter.person })}>People</button>
-      <button type="button" className={`chip ${filter.vehicle ? "on-vehicle" : ""}`} aria-pressed={filter.vehicle}
-        onClick={() => onChange({ vehicle: !filter.vehicle })}>Vehicles</button>
-      <button type="button" className={`chip ${filter.ppe ? "on-ppe" : ""}`} aria-pressed={filter.ppe}
-        onClick={() => onChange({ ppe: !filter.ppe })} title="Only events that broke a PPE rule">PPE violations</button>
-    </div>
+    <>
+      <div className="feed-filters" role="group" aria-label="Show">
+        <span className="muted small">Show</span>
+        {pill(filter.person, "on-person", "People", { person: !filter.person })}
+        {pill(filter.vehicle, "on-vehicle", "Vehicles", { vehicle: !filter.vehicle })}
+        {pill(filter.ppe, "on-ppe", "PPE violations", { ppe: !filter.ppe }, "Only events that broke a PPE rule")}
+      </div>
+      {summary && (
+        <p className="muted small feed-filter-note">{summary} ·{" "}
+          <button type="button" className="linkish" onClick={() => onChange({ ...DEFAULT_CLASS_FILTER })}>Show all</button></p>
+      )}
+    </>
   );
 }
 
@@ -244,6 +255,39 @@ function RegionNote({ cameras }: { cameras: Camera[] }) {
   return (
     <RegionChips items={ids.map((id) => ({ key: id, label: cameras.find((c) => c.id === id)?.name ?? id }))} />
   );
+}
+
+/** How many of the latest events matching the pills LiveView fetches (as the hub's Site Live, RECENT_LIMIT). */
+const MATCHING_LIMIT = 50;
+
+/**
+ * The latest events matching Live's pills, when they narrow (feedNarrow: one class, or PPE violations only); [] at
+ * the defaults. Fetched again when the pills change and on resync (replaced, as App's recent list is); an event merged
+ * into another (nvr:event_removed) leaves it. Live updates reach the feed through App's `recent`, merged over this.
+ */
+function useMatchingEvents(filter: ClassFilter): NvrEvent[] {
+  const narrow = feedNarrow(filter);
+  const key = feedNarrowKey(narrow);
+  const narrowRef = useRef(narrow);
+  narrowRef.current = narrow;
+  const resync = useResync();
+  const [got, setGot] = useState<{ key: string; events: NvrEvent[] } | null>(null);
+  useEffect(() => {
+    if (!key) { setGot(null); return; }
+    let alive = true;
+    api.events({ ...nvrFeedQuery(narrowRef.current), status: "open,pending,verified", limit: MATCHING_LIMIT })
+      .then((events) => { if (alive) setGot({ key, events }); }).catch(() => {});
+    return () => { alive = false; };
+  }, [key, resync]);
+  useEffect(() => {
+    const drop = (e: Event) => {
+      const id = (e as CustomEvent<number>).detail;
+      setGot((prev) => prev && { ...prev, events: prev.events.filter((x) => x.id !== id) });
+    };
+    window.addEventListener("nvr:event_removed", drop);
+    return () => window.removeEventListener("nvr:event_removed", drop);
+  }, []);
+  return got && got.key === key ? got.events : [];
 }
 
 export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: number; recent: NvrEvent[] }) {
@@ -265,17 +309,23 @@ export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: n
   // The server matches the region itself (`region`), so a burst of other events can't crowd the matches out of the
   // 100; a server without that filter ignores it and the regionPass below still applies.
   // Repainting a camera refetches only that camera (useRegionResults keeps the others' results).
+  // The People / Vehicles / PPE pills: when they narrow (one class, or PPE violations only), the latest MATCHING events
+  // are fetched too (`matching`), as are the painted cameras' — `recent` alone held only the few matches among the
+  // latest events of every kind. The cards still go through the pills (feedCards); the tiles' badges read `recent`.
+  const [classFilter, setClassFilter] = useFeedFilter();
+  const narrowKey = feedNarrowKey(feedNarrow(classFilter));
+  const matching = useMatchingEvents(classFilter);
   const paintedKey = Object.keys(regionMap).sort().join(",");
   const scoped = paintedKey.length > 0;
   const scopedEvents = useRegionResults<NvrEvent>(regionFetchKey(paintedKey.split(","), regionMap), (camera, region) =>
-    api.events({ camera, region, status: "open,pending,verified", limit: 100 }).catch(() => [] as NvrEvent[]));
-  const pool = scoped
-    ? [...new Map([...scopedEvents, ...recent].map((e) => [e.id, e])).values()].sort((a, b) => b.start_ts - a.start_ts)
+    api.events({ camera, region, status: "open,pending,verified", limit: 100, ...nvrFeedQuery(feedNarrow(classFilter)) })
+      .catch(() => [] as NvrEvent[]), narrowKey);
+  const deeper = [...(scoped ? scopedEvents : []), ...matching];
+  const pool = deeper.length
+    ? [...new Map([...deeper, ...recent].map((e) => [e.id, e])).values()].sort((a, b) => b.start_ts - a.start_ts)
     : recent;
   const feed = pool.filter((e) => !scoped || (regionMap[e.camera_id] && regionPass(e, regionMap[e.camera_id])));
   // vehicles still being verified are counted, not shown (liveFeed.ts); the tiles' badge still reads `recent`.
-  // The People / Vehicles / PPE pills filter the cards (and the vehicles counted) only.
-  const [classFilter, setClassFilter] = useFeedFilter();
   const { cards, checking, hidden } = feedCards(feed, classFilter);
   const [feedShown, showMore] = useFeedCount(paintedKey);   // back to 12 when the painted cameras change, not per stroke
   const [open, setOpen] = useState<number | null>(null);

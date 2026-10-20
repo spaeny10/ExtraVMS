@@ -90,29 +90,32 @@ export const useRegion = (cam: string) => useRegions()[cam];
 export const regionFetchKey = (keys: readonly string[], map: Record<string, Uint8Array>) =>
   keys.filter((k) => map[k]).map((k) => `${k}=${encodeCells(map[k])}`).join(",");
 
-/** Per camera: the region its events were fetched for, and those events. */
-export type RegionResults<T> = ReadonlyMap<string, { region: string; items: T[] }>;
+/** Per camera: the region its events were fetched for (and the other filters, `variant`), and those events. */
+export type RegionResults<T> = ReadonlyMap<string, { region: string; items: T[]; variant?: string }>;
 
-/** Which cameras of `fetchKey` need a fetch (none yet, or fetched for another region) and the results still worth
- *  keeping (cameras still painted; a repainted one keeps its old events until the new ones arrive, filtered on the
- *  client meanwhile). Repainting one camera refetches only that camera. */
-export function regionFetchPlan<T>(have: RegionResults<T>, fetchKey: string): { keep: RegionResults<T>; stale: [string, string][] } {
+/** Which cameras of `fetchKey` need a fetch (none yet, or fetched for another region or `variant`: the feed's other
+ *  filters, e.g. Live's People / Vehicles / PPE pills) and the results still worth keeping (cameras still painted; a
+ *  repainted one keeps its old events until the new ones arrive, filtered on the client meanwhile). Repainting one
+ *  camera refetches only that camera; a new variant refetches every camera. */
+export function regionFetchPlan<T>(have: RegionResults<T>, fetchKey: string, variant = ""): { keep: RegionResults<T>; stale: [string, string][] } {
   const wanted = fetchKey ? fetchKey.split(",").map((kv) => kv.split("=") as [string, string]) : [];
   const cams = new Set(wanted.map(([cam]) => cam));
   const keep = new Map([...have].filter(([cam]) => cams.has(cam)));
-  return { keep: keep.size === have.size ? have : keep, stale: wanted.filter(([cam, region]) => have.get(cam)?.region !== region) };
+  const fresh = (cam: string, region: string) => { const h = have.get(cam); return !!h && h.region === region && (h.variant ?? "") === variant; };
+  return { keep: keep.size === have.size ? have : keep, stale: wanted.filter(([cam, region]) => !fresh(cam, region)) };
 }
 
 /** The events of every painted camera, each fetched by `fetchOne(cam, region)` once its stroke settles (400 ms), and
- *  again only when that camera's region changes. `fetchOne` should not throw (catch to []). */
-export function useRegionResults<T>(fetchKey: string, fetchOne: (cam: string, region: string) => Promise<T[]>): T[] {
+ *  again only when that camera's region changes, or every camera when `variant` (the fetch's other filters) does.
+ *  `fetchOne` should not throw (catch to []). */
+export function useRegionResults<T>(fetchKey: string, fetchOne: (cam: string, region: string) => Promise<T[]>, variant = ""): T[] {
   const [have, setHave] = useState<RegionResults<T>>(() => new Map());
   const haveRef = useRef(have);
   haveRef.current = have;
   const fetchRef = useRef(fetchOne);
   fetchRef.current = fetchOne;
   useEffect(() => {
-    const { keep, stale } = regionFetchPlan(haveRef.current, fetchKey);
+    const { keep, stale } = regionFetchPlan(haveRef.current, fetchKey, variant);
     if (keep !== haveRef.current) setHave(keep);   // a cleared region drops its events now
     if (!stale.length) return;
     let alive = true;
@@ -122,13 +125,13 @@ export function useRegionResults<T>(fetchKey: string, fetchOne: (cam: string, re
           if (!alive) return;
           setHave((prev) => {
             const next = new Map(prev);
-            for (const [cam, region, items] of got) next.set(cam, { region, items });
+            for (const [cam, region, items] of got) next.set(cam, { region, items, variant });
             return next;
           });
         });
     }, 400);
     return () => { alive = false; clearTimeout(t); };
-  }, [fetchKey]);
+  }, [fetchKey, variant]);
   return useMemo(() => [...have.values()].flatMap((v) => v.items), [have]);
 }
 

@@ -1283,3 +1283,7 @@ body:has(.drag-ghost) { cursor: grabbing; user-select: none; }
    Views.tsx; the hub's Site Live too). One line in the 380 px column and on a phone; wraps only if it must. */
 .feed-filters { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .feed-filters .chip { cursor: pointer; padding: 2px 9px; white-space: nowrap; }
+/* a pill that is on carries a ✓ (colour alone didn't say which were on); the line under them says what shows */
+.feed-filters .chip-check { margin-right: 3px; font-size: 11px; }
+.feed-filter-note { margin: 0; }
+@media (max-width: 420px) { .feed-filters { gap: 4px; } .feed-filters .chip { padding: 2px 7px; } }

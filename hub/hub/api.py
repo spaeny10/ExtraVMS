@@ -1115,11 +1115,14 @@ async def location_alerts(location_id: str, open: bool = True, limit: int = Quer
 
 @app.get("/api/locations/{location_id}/events")
 async def location_events(location_id: str, cameras: str | None = None, classes: str | None = None,
-                          limit: int = Query(20, ge=1, le=100), since: float | None = None, u: dict = Depends(user)):
-    """The latest events across this Site's servers (same shape and params as /api/fleet/events)."""
+                          limit: int = Query(20, ge=1, le=100), since: float | None = None, ppe: bool = False,
+                          u: dict = Depends(user)):
+    """The latest events across this Site's servers (same shape and params as /api/fleet/events). ppe: only events
+    that broke a PPE rule."""
     loc, _ = auth.location_access(u, location_id)
     return await dashboards.fleet_events(u, loc["org_id"], None, _cam_refs(cameras), None,
-                                         [c for c in (classes or "").split(",") if c] or None, limit, since, within=_servers_of(u, loc))
+                                         [c for c in (classes or "").split(",") if c] or None, limit, since, within=_servers_of(u, loc),
+                                         ppe=ppe)
 
 
 @app.get("/api/locations/{location_id}/search")
@@ -2467,11 +2470,11 @@ def _cam_refs(cameras: str | None) -> list[tuple[str, str]] | None:
 @app.get("/api/fleet/events")
 async def fleet_events(org: str, sites: str | None = None, cameras: str | None = None, group: str | None = None,
                        classes: str | None = None, limit: int = Query(20, ge=1, le=500), since: float | None = None,
-                       location: str | None = None, u: dict = Depends(user)):
+                       location: str | None = None, ppe: bool = False, u: dict = Depends(user)):
     auth.require_role(u, org, "viewer")
     return await dashboards.fleet_events(u, org, [s for s in (sites or "").split(",") if s] or None, _cam_refs(cameras), group,
                                          [c for c in (classes or "").split(",") if c] or None, limit, since,
-                                         within=_location_scope(u, org, location))
+                                         within=_location_scope(u, org, location), ppe=ppe)
 
 
 @app.websocket("/api/fleet/ws")

@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { DEFAULT_CLASS_FILTER, classPass, isPpeViolation, parseClassFilter } from "./classFilter";
+import { DEFAULT_CLASS_FILTER, classPass, feedNarrow, feedNarrowKey, filterSummary, hubFeedQuery, isPpeViolation, nvrFeedQuery, parseClassFilter } from "./classFilter";
 
 const ppeRule = { kind: "ppe" };
 const towRule = { kind: "towing" };
@@ -46,4 +46,44 @@ test("a stored choice: bad JSON, nothing stored or odd values fall back to the d
   // the defaults are not handed out to be mutated
   parseClassFilter("{bad").person = false;
   expect(DEFAULT_CLASS_FILTER.person).toBe(true);
+});
+
+test("the pills as fetch params: one class narrows to it, PPE asks for violations, the defaults narrow nothing", () => {
+  const f = DEFAULT_CLASS_FILTER;
+  expect(feedNarrow(f)).toBeNull();
+  expect(nvrFeedQuery(feedNarrow(f))).toEqual({});
+  expect(hubFeedQuery(feedNarrow(f))).toEqual({});
+  expect(feedNarrowKey(feedNarrow(f))).toBe("");
+
+  const vehicles = feedNarrow({ ...f, person: false });
+  expect(vehicles).toEqual({ label: "vehicle", ppe: false });
+  expect(nvrFeedQuery(vehicles)).toEqual({ label: "vehicle" });
+  expect(hubFeedQuery(vehicles)).toEqual({ classes: ["vehicle"] });
+
+  const people = feedNarrow({ ...f, vehicle: false });
+  expect(nvrFeedQuery(people)).toEqual({ label: "person" });
+  expect(hubFeedQuery(people)).toEqual({ classes: ["person"] });
+
+  const ppe = feedNarrow({ ...f, ppe: true });
+  expect(nvrFeedQuery(ppe)).toEqual({ flags: ["ppe"] });
+  expect(hubFeedQuery(ppe)).toEqual({ ppe: true });
+  expect(nvrFeedQuery(feedNarrow({ person: true, vehicle: false, ppe: true }))).toEqual({ label: "person", flags: ["ppe"] });
+  expect(hubFeedQuery(feedNarrow({ person: true, vehicle: false, ppe: true }))).toEqual({ classes: ["person"], ppe: true });
+
+  // both classes off: only other labels pass, which no class param can ask for
+  expect(feedNarrow({ person: false, vehicle: false, ppe: false })).toBeNull();
+  // a change of pills changes the key (the fetches' dependency)
+  const keys = new Set([vehicles, people, ppe, null].map(feedNarrowKey));
+  expect(keys.size).toBe(4);
+});
+
+test("the line under the pills says what they hide; the defaults say nothing", () => {
+  const f = DEFAULT_CLASS_FILTER;
+  expect(filterSummary(f)).toBeNull();
+  expect(filterSummary({ ...f, person: false })).toBe("Showing vehicles only");
+  expect(filterSummary({ ...f, vehicle: false })).toBe("Showing people only");
+  expect(filterSummary({ ...f, ppe: true })).toBe("Showing PPE violations only");
+  expect(filterSummary({ person: true, vehicle: false, ppe: true })).toBe("Showing PPE violations only");
+  expect(filterSummary({ person: false, vehicle: true, ppe: true })).toBe("Showing vehicle PPE violations only");
+  expect(filterSummary({ person: false, vehicle: false, ppe: false })).toBe("People and vehicles hidden");
 });

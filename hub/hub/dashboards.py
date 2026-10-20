@@ -254,10 +254,13 @@ def resolve_group(org_id: str, group_id: str) -> list[tuple[str, str]] | None:
 
 # ---------------------------------------------------------------- fleet events
 async def fleet_events(u: dict, org_id: str, sites: list[str] | None, cameras: list[tuple[str, str]] | None, group: str | None,
-                       classes: list[str] | None, limit: int, since: float | None, within: set[str] | None = None) -> dict:
+                       classes: list[str] | None, limit: int, since: float | None, within: set[str] | None = None,
+                       ppe: bool = False) -> dict:
     """Latest events across the sites the user may see, newest first, each tagged with its site (server) and Site
     (location). `within` (a Site's server ids) caps every other selection: sites, cameras and groups that name a
-    server outside it are ignored, so a Site page can never show another Site's events."""
+    server outside it are ignored, so a Site page can never show another Site's events.
+    `ppe`: only events that broke a PPE rule (the server's flags=ppe; checked here too, on the event's `policy.kind`),
+    so Live's "PPE violations" pill gets the latest violations rather than the few among the latest events."""
     visible = {s["id"]: s for s in auth.visible_sites(u, org_id) if within is None or s["id"] in within}
     wanted: dict[str, set[str] | None] = {}          # site -> camera ids (None = all)
     members = resolve_group(org_id, group) if group else None
@@ -292,6 +295,8 @@ async def fleet_events(u: dict, org_id: str, sites: list[str] | None, cameras: l
             params["camera"] = next(iter(cams))
         if classes and len(classes) == 1:
             params["label"] = classes[0]
+        if ppe:
+            params["flags"] = "ppe"
         try:
             status, body = await _get_json(conn, "/api/events", params, headers)
         except Exception as e:  # tunnel timeout / abort
@@ -305,6 +310,8 @@ async def fleet_events(u: dict, org_id: str, sites: list[str] | None, cameras: l
             if cams and e.get("camera_id") not in cams:
                 continue
             if classes and e.get("camera_class") not in classes:
+                continue
+            if ppe and not (isinstance(e.get("policy"), dict) and e["policy"].get("kind") == "ppe"):
                 continue
             events.append({**e, **tag})
 

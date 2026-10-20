@@ -45,6 +45,7 @@ import { useIceServers } from "@site/dashboard/ice";
 import { camKey, splitKey, type DashboardSource } from "@site/dashboard/source";
 import type { FleetEvent } from "@site/dashboard/types";
 import { NO_PICTURE_TEXT, stillDue } from "@site/liveFallback";
+import { type ClassFilter, DEFAULT_CLASS_FILTER, feedNarrow, feedNarrowKey, hubFeedQuery, nvrFeedQuery } from "@site/classFilter";
 import { regionFetchKey, regionPass, useRegionResults, useRegions } from "@site/region";
 import { useResync } from "@site/resync";
 import type { TalkSpeaker } from "@site/talkdown";
@@ -178,7 +179,9 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
   const showFeed = !hideActivity && (isPhone || layout.activity);
   // the SOC incident view hides the column (it has its own event list): no feed fetches or socket for it either. Hidden
   // by the viewer, the Site's recent events still mark alerting tiles; only the painted regions' fetches stop.
-  const activity = useSiteActivity(site, servers, source, !hideActivity, showFeed, !isPhone && !feedAll ? expanded : null);
+  // the column's People / Vehicles / PPE pills: the activity fetches narrow by them too (useSiteActivity)
+  const [classFilter, setClassFilter] = useFeedFilter(SITE_FEED_FILTER_KEY);
+  const activity = useSiteActivity(site, servers, source, !hideActivity, showFeed, !isPhone && !feedAll ? expanded : null, classFilter);
   const activeOf = (key: string) => activity.recent?.find((e) => camKey(e.site_id, e.camera_id) === key && (e.status === "open" || e.status === "pending"));
 
   // talk-down: camera key -> its speakers, direct (the Site's heartbeat summaries) and through camera groups
@@ -195,7 +198,8 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
 
   const tileProps = { source, multi, q, dispatch, activeOf,
     talkOf: (t: Tile) => (mayTalk ? talk[t.key] : undefined), deter: canDeter(org) };
-  const feed = showFeed ? <SiteActivity site={site} servers={servers} tiles={tiles} multi={multi} activity={activity} onShowAll={() => setFeedAll(true)} /> : null;
+  const feed = showFeed ? <SiteActivity site={site} servers={servers} tiles={tiles} multi={multi} activity={activity} onShowAll={() => setFeedAll(true)}
+    filter={classFilter} onFilter={setClassFilter} /> : null;
   if (isPhone) {
     // the phone shows one camera at a time: a layout only sets which cameras are in the strip and their order
     const picker = named.enabled && !!named.list?.length && (
@@ -526,9 +530,9 @@ const RECENT_LIMIT = 50; // the Site's recent events; a painted camera adds up t
 const SCOPED_LIMIT = 100;
 
 type Activity = {
-  /** the Site's recent events kept fresh from the fleet socket (null: loading) */
+  /** the Site's recent events kept fresh from the fleet socket (null: loading); every kind, whatever the pills say */
   recent: FleetEvent[] | null;
-  /** recent + the painted cameras' deeper history */
+  /** recent + the latest events matching the pills (when they narrow) + the painted cameras' deeper history */
   pool: FleetEvent[];
   /** painted lane keys of this Site's cameras */
   regionKeys: string[];
@@ -542,13 +546,24 @@ type Activity = {
  * LiveView's `recent + socket` pool and its painted-region fetches, for every server at the Site: the Site's latest
  * events from the hub, live updates from the fleet socket (this Site's servers only), and up to 100 recent events of
  * each painted camera from its own server (only while the column shows: `withFeed`).
+ * When the pills narrow (`filter`: one class, or PPE violations only), the Site's latest MATCHING events are fetched
+ * too (classes= / ppe=, kept fresh from the socket as `recent` is), and the painted / expanded cameras' fetches narrow
+ * the same way (label= / flags=ppe): the latest 50 of every kind held only a few vehicles. `recent` itself stays
+ * unfiltered: the tiles' badges read it.
  */
-function useSiteActivity(site: Site, servers: Server[], source: DashboardSource, enabled: boolean, withFeed: boolean, focusKey: string | null = null): Activity {
+function useSiteActivity(site: Site, servers: Server[], source: DashboardSource, enabled: boolean, withFeed: boolean, focusKey: string | null = null,
+  filter: ClassFilter = DEFAULT_CLASS_FILTER): Activity {
+  const narrow = feedNarrow(filter);
+  const narrowKey = feedNarrowKey(narrow);
+  const narrowRef = useRef(narrow);
+  narrowRef.current = narrow;
   const serverKey = servers.map((s) => s.id).sort().join(",");
   const serversRef = useRef(servers);
   serversRef.current = servers;
   const [recent, setRecent] = useState<FleetEvent[] | null>(null);
   const [offline, setOffline] = useState<string[]>([]);
+  // the latest events matching the pills, for the pills they were fetched for (null: the pills don't narrow)
+  const [matching, setMatching] = useState<{ key: string; events: FleetEvent[] } | null>(null);
   useEffect(() => {
     if (!enabled) return;
     const own = new Set(serverKey.split(",").filter(Boolean));
@@ -560,8 +575,15 @@ function useSiteActivity(site: Site, servers: Server[], source: DashboardSource,
       .catch(() => { if (alive) setRecent((prev) => prev ?? []); });
     const unsub = source.subscribe((m) => {
       if (!own.has(m.site_id)) return;
-      if (m.type === "event_removed") setRecent((prev) => prev && removeLiveEvent(prev, m.site_id, m.id));
-      else if (m.type === "event") setRecent((prev) => applyLiveEvent(prev ?? [], { ...m.event, site_id: m.site_id, site_name: m.site_name }));
+      if (m.type === "event_removed") {
+        setRecent((prev) => prev && removeLiveEvent(prev, m.site_id, m.id));
+        setMatching((prev) => prev && { ...prev, events: removeLiveEvent(prev.events, m.site_id, m.id) });
+      } else if (m.type === "event") {
+        const e = { ...m.event, site_id: m.site_id, site_name: m.site_name };
+        setRecent((prev) => applyLiveEvent(prev ?? [], e));
+        // the pills filter the cards anyway: a live event that doesn't match is simply not shown
+        setMatching((prev) => prev && { ...prev, events: applyLiveEvent(prev.events, e) });
+      }
     });
     return () => { alive = false; unsub(); };
   }, [enabled, site.id, serverKey, source]);
@@ -578,6 +600,16 @@ function useSiteActivity(site: Site, servers: Server[], source: DashboardSource,
     return () => { alive = false; };
   }, [enabled, site.id, resync]);
 
+  // the latest events matching the pills: fetched when they change, and REPLACED on resync like `recent`
+  useEffect(() => {
+    if (!enabled || !withFeed || !narrowKey) { setMatching(null); return; }
+    let alive = true;
+    api.locationEvents(site.id, { limit: RECENT_LIMIT, ...hubFeedQuery(narrowRef.current) })
+      .then((r) => { if (alive) setMatching({ key: narrowKey, events: r.events }); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [enabled, withFeed, site.id, serverKey, narrowKey, resync]);
+
   const regionMap = useRegions();
   const regionKeys = useMemo(() => siteRegionKeys(regionMap, serverKey.split(",")), [regionMap, serverKey]);
   const scopeKey = regionKeys.join(",");
@@ -586,9 +618,9 @@ function useSiteActivity(site: Site, servers: Server[], source: DashboardSource,
   const scoped = useRegionResults<FleetEvent>(enabled && withFeed ? regionFetchKey(regionKeys, regionMap) : "", (k, region) => {
     const { server, id } = splitKey(k);
     const name = serversRef.current.find((s) => s.id === server)?.name ?? server;
-    return siteApi(server).events({ camera: id, region, status: "open,pending,verified", limit: SCOPED_LIMIT })
+    return siteApi(server).events({ camera: id, region, status: "open,pending,verified", limit: SCOPED_LIMIT, ...nvrFeedQuery(narrowRef.current) })
       .then((evs) => tagServer(evs, server, name)).catch(() => [] as FleetEvent[]);
-  });
+  }, narrowKey);
 
   // the expanded camera's own deeper history: the Site's recent list may hold only a few of its events
   const [focused, setFocused] = useState<FleetEvent[]>([]);
@@ -598,15 +630,16 @@ function useSiteActivity(site: Site, servers: Server[], source: DashboardSource,
     let alive = true;
     const { server, id } = splitKey(focusKey);
     const name = serversRef.current.find((s) => s.id === server)?.name ?? server;
-    siteApi(server).events({ camera: id, status: "open,pending,verified", limit: SCOPED_LIMIT })
+    siteApi(server).events({ camera: id, status: "open,pending,verified", limit: SCOPED_LIMIT, ...nvrFeedQuery(narrowRef.current) })
       .then((evs) => { if (alive) setFocused(tagServer(evs, server, name)); }).catch(() => {});
     return () => { alive = false; };
-  }, [enabled, withFeed, focusKey, resync]);
+  }, [enabled, withFeed, focusKey, narrowKey, resync]);
 
+  const matched = matching && matching.key === narrowKey ? matching.events : null;
   const pool = useMemo(() => {
-    const deeper = [...(scopeKey ? scoped : []), ...focused];
+    const deeper = [...(scopeKey ? scoped : []), ...focused, ...(matched ?? [])];
     return deeper.length ? mergePool(deeper, recent ?? []) : recent ?? [];
-  }, [scopeKey, scoped, focused, recent]);
+  }, [scopeKey, scoped, focused, matched, recent]);
   return { recent, pool, regionKeys, regionMap, offline, focusKey };
 }
 
@@ -631,8 +664,9 @@ function useExpandFit(grid: React.RefObject<HTMLDivElement | null>, on: boolean)
 }
 
 /** The "Latest activity" column: LiveView's feed and RegionNote, with the event viewer opened in place. */
-function SiteActivity({ site, servers, tiles, multi, activity: a, onShowAll }: {
+function SiteActivity({ site, servers, tiles, multi, activity: a, onShowAll, filter: classFilter, onFilter: setClassFilter }: {
   site: Site; servers: Server[]; tiles: Tile[]; multi: boolean; activity: Activity; onShowAll?: () => void;
+  filter: ClassFilter; onFilter: (patch: Partial<ClassFilter>) => void;
 }) {
   const [open, setOpen] = useState<EventRef | null>(null);
   const names = useMemo(() => new Map(tiles.map((t) => [t.key, t.name])), [tiles]);
@@ -649,7 +683,6 @@ function SiteActivity({ site, servers, tiles, multi, activity: a, onShowAll }: {
     : regionFeed(a.pool, a.regionMap, a.regionKeys);
   // unverified vehicles: counted, not shown (activeOf still sees them); the People / Vehicles / PPE pills filter the
   // cards and that count only, never the tiles' badges
-  const [classFilter, setClassFilter] = useFeedFilter(SITE_FEED_FILTER_KEY);
   const { cards, checking, hidden } = feedCards(feed, classFilter);
   const [shown, showMore] = useFeedCount(`${a.regionKeys.join(",")}|${fk ?? ""}`);
   const offline = a.offline.map((id) => servers.find((s) => s.id === id)?.name ?? id);

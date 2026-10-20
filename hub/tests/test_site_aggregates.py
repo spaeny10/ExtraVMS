@@ -17,11 +17,17 @@ class FakeConn:
 
     def __init__(self, s: dict, n: int):
         self.site_id, self.site, self.n, self.last_seen = s["id"], s, n, 1e12
+        self.queries: list[str] = []
 
     async def call(self, method, path, query, headers, body, timeout):
         name = self.site["name"]
         if path == "/api/events":
-            return 200, json.dumps([{"id": self.n, "camera_id": "cam1", "camera_class": "person", "start_ts": 100.0 + self.n}]).encode()
+            self.queries.append(query)
+            evs = [{"id": self.n, "camera_id": "cam1", "camera_class": "person", "start_ts": 100.0 + self.n}]
+            if "flags=ppe" not in query:   # a server that ignored flags=ppe would send this too: the hub drops it
+                evs.append({"id": 50 + self.n, "camera_id": "cam1", "camera_class": "vehicle", "start_ts": 90.0, "policy": {"kind": "towing"}})
+            evs.append({"id": 90 + self.n, "camera_id": "cam1", "camera_class": "person", "start_ts": 80.0, "policy": {"kind": "ppe"}})
+            return 200, json.dumps(evs).encode()
         if path == "/api/search":
             return 200, json.dumps([{"id": self.n, "synopsis": f"{name} person", "start_ts": 100.0 + self.n}]).encode()
         if path == "/api/footage/search":
@@ -58,18 +64,37 @@ def world(client, superuser):
 def test_events_per_site(world):
     root, viewer, oid, campus, a, b, solo = (world[k] for k in ("root", "viewer", "oid", "campus", "a", "b", "solo"))
     ev = root.get(f"/api/locations/{campus['id']}/events").json()
-    assert [e["site_id"] for e in ev["events"]] == [b["id"], a["id"]] and {e["location_name"] for e in ev["events"]} == {"Campus"}
+    assert [e["site_id"] for e in ev["events"]][:2] == [b["id"], a["id"]] and {e["location_name"] for e in ev["events"]} == {"Campus"}
     ev = root.get(f"/api/locations/{campus['id']}/events?cameras={solo['id']}:cam1").json()
     assert ev["events"] == []   # a camera of another Site is ignored, never shown
     ev = root.get(f"/api/fleet/events?org={oid}&location={solo['location_id']}").json()
-    assert [e["site_id"] for e in ev["events"]] == [solo["id"]] and ev["events"][0]["location_id"] == solo["location_id"]
+    assert {e["site_id"] for e in ev["events"]} == {solo["id"]} and ev["events"][0]["location_id"] == solo["location_id"]
     assert root.get(f"/api/fleet/events?org={oid}").json()["events"][0]["site_id"] == solo["id"]   # unfiltered: all three
     assert root.get(f"/api/fleet/events?org={oid}&location={world['foreign']['id']}").status_code == 404
     # the restricted viewer: their Site only, everywhere
     assert {e["site_id"] for e in viewer.get(f"/api/fleet/events?org={oid}").json()["events"]} == {a["id"], b["id"]}
     assert viewer.get(f"/api/locations/{solo['location_id']}/events").status_code == 403
     assert viewer.get(f"/api/fleet/events?org={oid}&location={solo['location_id']}").status_code == 403
-    assert len(viewer.get(f"/api/locations/{campus['id']}/events").json()["events"]) == 2
+    assert len(viewer.get(f"/api/locations/{campus['id']}/events").json()["events"]) == 6
+
+
+def test_events_feed_filters(world):
+    """Live's People / Vehicles / PPE pills: one class goes to each server as label=, PPE as flags=ppe (and is checked
+    on the event's broken rule here too); without them nothing is narrowed."""
+    root, campus, a = world["root"], world["campus"], world["a"]
+    conn = registry.by_site[a["id"]]
+    conn.queries.clear()
+    ev = root.get(f"/api/locations/{campus['id']}/events?limit=50").json()["events"]
+    assert "label=" not in conn.queries[-1] and "flags=" not in conn.queries[-1] and len(ev) == 6
+    ev = root.get(f"/api/locations/{campus['id']}/events?limit=50&classes=vehicle").json()["events"]
+    assert "label=vehicle" in conn.queries[-1] and {e["camera_class"] for e in ev} == {"vehicle"}
+    ev = root.get(f"/api/locations/{campus['id']}/events?limit=50&ppe=true").json()["events"]
+    assert "flags=ppe" in conn.queries[-1] and "label=" not in conn.queries[-1]
+    assert sorted(e["id"] for e in ev) == [91, 92] and all(e["policy"]["kind"] == "ppe" for e in ev)
+    ev = root.get(f"/api/locations/{campus['id']}/events?limit=50&ppe=true&classes=person").json()["events"]
+    assert "flags=ppe" in conn.queries[-1] and "label=person" in conn.queries[-1] and len(ev) == 2
+    ev = root.get(f"/api/fleet/events?org={world['oid']}&location={campus['id']}&ppe=true").json()["events"]
+    assert sorted(e["id"] for e in ev) == [91, 92]
 
 
 def test_alerts_per_site(world):
