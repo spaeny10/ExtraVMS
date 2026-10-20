@@ -6,7 +6,10 @@ import {
   defaultQuality, eventEnd, firstRecorded, followWindow, footageAvailable, initialSource, jumpTarget, listingRange, nearChunkEnd,
   needsListing, neighbour, nextChunkStart, pauseAtEnd, playStart, prefetchLead, PREV_SLACK_S, relLabel, scaleMarks, sdUsable,
   snapToRecorded, stripWindow, ticks, toFrac, viaHub, zoomLabel, zoomWindow, type ChunkLook,
+  MAX_STRIP_S, MIN_STRIP_S, centreOn, clampStrip, halfLabel, listedEvents, stripLimits, stripWidth, withSelected, zoomStep,
+  stepEvent, zoomWindowWidth,
 } from "./eventPlayback";
+import { panWindow, wheelZoom } from "./timeZoom";
 import {
   CHUNK, FAR_CHUNK, FIRST_FAR_CHUNK, PREFETCH_LEAD_S, REMOTE_CHUNK, REMOTE_FIRST_CHUNK, mergeSpans, nowS,
 } from "./playback";
@@ -389,5 +392,109 @@ describe("handing over from chunk to chunk", () => {
     expect(prefetchLead(REMOTE_CHUNK, PREFETCH_LEAD_S)).toBe(30);
     expect(prefetchLead(FAR_CHUNK, PREFETCH_LEAD_S)).toBe(60);
     expect(prefetchLead(CHUNK, PREFETCH_LEAD_S)).toBe(60);
+  });
+});
+
+describe("zooming and panning the strip (wheel, pinch, drag, −/+)", () => {
+  const short = { start: OLD, end: OLD + 7 };
+  it("wheel limits: the Timeline's 1 min up to 2 h, or wider for a long event, so it always fits", () => {
+    expect(stripLimits(short)).toEqual({ min: MIN_STRIP_S, max: MAX_STRIP_S });
+    expect(MIN_STRIP_S).toBe(60);
+    const long = { start: OLD, end: OLD + 3 * 3600 };
+    expect(stripLimits(long).max).toBe(stripWidth(long.start, long.end, ZOOM_HALF_S.length - 1));
+    expect(stripLimits(long).max).toBeGreaterThan(3 * 3600);
+  });
+  it("a wheel zoom keeps the time under the cursor, and clampStrip holds the width to the limits", () => {
+    const w = stripWindow(short.start, short.end, NOW);
+    const lim = stripLimits(short);
+    const z = clampStrip(wheelZoom(w, 0.25, -5000, 0, lim), NOW, lim);
+    expect(z.end - z.start).toBe(MIN_STRIP_S);
+    expect(clampStrip({ start: OLD, end: OLD + 10 }, NOW, lim).end - OLD - 5).toBeCloseTo(MIN_STRIP_S / 2);   // around its centre
+    expect(clampStrip({ start: OLD, end: OLD + 99999 }, NOW, lim).end - clampStrip({ start: OLD, end: OLD + 99999 }, NOW, lim).start).toBe(MAX_STRIP_S);
+  });
+  it("can't be panned or zoomed far past now (15% of its width, like the Timeline)", () => {
+    const lim = stripLimits(short);
+    const w = clampStrip(panWindow({ start: NOW - 600, end: NOW }, -10000, 600), NOW, lim);
+    expect(w.end).toBeCloseTo(NOW + 0.15 * 600);
+    expect(w.end - w.start).toBeCloseTo(600);
+    const small = clampStrip({ start: NOW, end: NOW + 60 }, NOW, lim);
+    expect(small.end).toBe(NOW + 30);   // at least GROWING_S of future
+  });
+  it("labels the zoom by half its width", () => {
+    expect([30, 60, 63.5, 150, 300, 310, 900, 1800, 3600, 5400].map(halfLabel))
+      .toEqual(["±30 s", "±1 min", "±1 min", "±2.5 min", "±5 min", "±5 min", "±15 min", "±30 min", "±1 h", "±1.5 h"]);
+    expect(halfLabel(stripWidth(OLD, OLD + 7, 0) / 2)).toBe(zoomLabel(0));
+  });
+  it("−/+ step between the zoom levels and the wheel limits, from wherever the wheel left it", () => {
+    const w0 = stripWidth(short.start, short.end, 0);   // 127 s: ±1 min
+    expect(zoomStep(short, w0, 1)).toBe(stripWidth(short.start, short.end, 1));
+    expect(zoomStep(short, w0, -1)).toBe(MIN_STRIP_S);
+    expect(zoomStep(short, MIN_STRIP_S, -1)).toBeNull();   // + disabled
+    expect(zoomStep(short, stripWidth(short.start, short.end, 2), 1)).toBe(MAX_STRIP_S);
+    expect(zoomStep(short, MAX_STRIP_S, 1)).toBeNull();   // − disabled
+    expect(zoomStep(short, 400, -1)).toBe(w0);   // between levels (the wheel): the next level in...
+    expect(zoomStep(short, 400, 1)).toBe(stripWidth(short.start, short.end, 1));   // ...or out
+    // around the event when the playhead is in it (the same as the zoom levels' windows)
+    expect(zoomWindowWidth(short, stripWidth(short.start, short.end, 1), OLD + 3, NOW)).toEqual(zoomWindow(short, 1, OLD + 3, NOW));
+  });
+  it("playing on doesn't pull the strip back once the viewer has panned away from the playhead", () => {
+    const w = { start: 0, end: 600 };
+    expect(followWindow(w, 700, 599)).toEqual({ start: 580, end: 1180 });   // was in view: follows
+    expect(followWindow(w, 701, 700)).toBe(w);   // was already out of view (panned away): stays
+    expect(followWindow(w, 701)).toEqual({ start: 581, end: 1181 });   // a jump: follows
+  });
+  it("ticks carry their length, so they are drawn as bars", () => {
+    const t = ticks([ev(2, 1100), ev(3, 1200, { end_ts: null })], { start: 1000, end: 1600 }, 1, (e) => String(e.id));
+    expect(t[0].len).toBeCloseTo(10 / 600);
+    expect(t[1].len).toBe(0);
+  });
+});
+
+describe("switching the viewer to another event on the strip", () => {
+  it("prev / next step through the camera's events in time order, masked ones skipped", () => {
+    const listed = listedEvents([ev(5, 1500), ev(2, 1100), ev(4, 1300, { status: "masked" }), ev(3, 1200)]);
+    expect(listed.map((x) => x.id)).toEqual([5, 2, 3]);
+    const all = withSelected(listed, ev(2, 1100));
+    // switched to #2: next is #3, then #5 (the masked #4 is no stop); previous from #3 is #2
+    expect(neighbour(all, jumpTarget(all[1]), 1)?.id).toBe(3);
+    expect(neighbour(all, jumpTarget(ev(3, 1200)), 1)?.id).toBe(5);
+    expect(neighbour(all, jumpTarget(ev(3, 1200)), -1)?.id).toBe(2);
+    expect(neighbour(all, jumpTarget(ev(5, 1500)), 1)).toBeNull();
+  });
+  it("the selected event is a stop even when the listing doesn't have it", () => {
+    const own = ev(9, 1250, { status: "masked" });
+    expect(withSelected(listedEvents([ev(2, 1100), own]), own).map((x) => x.id)).toEqual([2, 9]);
+    const listed = [ev(2, 1100)];
+    expect(withSelected(listed, ev(2, 1100))).toBe(listed);
+  });
+  it("keeps the zoom: the same width, centred on the new event", () => {
+    const w = { start: OLD - 300, end: OLD + 320 };   // ±5 min around a 20 s event
+    const c = centreOn(w, OLD + 1800, OLD + 1810, NOW);
+    expect(c.end - c.start).toBeCloseTo(620);
+    expect((c.start + c.end) / 2).toBeCloseTo(OLD + 1805);
+    expect(toFrac(OLD + 1800, c)).toBeGreaterThan(0.4);
+    // an event longer than the strip: same width, its start a fifth of the way in
+    const l = centreOn({ start: OLD, end: OLD + 120 }, OLD + 600, OLD + 1200, NOW);
+    expect(l).toEqual({ start: OLD + 600 - 24, end: OLD + 600 + 96 });
+    // a recent one: not running past now
+    expect(centreOn(w, NOW - 30, NOW - 20, NOW).end).toBeLessThanOrEqual(NOW + 30);
+  });
+});
+
+describe("previous / next from the selected event", () => {
+  const a = ev(1, 1000), b = ev(2, 1100, { end_ts: 1101 }), c = ev(3, 1102, { end_ts: 1130 }), d = ev(4, 1500);
+  const all = [d, b, a, c];
+  it("one by one in time order while the playhead is on the selected event, overlapping ones too", () => {
+    expect(stepEvent(all, b, jumpTarget(b), 1, NOW)?.id).toBe(3);
+    expect(stepEvent(all, b, jumpTarget(b), -1, NOW)?.id).toBe(1);
+    // played on into the next event's footage, still within the selected one's margin: previous is still the one before
+    expect(stepEvent(all, b, 1109, -1, NOW)?.id).toBe(1);
+    expect(stepEvent(all, c, jumpTarget(c), -1, NOW)?.id).toBe(2);
+    expect(stepEvent(all, d, jumpTarget(d), 1, NOW)).toBeNull();
+    expect(stepEvent(all, a, jumpTarget(a), -1, NOW)).toBeNull();
+  });
+  it("from the playhead once playback or a seek has left the selected event", () => {
+    expect(stepEvent(all, a, 1300, 1, NOW)?.id).toBe(4);   // not back to #2 and #3, already played through
+    expect(stepEvent(all, a, 1300, -1, NOW)?.id).toBe(3);
   });
 });

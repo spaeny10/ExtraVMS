@@ -98,7 +98,10 @@ def _track_fact(event: dict, camera: dict) -> str | None:
         return None, f"at the {edge}" if edge else "in the middle of the view"
 
     (p0, first), (p1, last) = describe(x0, y0), describe(x1, y1)
-    line = f"Track (from the NVR): first seen {first}; last seen {last}."
+    if (event.get("people") or 0) >= 2:   # a group (merge.py): the path runs from the first person seen to the last
+        line = f"Track (from the NVR, the whole group): the first of them seen {first}; the last of them seen {last}."
+    else:
+        line = f"Track (from the NVR): first seen {first}; last seen {last}."
     entered, left = zones.door_facts(event)
     # first / last sample in (or on the mat of) a door and not the same door at the other end: that is an entry / exit
     # too (door_facts needs the event's areas, which a short track may not have)
@@ -159,10 +162,23 @@ def ppe_fact(event: dict) -> str | None:
             f"and rate the threat at least medium for the safety breach.")
 
 
+def group_fact(event: dict) -> str | None:
+    """A group of people merged into one event (merge.py): how many, so the description is of the group's activity."""
+    n = event.get("people") or 0
+    if n < 2:
+        return None
+    tracks = len(event.get("tracks") or [])
+    return (f"People (counted by the NVR): a group of {n} people were in view at the same time ({tracks} camera tracks of "
+            f"people working or moving together, merged into this one event). Describe what the group did as one "
+            f"activity, e.g. 'a group of {n} people ...', not as a single person; the frames may each show a different "
+            f"one of them.")
+
+
 def event_facts(event: dict, camera: dict) -> str:
     """Shared factual context for synopsis and chat prompts."""
     start = dt.datetime.fromtimestamp(event["start_ts"]).astimezone()
     dur = (event["end_ts"] or event["start_ts"]) - event["start_ts"]
+    group = group_fact(event)
     rules = sorted({r["topic"].split("/")[-2] if "/" in r["topic"] else r["topic"] for r in event.get("rules") or []})
     notes = (camera.get("scene_notes") or "").strip()
     lines = [f"Camera: {camera.get('name', event['camera_id'])}"]
@@ -174,7 +190,8 @@ def event_facts(event: dict, camera: dict) -> str:
                      "place names describe the usual view and may not apply here.")
     lines += [
         f"Local time: {start:%A %Y-%m-%d %H:%M:%S} ({'night' if start.hour < 6 or start.hour >= 20 else 'day'})",
-        f"Duration on scene: {dur:.0f} s; movement across the frame: {describe_motion(event['path'])}",
+        f"Duration on scene: {dur:.0f} s; movement across the frame: "
+        + ("several people, each moving on their own" if group else describe_motion(event["path"])),
         (f"Camera analytics: {event['camera_class']} (the camera's own detection event, no position or confidence)"
          if str(event.get("track_id") or "").startswith("onvif:")   # ruleevents.TRACK_PREFIX
          else f"Camera analytics: {event['camera_class']} (confidence {event['camera_conf'] or 0:.2f})")
@@ -182,6 +199,8 @@ def event_facts(event: dict, camera: dict) -> str:
         f"YOLO verification: {event['yolo_class'] or 'not confirmed'} (confidence {event['yolo_conf'] or 0:.2f}, "
         f"matched in {event['yolo_hits'] or 0} frames)",
     ]
+    if group:
+        lines.append(group)
     from . import identities
     known = identities.identity_facts(event["camera_class"], event["id"]) if event.get("id") else None
     if known:  # operator-named person/vehicle, e.g. "Known person: 'Shawn' (owner)"

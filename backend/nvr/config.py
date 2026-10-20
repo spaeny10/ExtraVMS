@@ -120,6 +120,9 @@ class Settings(BaseSettings):
     merge_long_gap: float = 180.0           # people: gaps up to this merge too if YOLO sees them standing there throughout
     merge_gap_step_s: float = 5.0           # one recorded frame checked every this many seconds across such a gap
     merge_gap_max_frames: int = 40          # at most this many frames checked per pair (the step widens to fit)
+    # People who overlap on a camera (a crew working an aisle) are one activity: one event, described once (merge.py
+    # groups). A group never spans more than this from its first start to its last end; 0 = no group merging.
+    group_merge_max_s: float = 600.0
     synopsis_labels: list[str] = ["person"]  # Qwen runs only for these; YOLO verifies every label
     anomaly_synopsis_min: float = 0.75  # ...and for any other label once it is this unusual for its camera
     # No Qwen synopsis for events YOLO is less sure of than this (pipeline.synopsis_gate; 0 = off). Settings -> System

@@ -124,6 +124,9 @@ export type FrameShot = { url: string | null; t: number | null; cam: string };
 /** Preview frames from the recordings with at most one request in flight; the newest requested time wins. */
 export type FrameUrlFor = (cam: string, t: number, w?: number, exact?: boolean) => string;
 
+/** useLatestFrame's de-duplication key: asking again for the frame already wanted is a no-op (times to 1/100 s). */
+export const frameKey = (cam: string, t: number, exact = false): string => `${cam}|${t.toFixed(2)}|${exact}`;
+
 /** `frameUrlFor` maps the requested cam (a lane key on the hub) to a URL; it must be stable (memoized). */
 export function useLatestFrame(width: number, frameUrlFor: FrameUrlFor = frameUrl) {
   const [shot, setShot] = useState<FrameShot | null>(null);
@@ -156,7 +159,7 @@ export function useLatestFrame(width: number, frameUrlFor: FrameUrlFor = frameUr
   }, [width]);
 
   const request = useCallback((cam: string, t: number, exact = false) => {
-    const key = `${cam}|${t.toFixed(2)}|${exact}`;
+    const key = frameKey(cam, t, exact);
     if (key === last.current && wanted.current) return;
     last.current = key;
     wanted.current = { cam, t, exact };

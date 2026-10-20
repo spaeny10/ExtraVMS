@@ -2,6 +2,8 @@
 
 1. Topology (camera_links): which cameras neighbor each other and the walking-time window between them.
 2. Each verified person event gets a re-ID appearance embedding (reid.py, stored in reid_vec).
+   A group of people merged into one event on a camera (merge.py) has no re-ID vector, so it is never a candidate
+   (one fingerprint over several people would link the wrong person); links it had before it became a group stay.
 3. Candidate search: person events on a neighboring camera inside the time window, in either direction,
    whose re-ID similarity is at least REID_MIN_SIM; the best candidate per neighbor and direction is kept.
 4. Qwen confirms "same person?" from one crop of each; the verdict is stored so a pair is never asked twice.
@@ -327,9 +329,10 @@ def _tight_crops(event_id: int, detections: dict) -> list[np.ndarray]:
 
 
 def backfill(reid_model) -> int:
-    """Embed verified person events that don't have a re-ID vector yet (from their saved crops)."""
+    """Embed verified person events that don't have a re-ID vector yet (from their saved crops). A group of people
+    (merge.py) has none on purpose: its crops are of different people."""
     rows = db.all("SELECT id, detections FROM events WHERE camera_class='person' AND status='verified' "
-                  "AND detections IS NOT NULL AND id NOT IN (SELECT rowid FROM reid_vec)")
+                  "AND detections IS NOT NULL AND COALESCE(people, 0) < 2 AND id NOT IN (SELECT rowid FROM reid_vec)")
     n = 0
     for r in rows:
         vec = reid_model.embed(_tight_crops(r["id"], json.loads(r["detections"])))

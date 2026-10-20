@@ -38,7 +38,7 @@ import { useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, us
 import { createPortal } from "react-dom";
 import type { Camera as ServerCam, NvrEvent } from "@site/api";
 import { EventCard } from "@site/Events";
-import { FeedMore, LiveTile, RegionChips, useFeedCount } from "@site/Views";
+import { FeedFilterChips, FeedMore, LiveTile, NO_FILTER_MATCH, RegionChips, useFeedCount, useFeedFilter } from "@site/Views";
 import { QualityBadge } from "@site/LiveQuality";
 import { LiveBudgetProvider, useBudget } from "@site/dashboard/Dashboard";
 import { useIceServers } from "@site/dashboard/ice";
@@ -52,7 +52,8 @@ import { Icon, confirmDialog, promptDialog, swipeHandlers, toast, useDismiss, us
 import { useStill } from "@site/useStill";
 import { type Camera as RegistryCam, type Fleet, type Org, type Server, type Site, type SiteCameraGroup, type SiteLayout, api, lastPictureText,
   stillUrl } from "./api";
-import { type EventRef, applyLiveEvent, cameraNameFor, checkingText, feedCards, mergePool, regionFeed, removeLiveEvent, siteRegionKeys, tagServer } from "./eventOpen";
+import { type EventRef, SITE_FEED_FILTER_KEY, applyLiveEvent, cameraNameFor, checkingText, feedCards, mergePool, regionFeed, removeLiveEvent, siteRegionKeys,
+  tagServer } from "./eventOpen";
 import { HubEventDetail } from "./HubEventDetail";
 import { canDeter, canTalkDown } from "./access";
 import { useDirect, useDirectVersion } from "./direct";
@@ -646,13 +647,17 @@ function SiteActivity({ site, servers, tiles, multi, activity: a, onShowAll }: {
   const feed = fk
     ? a.pool.filter((e) => camKey(e.site_id, e.camera_id) === fk && (!a.regionMap[fk] || regionPass(e, a.regionMap[fk])))
     : regionFeed(a.pool, a.regionMap, a.regionKeys);
-  const { cards, checking } = feedCards(feed);   // unverified vehicles: counted, not shown (activeOf still sees them)
+  // unverified vehicles: counted, not shown (activeOf still sees them); the People / Vehicles / PPE pills filter the
+  // cards and that count only, never the tiles' badges
+  const [classFilter, setClassFilter] = useFeedFilter(SITE_FEED_FILTER_KEY);
+  const { cards, checking, hidden } = feedCards(feed, classFilter);
   const [shown, showMore] = useFeedCount(`${a.regionKeys.join(",")}|${fk ?? ""}`);
   const offline = a.offline.map((id) => servers.find((s) => s.id === id)?.name ?? id);
   return (
     <>
       <aside className="live-feed">
         <h3>Latest activity</h3>
+        <FeedFilterChips filter={classFilter} onChange={setClassFilter} />
         {checking > 0 && <p className="muted small">{checkingText(checking)}</p>}
         {fk && (
           <p className="muted small">Only {label(fk)} ·{" "}
@@ -663,6 +668,7 @@ function SiteActivity({ site, servers, tiles, multi, activity: a, onShowAll }: {
         {a.recent === null && <p className="muted">Loading…</p>}
         {a.recent !== null && a.pool.length === 0 && <p className="muted">Nothing yet.</p>}
         {a.pool.length > 0 && feed.length === 0 && <p className="muted">{fk && !a.regionMap[fk] ? "Nothing recent on this camera." : "Nothing recent on that camera passed through the painted region."}</p>}
+        {cards.length === 0 && hidden > 0 && <p className="muted small">{NO_FILTER_MATCH}</p>}
         {cards.slice(0, shown).map((e) => (
           <EventCard key={`${e.site_id}-${e.id}`} e={e} cameraName={names.get(camKey(e.site_id, e.camera_id)) ?? e.camera_id}
             site={mediaApi(e.site_id)} siteName={multi ? e.site_name : undefined}

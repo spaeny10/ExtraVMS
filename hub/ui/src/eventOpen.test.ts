@@ -1,9 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { NvrEvent } from "@site/api";
 import type { FleetEvent } from "@site/dashboard/types";
 import { NBYTES, cellIndex, encodeCells, setCell } from "@site/region";
-import { alertEvent, applyLiveEvent, cameraNameFor, checkingText, feedCards, mergePool, poolKey, regionFeed, removeLiveEvent, siteRegionKeys,
-  tagServer, timelineTargetHref } from "./eventOpen";
+import { DEFAULT_CLASS_FILTER, SITE_FEED_FILTER_KEY, alertEvent, applyLiveEvent, cameraNameFor, checkingText, classPass, feedCards, isPpeViolation,
+  loadFeedFilter, mergePool, parseClassFilter, poolKey, regionFeed, removeLiveEvent, siteRegionKeys, tagServer, timelineTargetHref } from "./eventOpen";
 
 const ev = (server: string, id: number, cam: string, start: number, extra: Partial<FleetEvent> = {}): FleetEvent =>
   ({ id, camera_id: cam, start_ts: start, end_ts: start + 5, status: "verified", camera_class: "person", site_id: server, site_name: server.toUpperCase(), ...extra }) as FleetEvent;
@@ -78,6 +78,48 @@ describe("activity pool", () => {
     expect(feed.cards.map(poolKey)).toEqual(["srvA/3", "srvB/1", "srvA/1"]);
     expect(feed.checking).toBe(0);
     expect(checkingText(feed.checking)).toBeNull();
+  });
+  it("the column's pills: the Timeline's People / Vehicles / PPE predicate, cards and checking line only", () => {
+    const ppe = { kind: "ppe", text: "No hard hat", priority: "high" } as unknown as FleetEvent["policy"];
+    const pool = [
+      ev("srvA", 1, "cam1", 100, { camera_class: "person", policy: ppe }),
+      ev("srvB", 1, "cam2", 110, { camera_class: "person" }),
+      ev("srvA", 2, "cam1", 120, { camera_class: "vehicle", status: "verified" }),
+      ev("srvA", 3, "cam1", 130, { camera_class: "vehicle", status: "open" }),
+    ];
+    expect(DEFAULT_CLASS_FILTER).toEqual({ person: true, vehicle: true, ppe: false });
+    expect(isPpeViolation(pool[0])).toBe(true);
+    expect(isPpeViolation(pool[1])).toBe(false);
+    expect(classPass(pool[0], { ...DEFAULT_CLASS_FILTER, ppe: true })).toBe(true);
+    expect(classPass(pool[1], { ...DEFAULT_CLASS_FILTER, ppe: true })).toBe(false);
+    let feed = feedCards(pool);
+    expect(feed.cards.map(poolKey)).toEqual(["srvA/1", "srvB/1", "srvA/2"]);
+    expect(checkingText(feed.checking)).toBe("Checking 1 vehicle…");
+    feed = feedCards(pool, { person: true, vehicle: false, ppe: false });
+    expect(feed.cards.map(poolKey)).toEqual(["srvA/1", "srvB/1"]);
+    expect(checkingText(feed.checking)).toBeNull();   // Vehicles off: no checking line
+    feed = feedCards(pool, { person: true, vehicle: true, ppe: true });
+    expect(feed.cards.map(poolKey)).toEqual(["srvA/1"]);
+    expect(feed.hidden).toBe(2);
+    feed = feedCards(pool.slice(1, 3), { ...DEFAULT_CLASS_FILTER, ppe: true });
+    expect(feed.cards).toEqual([]);   // "Nothing matches these filters"
+    expect(feed.hidden).toBe(2);
+    expect(pool).toHaveLength(4);   // the pool (the tiles' badges) is untouched
+  });
+  it("the pills are kept per viewer under the Site Live key; bad JSON or blocked storage gives the defaults", () => {
+    expect(SITE_FEED_FILTER_KEY).not.toBe("timelineFilter");
+    expect(parseClassFilter("{nope")).toEqual(DEFAULT_CLASS_FILTER);
+    expect(parseClassFilter('{"ppe":true}')).toEqual({ person: true, vehicle: true, ppe: true });
+    const store = new Map<string, string>([[SITE_FEED_FILTER_KEY, '{"vehicle":false}'], ["liveFeedFilter", "{bad"]]);
+    try {
+      vi.stubGlobal("localStorage", { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => void store.set(k, v) });
+      expect(loadFeedFilter(SITE_FEED_FILTER_KEY)).toEqual({ person: true, vehicle: false, ppe: false });
+      expect(loadFeedFilter()).toEqual(DEFAULT_CLASS_FILTER);
+      vi.stubGlobal("localStorage", { getItem: () => { throw new Error("blocked"); } });
+      expect(loadFeedFilter(SITE_FEED_FILTER_KEY)).toEqual(DEFAULT_CLASS_FILTER);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
   it("merges the painted cameras' history under the recent list (recent wins)", () => {
     const scoped = [ev("srvA", 1, "cam1", 100, { synopsis: "old" }), ev("srvA", 3, "cam1", 10)];

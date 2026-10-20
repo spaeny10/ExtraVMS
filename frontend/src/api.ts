@@ -297,6 +297,10 @@ export type NvrEvent = {
   areas?: { name: string; from: number; to: number }[] | null;
   cells?: string | null; // 32x18 grid cells the object crossed (region.ts filter)
   ptz_preset?: string | null; // PTZ camera turned away from home: preset name or "away"
+  /** a group of people merged into one event (backend merge.py): the most of them in view at once; null = one */
+  people?: number | null;
+  /** detail only: the camera tracks merged into this event (backend merge.py) */
+  tracks?: { event: number; track: string | null; from: number; to: number; why?: string }[] | null;
   error: string | null;
   corrected_at?: number | null;
   feedback?: Feedback | null;

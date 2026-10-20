@@ -2,11 +2,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type NamedIdentity,
   api, fmtDuration, fmtTime, ppeItemsText, type SiteApi,
-  type ChatMessage, type Feedback, type Journey, type NvrEvent, type Synopsis, type Threat, type Verdict, type WeaponCheck,
+  type ChatMessage, type Feedback, type Journey, type NvrEvent, type Synopsis, type Threat, type TimelineEvent, type Verdict, type WeaponCheck,
 } from "./api";
 import { EventPlayer, type EventPlayerHandle } from "./EventPlayer";
 import { clipOrigin } from "./eventPlayback";
-import { StatusBadge, placeholder, rejectedReason } from "./Events";
+import { StatusBadge, eventLabel, placeholder, rejectedReason } from "./Events";
 import { useNav } from "./nav";
 import { Icon, confirmDialog, toast, useIsPhone } from "./ui";
 
@@ -22,27 +22,52 @@ const THREATS: Threat[] = ["none", "low", "medium", "high"];
 export function EventDetail({ id: initialId, cameraName, onClose, site = api, variant = "modal" }: {
   id: number; cameraName: (id: string) => string; onClose: () => void; site?: SiteApi; variant?: "modal" | "drawer";
 }) {
-  const [id, setId] = useState(initialId); // the viewer can step to another camera's sighting of the same person
+  // the viewer can step to another camera's sighting of the same person (Journey), or to another event of the camera
+  // on the player's strip (a tick, previous / next)
+  const [id, setId] = useState(initialId);
   useEffect(() => setId(initialId), [initialId]);
-  const [e, setE] = useState<NvrEvent | null>(null);
+  const idRef = useRef(id);
+  idRef.current = id;
+  const [e, setEState] = useState<NvrEvent | null>(null);
+  // Only the selected event's record is shown: a late answer for one switched away from (a fetch, a save, feedback) is
+  // dropped, so nothing meant for one event lands on the other.
+  const setE = useCallback((x: NvrEvent) => { if (x.id === idRef.current) setEState(x); }, []);
+  const [chat, setChatState] = useState<ChatMessage[]>([]);
+  /** setChat for event `eid`'s conversation: ignored once the viewer shows another event. */
+  const chatFor = (eid: number) => (c: ChatMessage[]) => { if (idRef.current === eid) setChatState(c); };
+  // The player stays (and keeps playing) when it switched the event itself (onSelectEvent); any other change of event
+  // (the page, Journey) or one it asked to start afresh on (no recording there) mounts a new one.
+  const sticky = useRef<{ key: number; ids: Set<number> } | null>(null);
+  let playerKey = e?.id ?? id;
+  if (e) {
+    if (sticky.current?.ids.has(e.id)) playerKey = sticky.current.key;
+    else sticky.current = { key: e.id, ids: new Set([e.id]) };
+  }
+  const onSelectEvent = useCallback((x: TimelineEvent, o: { remount: boolean }) => {
+    if (!o.remount) sticky.current?.ids.add(x.id);
+    setId(x.id);
+  }, []);
   const [tab, setTab] = useState<"clip" | "details" | "journey" | "chat">("details");
   const isPhone = useIsPhone();
   useEffect(() => { if (isPhone) setTab("clip"); }, [isPhone]);
-  const [chat, setChat] = useState<ChatMessage[]>([]);
   // The player (EventPlayer): its playhead for the Ask tab, and seek for chat frames and notes. A phone shows it on
   // the Clip tab only: coming back there (or tapping a chat frame elsewhere) mounts it again at `resume`.
   const player = useRef<EventPlayerHandle | null>(null);
   const playhead = useRef<Playhead>({ t: null, subs: new Set() });
   const [resume, setResume] = useState<{ t: number; paused: boolean } | null>(null);
-  const [footage, setFootage] = useState<boolean | undefined>(undefined);   // is any of the event's footage there?
-  useEffect(() => { playhead.current.t = null; setResume(null); setFootage(undefined); }, [id]);
+  const [footage, setFootage] = useState<boolean | undefined>(undefined);   // is any of the event's footage there? (the player says)
+  useEffect(() => { setResume(null); }, [id]);
+  useEffect(() => { playhead.current.t = null; }, [playerKey]);   // a new player: no playhead until it reports one
   const onTime = useCallback((t: number) => { playhead.current.t = t; playhead.current.subs.forEach((f) => f(t)); }, []);
   const { openInTimeline } = useNav();
 
   const gone = () => { toast.info("This sighting was merged into a longer event"); onClose(); };
   useEffect(() => {
-    site.event(id).then(setE).catch(gone);
-    site.chat(id).then(setChat).catch(() => {});
+    // switched on the player's strip to an event that has gone meanwhile (merged): say so, the viewer stays open
+    const fromStrip = sticky.current != null && sticky.current.ids.has(id) && id !== sticky.current.key;
+    site.event(id).then(setE).catch(() => (fromStrip ? toast.error("Couldn't load that event") : gone()));
+    setChatState([]);
+    site.chat(id).then(chatFor(id)).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
   useEffect(() => {
@@ -77,7 +102,7 @@ export function EventDetail({ id: initialId, cameraName, onClose, site = api, va
       <div className={`modal ${variant === "drawer" ? "drawer" : ""}`} onClick={(ev) => ev.stopPropagation()}>
         <header className="modal-head">
           <div>
-            <h2>{cameraName(e.camera_id)} · {e.yolo_class ?? e.camera_class}</h2>
+            <h2>{cameraName(e.camera_id)} · {eventLabel(e)}</h2>
             <span className="muted">{fmtTime(e.start_ts)} · {fmtDuration(e)} · event #{e.id}</span>
           </div>
           <div className="row">
@@ -85,8 +110,8 @@ export function EventDetail({ id: initialId, cameraName, onClose, site = api, va
             <WeaponCheckBadge check={e.synopsis_json?.weapon_check} />
             {e.feedback?.verdict === "false_alarm" && <span className="badge status-error">Marked false alarm</span>}
             <button className="ghost" onClick={() => { openInTimeline(e); onClose(); }} title="Show this event on the Timeline, playing from just before it">⏱ Open in Timeline</button>
-            <LockControl e={e} site={site} onChange={() => site.event(e.id).then(setE)} />
-            {e.status === "verified" && <WatchControl e={e} site={site} onChange={() => site.event(e.id).then(setE)} />}
+            <LockControl key={`lock${e.id}`} e={e} site={site} onChange={() => site.event(e.id).then(setE)} />
+            {e.status === "verified" && <WatchControl key={`watch${e.id}`} e={e} site={site} onChange={() => site.event(e.id).then(setE)} />}
             {e.status === "open" || e.status === "pending"
               ? <span className="muted small" title="Verification runs automatically once the event ends">{e.status === "open" ? "Still tracking…" : "Verifying…"}</span>
               : <button className="ghost" onClick={() => site.reprocess(e.id).then(onClose).catch((err) => toast.error(err))} title="Run YOLO verification and the synopsis again">Reprocess</button>}
@@ -103,7 +128,8 @@ export function EventDetail({ id: initialId, cameraName, onClose, site = api, va
         )}
         <div className={`modal-grid ${isPhone ? "phone" : ""}`}>
           {(!isPhone || view === "clip") && <div>
-            <EventPlayer key={e.id} e={e} site={site} startAt={resume} onTime={onTime} handle={player} onFootage={setFootage} />
+            <EventPlayer key={playerKey} e={e} site={site} startAt={resume} onTime={onTime} handle={player} onFootage={setFootage}
+              onSelectEvent={onSelectEvent} />
             {crops.length > 0 && (
               <div className="crops">
                 {crops.map((k) => <img key={k.file} src={site.media(e, k.file)} alt="" />)}
@@ -121,12 +147,12 @@ export function EventDetail({ id: initialId, cameraName, onClose, site = api, va
               </button>
             </div>}
             {view === "journey" ? (
-              <JourneySection e={e} site={site} cameraName={cameraName} onShow={(eid) => setId(eid)}
+              <JourneySection key={e.id} e={e} site={site} cameraName={cameraName} onShow={(eid) => { sticky.current?.ids.delete(eid); setId(eid); }}
                 onOpenTimeline={(members) => { openInTimeline({ ...e, members }); onClose(); }} />
             ) : view === "chat" ? (
-              <ChatPanel e={e} site={site} chat={chat} setChat={setChat} playhead={playhead} footage={footage} seek={seek} />
+              <ChatPanel key={e.id} e={e} site={site} chat={chat} setChat={chatFor(e.id)} playhead={playhead} footage={footage} seek={seek} />
             ) : (
-              <Details e={e} site={site} setE={setE} notes={chat.filter((m) => m.saved)} onUnsave={(m) => site.saveNote(e.id, m.id, false).then(setChat)} seek={seek} />
+              <Details key={e.id} e={e} site={site} setE={setE} notes={chat.filter((m) => m.saved)} onUnsave={(m) => site.saveNote(e.id, m.id, false).then(chatFor(e.id))} seek={seek} />
             )}
           </aside>}
         </div>
@@ -422,6 +448,10 @@ function Details({ e, site, setE, notes, onUnsave, seek }: {
           <table className="kv">
             <tbody>
               <tr><td>Camera</td><td>{e.camera_class} · {((e.camera_conf ?? 0) * 100).toFixed(0)}% · track {e.track_id}</td></tr>
+              {e.tracks && e.tracks.length > 1 && <tr><td>Merged</td><td>
+                {e.tracks.length} camera tracks{e.people && e.people > 1 ? `, up to ${e.people} people at once` : ""}
+                {e.tracks.filter((m) => m.why).map((m) => <div key={m.event} className="muted small">{m.event}: {m.why}</div>)}
+              </td></tr>}
               {e.detections?.source === "onvif_event" && <tr><td>Source</td><td>the camera's ONVIF event (no object positions): YOLO found the {e.camera_class} in the clip</td></tr>}
               <tr><td>YOLO</td><td>{e.yolo_class ?? "—"} {e.yolo_conf != null && `· ${(e.yolo_conf * 100).toFixed(0)}%`}</td></tr>
               <tr><td>Agreement</td><td>{e.yolo_hits ?? 0} of {frames} frames (need {e.detections?.needed ?? "—"}){e.detections?.time_shift_s ? ` · clock shift ${e.detections.time_shift_s} s` : ""}</td></tr>

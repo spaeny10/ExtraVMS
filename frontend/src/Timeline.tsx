@@ -2,6 +2,7 @@ import { confirmDialog, promptDialog, toast, useIsPhone } from "./ui";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, fmtTime, localApi, type ApiResolver, type Camera, type KeptSpan, type Layout, type LayoutConfig, type Lock, type PlaybackQuality, type TimelineEvent, UNUSUAL_MIN } from "./api";
 import { ConfidenceSlider, loadNumber, saveNumber } from "./ConfidenceSlider";
+import { classPass } from "./classFilter";
 import { EventDetail } from "./EventDetail";
 import { NavContext, useNav, type TimelineFocus, type TimelineTarget } from "./nav";
 import { HOLD_MAX_MS, LIVE_LAG, camKey, fmtClock, mergeSpans, nowS, reachesLiveEdge, retryDelayMs, spanAt, splitKey, useLatestFrame, type Span } from "./playback";
@@ -9,6 +10,7 @@ import { SyncTile, type TileStatus } from "./SyncPlayer";
 import { encodeCells, regionPass, regions, useRegions } from "./region";
 import { timelineHash } from "./nav";
 import { fmtLength, recoverableGaps, restoredLabel, type CardRange, type RestoredSpan } from "./sdcard";
+import { fracIn, hoverFrameTime, isDrag, panWindow, pinchStart, pinchWindow, thumbLeft, wheelWindow, type PinchStart } from "./timeZoom";
 
 type Marker = TimelineEvent;
 type Filter = {
@@ -27,8 +29,7 @@ const THREAT_RANK: Record<string, number> = { none: 0, low: 1, medium: 2, high: 
 
 function matches(e: Marker, f: Filter): boolean {
   if (e.status === "masked") return false;   // hidden by a mask (or by hand): never on the Timeline, whatever the filter
-  if (e.camera_class === "person" ? !f.person : e.camera_class === "vehicle" ? !f.vehicle : false) return false;
-  if (f.ppe && !e.ppe) return false;
+  if (!classPass(e, f)) return false;   // People / Vehicles / PPE violations: the same pills as Live's activity column
   if (f.status === "verified" && e.status !== "verified") return false;
   if (f.status === "active" && e.status !== "open" && e.status !== "pending") return false;
   if (f.status === "rejected" && e.status !== "rejected") return false;
@@ -85,7 +86,7 @@ function shiftLane(l: Lane, d: number): Lane {
 type View = { start: number; end: number };
 type Drag =
   | { mode: "scrub"; pointer: number }
-  | { mode: "pan"; pointer: number; x0: number; view0: View; moved: boolean; cam: string | null }
+  | { mode: "pan"; pointer: number; x0: number; view0: View; moved: boolean; cam: string | null; touch: boolean }
   | { mode: "select"; pointer: number; cam: string; t0: number };
 
 const ALL_CAMERAS: LayoutConfig = { visible: null, solo: null, order: null };
@@ -94,6 +95,7 @@ const MIN_RANGE = 60; // 1 minute
 /** touch screen (phone/tablet): changes hints and grab sizes */
 const COARSE = typeof matchMedia !== "undefined" && matchMedia("(pointer: coarse)").matches;
 const MAX_RANGE = 14 * 86400; // 2 weeks
+const RANGE_LIMITS = { min: MIN_RANGE, max: MAX_RANGE };
 const STEPS = [1, 5, 10, 30, 60, 300, 600, 900, 1800, 3600, 10800, 21600, 43200, 86400, 172800, 604800];
 const SPEEDS = [0.5, 1, 2, 4, 8, 16];
 const PRESETS: [string, number][] = [["5m", 300], ["1h", 3600], ["6h", 21600], ["24h", 86400], ["7d", 604800]];
@@ -561,18 +563,10 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
     const onWheel = (ev: WheelEvent) => {
       ev.preventDefault();
       const rect = el.getBoundingClientRect();
-      const frac = Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width));
+      const frac = fracIn(ev.clientX, rect);
       setView((v) => {
-        const r = v.end - v.start;
-        const horizontal = ev.shiftKey || Math.abs(ev.deltaX) > Math.abs(ev.deltaY);
-        if (horizontal) {
-          const d = ((ev.shiftKey ? ev.deltaY : ev.deltaX) / rect.width) * r;
-          return clampView(v.start + d, v.end + d);
-        }
-        const scale = ev.deltaMode === 1 ? 40 : 1; // line-based wheels
-        const nr = Math.min(MAX_RANGE, Math.max(MIN_RANGE, r * Math.exp(ev.deltaY * scale * 0.0015)));
-        const anchor = v.start + frac * r;
-        return clampView(anchor - frac * nr, anchor + (1 - frac) * nr);
+        const w = wheelWindow(v, ev, frac, rect.width, RANGE_LIMITS);   // timeZoom.ts, shared with the event viewer's strip
+        return clampView(w.start, w.end);
       });
     };
     el.addEventListener("wheel", onWheel, { passive: false });
@@ -842,20 +836,14 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
 
   // ---- pinch to zoom (two fingers on the track)
   const pointers = useRef(new Map<number, number>()); // pointerId -> clientX, touch pointers only
-  const pinch = useRef<{ d0: number; mid0: number; view0: View } | null>(null);
+  const pinch = useRef<PinchStart | null>(null);
   const pinchUpdate = () => {
     const xs = [...pointers.current.values()];
     const p0 = pinch.current;
     if (!p0 || xs.length < 2) return;
-    const rect = track.current!.getBoundingClientRect();
-    const d = Math.max(20, Math.abs(xs[0] - xs[1]));
-    const r0 = p0.view0.end - p0.view0.start;
-    const nr = Math.min(MAX_RANGE, Math.max(MIN_RANGE, r0 * (p0.d0 / d)));
-    const frac = Math.min(1, Math.max(0, (p0.mid0 - rect.left) / rect.width));
-    const anchor = p0.view0.start + frac * r0; // the time under the fingers stays put
-    const mid = (xs[0] + xs[1]) / 2;
-    const shift = -((mid - p0.mid0) / rect.width) * nr; // moving both fingers pans
-    setView(clampView(anchor - frac * nr + shift, anchor + (1 - frac) * nr + shift));
+    // the time under the fingers stays put; moving both fingers pans (timeZoom.ts)
+    const w = pinchWindow(p0, xs[0], xs[1], track.current!.getBoundingClientRect(), RANGE_LIMITS);
+    setView(clampView(w.start, w.end));
   };
 
   const onPointerDown = (ev: React.PointerEvent) => {
@@ -868,7 +856,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
         if (drag.current?.mode === "scrub") { setScrubbing(false); lastScrubT.current = null; }
         drag.current = null;
         const xs = [...pointers.current.values()];
-        pinch.current = { d0: Math.max(20, Math.abs(xs[0] - xs[1])), mid0: (xs[0] + xs[1]) / 2, view0: view };
+        pinch.current = pinchStart(xs[0], xs[1], view);
         try { track.current!.setPointerCapture(ev.pointerId); } catch { /* released */ }
         return;
       }
@@ -900,7 +888,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
       setScrubbing(true);
       scrubTo(onRuler ? toT(x) : playhead ?? toT(x));
     } else {
-      drag.current = { mode: "pan", pointer: ev.pointerId, x0: ev.clientX, view0: view, moved: false, cam: laneEl?.dataset.cam ?? null };
+      drag.current = { mode: "pan", pointer: ev.pointerId, x0: ev.clientX, view0: view, moved: false, cam: laneEl?.dataset.cam ?? null, touch };
     }
   };
 
@@ -916,7 +904,8 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
     const d = drag.current;
     if (!d) {
       // Hover thumbnail, snapped to whole seconds so nearby positions share cached frames.
-      if (t < nowS() - LIVE_LAG) hoverFrames.request(laneCam, Math.round(t));
+      const at = hoverFrameTime(t, nowS());
+      if (at != null) hoverFrames.request(laneCam, at);
       else hoverFrames.clear();
       return;
     }
@@ -929,11 +918,10 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
       scrubTo(toT(x));
     } else {
       const dx = ev.clientX - d.x0;
-      if (Math.abs(dx) > 3) d.moved = true;
+      if (isDrag(dx, d.touch ? "touch" : "mouse")) d.moved = true;
       if (d.moved) {
-        const r = d.view0.end - d.view0.start;
-        const shift = (-dx / width) * r;
-        setView(clampView(d.view0.start + shift, d.view0.end + shift));
+        const w = panWindow(d.view0, dx, width);
+        setView(clampView(w.start, w.end));
       }
     }
   };
@@ -1309,7 +1297,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
       {laneError && <div className="muted small tl-retry-note" style={{ margin: "4px 0" }}>Server not answering · retrying</div>}
       <div className="tl-wrap">
       {hover && !drag.current && hoverFrames.shot && hoverFrames.shot.cam === hover.cam && (
-        <div className="tl-thumb" style={{ left: Math.min(Math.max(hover.x + 150 - 160, 0), width + 150 - 320) }}>
+        <div className="tl-thumb" style={{ left: thumbLeft(hover.x + 150, 320, width + 150) }}>
           {hoverFrames.shot.url ? <img src={hoverFrames.shot.url} alt="" /> : <div className="tl-thumb-gap">No recording</div>}
           <div className="tl-thumb-label">{camName(hover.cam)} · {fmtClock(hover.t)}</div>
         </div>

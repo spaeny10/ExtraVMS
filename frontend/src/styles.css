@@ -174,23 +174,37 @@ main { flex: 1; padding: 16px; }
 .ep-preview img { width: 100%; height: 100%; object-fit: contain; display: block; }
 .ep-preview .ep-msg { position: absolute; inset: 0; display: grid; place-items: center; color: #9aa4b1; font-size: 13px; }
 .ep-msg-bar { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); background: rgb(0 0 0 / .72); color: #fff; padding: 4px 10px; border-radius: 6px; font-size: 13px; white-space: nowrap; pointer-events: none; }
-.ep-strip { position: relative; height: 44px; touch-action: pan-y; user-select: none; -webkit-user-select: none; cursor: pointer; }
-.ep-track { position: absolute; inset: 6px 0; border-radius: 6px; background: var(--panel-2); border: 1px solid var(--border); overflow: hidden; }
+/* the strip works like the Timeline page's track: drag to pan, drag the playhead to scrub, click to go there, the wheel
+   (or a pinch) zooms around the cursor, hover shows a thumbnail (the Timeline's .tl-thumb, above the strip) */
+.ep-strip-wrap { position: relative; }
+.ep-strip-wrap .tl-thumb { max-width: 100%; }
+.ep-strip { position: relative; height: 88px; touch-action: none; user-select: none; -webkit-user-select: none; cursor: grab; }
+.ep-strip.panning, .ep-strip.panning * { cursor: grabbing !important; }
+.ep-strip.scrubbing, .ep-strip.scrubbing * { cursor: ew-resize !important; }
+.ep-track { position: absolute; inset: 8px 0; border-radius: 8px; background: var(--panel-2); border: 1px solid var(--border); overflow: hidden; }
 .ep-track:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .ep-rec, .ep-key.rec { background: color-mix(in srgb, var(--ok) 38%, transparent); }
 /* not recorded: hatched, so a gap reads as "nothing here", not as a quiet stretch */
 .ep-gap, .ep-key.gap { background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--muted) 40%, transparent) 0 2px, transparent 2px 7px); }
 .ep-rec, .ep-gap { position: absolute; top: 0; bottom: 0; }
-.ep-event { position: absolute; top: 3px; bottom: 3px; border-radius: 4px; background: color-mix(in srgb, var(--accent) 30%, transparent); border: 2px solid var(--accent); pointer-events: none; }
+/* this event: an outlined box nearly the strip's height; the camera's other events (.ep-tick) are solid bars in the middle */
+.ep-event { position: absolute; top: 5px; bottom: 5px; border-radius: 6px; background: color-mix(in srgb, var(--accent) 24%, transparent); border: 2px solid var(--accent); pointer-events: none; }
+.ep-hover { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px solid var(--muted); pointer-events: none; z-index: 1; }
+.ep-hover span { position: absolute; bottom: 4px; left: 6px; font-size: 11px; background: var(--panel-2); border: 1px solid var(--border); padding: 1px 6px; border-radius: 4px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ep-thumb-snap { position: relative; aspect-ratio: 2592 / 1520; display: grid; place-items: center; color: #aaa; font-size: 13px; }
+.ep-thumb-snap img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 .ep-grid { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px solid color-mix(in srgb, var(--text) 14%, transparent); pointer-events: none; }
-.ep-playhead { position: absolute; top: 0; bottom: 0; width: 0; margin-left: -1px; border-left: 2px solid var(--bad); pointer-events: none; z-index: 2; }
-/* another event on the camera: a thin mark, in a 24 px wide hit area as tall as the strip */
-.ep-tick { position: absolute; top: 0; bottom: 0; width: 24px; margin-left: -12px; padding: 0; background: transparent; border: 0; border-radius: 0; z-index: 3; }
-.ep-tick::before { content: ""; position: absolute; left: 10px; width: 4px; top: 4px; bottom: 4px; border-radius: 2px; background: var(--muted); }
+.ep-playhead { position: absolute; top: 2px; bottom: 2px; width: 0; margin-left: -1px; border-left: 2px solid var(--bad); pointer-events: none; z-index: 4; }
+/* the playhead's grip (drag within 12 px of the line to scrub, as on the Timeline) */
+.ep-handle { position: absolute; top: 0; left: -7px; width: 12px; height: 14px; border-radius: 0 0 6px 6px; background: var(--bad); box-shadow: 0 1px 3px rgb(0 0 0 / .35); }
+/* another event on the camera: a bar in the class colour, as long as the event, inside an 8 px wider hit area each side */
+.ep-tick { --tick-pad: 8px; position: absolute; top: 8px; bottom: 8px; margin-left: calc(-1 * var(--tick-pad)); padding: 0; background: transparent; border: 0; border-radius: 0; z-index: 3; min-height: 0; }
+.ep-tick::before { content: ""; position: absolute; left: var(--tick-pad); right: var(--tick-pad); top: 30%; bottom: 30%; border-radius: 3px; background: var(--muted);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--panel) 70%, transparent); }
 .ep-tick.person::before { background: var(--person); }
 .ep-tick.vehicle::before { background: var(--vehicle); }
 .ep-tick.rejected::before { opacity: .35; }
-.ep-tick:hover::before { outline: 2px solid var(--text); }
+.ep-tick:hover::before { outline: 2px solid var(--text); outline-offset: 1px; }
 /* the strip's scale: its two ends, and round times between them when there is room */
 .ep-scale { position: relative; display: flex; justify-content: space-between; height: 16px; margin-top: -4px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .ep-scale-mark { position: absolute; top: 0; transform: translateX(-50%); }
@@ -206,8 +220,12 @@ main { flex: 1; padding: 16px; }
   .ep-controls button { min-height: 44px; }
   .ep-zoom button { min-width: 44px; }
   .ep-bar button { width: 40px; height: 40px; }
-  .ep-tick { width: 32px; margin-left: -16px; }
-  .ep-tick::before { left: 14px; }
+  .ep-tick { --tick-pad: 13px; }   /* a fingertip's hit area */
+}
+@media (max-width: 700px) {
+  .ep-strip { height: 66px; }
+  .ep-track, .ep-tick { inset-block: 6px; }
+  .ep-event { top: 4px; bottom: 4px; }
 }
 .crops { display: flex; gap: 8px; margin-top: 8px; overflow-x: auto; }
 .crops img { height: 110px; border-radius: 6px; }
@@ -1260,3 +1278,8 @@ body:has(.drag-ghost) { cursor: grabbing; user-select: none; }
 .qbadge-menu button[aria-checked="true"] { color: var(--accent); font-weight: 600; }
 .qbadge-menu button[aria-checked="true"]::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: currentColor; margin-right: 6px; vertical-align: middle; }
 @media (pointer: coarse) { .qbadge-menu button { min-height: 44px; } }
+
+/* Live → "Latest activity": the Timeline's People / Vehicles / PPE pills at the top of the column (FeedFilterChips in
+   Views.tsx; the hub's Site Live too). One line in the 380 px column and on a phone; wraps only if it must. */
+.feed-filters { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.feed-filters .chip { cursor: pointer; padding: 2px 9px; white-space: nowrap; }

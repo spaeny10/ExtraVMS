@@ -371,8 +371,13 @@ MIGRATIONS = [
     # a camera's deterrence settings (deterrence.clean_config): JSON {siren_source: auto | relay | speaker}; NULL = defaults
     ("cameras", "deterrence_config", "TEXT"),
     ("deterrence_log", "via", "TEXT"),           # how it went: relay | aux | speaker (the siren through a talk-down speaker)
+    # merged events (merge.py): the camera tracks folded into this one, JSON [{event, track, from, to, why}], and for a
+    # group of people the most of them in view at once (>= 2; NULL = one person / never merged)
+    ("events", "tracks", "TEXT"),
+    ("events", "people", "INTEGER"),
 ]
-JSON_FIELDS = ("path", "rules", "detections", "synopsis_json", "synopsis_original", "feedback", "anomaly_json", "areas", "policy", "migrated_from")
+JSON_FIELDS = ("path", "rules", "detections", "synopsis_json", "synopsis_original", "feedback", "anomaly_json", "areas", "policy",
+               "migrated_from", "tracks")
 
 # ---- event filters shared by browse (/api/events), search and the Find summary strip
 UNUSUAL_MIN = 0.75   # anomaly at/above this is "unusual" (frontend UNUSUAL_MIN)

@@ -63,8 +63,14 @@ export function applyLiveEvent(pool: FleetEvent[], e: FleetEvent): FleetEvent[] 
 /**
  * The column's cards: vehicles still being verified are left out and counted ("Checking 3 vehicles…"), as in the
  * server UI's LiveView (@site/liveFeed). They stay in the pool, so a tile still lights "vehicle" while one is open.
+ * The column's People / Vehicles / PPE violations pills are the Timeline's (classPass): they filter the cards and the
+ * vehicles counted, not the pool.
  */
-export { checkingText, feedCards } from "@site/liveFeed";
+export { checkingText, classPass, DEFAULT_CLASS_FILTER, feedCards, isPpeViolation, loadFeedFilter, parseClassFilter } from "@site/liveFeed";
+
+/** Site Live's People / Vehicles / PPE pills, per viewer (the server UI's own column keeps "liveFeedFilter", the
+ *  Timeline "timelineFilter"). */
+export const SITE_FEED_FILTER_KEY = "siteLiveFeedFilter";
 
 export const removeLiveEvent = (pool: FleetEvent[], server: string, id: number): FleetEvent[] =>
   pool.filter((x) => !(x.site_id === server && x.id === id));

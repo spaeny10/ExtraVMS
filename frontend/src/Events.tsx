@@ -46,6 +46,11 @@ export function placeholder(e: NvrEvent): string {
   return e.error ?? "Waiting for verification…";
 }
 
+/** The card's label: "4 people" for a group merged into one event (backend merge.py), else the class. */
+export function eventLabel(e: Pick<NvrEvent, "people" | "yolo_class" | "camera_class">): string {
+  return e.people && e.people > 1 ? `${e.people} people` : e.yolo_class ?? e.camera_class;
+}
+
 export function EventCard({ e, cameraName, onOpen, site = api, siteName, focused }: {
   e: NvrEvent; cameraName: string; onOpen: () => void;
   /** the site the event belongs to (hub dashboard: another site than the page's); default: this site */
@@ -59,7 +64,7 @@ export function EventCard({ e, cameraName, onOpen, site = api, siteName, focused
     <button className={`event-card ${e.status}${focused ? " focused" : ""}`} onClick={onOpen} data-event-id={e.id}>
       <div className="thumb">
         {e.snapshot ? <img src={site.media(e, "snapshot.jpg", 480)} loading="lazy" alt="" /> : <div className="thumb-empty">{e.camera_class}</div>}
-        <span className={`label-chip ${e.camera_class}`}>{e.yolo_class ?? e.camera_class}</span>
+        <span className={`label-chip ${e.camera_class}`}>{eventLabel(e)}</span>
       </div>
       <div className="event-body">
         <div className="event-meta">

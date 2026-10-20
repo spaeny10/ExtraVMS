@@ -67,6 +67,10 @@ class Pipeline:
         self._synopsis_seq = 0
         self.synopsis_pending: set[int] = set()  # queued or being written now; the UI shows "Qwen is writing…"
         self.synopsis_hold: dict[int, float] = {}  # verified events waiting for a possible follow-on fragment (merge.py)
+        # merged group events (merge.py) not verified again yet: more of their people are still being tracked or
+        # verified, so the whole activity is verified once, when they are in (hold_tick releases them)
+        self.verify_hold: set[int] = set()
+        self._reverify_polled = 0.0
         self.synopsis_times: deque[float] = deque(maxlen=50)  # seconds per synopsis, for Optimize my system
         self.synopsis_failed_at = 0.0    # last synopsis that ended in an error (retry_loop backs off from it)
         # Outside the Site's AI schedule (aischedule.py): descriptions set to "catch up when idle" wait here, (priority,
@@ -277,7 +281,7 @@ class Pipeline:
         if "path" in result:  # extended into the pre/post-roll: the region cells follow
             result["cells"] = cells.for_event(result["path"])
         db.update_event(event_id, clip=str(clip.relative_to(settings.data_dir)), error=None, **result)
-        if reid:
+        if reid and not e.get("people"):   # a group's crops are several people: no one fingerprint (merge.py)
             db.set_reid(event_id, reid)
         if result["status"] == "rejected":
             # a parked car that keeps being "seen": its track opens no new event while it stays put (tracker.rejected),
@@ -315,19 +319,30 @@ class Pipeline:
                 found = (a_now, reason)
         if found:
             target, reason = found
-            self.synopsis_hold.pop(event_id, None)
-            self.synopsis_hold.pop(target["id"], None)
+            self.forget_synopsis(event_id)
+            self.forget_synopsis(target["id"])
             merge.apply(target, db.event(event_id), reason)
             self.publish_removed(event_id)
             self.publish(target["id"])
-            self.verify_q.put_nowait(target["id"])
+            self.reverify(target["id"])
             return
+        # People overlapping on this camera are one activity (merge.py groups): fold it into one event before Qwen
+        # describes any of it. A person breaking a PPE rule keeps their own event, so the PPE check comes first.
+        zone_list = self.zones_of(e)
+        ppe_done = False
+        if settings.group_merge_max_s > 0 and merge.group_ok(db.event(event_id)):
+            if ppe.ppe_zones(zone_list):
+                await self.check_ppe(event_id)
+                ppe_done = True
+            if (grouped := merge.group_for(db.event(event_id), zone_list)) and self.merge_group(*grouped):
+                return
         a: dict = {}
         if away:  # named places, site rules and "what's normal" all describe the home view
             db.update_event(event_id, anomaly=None, anomaly_json=None, priority=None)
         else:
             self.record_areas(event_id)
-            await self.check_ppe(event_id)          # hard hat / hi-vis vest in a PPE zone (before the rules: it is one)
+            if not ppe_done:
+                await self.check_ppe(event_id)      # hard hat / hi-vis vest in a PPE zone (before the rules: it is one)
             policy.check(event_id, self.cameras.get(e["camera_id"]))  # e.g. an unrecognized person entering by an exterior door
             a = baseline.apply(event_id) or {}
         if a.get("reasons"):
@@ -349,18 +364,90 @@ class Pipeline:
             log.info("event %s: %s", event_id, note)
         return False
 
+    def zones_of(self, e: dict) -> list[dict] | None:
+        """The zones that apply to this event: its camera's, unless a PTZ camera was turned away (merge.zone_set)."""
+        return None if e.get("ptz_preset") else (self.cameras.get(e["camera_id"]) or {}).get("zones")
+
+    def forget_synopsis(self, event_id: int) -> None:
+        """The event is being merged: no held or deferred description of it is written (a re-verified merged event is
+        planned again; one Qwen is writing right now is dropped by _synopsis)."""
+        self.synopsis_hold.pop(event_id, None)
+        self.synopsis_deferred.discard(event_id)
+        self.verify_hold.discard(event_id)
+
+    def reverify(self, event_id: int) -> None:
+        """A merged event goes back to verification, or (a group whose people are still arriving) waits in
+        verify_hold so the whole activity is verified once."""
+        e = db.event(event_id)
+        if e and e["status"] == "pending" and merge.group_waiting(e, zone_list=self.zones_of(e)):
+            self.verify_hold.add(event_id)
+            return
+        self.verify_hold.discard(event_id)
+        self.verify_q.put_nowait(event_id)
+
+    def merge_group(self, target: dict, joins: list[tuple[dict, str]]) -> int:
+        """Fold an activity's other events into its earliest one (merge.group_for); each is checked again first, as
+        the operator or the pipeline may have changed it meanwhile. Returns how many were merged."""
+        n = 0
+        for b, why in joins:
+            a_now, b_now = db.event(target["id"]), db.event(b["id"])
+            if not (a_now and b_now and a_now["status"] in ("verified", "pending") and merge.joinable(b_now)
+                    and merge.group_ok(a_now) and merge.group_ok(b_now)):
+                continue
+            self.forget_synopsis(b["id"])
+            merge.apply(a_now, b_now, why)
+            self.publish_removed(b["id"])
+            n += 1
+        if n:
+            self.forget_synopsis(target["id"])
+            self.publish(target["id"])
+            self.reverify(target["id"])
+        return n
+
+    HOLD_STEP_S = 5.0          # a description waiting for its activity to end is looked at again this often
+    REVERIFY_POLL_S = 30.0     # how often the backfill tool's requests (merge.request_reverify) are picked up
+
+    def hold_tick(self, now: float | None = None) -> None:
+        """One pass of hold_loop. Held synopses are queued once their merge window has passed (events merged meanwhile
+        were removed from the hold), unless the activity is still going on (merge.group_waiting: people overlapping it
+        are still being tracked or verified, for at most group_merge_max_s); merged groups waiting in verify_hold go
+        to verification once their people are in; the backfill tool's requests are picked up."""
+        now = time.time() if now is None else now
+        for event_id, due in list(self.synopsis_hold.items()):
+            if due > now:
+                continue
+            e = db.event(event_id)
+            live = e and e["status"] == "verified" and not e["synopsis"]
+            if live and (event_id in self.synopsis_pending or merge.group_waiting(e, now, self.zones_of(e))):
+                # Qwen is still writing the version from before a merge (dropped when it returns), or more people may
+                # still join this activity: describe it once they have
+                self.synopsis_hold[event_id] = now + self.HOLD_STEP_S
+                continue
+            self.synopsis_hold.pop(event_id, None)
+            if live:
+                self.queue_synopsis(event_id)
+        for event_id in list(self.verify_hold):
+            e = db.event(event_id)
+            if not e or e["status"] != "pending":
+                self.verify_hold.discard(event_id)
+            elif not merge.group_waiting(e, now, self.zones_of(e)):
+                self.verify_hold.discard(event_id)
+                self.verify_q.put_nowait(event_id)
+        if now - self._reverify_polled >= self.REVERIFY_POLL_S:
+            self._reverify_polled = now
+            for event_id in merge.take_reverify_requests():
+                e = db.event(event_id)
+                if e and e["status"] == "pending":
+                    log.info("event %s: verifying again (merged by merge_groups)", event_id)
+                    self.reverify(event_id)
+
     async def hold_loop(self) -> None:
-        """Queue held synopses once their merge window has passed (events merged meanwhile were removed from the hold)."""
         while True:
             await asyncio.sleep(1)
-            now = time.time()
-            for event_id, due in list(self.synopsis_hold.items()):
-                if due > now:
-                    continue
-                self.synopsis_hold.pop(event_id, None)
-                e = db.event(event_id)
-                if e and e["status"] == "verified" and not e["synopsis"]:
-                    self.queue_synopsis(event_id)
+            try:
+                self.hold_tick()
+            except Exception:  # keep the loop alive
+                log.exception("synopsis hold pass failed")
 
     def synopsis_workers(self) -> int:
         """One synopsis at a time with one local model (as before). With a fallback model, enough workers that the
@@ -579,6 +666,12 @@ class Pipeline:
         # that column is the operator's correction ("Revert to original" would bring the false "handgun" back).
         result, _original = await weaponcheck.review(e, result, lambda: self.weapon_evidence(e))
         summary = result.get("summary", summary)
+        now_e = db.event(event_id)
+        if (not now_e or now_e["status"] != "verified" or now_e["end_ts"] != e["end_ts"]
+                or now_e.get("tracks") != e.get("tracks")):
+            # merged while Qwen was looking (merge.py): this describes only part of it; the merged event gets its own
+            log.info("event %s changed while Qwen described it (merged): description dropped", event_id)
+            return
         db.update_event(event_id, synopsis=summary, synopsis_json=result, threat=result.get("threat_level"), error=None)
         if not e.get("ptz_preset"):
             await policy.confirm_towing(event_id)   # a towing claim needs a second, focused look before a rule can break
@@ -640,6 +733,8 @@ class Pipeline:
         s = e.get("synopsis_json") or {}
         fb = e.get("feedback") or {}
         notes = [m["content"] for m in db.chat(event_id) if m["saved"]]
+        if (e.get("people") or 0) >= 2:  # a merged group (merge.py), so "group of people" / "several people" finds it
+            notes.append(f"A group of {e['people']} people, several people together")
         if e.get("areas"):  # named places, so "did anyone use the bathroom" finds "entered Bathroom 2"
             notes.append("Went to: " + ", ".join(f"entered {a['name']}" for a in e["areas"]))
         an = e.get("anomaly_json") or {}

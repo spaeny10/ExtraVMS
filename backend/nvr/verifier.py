@@ -458,7 +458,10 @@ class Verifier:
         if no_box:
             samples = ruleevents.sample_points(event, settings.verify_frames, settings.clip_pre_roll, settings.clip_post_roll)
         else:
-            samples = sample_path(event["path"], settings.verify_frames)
+            # a merged event (merge.py) spans several camera tracks, a group several people at once: a frame more per
+            # extra track, up to twice the usual, so each of them is likely to be looked at (and cropped for Qwen)
+            n = settings.verify_frames
+            samples = sample_path(event["path"], min(2 * n, n + len(event.get("tracks") or [1]) - 1))
         # vehicles also get one pre-roll frame from before the camera saw motion: what was already parked there
         # (boxless ones always: an object that was not there before arrived, see boxless_matches)
         pre_t = clip_start + 0.5 if ((label in parked.VEHICLE_LABELS or motion)

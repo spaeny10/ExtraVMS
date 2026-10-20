@@ -13,13 +13,26 @@ on a frame every `merge_gap_step_s` across the gap and must find a person where 
 one of them (`candidate_long` + `footage_check`).
 The merged A goes back through verification as one span (clip, YOLO, keyframes, re-ID, cells) and is
 described once. Every merge is logged with its reason so a wrong one is easy to spot.
+
+Groups: people who work together (a crew in a warehouse aisle) each get their own camera track, so one activity used to
+arrive as a dozen overlapping events, each verified and described on its own (T-304 cam1, 2026-10-20 15:37-15:45: 14
+events in 8 minutes). Person events on one camera that overlap, or follow within `track_merge_gap`, are one activity:
+`plan_groups` chains them (same class and PTZ view, the same include zone, nobody's touched them, no PPE violation of
+their own) into the earliest one, up to `group_merge_max_s` from its start to its last end, and `apply` folds them in
+the way fragments are folded, without re-ID agreement: different people, one activity. The event keeps its camera
+tracks (`tracks`) and the most people in view at once (`people`), so the description can say "a group of 4 people".
+A group keeps no re-ID vector: one fingerprint over different people would link or name the wrong person, so group
+events take no part in cross-camera journeys or identity matching (links confirmed before it became a group stay).
+Vehicles never group: each is described, fingerprinted and checked against the site rules on its own.
 """
 from __future__ import annotations
 
 import gc
+import json
 import logging
 import math
 import shutil
+import time
 
 import numpy as np
 
@@ -215,20 +228,215 @@ def footage_check(a: dict, b: dict, zone_list: list[dict] | None = None, model=N
     return f"footage: person stayed in view for {b['start_ts'] - a['end_ts']:.0f} s ({len(times)} frames checked)"
 
 
+def track_entry(e: dict, why: str | None = None) -> dict:
+    """One camera track inside a merged event: where it came from and the span it covered."""
+    end = e["end_ts"] if e.get("end_ts") is not None else e["start_ts"]
+    return {"event": e["id"], "track": e.get("track_id"), "from": e["start_ts"], "to": end, **({"why": why} if why else {})}
+
+
+def tracks_of(e: dict) -> list[dict]:
+    """The camera tracks an event is made of (itself, until something was merged into it)."""
+    return list(e.get("tracks") or []) or [track_entry(e)]
+
+
+def people_at_once(tracks: list[dict]) -> int:
+    """The most tracks in view at the same moment. The tracker closes a track `track_end_gap` after the camera lost
+    the person and the camera often re-finds them under a new id at once, so an overlap of up to OVERLAP_S is a
+    hand-off of one person, not a second one (each span is shortened by that much; a short track still counts)."""
+    marks = []
+    for m in tracks:
+        s = float(m["from"])
+        t = max(s + 1e-3, float(m["to"]) - OVERLAP_S)
+        marks += [(s, 1), (t, -1)]
+    best = n = 0
+    for _, d in sorted(marks):   # at the same instant an end comes before a start: a hand-off is not two people
+        n += d
+        best = max(best, n)
+    return max(1, best)
+
+
 def apply(a: dict, b: dict, reason: str = "") -> dict:
-    """Fold B into A: one span, one path; A goes back to `pending` for a fresh verification; B is gone."""
-    path = (a.get("path") or []) + (b.get("path") or [])
+    """Fold B into A: one span, one path; A goes back to `pending` for a fresh verification; B is gone.
+    The path is kept in time order (a group's tracks overlap); A keeps B's tracks in `tracks` and, for people,
+    the most in view at once in `people`. A group of people loses its re-ID vector (one fingerprint would mix them)."""
+    path = sorted((a.get("path") or []) + (b.get("path") or []),
+                  key=lambda p: p[0] if isinstance(p, (list, tuple)) and p else 0)
     rules = (a.get("rules") or []) + (b.get("rules") or [])
-    db.update_event(a["id"], end_ts=b["end_ts"], path=path, rules=rules, cells=cells.for_event(path), status="pending",
+    tracks = sorted(tracks_of(a) + [{**m, "why": m.get("why") or reason} for m in tracks_of(b)],
+                     key=lambda m: (m["from"], m["event"]))
+    n = people_at_once(tracks) if a["camera_class"] == "person" else 1
+    people = n if n >= 2 else None
+    db.update_event(a["id"], end_ts=max(a["end_ts"] or a["start_ts"], b["end_ts"]), path=path, rules=rules,
+                    cells=cells.for_event(path), status="pending", tracks=tracks, people=people,
                     camera_conf=max(a.get("camera_conf") or 0, b.get("camera_conf") or 0),
                     synopsis=None, synopsis_json=None, threat=None, error=None, detections=None, snapshot=None, clip=None,
                     areas=None, anomaly=None, anomaly_json=None, priority=None, policy=None, watched=None)
+    partners = [r["x"] for r in db.all("SELECT CASE WHEN a=? THEN b ELSE a END AS x FROM event_links WHERE (a=? OR b=?) "
+                                       "AND status='confirmed'", [b["id"], b["id"], b["id"]])]
     with db.lock:
         db.conn.execute("UPDATE locks SET event_id=? WHERE event_id=?", (a["id"], b["id"]))
         db.conn.execute("UPDATE chat_messages SET event_id=? WHERE event_id=?", (a["id"], b["id"]))
         db.conn.execute("DELETE FROM event_links WHERE a=? OR b=?", (b["id"], b["id"]))
+    if people:
+        db.execute("DELETE FROM reid_vec WHERE rowid=?", [a["id"]])
     db.delete_event(b["id"])
     shutil.rmtree(settings.data_dir / "events" / str(b["id"]), ignore_errors=True)  # event_dir() would recreate it
-    log.info("merged event %s into %s on %s (%s): %.0fs -> %.0fs", b["id"], a["id"], a["camera_id"], reason,
-             (a["end_ts"] or a["start_ts"]) - a["start_ts"], b["end_ts"] - a["start_ts"])
+    if partners:   # B was on a cross-camera journey: its other events' journey is rebuilt without it
+        from . import journeys
+        for x in set(partners) - {a["id"]}:
+            journeys.rebuild(x)
+    log.info("merged event %s into %s on %s (%s): %.0fs -> %.0fs%s", b["id"], a["id"], a["camera_id"], reason,
+             (a["end_ts"] or a["start_ts"]) - a["start_ts"], max(a["end_ts"] or a["start_ts"], b["end_ts"]) - a["start_ts"],
+             f", {people} people at once" if people else "")
     return db.event(a["id"])
+
+
+# ---------------------------------------------------------------- groups: one activity, several people
+
+GROUP_CLASSES = ("person",)   # vehicles stay one per vehicle: plates, fingerprints, parked spots and towing rules are per vehicle
+REVERIFY_KEY = "merge_reverify"   # settings row: events the backfill tool merged, for the running NVR to verify again
+
+
+def group_ok(e: dict | None) -> bool:
+    """May this event be part of a group: a closed person event nobody has touched, without a PPE violation of its own
+    (a person breaking a PPE rule keeps their own event: its marked frame, priority and alert are about them)."""
+    if not e or e.get("camera_class") not in GROUP_CLASSES or e.get("end_ts") is None:
+        return False
+    if (((e.get("detections") or {}).get("ppe")) or {}).get("verdict") == "violation":
+        return False
+    return untouched(e)
+
+
+def joinable(e: dict) -> bool:
+    """May join another event's group now: verified, or a merged group waiting to be verified again (made of verified
+    events; it is verified again as part of the bigger one)."""
+    return e["status"] == "verified" or (e["status"] == "pending" and len(e.get("tracks") or []) > 1)
+
+
+def zone_set(e: dict, zone_list: list[dict] | None) -> frozenset | None:
+    """The camera's include zones the object stood in (YOLO's matched boxes and the camera's own boxes); None when
+    the whole view counts (no include zones) or the PTZ camera was turned away (zones describe the home view)."""
+    zl = zones.normalize(zone_list)
+    inc = [i for i, z in enumerate(zl) if z["type"] == "include"]
+    if not inc or e.get("ptz_preset"):
+        return None
+    feet = [zones.foot(s["match"]["box"]) for s in (e.get("detections") or {}).get("samples") or [] if s.get("match")]
+    feet += [zones.foot(p[1:5]) for p in e.get("path") or []
+             if isinstance(p, (list, tuple)) and len(p) >= 5 and not ruleevents.whole_frame(p[1:5])]
+    return frozenset(i for i in inc if any(zones.point_in_polygon(x, y, zl[i]["points"]) for x, y in feet))
+
+
+def same_activity(a: dict, b: dict, zone_list: list[dict] | None) -> bool:
+    """Same camera, class and PTZ view, and (cameras with include zones) the same include zone."""
+    if a["camera_id"] != b["camera_id"] or a["camera_class"] != b["camera_class"]:
+        return False
+    if (a.get("ptz_preset") or None) != (b.get("ptz_preset") or None):
+        return False
+    za, zb = zone_set(a, zone_list), zone_set(b, zone_list)
+    return za is None or zb is None or bool(za & zb)
+
+
+def plan_groups(events: list[dict], zone_list: list[dict] | None, cap: float | None = None) -> list[dict]:
+    """Chain one camera's events into activities: [{target, joins: [(event, reason)], start, end, people}], every
+    event in exactly one (a lone event is a group of one). In start order, an event joins the latest group of the same
+    activity it overlaps (or starts within track_merge_gap after); if that would take the group past `cap` from its
+    start, it starts the next group instead: a busy camera yields one event per `cap` of activity, never a day-long
+    one. An event not verified yet never joins (it joins once it is; `joinable`) but may lead a group."""
+    cap = settings.group_merge_max_s if cap is None else cap
+    gap = settings.track_merge_gap
+    groups: list[dict] = []
+    for e in sorted(events, key=lambda x: (x["start_ts"], x["id"])):
+        end = e["end_ts"] if e["end_ts"] is not None else e["start_ts"]
+        home = next((g for g in reversed(groups)
+                     if same_activity(g["target"], e, zone_list) and e["start_ts"] <= g["end"] + gap), None)
+        if home is not None and max(home["end"], end) - home["start"] <= cap:
+            if not joinable(e):
+                continue   # not verified yet: it joins once it is
+            # the member it overlaps most (or the one that ended last before it) names the reason
+            over = max(home["spans"], key=lambda s: (min(s[2], end) - e["start_ts"], s[2]))
+            o = min(over[2], end) - e["start_ts"]
+            why = f"group: overlaps {over[0]} by {o:.0f} s" if o > 0 else f"group: starts {-o:.0f} s after {over[0]} ended"
+            home["joins"].append((e, why))
+            home["spans"].append((e["id"], e["start_ts"], end))
+            home["end"] = max(home["end"], end)
+            continue
+        groups.append({"target": e, "joins": [], "start": e["start_ts"], "end": end, "spans": [(e["id"], e["start_ts"], end)]})
+    for g in groups:
+        g["people"] = people_at_once([m for x in [g["target"], *(j for j, _ in g["joins"])] for m in tracks_of(x)])
+    return groups
+
+
+def group_events(camera_id: str, lo: float, hi: float) -> list[dict]:
+    """The camera's events between lo and hi that may group (verified, or pending again after a merge)."""
+    rows = db.all(f"SELECT id FROM events WHERE camera_id=? AND camera_class IN ({','.join('?' * len(GROUP_CLASSES))}) "
+                  "AND status IN ('verified','pending') AND end_ts IS NOT NULL AND end_ts>=? AND start_ts<=? ORDER BY start_ts",
+                  [camera_id, *GROUP_CLASSES, lo, hi])
+    return [e for r in rows if group_ok(e := db.event(r["id"]))]
+
+
+def group_for(b: dict, zone_list: list[dict] | None) -> tuple[dict, list[tuple[dict, str]]] | None:
+    """The just-verified event B's activity on its camera, when B shares it with other events: (target, joins), the
+    target being the activity's earliest event and joins every other joinable event of it (B among them, unless B is
+    the target). None when B is alone, may not group, or group merging is off."""
+    if settings.group_merge_max_s <= 0 or b["status"] != "verified" or not group_ok(b):
+        return None
+    cap = settings.group_merge_max_s
+    events = group_events(b["camera_id"], b["start_ts"] - cap, b["end_ts"] + cap)
+    for g in plan_groups(events, zone_list, cap):
+        ids = {g["target"]["id"], *(j["id"] for j, _ in g["joins"])}
+        if b["id"] in ids:
+            return (g["target"], g["joins"]) if g["joins"] else None
+    return None
+
+
+def group_waiting(e: dict, now: float | None = None, zone_list: list[dict] | None = None) -> bool:
+    """Should this event's description (or its verification after a merge) wait: another person event on its camera
+    and view that may still join its activity is open (being tracked) or pending (being verified) and overlaps it, or
+    starts within track_merge_gap after it, and the activity could still fit in group_merge_max_s. Never for longer
+    than that after the event ended, so a busy camera's description is never held for ever. A pending one must be
+    of the same activity (include zone; group_ok); an open one's path isn't complete yet, so it always counts."""
+    cap = settings.group_merge_max_s
+    if cap <= 0 or not group_ok(e):
+        return False
+    now = time.time() if now is None else now
+    end = e["end_ts"]
+    if now - end > cap:
+        return False
+    gap = settings.track_merge_gap
+    for r in db.all("SELECT id, status, start_ts, end_ts, ptz_preset FROM events WHERE camera_id=? AND id!=? AND camera_class=? "
+                    "AND status IN ('open','pending') AND start_ts<=? AND (end_ts IS NULL OR end_ts>=?)",
+                    [e["camera_id"], e["id"], e["camera_class"], end + gap, e["start_ts"] - gap]):
+        if (r["ptz_preset"] or None) != (e.get("ptz_preset") or None):
+            continue
+        if max(end, r["end_ts"] if r["end_ts"] is not None else now) - min(e["start_ts"], r["start_ts"]) > cap:
+            continue
+        if r["status"] == "pending":
+            o = db.event(r["id"])
+            # two merged groups side by side in different zones must not wait for each other
+            if not (o and group_ok(o) and same_activity(e, o, zone_list)):
+                continue
+        return True
+    return False
+
+
+def request_reverify(ids: list[int]) -> None:
+    """Ask the running NVR to verify these events again (its hold loop takes them, take_reverify_requests; being
+    pending, recover() picks them up at its next start anyway). One statement per id: a concurrent take loses none."""
+    for i in ids:
+        db.execute("INSERT INTO settings (key, value) VALUES (?, json_array(?)) "
+                   "ON CONFLICT(key) DO UPDATE SET value=json_insert(value, '$[#]', ?)", [REVERIFY_KEY, int(i), int(i)])
+
+
+def take_reverify_requests() -> list[int]:
+    """The ids the backfill tool asked to verify again, removed from the request (only if nothing was added meanwhile:
+    the rest is taken next time)."""
+    row = db.one("SELECT value FROM settings WHERE key=?", [REVERIFY_KEY])
+    if not row or row["value"] is None:
+        return []
+    cur = db.execute("DELETE FROM settings WHERE key=? AND value=?", [REVERIFY_KEY, row["value"]])
+    if not cur.rowcount:
+        return []
+    try:
+        return [int(x) for x in json.loads(row["value"])]
+    except (TypeError, ValueError):
+        return []

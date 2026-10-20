@@ -9,6 +9,7 @@
  */
 import type { NvrEvent, PlaybackQuality, TimelineEvent } from "./api";
 import { LIVE_LAG, chunkLen, firstChunkLen, spanAt, type Span } from "./playback";
+import { clampRange, type RangeLimits } from "./timeZoom";
 
 /** Playback starts this long before the event (Shawn, 2026-10-17: 10 s was too early; the strip has the rest). */
 export const PRE_ROLL_S = 2;
@@ -21,6 +22,12 @@ export const STRIP_HALF_S = ZOOM_HALF_S[0];
 /** ...and a long event, plus EVENT_MARGIN_S either side, fills at most this share of it. */
 export const STRIP_FILL = 0.6;
 export const EVENT_MARGIN_S = 10;
+/** Wheel / pinch zoom limits for the strip's width: the Timeline page's shortest window (1 min), and up to 2 h, or
+ *  wider for a long event, so the whole event (and its margins) is always within reach of a zoom out. */
+export const MIN_STRIP_S = 60;
+export const MAX_STRIP_S = 7200;
+/** How far past now the strip may be panned or zoomed: this share of its width (like the Timeline page), at least GROWING_S. */
+const FUTURE_SHARE = 0.15;
 /** A jump to an event (a tick, previous / next, Event start) lands this long before it starts. */
 export const JUMP_LEAD_S = 2;
 /** Arrow keys on the strip step this far. */
@@ -53,13 +60,35 @@ export const eventEnd = (e: Pick<NvrEvent, "start_ts" | "end_ts">, now: number):
  * event is shown with more of what led up to it), but never so far back that the event's end leaves it.
  */
 export function stripWindow(start: number, end: number, now: number, level = 0): Win {
+  return eventWindow(start, end, now, stripWidth(start, end, level));
+}
+/** The strip's width at zoom `level` for an event from `start` to `end` (see stripWindow). */
+export function stripWidth(start: number, end: number, level = 0): number {
   const half = ZOOM_HALF_S[Math.max(0, Math.min(ZOOM_HALF_S.length - 1, level))];
+  const len = Math.max(end, start) - start;
+  return Math.max(len + 2 * half, (len + 2 * EVENT_MARGIN_S) / STRIP_FILL);
+}
+/** A window `width` wide centred on the event, not running more than a little past `now` (but never so far back that
+ *  the event's end leaves it). */
+export function eventWindow(start: number, end: number, now: number, width: number): Win {
   const e1 = Math.max(end, start);
-  const width = Math.max(e1 - start + 2 * half, (e1 - start + 2 * EVENT_MARGIN_S) / STRIP_FILL);
   const mid = (start + e1) / 2;
   let s = mid - width / 2, e = mid + width / 2;
   const over = e - Math.max(now + GROWING_S, e1 + EVENT_MARGIN_S);
   if (over > 0) { s -= over; e -= over; }
+  return { start: s, end: e };
+}
+/** Wheel / pinch limits for an event's strip: MIN_STRIP_S to MAX_STRIP_S, or the widest zoom level when that is wider. */
+export const stripLimits = (ev: { start: number; end: number }): RangeLimits =>
+  ({ min: MIN_STRIP_S, max: Math.max(MAX_STRIP_S, stripWidth(ev.start, ev.end, ZOOM_HALF_S.length - 1)) });
+/** A window after a wheel, pinch or drag: its width within `lim` (around its centre), and not more than FUTURE_SHARE of
+ *  it (or GROWING_S) past now. */
+export function clampStrip(w: Win, now: number, lim: RangeLimits): Win {
+  const width = clampRange(w.end - w.start, lim);
+  const mid = (w.start + w.end) / 2;
+  let s = mid - width / 2, e = mid + width / 2;
+  const maxEnd = now + Math.max(GROWING_S, FUTURE_SHARE * width);
+  if (e > maxEnd) { s -= e - maxEnd; e = maxEnd; }
   return { start: s, end: e };
 }
 
@@ -68,14 +97,36 @@ export function stripWindow(start: number, end: number, now: number, level = 0):
  * the playhead (not running more than a little past `now`), so the playhead stays in view either way.
  */
 export function zoomWindow(ev: { start: number; end: number }, level: number, t: number, now: number): Win {
-  const w = stripWindow(ev.start, ev.end, now, level);
+  return zoomWindowWidth(ev, stripWidth(ev.start, ev.end, level), t, now);
+}
+/** zoomWindow for any width (the buttons step to the zoom levels' widths, and to the wheel limits past them). */
+export function zoomWindowWidth(ev: { start: number; end: number }, width: number, t: number, now: number): Win {
+  const w = eventWindow(ev.start, ev.end, now, width);
   if (t >= w.start && t <= w.end) return w;
-  const width = w.end - w.start;
   const e = Math.min(t + width / 2, Math.max(now + GROWING_S, t + 0.1 * width));
   return { start: e - width, end: e };
 }
 /** "±1 min" for a zoom level. */
-export const zoomLabel = (level: number): string => `±${Math.round(ZOOM_HALF_S[level] / 60)} min`;
+export const zoomLabel = (level: number): string => halfLabel(ZOOM_HALF_S[level]);
+/** "±30 s", "±1 min", "±2.5 min", "±15 min", "±1 h": half a strip's width, rounded to what reads at a glance. */
+export function halfLabel(half: number): string {
+  const tidy = (x: number) => String(Math.round(x * 2) / 2);
+  if (half < 57) return `±${Math.max(5, Math.round(half / 5) * 5)} s`;
+  if (half < 600) return `±${tidy(half / 60)} min`;
+  if (half < 3570) return `±${Math.round(half / 60)} min`;
+  return `±${tidy(half / 3600)} h`;
+}
+/**
+ * The −/+ buttons from a strip `width` wide: the next stop out (dir 1) or in (dir -1) that differs from it by more than
+ * 5%: the zoom levels' widths for this event, and the wheel limits past them; null when already there (disabled).
+ */
+export function zoomStep(ev: { start: number; end: number }, width: number, dir: -1 | 1): number | null {
+  const lim = stripLimits(ev);
+  const stops = [...new Set([lim.min, ...ZOOM_HALF_S.map((_, i) => stripWidth(ev.start, ev.end, i)), lim.max])]
+    .filter((x) => x >= lim.min && x <= lim.max).sort((a, b) => a - b);
+  const pick = dir > 0 ? stops.find((x) => x > width * 1.05) : [...stops].reverse().find((x) => x < width / 1.05);
+  return pick ?? null;
+}
 
 /** What to list (recordings and the camera's events) for window `w`: NEIGHBOUR_RANGE_S or one and a half times the
  *  window's width either side, whichever is more, so previous / next reach past it at any zoom; nothing past now. */
@@ -118,9 +169,12 @@ export function scaleMarks(w: Win, max: number, edge = 0.12): ScaleMark[] {
   return [];
 }
 
-/** The window moved so `t` is inside it again (playback ran past an edge, or a jump left it); same width. */
-export function followWindow(w: Win, t: number): Win {
+/** The window moved so `t` is inside it again (playback ran past an edge, or a jump left it); same width. `prev`: the
+ *  playhead before (playback moving on): when that was already outside, the viewer panned or zoomed away to look
+ *  elsewhere, and the window stays there. */
+export function followWindow(w: Win, t: number, prev?: number): Win {
   if (t >= w.start && t <= w.end) return w;
+  if (prev != null && (prev < w.start || prev > w.end)) return w;
   const width = w.end - w.start;
   const s = t > w.end ? t - 0.2 * width : t - 0.8 * width;
   return { start: s, end: s + width };
@@ -151,14 +205,35 @@ export function coverage(spans: Span[], w: Win): Coverage[] {
 /** Does any recording overlap [from, to]? */
 export const anyRecorded = (spans: Span[], from: number, to: number): boolean => spans.some((s) => s.end > from && s.start <= to);
 
-export type Tick = { id: number; frac: number; cls: string; title: string };
+/** `frac` where it starts, `len` its length as a share of the window (0 for an event still open: drawn a few px wide). */
+export type Tick = { id: number; frac: number; len: number; cls: string; title: string };
 
 /** The other events on the camera inside the window, as ticks (the viewer's own event is the highlighted span). */
 export function ticks(events: TimelineEvent[], w: Win, currentId: number, label: (e: TimelineEvent) => string): Tick[] {
   return events
     .filter((e) => e.id !== currentId && e.start_ts >= w.start && e.start_ts <= w.end)
     .sort((a, b) => a.start_ts - b.start_ts)
-    .map((e) => ({ id: e.id, frac: toFrac(e.start_ts, w), cls: `${e.camera_class} ${e.status}`, title: label(e) }));
+    .map((e) => {
+      const frac = toFrac(e.start_ts, w);
+      return { id: e.id, frac, len: e.end_ts == null ? 0 : Math.max(0, toFrac(e.end_ts, w) - frac), cls: `${e.camera_class} ${e.status}`, title: label(e) };
+    });
+}
+
+/** The camera's events the strip shows and previous / next step through: everything listed but masked ones (a mask,
+ *  or hidden by hand). */
+export const listedEvents = <E extends Pick<TimelineEvent, "status">>(events: E[]): E[] => events.filter((x) => x.status !== "masked");
+/** ...and the selected event among them, also when the listing doesn't have it (yet, or masked). */
+export function withSelected<E extends Pick<TimelineEvent, "id">>(events: E[], selected: E): E[] {
+  return events.some((x) => x.id === selected.id) ? events : [...events, selected];
+}
+/** The strip after switching the viewer to the event from `start` to `end`: the same width (the zoom is kept), centred
+ *  on it, or for an event too long for it, its start a fifth of the way in; not more than a little past now. */
+export function centreOn(w: Win, start: number, end: number, now: number): Win {
+  const width = w.end - w.start;
+  const len = Math.max(end, start) - start;
+  if (len + 2 * EVENT_MARGIN_S <= width) return eventWindow(start, end, now, width);
+  const s = start - 0.2 * width;
+  return { start: s, end: s + width };
 }
 
 /** Where a jump to an event lands. */
@@ -172,6 +247,21 @@ export function neighbour<E extends Pick<TimelineEvent, "start_ts">>(events: E[]
   const sorted = [...events].sort((a, b) => a.start_ts - b.start_ts);
   if (dir < 0) return [...sorted].reverse().find((e) => jumpTarget(e) < t - PREV_SLACK_S) ?? null;
   return sorted.find((e) => jumpTarget(e) > t + 1) ?? null;
+}
+
+/**
+ * Previous / next from the selected event `sel` with the playhead at `t`: while the playhead is on it (from where a jump
+ * to it lands to EVENT_MARGIN_S past its end), the event before or after it in time order, so stepping through the
+ * camera's events goes one by one, overlapping ones too; once playback (or a seek) has left it, the event before or
+ * after the playhead (neighbour), so Next never goes back to footage already played through.
+ */
+export function stepEvent<E extends Pick<TimelineEvent, "id" | "start_ts" | "end_ts">>(events: E[], sel: E, t: number, dir: -1 | 1, now: number): E | null {
+  const onSel = t >= jumpTarget(sel) - 0.5 && t <= eventEnd(sel, now) + EVENT_MARGIN_S;
+  if (!onSel) return neighbour(events, t, dir);
+  const sorted = [...events].sort((a, b) => a.start_ts - b.start_ts || a.id - b.id);
+  const i = sorted.findIndex((x) => x.id === sel.id);
+  if (i < 0) return neighbour(events, t, dir);
+  return sorted[i + dir] ?? null;
 }
 
 /** Playback asked for exactly at a recording's listed start can miss it (MediaMTX answers 404: the request's time is

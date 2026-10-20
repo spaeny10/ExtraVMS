@@ -19,7 +19,7 @@ import { yoloFallbackText, yoloState } from "./yoloStatus";
 import { vlmSub, vlmValue } from "./vlmStatus";
 import { sdStatusText } from "./sdcard";
 import { detectionsText, livePath } from "./cameraStreams";
-import { checkingText, feedCards } from "./liveFeed";
+import { type ClassFilter, FEED_FILTER_KEY, checkingText, feedCards, loadFeedFilter, saveFeedFilter } from "./liveFeed";
 import { TalkdownPanel } from "./TalkdownPanel";
 import { DeterrencePanel } from "./DeterrencePanel";
 import { hasDeterrence } from "./deterrence";
@@ -206,6 +206,36 @@ export function FeedMore({ shown, total, onMore }: { shown: number; total: numbe
   return <button type="button" className="ghost small feed-more" onClick={onMore}>Show more ({total - shown} older)</button>;
 }
 
+/** Live → "Latest activity": the viewer's People / Vehicles / PPE pills, remembered in this browser under `key`. */
+export function useFeedFilter(key: string = FEED_FILTER_KEY): [ClassFilter, (patch: Partial<ClassFilter>) => void] {
+  const [filter, setFilter] = useState<ClassFilter>(() => loadFeedFilter(key));
+  const change = (patch: Partial<ClassFilter>) => {
+    const next = { ...filter, ...patch };
+    setFilter(next);
+    saveFeedFilter(next, key);
+  };
+  return [filter, change];
+}
+
+/** The Timeline's "Show [People] [Vehicles] [PPE violations]" pills at the top of the activity column (cards only:
+ *  the tiles' badges are not filtered). */
+export function FeedFilterChips({ filter, onChange }: { filter: ClassFilter; onChange: (patch: Partial<ClassFilter>) => void }) {
+  return (
+    <div className="feed-filters" role="group" aria-label="Show">
+      <span className="muted small">Show</span>
+      <button type="button" className={`chip ${filter.person ? "on-person" : ""}`} aria-pressed={filter.person}
+        onClick={() => onChange({ person: !filter.person })}>People</button>
+      <button type="button" className={`chip ${filter.vehicle ? "on-vehicle" : ""}`} aria-pressed={filter.vehicle}
+        onClick={() => onChange({ vehicle: !filter.vehicle })}>Vehicles</button>
+      <button type="button" className={`chip ${filter.ppe ? "on-ppe" : ""}`} aria-pressed={filter.ppe}
+        onClick={() => onChange({ ppe: !filter.ppe })} title="Only events that broke a PPE rule">PPE violations</button>
+    </div>
+  );
+}
+
+/** The column's muted line when the pills hide every card there is. */
+export const NO_FILTER_MATCH = "Nothing matches these filters";
+
 /** The activity feed filtered by painted regions, with a note and a way to clear them. */
 function RegionNote({ cameras }: { cameras: Camera[] }) {
   const regionMap = useRegions();
@@ -243,8 +273,10 @@ export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: n
     ? [...new Map([...scopedEvents, ...recent].map((e) => [e.id, e])).values()].sort((a, b) => b.start_ts - a.start_ts)
     : recent;
   const feed = pool.filter((e) => !scoped || (regionMap[e.camera_id] && regionPass(e, regionMap[e.camera_id])));
-  // vehicles still being verified are counted, not shown (liveFeed.ts); the tiles' badge still reads `recent`
-  const { cards, checking } = feedCards(feed);
+  // vehicles still being verified are counted, not shown (liveFeed.ts); the tiles' badge still reads `recent`.
+  // The People / Vehicles / PPE pills filter the cards (and the vehicles counted) only.
+  const [classFilter, setClassFilter] = useFeedFilter();
+  const { cards, checking, hidden } = feedCards(feed, classFilter);
   const [feedShown, showMore] = useFeedCount(paintedKey);   // back to 12 when the painted cameras change, not per stroke
   const [open, setOpen] = useState<number | null>(null);
   // SD = the sub stream (light); HD = the recorded main stream. A camera the viewer never picked for is on Auto
@@ -308,10 +340,12 @@ export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: n
           {cameras.length > 1 && <p className="muted small center">Swipe the picture or tap a thumbnail to switch cameras.</p>}
           <aside className="live-feed">
             <h3>Latest activity</h3>
+            <FeedFilterChips filter={classFilter} onChange={setClassFilter} />
             {checking > 0 && <p className="muted small">{checkingText(checking)}</p>}
             <RegionNote cameras={cameras} />
             {recent.length === 0 && <p className="muted">Nothing yet.</p>}
             {recent.length > 0 && feed.length === 0 && <p className="muted">Nothing recent on that camera passed through the painted region.</p>}
+            {cards.length === 0 && hidden > 0 && <p className="muted small">{NO_FILTER_MATCH}</p>}
             {cards.slice(0, feedShown).map((e) => <EventCard key={e.id} e={e} cameraName={name(e.camera_id)} onOpen={() => setOpen(e.id)} />)}
             <FeedMore shown={feedShown} total={cards.length} onMore={showMore} />
           </aside>
@@ -354,10 +388,12 @@ export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: n
         </div>
         <aside className="live-feed">
           <h3>Latest activity</h3>
+          <FeedFilterChips filter={classFilter} onChange={setClassFilter} />
           {checking > 0 && <p className="muted small">{checkingText(checking)}</p>}
           <RegionNote cameras={cameras} />
           {recent.length === 0 && <p className="muted">Nothing yet.</p>}
           {recent.length > 0 && feed.length === 0 && <p className="muted">Nothing recent on that camera passed through the painted region.</p>}
+          {cards.length === 0 && hidden > 0 && <p className="muted small">{NO_FILTER_MATCH}</p>}
           {cards.slice(0, feedShown).map((e) => (
             <EventCard key={e.id} e={e} cameraName={name(e.camera_id)} onOpen={() => setOpen(e.id)} />
           ))}

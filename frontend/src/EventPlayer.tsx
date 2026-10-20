@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fmtTime, type NvrEvent, type PlaybackQuality, type SiteApi, type TimelineEvent } from "./api";
 import {
-  KEY_STEP_S, ZOOM_HALF_S, afterPlaybackError, atFrac, chunkAt, chunkStep, clipOrigin, clock, coverage, defaultQuality, eventEnd,
-  followWindow, footageAvailable, initialSource, jumpTarget, listingRange, needsListing, neighbour, nextChunkStart, pauseAtEnd,
-  playStart, prefetchLead, relLabel, scaleMarks, sdUsable, snapToRecorded, stripWindow, ticks, toFrac, viaHub, zoomLabel, zoomWindow,
-  type Source, type Win,
+  KEY_STEP_S, afterPlaybackError, anyRecorded, atFrac, centreOn, chunkAt, chunkStep, clampStrip, clipOrigin, clock, coverage,
+  defaultQuality, eventEnd, followWindow, footageAvailable, halfLabel, initialSource, jumpTarget, listedEvents, listingRange,
+  needsListing, nextChunkStart, pauseAtEnd, playStart, prefetchLead, relLabel, scaleMarks, sdUsable, snapToRecorded,
+  stepEvent, stripLimits, stripWindow, ticks, toFrac, viaHub, withSelected, zoomStep, zoomWindowWidth, type Source, type Win,
 } from "./eventPlayback";
 import { httpStatus } from "./liveFallback";
 import { PREFETCH_LEAD_S, dropPrefetch, isBuffered, mergeSpans, nowS, prefetchChunk, spanAt, useLatestFrame, type Prefetched, type Span } from "./playback";
+import { fracIn, hoverFrameTime, isDrag, panWindow, pinchStart, pinchWindow, thumbLeft, wheelWindow, type PinchStart } from "./timeZoom";
 import { Icon, useIsPhone } from "./ui";
 
 /** What the event viewer can do with the player: seek it (Ask answers' frames, notes) to epoch `t`, paused if asked. */
@@ -31,6 +32,16 @@ type Listing = { spans: Span[] | null | undefined; events: TimelineEvent[]; from
 type Chunk = { start: number; len: number; src: string; key: number; cont: boolean; retry: number; asked: number };
 type Stopped = "failed" | "end" | "live" | null;
 let chunkSeq = 0;
+/** The event the strip is about: the viewer's event, or one picked on the strip (a tick, previous / next) whose full
+ *  record the viewer is still fetching. */
+type Selected = Pick<TimelineEvent, "id" | "start_ts" | "end_ts" | "status" | "camera_class" | "yolo_class">;
+/** A press on the strip: `pan` drags the window, `scrub` the playhead (grabbed within GRAB_PX of it). */
+type StripDrag = { mode: "pan" | "scrub"; id: number; x0: number; w0: Win; moving: boolean; type: string };
+/** How close to the playhead (px) a press grabs it to scrub, as on the Timeline page; a fingertip is less precise. */
+const GRAB_PX = 12;
+const GRAB_TOUCH_PX = 28;
+/** Hover thumbnails: the Timeline page's width, so the two share the browser's cache of the same frame URLs. */
+const THUMB_W = 320;
 
 /** The end of the buffered range at `t` (or `t` itself when nothing is buffered there). */
 const bufferedEnd = (v: HTMLVideoElement, t: number): number => {
@@ -64,7 +75,7 @@ const fullscreenEl = (): Element | null => document.fullscreenElement ?? (docume
  * The pure decisions are in eventPlayback.ts. `startAt`: where to start instead (a phone coming back to the Clip tab, or
  * a chat frame tapped while the player was hidden), read when it mounts.
  */
-export function EventPlayer({ e, site, startAt, onTime, handle, onFootage }: {
+export function EventPlayer({ e, site, startAt, onTime, handle, onFootage, onSelectEvent }: {
   e: NvrEvent; site: SiteApi;
   startAt?: { t: number; paused: boolean } | null;
   /** the playhead (epoch seconds), a few times a second while it moves */
@@ -72,6 +83,9 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage }: {
   handle?: React.RefObject<EventPlayerHandle | null>;
   /** is any footage of the event there (the clip, or a recording overlapping it)? undefined while that isn't known */
   onFootage?: (available: boolean | undefined) => void;
+  /** the viewer switched to another event of the camera on the strip (a tick, previous / next): the video goes on from
+   *  there; `remount` = it has no recording, so the viewer should start a new player on it (its clip or snapshot) */
+  onSelectEvent?: (x: TimelineEvent, o: { remount: boolean }) => void;
 }) {
   const cam = e.camera_id;
   const isPhone = useIsPhone();
@@ -79,7 +93,10 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage }: {
   const live = e.status === "open" || e.status === "pending";
   const t0 = clipOrigin(e);
   const from = startAt?.t ?? playStart(e);
-  const [zoom, setZoom] = useState(0);
+  // the event the strip is about: `e`, or one picked on the strip until the viewer hands over its full record as `e`
+  const [pick, setPick] = useState<Selected | null>(null);
+  const cur: Selected = pick && pick.id !== e.id ? pick : e;
+  useEffect(() => { setPick(null); }, [e.id]);   // the viewer's record of it arrived (or it moved on): `e` again
   const [win, setWin] = useState<Win>(() => {
     const now = nowS();
     return followWindow(stripWindow(e.start_ts, eventEnd(e, now), now), from);
@@ -112,8 +129,9 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage }: {
   const blobInUse = useRef<string | null>(null);
   const firstChunk = useRef(true);             // the snapshot is the poster of the first chunk only, not of every switch
   const advancing = useRef<number | null>(null);   // the chunk (key) already handing over to the next
-  const st = useRef({ spans, quality, remote, chunk, source, win, stopped });
-  st.current = { spans, quality, remote, chunk, source, win, stopped };
+  const lim = stripLimits({ start: cur.start_ts, end: eventEnd(cur, nowS()) });   // wheel / pinch zoom limits
+  const st = useRef({ spans, quality, remote, chunk, source, win, stopped, lim });
+  st.current = { spans, quality, remote, chunk, source, win, stopped, lim };
 
   useEffect(() => { canSd(site).then(setCaps); }, [site]);
 
@@ -123,25 +141,30 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage }: {
     const { from: lo, to: hi } = listingRange(w, nowS());
     return site.recordings(cam, lo, hi)
       // masked events (a mask, or hidden by hand) are no ticks and no Prev / Next stops
-      .then((r) => ({ spans: mergeSpans(r.spans), events: r.events.filter((x) => x.status !== "masked"), from: lo, to: hi }))
+      .then((r) => ({ spans: mergeSpans(r.spans), events: listedEvents(r.events), from: lo, to: hi }))
       .catch(() => ({ spans: null, events: [], from: lo, to: hi }));
   }, [site, cam]);
+  // (at once the first time; then after the strip has rested 200 ms, so a drag or wheel doesn't list at every step)
   useEffect(() => {
     if (listing.spans !== undefined && !needsListing(listing, win, nowS())) return;
     let alive = true;
-    list(win).then((l) => { if (alive) setListing(l); });
-    return () => { alive = false; };
+    const go = () => { list(win).then((l) => { if (alive) setListing(l); }); };
+    const id = listing.spans === undefined ? (go(), 0) : window.setTimeout(go, 200);
+    return () => { alive = false; window.clearTimeout(id); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [win.start, win.end, list]);
 
   const available = footageAvailable({ spans, start: e.start_ts, end: eventEnd(e, nowS()), hasClip });
   useEffect(() => { onFootage?.(available); }, [available, onFootage]);
 
-  const moveTo = (x: number) => {
+  /** The playhead is at `x` now. `jump` (a seek, a new chunk): the strip follows it there; playing on, it follows only
+   *  while the playhead was in view (the viewer may have panned or zoomed away to look elsewhere). */
+  const moveTo = (x: number, jump = true) => {
+    const prev = tRef.current;
     tRef.current = x;
     setT(x);
     onTime?.(x);
-    setWin((w) => followWindow(w, x));
+    setWin((w) => followWindow(w, x, jump ? undefined : prev));
   };
 
   /** play(), and if the browser refuses sound without a tap, muted; refused even muted: show it paused. */
@@ -187,7 +210,7 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage }: {
     setStopped(null);
     setSource({ kind: "recording", at });
     setChunk({ start: at, len, src, key: ++chunkSeq, cont, retry, asked: performance.now() });
-    moveTo(at);
+    moveTo(at, !cont);
   };
   /** The chunk is running out: download the next one now so the switch is seamless. */
   const prefetchNext = (c: Chunk) => {
@@ -306,7 +329,7 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage }: {
     if (st.current.stopped === "failed" && c) { setWant(true); return again(c, true); }
     if (wantPlay.current) { setWant(false); v?.pause(); return; }
     setWant(true);
-    if (st.current.stopped === "end" || st.current.stopped === "live") return seek(playStart(e));   // from the top
+    if (st.current.stopped === "end" || st.current.stopped === "live") return seek(playStart(cur));   // from the top
     if (!v) return;
     if (st.current.source?.kind === "recording" && c && v.ended) advance(c, v);   // play() would restart the chunk
     else playNow(v);
@@ -361,7 +384,8 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage }: {
   }, [scrubT]);
   const caughtUp = () => { if (scrubT == null && frames.shot) frames.clear(); };
 
-  // ---- the strip: drag or tap to scrub; a tap on a tick is the tick's own click (it goes there)
+  // ---- the strip, like the Timeline page's (timeZoom.ts): drag to pan, drag the playhead to scrub, a click or tap to
+  // go there (a tick: switch to that event), the wheel or a pinch to zoom around the cursor, hover for a thumbnail
   const strip = useRef<HTMLDivElement | null>(null);
   const [stripW, setStripW] = useState(0);
   useEffect(() => {
@@ -372,50 +396,148 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage }: {
     setStripW(el.clientWidth);
     return () => ro.disconnect();
   }, []);
-  const drag = useRef<{ x0: number; id: number; moving: boolean } | null>(null);
-  const timeAtX = (clientX: number) => {
+  const drag = useRef<StripDrag | null>(null);
+  const [dragMode, setDragMode] = useState<StripDrag["mode"] | null>(null);   // a drag under way (cursor, no hover)
+  const touches = useRef(new Map<number, number>());   // touch pointerId -> clientX, for the pinch
+  const pinch = useRef<PinchStart | null>(null);
+  const timeAtX = (clientX: number) => atFrac(fracIn(clientX, strip.current!.getBoundingClientRect()), st.current.win);
+
+  // Hover: the recording's frame at that time (the Timeline page's useLatestFrame and frame URLs: one request in flight,
+  // whole seconds), or over a tick that event's snapshot.
+  const [hover, setHover] = useState<{ x: number; t: number; tick: number | null } | null>(null);
+  const hoverFrames = useLatestFrame(THUMB_W, frameUrlFor);
+  const endHover = () => { setHover(null); hoverFrames.clear(); };
+  const endHoverRef = useRef(endHover);
+  endHoverRef.current = endHover;
+  const hoverAt = (clientX: number, target: Element) => {
     const r = strip.current!.getBoundingClientRect();
-    return atFrac((clientX - r.left) / Math.max(1, r.width), st.current.win);
+    const t = atFrac(fracIn(clientX, r), st.current.win);
+    const tickEl = target.closest<HTMLElement>(".ep-tick");
+    const tick = tickEl ? Number(tickEl.dataset.id) : null;
+    setHover({ x: clientX - r.left, t, tick });
+    const at = hoverFrameTime(t, nowS());
+    const sp = st.current.spans;
+    if (tick != null || at == null || (sp && !spanAt(sp, t))) hoverFrames.stop();   // a snapshot, live, or not recorded
+    else hoverFrames.request(cam, at);
   };
+
   const onPointerDown = (ev: React.PointerEvent) => {
     if (ev.button !== 0) return;
-    drag.current = { x0: ev.clientX, id: ev.pointerId, moving: false };
+    const touch = ev.pointerType === "touch";
+    if (touch) {
+      touches.current.set(ev.pointerId, ev.clientX);
+      if (touches.current.size === 2) {
+        // a second finger: from pan / scrub to pinch zoom
+        if (drag.current?.mode === "scrub" && drag.current.moving) setScrubT(null);
+        drag.current = null;
+        setDragMode(null);
+        const xs = [...touches.current.values()];
+        pinch.current = pinchStart(xs[0], xs[1], st.current.win);
+        try { strip.current?.setPointerCapture(ev.pointerId); } catch { /* released */ }
+        return;
+      }
+    }
+    const r = strip.current!.getBoundingClientRect();
+    const phX = toFrac(shownT, win) * r.width;
+    const grab = shownT >= win.start && shownT <= win.end && Math.abs(ev.clientX - r.left - phX) <= (touch ? GRAB_TOUCH_PX : GRAB_PX);
+    drag.current = { mode: grab ? "scrub" : "pan", id: ev.pointerId, x0: ev.clientX, w0: st.current.win, moving: false, type: ev.pointerType };
+    endHover();
   };
   const onPointerMove = (ev: React.PointerEvent) => {
+    if (touches.current.has(ev.pointerId)) {
+      touches.current.set(ev.pointerId, ev.clientX);
+      const xs = [...touches.current.values()];
+      if (pinch.current) {
+        if (xs.length >= 2) {
+          const w = pinchWindow(pinch.current, xs[0], xs[1], strip.current!.getBoundingClientRect(), st.current.lim);
+          setWin(clampStrip(w, nowS(), st.current.lim));
+        }
+        return;
+      }
+    }
     const d = drag.current;
-    if (!d || d.id !== ev.pointerId) return;
+    if (!d) { if (ev.pointerType !== "touch") hoverAt(ev.clientX, ev.target as Element); return; }
+    if (d.id !== ev.pointerId) return;
     if (!d.moving) {
-      if (Math.abs(ev.clientX - d.x0) < 6) return;
+      if (!isDrag(ev.clientX - d.x0, d.type)) return;
       d.moving = true;
+      setDragMode(d.mode);
       strip.current?.setPointerCapture(ev.pointerId);   // only now: a plain tap must still reach a tick's button
     }
-    setScrubT(timeAtX(ev.clientX));
+    if (d.mode === "scrub") setScrubT(timeAtX(ev.clientX));
+    else setWin(clampStrip(panWindow(d.w0, ev.clientX - d.x0, strip.current!.clientWidth), nowS(), st.current.lim));
   };
   const onPointerUp = (ev: React.PointerEvent) => {
+    touches.current.delete(ev.pointerId);
+    if (pinch.current) {
+      if (touches.current.size < 2) pinch.current = null;   // lifting a finger ends the pinch (no tap to seek)
+      drag.current = null;
+      return;
+    }
     const d = drag.current;
     drag.current = null;
+    setDragMode(null);
     if (!d || d.id !== ev.pointerId) return;
-    if (d.moving) { setScrubT(null); seek(timeAtX(ev.clientX)); return; }
+    if (d.moving) {
+      if (d.mode === "scrub") { setScrubT(null); seek(timeAtX(ev.clientX)); }
+      return;
+    }
     if (!(ev.target as Element).closest(".ep-tick")) seek(timeAtX(ev.clientX));
   };
-  const onPointerCancel = () => { drag.current = null; setScrubT(null); };
+  const onPointerCancel = (ev: React.PointerEvent) => {
+    touches.current.delete(ev.pointerId);
+    pinch.current = null;
+    drag.current = null;
+    setDragMode(null);
+    setScrubT(null);
+  };
+  // The wheel zooms around the cursor; shift+wheel or a sideways swipe pans. Not passive, so the page doesn't scroll.
+  useEffect(() => {
+    const el = strip.current;
+    if (!el) return;
+    const onWheel = (ev: WheelEvent) => {
+      ev.preventDefault();
+      const r = el.getBoundingClientRect();
+      const { lim } = st.current;
+      setWin((w) => clampStrip(wheelWindow(w, ev, fracIn(ev.clientX, r), r.width, lim), nowS(), lim));
+      endHoverRef.current();   // what is under the cursor changed: the next move shows it
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
+
+  const now = nowS();
+  const end = eventEnd(cur, now);
+  const evRange = { start: cur.start_ts, end };
+  const width = win.end - win.start;
+  const zoomOut = zoomStep(evRange, width, 1), zoomIn = zoomStep(evRange, width, -1);
+  /** −/+: the next zoom level's width (eventPlayback.ts zoomStep), around the event when the playhead is in it. */
+  const zoomTo = (w: number | null) => { if (w != null) setWin(zoomWindowWidth(evRange, w, scrubT ?? tRef.current, nowS())); };
   const onKeyDown = (ev: React.KeyboardEvent) => {
+    if (ev.key === "+" || ev.key === "=") { ev.preventDefault(); return zoomTo(zoomIn); }
+    if (ev.key === "-") { ev.preventDefault(); return zoomTo(zoomOut); }
     if (ev.key !== "ArrowLeft" && ev.key !== "ArrowRight") return;
     ev.preventDefault();
     const back = ev.key === "ArrowLeft";
     seek(tRef.current + (back ? -KEY_STEP_S : KEY_STEP_S), false, back ? -1 : 1);
   };
 
-  const now = nowS();
-  const end = eventEnd(e, now);
-  const zoomTo = (level: number) => {
-    setZoom(level);
-    setWin(zoomWindow({ start: e.start_ts, end: eventEnd(e, nowS()) }, level, scrubT ?? tRef.current, nowS()));
+  const label = (x: Selected) => `${x.yolo_class ?? x.camera_class} · ${fmtTime(x.start_ts)}${x.status === "rejected" ? " · rejected" : ""}`;
+  const marks = ticks(listing.events, win, cur.id, label);
+  const all = withSelected(listing.events, cur as TimelineEvent);
+  const selected = all.find((x) => x.id === cur.id)!;
+  const prev = stepEvent(all, selected, t, -1, now), next = stepEvent(all, selected, t, 1, now);
+  /** Switch the viewer to event `x` of this camera: the strip centres on it at the same zoom, the video goes on from just
+   *  before it, and the viewer (onSelectEvent) shows its details. */
+  const select = (x: TimelineEvent) => {
+    const at = nowS();
+    const { source: src, spans: sp } = st.current;
+    const remount = (src?.kind === "clip" || src?.kind === "still") && Array.isArray(sp) && !anyRecorded(sp, x.start_ts - 5, eventEnd(x, at));
+    setPick(x);
+    setWin((w) => centreOn(w, x.start_ts, eventEnd(x, at), at));
+    if (!remount) seek(jumpTarget(x));
+    onSelectEvent?.(x, { remount });
   };
-  const label = (x: TimelineEvent) => `${x.yolo_class ?? x.camera_class} · ${fmtTime(x.start_ts)}${x.status === "rejected" ? " · rejected" : ""}`;
-  const marks = ticks(listing.events, win, e.id, label);
-  const all = listing.events.some((x) => x.id === e.id) ? listing.events : [...listing.events, { ...e, verdict: null, has_synopsis: 0 } as TimelineEvent];
-  const prev = neighbour(all, t, -1), next = neighbour(all, t, 1);
   const pieces = spans ? coverage(spans, win) : null;
   const gaps = pieces?.some((p) => !p.recorded && p.end - p.start > 2);
   // round times between the end labels: about one per 80 px, none within 95 px of an end (an end label is ~60 px wide)
@@ -425,6 +547,12 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage }: {
   const pct = (x: number) => `${(toFrac(x, win) * 100).toFixed(3)}%`;
   const poster = e.snapshot ? site.media(e, "snapshot.jpg", 960) : undefined;
   const hasVideo = (source?.kind === "recording" && chunk) || source?.kind === "clip";
+  // the hover thumbnail: a tick's snapshot, else the recording's frame (not recorded / live: just the time)
+  const thumbW = Math.min(THUMB_W, sw);
+  const hoverEvent = hover?.tick != null ? listing.events.find((x) => x.id === hover.tick) ?? null : null;
+  const hoverGap = hover != null && hoverEvent == null && Array.isArray(spans) && !spanAt(spans, hover.t);
+  const hoverShot = hover != null && hoverEvent == null && !hoverGap && hoverFrameTime(hover.t, now) != null && hoverFrames.shot?.cam === cam ? hoverFrames.shot : null;
+  const hoverText = hover ? `${clock(hover.t)} · ${relLabel(hover.t, cur.start_ts, end)}` : "";
 
   const onError = async (c: Chunk) => {
     const status = c.src.startsWith("blob:") ? null : await httpStatus(c.src);
@@ -461,7 +589,7 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage }: {
             }}
             onTimeUpdate={(ev) => {
               const at = chunk.start + ev.currentTarget.currentTime;
-              if (scrubT == null) moveTo(at);
+              if (scrubT == null) moveTo(at, false);
               if (chunk.start + chunk.len - at < prefetchLead(chunk.len, PREFETCH_LEAD_S)) prefetchNext(chunk);
             }}
             onError={() => onError(chunk)}
@@ -469,7 +597,7 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage }: {
         ) : source?.kind === "clip" ? (
           <video ref={attachVideo} className="clip" src={site.media(e, "clip.mp4")} poster={poster} autoPlay={wantPlay.current} muted={muted} playsInline
             onClick={toggle}
-            onTimeUpdate={(ev) => { if (scrubT == null) moveTo(t0 + ev.currentTarget.currentTime); }}
+            onTimeUpdate={(ev) => { if (scrubT == null) moveTo(t0 + ev.currentTarget.currentTime, false); }}
             onPlay={(ev) => { if (ev.currentTarget === video.current) setWant(true); }}
             onPause={(ev) => { if (ev.currentTarget === video.current && !ev.currentTarget.ended) setWant(false); }}
             onEnded={() => setWant(false)}
@@ -518,26 +646,45 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage }: {
         <p className="muted small">The footage for this event is no longer recorded (retention policy); only the snapshot remains.</p>
       )}
 
-      <div className="ep-strip" ref={strip} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}
-        onPointerCancel={onPointerCancel}>
-        <div className={`ep-track ${pieces ? "" : "unknown"}`} role="slider" tabIndex={0} onKeyDown={onKeyDown}
-          aria-label="Playback position around the event (arrow keys: 5 s; Space: play or pause)"
-          aria-valuemin={0} aria-valuemax={Math.round(win.end - win.start)} aria-valuenow={Math.round(Math.min(win.end, Math.max(win.start, shownT)) - win.start)}
-          aria-valuetext={`${clock(shownT)} (${relLabel(shownT, e.start_ts, end)})`}>
-          {pieces?.map((p) => (
-            <div key={p.start} className={p.recorded ? "ep-rec" : "ep-gap"} style={{ left: pct(p.start), width: pct(win.start + p.end - p.start) }}
-              title={p.recorded ? `Recorded ${clock(p.start)}–${clock(p.end)}` : `Not recorded ${clock(p.start)}–${clock(p.end)}`} />
+      <div className="ep-strip-wrap">
+        {hover && !dragMode && (hoverEvent || hoverGap || hoverShot) && (
+          <div className="tl-thumb ep-thumb" style={{ left: thumbLeft(hover.x, thumbW, sw), width: thumbW }}>
+            {hoverEvent ? (
+              <div className="ep-thumb-snap">
+                <span>No snapshot</span>
+                <img src={site.media(hoverEvent, "snapshot.jpg", THUMB_W)} alt="" onError={(ev) => { ev.currentTarget.style.display = "none"; }} />
+              </div>
+            ) : hoverShot?.url ? <img src={hoverShot.url} alt="" />
+              : <div className="tl-thumb-gap">{hoverGap ? "Not recorded" : "No recording"}</div>}
+            <div className="tl-thumb-label">{hoverEvent ? label(hoverEvent) : hoverText}</div>
+          </div>
+        )}
+        <div className={`ep-strip${dragMode === "pan" ? " panning" : dragMode === "scrub" ? " scrubbing" : ""}`} ref={strip}
+          onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel}
+          onPointerLeave={() => { if (!drag.current) endHover(); }}>
+          <div className={`ep-track ${pieces ? "" : "unknown"}`} role="slider" tabIndex={0} onKeyDown={onKeyDown}
+            aria-label="Playback position around the event (arrow keys: 5 s; + and −: zoom; Space: play or pause)"
+            aria-valuemin={0} aria-valuemax={Math.round(width)} aria-valuenow={Math.round(Math.min(win.end, Math.max(win.start, shownT)) - win.start)}
+            aria-valuetext={`${clock(shownT)} (${relLabel(shownT, cur.start_ts, end)})`}>
+            {pieces?.map((p) => (
+              <div key={p.start} className={p.recorded ? "ep-rec" : "ep-gap"} style={{ left: pct(p.start), width: pct(win.start + p.end - p.start) }} />
+            ))}
+            {scale.map((m) => <div key={m.t} className="ep-grid" style={{ left: `${(m.frac * 100).toFixed(3)}%` }} />)}
+            <div className="ep-event" style={{ left: pct(cur.start_ts), width: `max(6px, ${((toFrac(end, win) - toFrac(cur.start_ts, win)) * 100).toFixed(3)}%)` }} />
+            {hover && !dragMode && (
+              <div className="ep-hover" style={{ left: `${(toFrac(hover.t, win) * 100).toFixed(3)}%` }}>
+                {!(hoverEvent || hoverGap || hoverShot) && <span>{clock(hover.t)}</span>}
+              </div>
+            )}
+          </div>
+          {marks.map((m) => (
+            <button key={m.id} type="button" tabIndex={-1} data-id={m.id} className={`ep-tick ${m.cls}`}
+              style={{ left: `${(m.frac * 100).toFixed(3)}%`, width: `calc(max(6px, ${(m.len * 100).toFixed(3)}%) + 2 * var(--tick-pad))` }}
+              aria-label={`Go to ${m.title}`}
+              onClick={() => { const x = listing.events.find((ev) => ev.id === m.id); if (x) select(x); }} />
           ))}
-          {scale.map((m) => <div key={m.t} className="ep-grid" style={{ left: `${(m.frac * 100).toFixed(3)}%` }} />)}
-          <div className="ep-event" style={{ left: pct(e.start_ts), width: `max(4px, ${((toFrac(end, win) - toFrac(e.start_ts, win)) * 100).toFixed(3)}%)` }}
-            title={`This event: ${clock(e.start_ts)}–${clock(end)}`} />
-          <div className="ep-playhead" style={{ left: pct(shownT) }} />
+          {shownT >= win.start && shownT <= win.end && <div className="ep-playhead" style={{ left: pct(shownT) }}><div className="ep-handle" /></div>}
         </div>
-        {marks.map((m) => (
-          <button key={m.id} type="button" tabIndex={-1} className={`ep-tick ${m.cls}`} style={{ left: `${(m.frac * 100).toFixed(3)}%` }}
-            title={m.title} aria-label={`Go to ${m.title}`}
-            onClick={() => { const x = listing.events.find((ev) => ev.id === m.id); if (x) seek(jumpTarget(x)); }} />
-        ))}
       </div>
       <div className="ep-scale small muted" aria-hidden="true">
         <span className="ep-scale-end">{clock(win.start)}</span>
@@ -546,19 +693,19 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage }: {
       </div>
       {gaps ? <div className="ep-legend small muted"><i className="ep-key rec" /> recorded <i className="ep-key gap" /> not recorded</div> : null}
       <div className="ep-controls">
-        <button type="button" className="ghost" disabled={!prev} onClick={() => prev && seek(jumpTarget(prev))}
+        <button type="button" className="ghost" disabled={!prev} onClick={() => prev && select(prev)}
           aria-label="Previous event on this camera" title={prev ? `Previous event: ${label(prev)}` : "No earlier event on this camera"}>◀ Prev</button>
         <button type="button" className="ghost" title="Back to the start of this event"
-          onClick={() => { const to = jumpTarget(e); seek(to); setWin(zoomWindow({ start: e.start_ts, end: eventEnd(e, nowS()) }, zoom, to, nowS())); }}>Event</button>
-        <button type="button" className="ghost" disabled={!next} onClick={() => next && seek(jumpTarget(next))}
+          onClick={() => { const to = jumpTarget(cur); seek(to); setWin(zoomWindowWidth(evRange, width, to, nowS())); }}>Event</button>
+        <button type="button" className="ghost" disabled={!next} onClick={() => next && select(next)}
           aria-label="Next event on this camera" title={next ? `Next event: ${label(next)}` : "No later event on this camera"}>Next ▶</button>
-        <span className="ep-time"><strong>{clock(shownT)}</strong> <span className="muted">{relLabel(shownT, e.start_ts, end)}</span></span>
-        <div className="ep-zoom" role="group" aria-label={`Strip zoom: ${zoomLabel(zoom)} around the event`}>
-          <button type="button" className="ghost" disabled={zoom >= ZOOM_HALF_S.length - 1} onClick={() => zoomTo(zoom + 1)}
-            aria-label="Zoom the strip out" title="Zoom out: more time on the strip">−</button>
-          <span className="small muted">{zoomLabel(zoom)}</span>
-          <button type="button" className="ghost" disabled={zoom <= 0} onClick={() => zoomTo(zoom - 1)}
-            aria-label="Zoom the strip in" title="Zoom in: less time on the strip">+</button>
+        <span className="ep-time"><strong>{clock(shownT)}</strong> <span className="muted">{relLabel(shownT, cur.start_ts, end)}</span></span>
+        <div className="ep-zoom" role="group" aria-label={`Strip zoom: ${halfLabel(width / 2)} (scroll on the strip to zoom, drag to pan)`}>
+          <button type="button" className="ghost" disabled={zoomOut == null} onClick={() => zoomTo(zoomOut)}
+            aria-label="Zoom the strip out" title="Zoom out: more time on the strip (or scroll on it)">−</button>
+          <span className="small muted">{halfLabel(width / 2)}</span>
+          <button type="button" className="ghost" disabled={zoomIn == null} onClick={() => zoomTo(zoomIn)}
+            aria-label="Zoom the strip in" title="Zoom in: less time on the strip (or scroll on it)">+</button>
         </div>
         {caps && source?.kind === "recording" && (
           <div className="segmented ep-quality" role="group" aria-label="Playback quality">

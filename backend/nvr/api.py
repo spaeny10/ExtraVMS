@@ -1169,7 +1169,7 @@ async def list_events(camera: str | None = None, status: str | None = None, labe
         ids = await asyncio.to_thread(_region_ids, where, params, order, region, limit, max(0, int(offset or 0)))
         where, params, offset = [f"id IN ({','.join('?' * len(ids))})"] if ids else ["0"], list(ids), 0
     sql = ("SELECT id, camera_id, track_id, camera_class, camera_conf, start_ts, end_ts, status, yolo_class, "
-           "yolo_conf, yolo_hits, snapshot, clip, synopsis, threat, priority, anomaly, anomaly_json, watched, areas, policy, cells, ptz_preset, error, corrected_at, feedback, "
+           "yolo_conf, yolo_hits, snapshot, clip, synopsis, threat, priority, anomaly, anomaly_json, watched, areas, policy, cells, ptz_preset, error, corrected_at, feedback, people, "
            f"{LOCKED_SQL} AS locked, journey_id, {JOURNEY_CAMS_SQL} AS journey_cameras FROM events"
            + (f" WHERE {' AND '.join(where)}" if where else "") + f" ORDER BY {order} LIMIT ? OFFSET ?")
     rows = db.all(sql, [*params, limit, max(0, int(offset or 0))])
