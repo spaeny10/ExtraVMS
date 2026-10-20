@@ -306,7 +306,7 @@ CREATE TABLE IF NOT EXISTS deterrence_log (
     ts          REAL NOT NULL,
     camera_id   TEXT NOT NULL,
     action      TEXT NOT NULL,                    -- strobe | siren | light | relay | stop
-    target      TEXT,                             -- the aux command or relay token sent
+    target      TEXT,                             -- the aux command or relay token sent (a siren on a speaker: its id)
     on_state    INTEGER NOT NULL DEFAULT 1,
     seconds     REAL,
     by          TEXT,
@@ -368,6 +368,9 @@ MIGRATIONS = [
     ("cameras", "event_labels", "TEXT"),
     # automatic deterrence on verified events (deterrence.py): JSON [rule, ...]; NULL / [] = off (every camera's default)
     ("cameras", "deterrence_rules", "TEXT"),
+    # a camera's deterrence settings (deterrence.clean_config): JSON {siren_source: auto | relay | speaker}; NULL = defaults
+    ("cameras", "deterrence_config", "TEXT"),
+    ("deterrence_log", "via", "TEXT"),           # how it went: relay | aux | speaker (the siren through a talk-down speaker)
 ]
 JSON_FIELDS = ("path", "rules", "detections", "synopsis_json", "synopsis_original", "feedback", "anomaly_json", "areas", "policy", "migrated_from")
 
@@ -671,6 +674,7 @@ class Database:
             c["policies"] = json.loads(c["policies"]) if c.get("policies") else []
             c["ptz_config"] = json.loads(c["ptz_config"]) if c.get("ptz_config") else None
             c["deterrence_rules"] = json.loads(c["deterrence_rules"]) if c.get("deterrence_rules") else []
+            c["deterrence_config"] = json.loads(c["deterrence_config"]) if c.get("deterrence_config") else {}
             c["streams"] = json.loads(c["streams"]) if c.get("streams") else None
         return cams
 
@@ -681,6 +685,11 @@ class Database:
     def set_deterrence_rules(self, camera_id: str, rules: list[dict]) -> None:
         """Only deterrence.py writes this (its own route, a config restore); the camera form never touches it."""
         self.execute("UPDATE cameras SET deterrence_rules=? WHERE id=?", [json.dumps(rules) if rules else None, camera_id])
+
+    def set_deterrence_config(self, camera_id: str, cfg: dict | None) -> None:
+        """Only deterrence.py writes this (the rules route, a config restore), already checked (deterrence.clean_config);
+        the defaults are stored as NULL."""
+        self.execute("UPDATE cameras SET deterrence_config=? WHERE id=?", [json.dumps(cfg) if cfg else None, camera_id])
 
     def upsert_camera(self, cam: dict) -> None:
         cols = ["id", "name", "host", "onvif_port", "rtsp_port", "username", "password",

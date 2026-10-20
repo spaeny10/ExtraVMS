@@ -23,6 +23,11 @@ set.audio.file {"file": {index, name, path}}, and never sets audioPlayFileIndex;
 event in set.event.playaudio (admin.cgi, keyed by the event's list name). set.strobeled.flash is named in the page's
 code but no page in this firmware calls it, so its payload is unknown.
 
+Whether the siren relay can sound (siren_sound, asked by the deterrence probe, read-only): the "Sounder" relay plays an
+alarm-sound file slot, and a camera's slots ship empty (get.audio.file: fileList entries with path "0"; the camera's own
+page treats any other path as a loaded file), so an empty camera pulses its relay in silence. deterrence.py then sends
+the siren through a linked talk-down speaker instead.
+
 Blocking (httpx sync): call from a worker thread. Errors never carry the camera's password (camdevice.clean).
 """
 from __future__ import annotations
@@ -110,11 +115,39 @@ def red_blue_view(raw: dict) -> dict:
             "frequency": FREQUENCIES.get(int(rb.get("frequency", 0)), "low"), "writable": True}
 
 
+def slot_loaded(f: dict) -> bool:
+    """A get.audio.file fileList entry holds a sound: its path isn't "0" (the camera's page's test) or empty."""
+    return f.get("path") is not None and str(f.get("path")).strip() not in ("0", "")
+
+
+def sound_loaded(files: dict) -> dict:
+    """get.audio.file -> {loaded, play_index, slots, loaded_slots, error}: `loaded` = the siren relay has something to
+    play: the selected slot (audioPlayFileIndex) is loaded when it names one of the slots, else any slot is."""
+    slots = [f for f in files.get("fileList") or [] if isinstance(f, dict)]
+    have = [f.get("index") for f in slots if slot_loaded(f)]
+    idx = files.get("audioPlayFileIndex")
+    if idx is not None and any(f.get("index") == idx for f in slots):
+        loaded = idx in have
+    else:
+        loaded = bool(have)
+    return {"loaded": loaded, "play_index": idx, "slots": len(slots), "loaded_slots": have, "error": None}
+
+
+def siren_sound(cam: dict) -> dict:
+    """Can the camera's siren relay make a sound (sound_loaded)? {loaded: None, error} when its web API can't tell.
+    Blocking (a worker thread); one read-only get."""
+    try:
+        with _client(cam) as c:
+            return sound_loaded(get(c, cam, "get.audio.file"))
+    except (WebApiError, Unsupported, ValueError, TypeError, AttributeError) as e:
+        return {"loaded": None, "play_index": None, "slots": 0, "loaded_slots": [], "error": clean(str(e), cam)[:200]}
+
+
 def siren_view(files: dict | None, audio: dict | None) -> dict:
     out: dict = {"supported": bool(files or audio), "files": [], "play_index": None, "speaker_volume": None,
                  "volume_writable": False, "file_writable": False}
     if files:
-        out["files"] = [{"index": f.get("index"), "name": f.get("name") or "", "present": str(f.get("path")) not in ("0", "")}
+        out["files"] = [{"index": f.get("index"), "name": f.get("name") or "", "present": slot_loaded(f)}
                         for f in files.get("fileList") or [] if isinstance(f, dict)]
         out["play_index"] = files.get("audioPlayFileIndex")
     if audio:

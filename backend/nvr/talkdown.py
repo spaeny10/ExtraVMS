@@ -23,6 +23,19 @@ same kind of session: the wake tone, then the frames in the speaker's law as the
 while none is buffered (a short gap in the network), a backlog trimmed at the operator's pauses. It ends when the
 operator lets go (what is buffered still plays), after LIVE_IDLE_S without audio, or at LIVE_MAX_S. It is a playback
 like any other: it replaces what plays on the speaker, a message replaces it, Stop ends it, and it is logged as "Live talk".
+
+The siren (siren.py; deterrence's "siren" on a camera whose own siren can't sound, through a speaker linked to it:
+siren()): exactly the asked seconds of the built-in wail/yelp in the speaker's law, no wake tone (the siren wakes the
+amplifier itself), logged as "Siren". Who wins on one speaker:
+  a person holding to talk     wins over the siren: a siren asked for while a live talk is on is refused (SpeakerBusy:
+                               409, a failed deterrence_log row) and Hold to Talk started during a siren replaces it
+  a siren                      replaces a recorded or spoken message that is playing (or connecting) and drops one that
+                               waits; a newer siren replaces the older one; Stop (or the siren switched off) ends it
+  an operator's message        replaces a siren like anything else (the operator's latest choice wins, as before)
+  an automatic rule's message  (play(..., after_siren=True)) never cuts a siren: it waits and plays when the siren has
+                               played to its end, so "siren, then the talk-down message" is one rule. One message waits
+                               per speaker (a newer one takes its place); it is dropped, with a talkdown_log row, when
+                               the siren is stopped, replaced or fails.
 """
 from __future__ import annotations
 
@@ -47,6 +60,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import siren as siren_sound
 from . import tts
 from .config import settings
 from .db import db
@@ -98,6 +112,13 @@ class TalkdownError(RuntimeError):
 
 class Unreachable(TalkdownError):
     """No RTSP connection to the speaker at all (offline, wrong address or port)."""
+
+
+class SpeakerBusy(TalkdownError):
+    """Someone is talking on the speaker (Hold to Talk): a siren doesn't cut a person off."""
+
+
+SIREN_NAME = "Siren"               # the siren's name in the status, the log and the hub's audit
 
 
 # ---------------------------------------------------------------- SDP and RTP
@@ -600,6 +621,7 @@ class Message:
     cache: bool = False            # a library text: its speech is kept under talkdown/tts/
     voice: dict | None = None      # a text: {voice, speed, chime} (voice_for); None = the Site's at play time
     spoken: dict | None = None     # a text, once synthesized: who spoke it (tts.Spoken.public)
+    siren_s: float | None = None   # the built-in siren (siren.py) for this many seconds, in the speaker's law
 
 
 @dataclass
@@ -626,37 +648,62 @@ class Talkdown:
     """The playbacks of this server's speakers: at most one per speaker (a new one replaces it), each in its own thread."""
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()   # re-entered: a siren's thread starts the message that waited for it
         self._jobs: dict[str, Job] = {}
+        self._queued: dict[str, tuple[dict, Message, str]] = {}   # speaker -> (speaker, message, by) waiting for its siren
 
-    def play(self, speaker: dict, msg: Message, by: str) -> dict:
+    @staticmethod
+    def _live(job: Job | None) -> bool:
+        """Still playing (or connecting): not yet past its finally."""
+        return bool(job and job.thread and job.thread.is_alive() and job.state != "done")
+
+    def play(self, speaker: dict, msg: Message, by: str, after_siren: bool = False) -> dict:
         """Start the playback; the answer says who will speak a text (`tts`: tts.effective, without synthesizing: the
-        finished play's `last.tts` and the log say who did)."""
+        finished play's `last.tts` and the log say who did). `after_siren` (an automatic rule): while the speaker sounds
+        a siren the message waits for it instead (`queued`)."""
         sid = speaker["id"]
         will = None
         if msg.text is not None:
             msg.voice = msg.voice or voice_for()
             eff = tts.effective(msg.voice["voice"], probe=False)
             will = eff.public() if eff else None
-        job = self._start(speaker, msg, by)
-        return {"speaker_id": sid, "speaker": speaker["name"], "camera_ids": speaker.get("camera_ids") or [], "message": msg.name,
-                "message_id": msg.message_id, "text": msg.text, "replaced": job.replacing, "status": self.status(sid),
-                "tts": will}
+        out = {"speaker_id": sid, "speaker": speaker["name"], "camera_ids": speaker.get("camera_ids") or [], "message": msg.name,
+               "message_id": msg.message_id, "text": msg.text, "tts": will, "queued": False}
+        with self._lock:
+            cur = self._jobs.get(sid)
+            if after_siren and self._live(cur) and cur.message.siren_s is not None:
+                if sid in self._queued:
+                    self._drop(sid, "a newer message took its place")
+                self._queued[sid] = (dict(speaker), msg, by)
+                log.info("talk-down: %r on %s by %s waits for the siren", msg.name, sid, by)
+                return {**out, "replaced": None, "queued": True, "status": self.status(sid)}
+            job = self._start(speaker, msg, by)
+        return {**out, "replaced": job.replacing, "status": self.status(sid)}
+
+    def siren(self, speaker: dict, seconds: float, by: str) -> Job:
+        """Sound the built-in siren on the speaker for `seconds` (1 to MAX_S): it replaces a message or an older siren
+        and drops a waiting message; SpeakerBusy while someone holds to talk there."""
+        secs = float(min(MAX_S, max(1.0, float(seconds))))
+        return self._start(speaker, Message(SIREN_NAME, siren_s=secs), by, refuse_live=True)
 
     def talk(self, speaker: dict, by: str, feed: LiveFeed | None = None) -> Job:
         """Start a live talk on the speaker (it replaces what plays there, as play() does): the caller pushes the
         browser's audio into job.feed and ends it when the operator lets go; the job's thread ends on its own after that."""
         return self._start(speaker, Message(LIVE_NAME), by, feed or LiveFeed())
 
-    def _start(self, speaker: dict, msg: Message, by: str, feed: LiveFeed | None = None) -> Job:
+    def _start(self, speaker: dict, msg: Message, by: str, feed: LiveFeed | None = None, refuse_live: bool = False) -> Job:
         sid = speaker["id"]
         with self._lock:
             old = self._jobs.get(sid)
-            if old and old.thread and old.thread.is_alive():
+            if not self._live(old):
+                old = None
+            if refuse_live and old is not None and old.feed is not None:
+                raise SpeakerBusy(f"{old.by} is talking on {speaker['name']} (Hold to Talk)")
+            if sid in self._queued:
+                self._drop(sid, f"replaced by {msg.name!r}")   # it waited for a siren that is now cut short
+            if old:
                 old.replaced_by = msg.name
                 old.stop.set()
-            else:
-                old = None
             job = Job(sid, speaker["name"], msg, by, feed=feed, replacing=old.message.name if old else None)
             job.log_id = db.execute_insert("INSERT INTO talkdown_log (ts, speaker_id, message, text, by, result) VALUES (?,?,?,?,?,?)",
                                            [job.requested_at, sid, msg.name, msg.text, by, "playing"])
@@ -669,10 +716,46 @@ class Talkdown:
     def stop(self, speaker_id: str) -> bool:
         with self._lock:
             job = self._jobs.get(speaker_id)
+            if speaker_id in self._queued:
+                self._drop(speaker_id, "stopped")
         if job and job.thread and job.thread.is_alive():
             job.stop.set()
             return True
         return False
+
+    def stop_job(self, speaker_id: str, job: Job) -> bool:
+        """Stop this playback only if it is still the one on the speaker (deterrence switching its siren off must not
+        end a message or a live talk that took over since)."""
+        with self._lock:
+            if self._jobs.get(speaker_id) is not job or not self._live(job):
+                return False
+            return self.stop(speaker_id)
+
+    def current(self, speaker_id: str) -> Job | None:
+        """The playback on the speaker now (None when idle)."""
+        job = self._jobs.get(speaker_id)
+        return job if self._live(job) else None
+
+    def _drop(self, speaker_id: str, why: str) -> None:
+        """A message that waited for a siren won't play: logged (talkdown_log 'dropped'). Called with the lock held."""
+        sp, msg, by = self._queued.pop(speaker_id)
+        log.info("talk-down: %r on %s by %s dropped (%s)", msg.name, speaker_id, by, why)
+        with contextlib.suppress(Exception):
+            db.execute("INSERT INTO talkdown_log (ts, speaker_id, message, text, by, result, error, duration_s) VALUES (?,?,?,?,?,?,?,?)",
+                       [time.time(), speaker_id, msg.name, msg.text, by, "dropped", f"waited for the siren: {why}", 0.0])
+        if msg.cleanup and msg.path:
+            msg.path.unlink(missing_ok=True)
+
+    def _after_siren(self, job: Job, result: str) -> None:
+        """A siren's thread is done: start the message that waited for it when the siren played to its end."""
+        with self._lock:
+            if self._jobs.get(job.speaker_id) is not job or job.speaker_id not in self._queued:
+                return   # something newer is on the speaker (it dropped the waiting message), or nothing waits
+            if result != "played":
+                self._drop(job.speaker_id, f"the siren {result}")
+                return
+            sp, msg, by = self._queued.pop(job.speaker_id)
+            self._start(sp, msg, by)
 
     def stop_all(self) -> None:
         for sid in list(self._jobs):
@@ -690,17 +773,21 @@ class Talkdown:
 
     def status(self, speaker_id: str) -> dict:
         job = self._jobs.get(speaker_id)
+        queued = self._queued.get(speaker_id)
         if job and job.thread and job.thread.is_alive():
             now = time.time()
             return {"state": job.state, "message": job.message.name, "by": job.by, "requested_at": job.requested_at,
                     "started_at": job.started_at, "elapsed_s": round(now - job.started_at, 1) if job.started_at else None,
-                    "duration_s": job.duration_s, "live": job.feed is not None, "last": None}
+                    "duration_s": job.duration_s, "live": job.feed is not None, "siren": job.message.siren_s is not None,
+                    "queued": queued[1].name if queued else None, "last": None}
         return {"state": "idle", "message": None, "by": None, "requested_at": None, "started_at": None, "elapsed_s": None,
-                "duration_s": None, "live": False, "last": job.result if job else None}
+                "duration_s": None, "live": False, "siren": False, "queued": None, "last": job.result if job else None}
 
     def _audio(self, msg: Message, codec: str) -> bytes:
         if msg.g711 is not None:
             return msg.g711
+        if msg.siren_s is not None:
+            return siren_sound.g711(msg.siren_s, codec)
         if msg.text is not None:
             v = msg.voice or voice_for()
             wav = talkdown_dir() / "oneoff" / f"say-{uuid.uuid4().hex[:12]}.wav"
@@ -745,8 +832,9 @@ class Talkdown:
             if not codec:
                 raise TalkdownError("the speaker's backchannel offers no G.711 (PCMU / PCMA)")
             name, pt = codec
-            # the wake-up tone first, so a speaker whose amplifier slept is awake when the words come
-            lead = wake_tone(name, settings.talkdown_wake_ms)
+            # the wake-up tone first, so a speaker whose amplifier slept is awake when the words come (not before a
+            # siren: it wakes the amplifier itself, and it lasts exactly the seconds asked)
+            lead = b"" if job.message.siren_s is not None else wake_tone(name, settings.talkdown_wake_ms)
             if job.feed is None:
                 audio = (lead + self._audio(job.message, name))[:MAX_S * RATE]
                 job.duration_s = round(len(audio) / RATE, 1)
@@ -796,6 +884,8 @@ class Talkdown:
                                                  f" ({job.reason})" if job.reason else "",
                                                  f", spoken by {said}" + (f" (fallback: {spoken['reason']})" if spoken.get("fallback") else "") if spoken else "",
                                                  f": {error}" if error else "")
+            if job.message.siren_s is not None:
+                self._after_siren(job, result)
 
 
 class _Stopped(Exception):

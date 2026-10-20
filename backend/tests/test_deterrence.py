@@ -4,6 +4,10 @@ mapping for it and for other makers' relays, aux On -> Off timing with a newer a
 pulses and bistable relays, Stop, the automatic rules (verified event -> action, cooldown, armed gating, zones, off by
 default), the routes with hub roles, the old relay route on a camera without PTZ, a camera's own speaker for talk-down,
 and the Milesight web API requests against a fake camera on 127.0.0.1 (digest auth, get / set bodies as its page sends).
+The siren's way: the Milesight sound-file check (loaded / empty slots, the selected slot), resolve_siren for a Milesight,
+another maker, no speaker and the per-camera setting; the built-in siren through a linked speaker (the fake RTSP speaker
+of test_talkdown.py on 127.0.0.1): exactly the seconds, off / Stop / a newer siren, who wins against a message and Hold
+to Talk, a rule's message waiting for the siren, the routes, the log's `via`, the setting's export and restore.
 
 Every ONVIF call goes to a fake (onvif_soap.Onvif.call is replaced before anything runs); nothing reaches a real camera.
 
@@ -53,6 +57,20 @@ def fake_call(self, url, body, auth=True, header="", timeout=None):
 onvif_soap.Onvif.call = fake_call   # before the app is imported: every ONVIF call in this file hits the fake
 
 from nvr import aischedule, api, deterrence, hub_agent, milesight, ptz  # noqa: E402
+
+# the probe asks a Milesight whether its siren relay has a sound file (milesight.siren_sound, its web API): never the
+# fixture's TEST-NET address; SOUND is what the fake answers (a loaded slot unless a test says otherwise)
+SOUND = {"loaded": True, "play_index": 0, "slots": 5, "loaded_slots": [0], "error": None}
+sound_asked: list[str] = []
+
+
+def fake_siren_sound(cam):
+    sound_asked.append(cam["id"])
+    return dict(SOUND)
+
+
+REAL_SIREN_SOUND = milesight.siren_sound
+milesight.siren_sound = fake_siren_sound
 from nvr.api import app  # noqa: E402
 from nvr.config import settings  # noqa: E402
 from nvr.db import db  # noqa: E402
@@ -342,7 +360,7 @@ def test_rule_plays_the_talkdown_message_on_a_linked_speaker():
     from nvr import talkdown
     played = []
     orig = talkdown.manager.play
-    talkdown.manager.play = lambda sp, msg, by: played.append((sp["id"], msg.name, by)) or {}
+    talkdown.manager.play = lambda sp, msg, by, after_siren=False: played.append((sp["id"], msg.name, by)) or {}
     try:
         db.upsert_speaker({"id": "spk7", "name": "Cam7 speaker", "host": "192.0.2.75", "camera_ids": ["cam7"], "enabled": True})
         db.upsert_speaker({"id": "spk8", "name": "Elsewhere", "host": "192.0.2.76", "camera_ids": ["cam1"], "enabled": True})
@@ -389,7 +407,7 @@ def test_routes_roles_and_errors():
     assert PW not in r.text
     r = call("POST", "/api/cameras/cam7/deterrence", {"action": "siren", "seconds": 10}, role="operator", user="op@example")
     assert r.status_code == 200, r.text
-    assert r.json()["result"] == {"action": "siren", "on": True, "seconds": 10.0} and r.json()["state"]["siren"]["by"] == "op@example"
+    assert r.json()["result"] == {"action": "siren", "on": True, "seconds": 10.0, "via": "relay"} and r.json()["state"]["siren"]["by"] == "op@example"
     assert call("POST", "/api/cameras/cam7/deterrence", {"action": "relay", "token": "nope"}, role="operator").status_code == 409
     assert call("POST", "/api/cameras/cam7/deterrence", {"action": "strobe", "seconds": 500}, role="operator").status_code == 422
     assert call("POST", "/api/cameras/cam7/deterrence", {"action": "laser"}, role="operator").status_code == 422
@@ -583,6 +601,384 @@ def test_milesight_routes():
     r = call("GET", "/api/cameras/ms1/device/milesight", role="operator")
     assert r.status_code == 200 and r.json() == {"supported": False, "reason": "not a Milesight camera"} and len(fake.authorized) == n
     fake.srv.shutdown()
+
+
+# ---------------------------------------------------------------- the siren: which way it goes, and through a speaker
+
+from test_talkdown import FakeSpeaker, tone  # noqa: E402 - the fake RTSP speaker on 127.0.0.1 (nvr is already loaded)
+
+from nvr import siren as siren_sound  # noqa: E402
+from nvr import siteconfig, talkdown  # noqa: E402
+
+LOADED = {"loaded": True, "play_index": 0, "slots": 5, "loaded_slots": [0], "error": None}
+EMPTY = {"loaded": False, "play_index": 0, "slots": 5, "loaded_slots": [], "error": None}
+
+
+def sound(v: dict) -> None:
+    SOUND.clear()
+    SOUND.update(v)
+
+
+def unlink_speakers(camera_id: str = "cam7") -> None:
+    for s in db.speakers():
+        if camera_id in s["camera_ids"]:
+            db.execute("DELETE FROM speakers WHERE id=?", [s["id"]])
+
+
+async def until(fn, timeout: float = 8.0):
+    t = time.monotonic()
+    while time.monotonic() - t < timeout:
+        v = fn()
+        if v:
+            return v
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"timed out waiting for {fn}")
+
+
+def playing(sid: str, name: str | None = None):
+    def check():
+        st = talkdown.manager.status(sid)
+        return st["state"] == "playing" and (name is None or st["message"] == name)
+    return check
+
+
+async def speaker_cam(fake: FakeSpeaker, sid: str) -> deterrence.DeterrenceCamera:
+    """cam7 probed with empty sound slots and only the fake speaker `sid` linked: the siren goes through it."""
+    unlink_speakers()
+    db.upsert_speaker(fake.speaker(sid, cams=("cam7",)))
+    sound(EMPTY)
+    try:
+        d = await probed()
+    finally:
+        sound(LOADED)
+    assert d.siren_route()["via"] == "speaker" and d.siren_route()["speaker_id"] == sid
+    return d
+
+
+def log_rows(sid: str) -> list[tuple[str, str]]:
+    return [(r["message"], r["result"]) for r in db.all("SELECT message, result FROM talkdown_log WHERE speaker_id=? ORDER BY id", [sid])]
+
+
+def last_deter(**where) -> dict:
+    sql = "SELECT * FROM deterrence_log WHERE camera_id='cam7'" + "".join(f" AND {k}=?" for k in where) + " ORDER BY id DESC LIMIT 1"
+    return db.one(sql, list(where.values()))
+
+
+def test_milesight_sound_check():
+    empty = CGI["get.audio.file"]
+    assert milesight.sound_loaded(empty) == {"loaded": False, "play_index": 0, "slots": 5, "loaded_slots": [], "error": None}
+
+    def with_slot(i: int, play):
+        f = json.loads(json.dumps(empty))
+        f["fileList"][i]["path"] = "/mnt/sd/audio/siren.wav"
+        if play is None:
+            f.pop("audioPlayFileIndex")
+        else:
+            f["audioPlayFileIndex"] = play
+        return f
+    assert milesight.sound_loaded(with_slot(2, 2))["loaded"] is True and milesight.sound_loaded(with_slot(2, 2))["loaded_slots"] == [2]
+    assert milesight.sound_loaded(with_slot(2, 0))["loaded"] is False    # the selected slot is an empty one
+    assert milesight.sound_loaded(with_slot(2, None))["loaded"] is True  # nothing selected: any loaded slot
+    assert milesight.sound_loaded(with_slot(2, 9))["loaded"] is True     # a selection that names no slot: any loaded slot
+    assert milesight.siren_view(with_slot(2, 2), None)["files"][2]["present"] and not milesight.siren_view(empty, None)["files"][2]["present"]
+    # the real check against the fake camera's web API on 127.0.0.1: one read-only get, the shipped empty slots
+    fake = FakeMilesight()
+    out = REAL_SIREN_SOUND(fake.cam())
+    assert out["loaded"] is False and out["slots"] == 5 and out["error"] is None and fake.posts == []
+    fake.srv.shutdown()
+    fake.srv.server_close()
+    # no answer (a closed local port): can't tell, and the error never carries the password
+    out = REAL_SIREN_SOUND({**fake.cam(), "web_port": fake.port})
+    assert out["loaded"] is None and out["error"] and PW not in out["error"]
+
+
+def test_siren_resolution():
+    act = {"via": "relay", "target": "Sounder", "pulse_s": 10.0}
+    own = {"id": "spk7", "name": "Q speaker", "host": "192.0.2.75"}
+    pole = {"id": "spka", "name": "Pole", "host": "192.0.2.80"}
+    R = deterrence.resolve_siren
+    loaded, empty, unread = {"loaded": True}, {"loaded": False}, {"loaded": None, "error": "no answer"}
+    # a Milesight: its relay only with a sound loaded; else the linked speaker; else no siren at all
+    assert R(act, True, loaded, [own])["via"] == "relay"
+    r = R(act, True, empty, [own], host="192.0.2.75")
+    assert (r["via"], r["speaker_id"], r["own_speaker"], r["camera_sounds"]) == ("speaker", "spk7", True, False) and "no sound file" in r["reason"]
+    assert speaker_label(r) == "Siren through the camera's speaker"
+    assert speaker_label(R(act, True, empty, [pole], host="192.0.2.75")) == "Siren through Pole"
+    r = R(act, True, empty, [])
+    assert r["via"] is None and r["has_output"] and "no talk-down speaker" in r["reason"]
+    # its files unreadable: the speaker when there is one, else the relay (better than nothing)
+    assert R(act, True, unread, [pole])["via"] == "speaker" and R(act, True, unread, [])["via"] == "relay"
+    # another maker: can't tell, so its siren output is used as before, even with a speaker linked
+    assert R(act, False, None, [own])["via"] == "relay"
+    assert R(None, False, None, [pole])["via"] == "speaker" and R(None, False, None, [])["via"] is None
+    # the setting pins one way (or none)
+    assert R(act, True, empty, [own], "relay")["via"] == "relay" and R(None, True, empty, [own], "relay")["via"] is None
+    assert R(act, True, loaded, [own], "speaker")["via"] == "speaker" and R(act, True, loaded, [], "speaker")["via"] is None
+    assert deterrence.clean_config(None) == {"siren_source": "auto"} and deterrence.clean_config({"siren_source": "speaker"}) == {"siren_source": "speaker"}
+    assert deterrence.stored_config({"siren_source": "auto"}) is None and deterrence.stored_config({"siren_source": "relay"}) == {"siren_source": "relay"}
+    for bad in ({"siren_source": "horn"}, ["relay"], "relay"):
+        try:
+            deterrence.clean_config(bad)
+            raise AssertionError(f"{bad} must be refused")
+        except ValueError:
+            pass
+    # the linked speakers: enabled only, the camera's own (its address) first
+    unlink_speakers()
+    db.upsert_speaker({"id": "spk7", "name": "Q speaker", "host": "192.0.2.75", "camera_ids": ["cam7"], "enabled": True})
+    db.upsert_speaker({"id": "spk0", "name": "Off", "host": "192.0.2.81", "camera_ids": ["cam7"], "enabled": False})
+    db.upsert_speaker({"id": "spk1", "name": "Pole", "host": "192.0.2.80", "camera_ids": ["cam7", "cam1"], "enabled": True})
+    assert [s["id"] for s in deterrence.linked_speakers("cam7", "192.0.2.75")] == ["spk7", "spk1"]
+    assert [s["id"] for s in deterrence.linked_speakers("cam7", "192.0.2.99")] == ["spk1", "spk7"]
+    unlink_speakers()
+
+
+def speaker_label(route: dict) -> str:
+    return deterrence.speaker_act(route)["label"]
+
+
+def test_probe_checks_the_sound_and_says_which_way():
+    async def go():
+        unlink_speakers()
+        sound(EMPTY)
+        sound_asked.clear()
+        d = await probed()
+        assert sound_asked == ["cam7"] and d.caps["siren_sound"]["loaded"] is False and not sent_writes()
+        pub = d.public()
+        assert pub["actions"]["siren"] is None and pub["siren"]["via"] is None and pub["siren"]["sound"]["loaded"] is False
+        assert d.brief() == {"strobe": True, "siren": False, "light": True, "relays": 3}
+        try:
+            await d.turn("siren", True)
+            raise AssertionError("a silent siren with no speaker is not offered")
+        except deterrence.NoOutput as e:
+            assert "no sound file" in str(e)
+        # the camera's own speaker linked: the siren goes through it
+        db.upsert_speaker({"id": "spk7", "name": "Q speaker", "host": "192.0.2.75", "camera_ids": ["cam7"], "enabled": True})
+        pub = d.public()
+        assert pub["siren"]["via"] == "speaker" and pub["siren"]["speaker_id"] == "spk7" and pub["siren"]["own_speaker"]
+        assert pub["actions"]["siren"] == {"via": "speaker", "target": "spk7", "label": "Siren through the camera's speaker", "timed": True,
+                                           "pulse_s": None, "speaker_id": "spk7", "speaker": "Q speaker", "own_speaker": True}
+        assert d.brief()["siren"] is True and [r["role"] for r in pub["relays"]] == [None, None, "siren"]
+        # a sound loaded on the camera: the next probe finds it and the relay is used again
+        sound(LOADED)
+        await d.probe()
+        assert d.public()["siren"]["via"] == "relay" and d.public()["actions"]["siren"]["target"] == "Sounder"
+        # another maker's camera: nothing asked of a web API, its siren output used as before
+        sound_asked.clear()
+        refuse.add("GetDeviceInformation")
+        try:
+            other = await probed()
+        finally:
+            refuse.clear()
+        assert sound_asked == [] and not other.caps["milesight"] and other.caps["siren_sound"] is None and other.siren_route()["via"] == "relay"
+        unlink_speakers()
+    try:
+        asyncio.run(go())
+    finally:
+        sound(LOADED)
+
+
+def sent_writes() -> list[str]:
+    return [t for t, _ in sent if t.startswith(("Set", "Send"))]
+
+
+def test_siren_on_the_speaker_lasts_exactly_the_seconds():
+    fake = FakeSpeaker()
+
+    async def go():
+        d = await speaker_cam(fake, "sps1")
+        r = await d.turn("siren", True, seconds=1, by="op@example")
+        assert r == {"action": "siren", "on": True, "seconds": 1.0, "via": "speaker", "speaker_id": "sps1"}
+        assert d.public_state()["siren"]["on"] and d.public()["state"]["siren"]["by"] == "op@example"
+        await asyncio.to_thread(talkdown.manager.wait, "sps1", 10)
+        assert not d.public_state()["siren"]["on"] and d.siren_job is None
+    asyncio.run(go())
+    pkts = [x["pkt"] for x in fake.rtp]
+    assert len(pkts) == 50 and all(p[1] & 0x7F == 0 for p in pkts)            # 1 s = 50 packets of 20 ms, PCMU (the speaker's codec)
+    assert b"".join(p[12:] for p in pkts) == siren_sound.g711(1, "PCMU")       # the built-in siren, no wake tone before it
+    assert not sent_writes()                                                    # nothing asked of the camera's silent relay
+    assert log_rows("sps1") == [("Siren", "played")]
+    row = last_deter()
+    assert (row["action"], row["via"], row["target"], row["seconds"], row["result"], row["by"]) == ("siren", "speaker", "sps1", 1.0, "ok", "op@example")
+
+
+def test_siren_on_the_speaker_off_stop_and_replace():
+    fake = FakeSpeaker()
+
+    async def go():
+        d = await speaker_cam(fake, "sps2")
+        await d.turn("siren", True, seconds=30, by="a@example")
+        await until(playing("sps2", "Siren"))
+        first = talkdown.manager.current("sps2")
+        # a newer siren replaces it
+        await d.turn("siren", True, seconds=30, by="b@example")
+        await asyncio.to_thread(first.thread.join, 5)
+        assert first.result["result"] == "replaced"
+        await until(playing("sps2", "Siren"))
+        second = talkdown.manager.current("sps2")
+        assert second is not first and d.public_state()["siren"]["on"] and d.public_state()["siren"]["by"] == "b@example"
+        # switched off: it ends at once
+        t0 = time.monotonic()
+        r = await d.turn("siren", False, by="c@example")
+        assert r == {"action": "siren", "on": False, "seconds": None, "via": "speaker", "speaker_id": "sps2"}
+        await asyncio.to_thread(second.thread.join, 5)
+        assert second.result["result"] == "stopped" and time.monotonic() - t0 < 3 and not d.public_state()["siren"]["on"]
+        row = last_deter()
+        assert (row["action"], row["on_state"], row["via"]) == ("siren", 0, "speaker")
+        # Stop ends it too (and turns the camera's outputs off as always)
+        await d.turn("siren", True, seconds=30, by="d@example")
+        await until(playing("sps2", "Siren"))
+        third = talkdown.manager.current("sps2")
+        sent.clear()
+        await d.stop(by="e@example")
+        await asyncio.to_thread(third.thread.join, 5)
+        assert third.result["result"] == "stopped" and not d.public_state()["siren"]["on"]
+        row = last_deter()
+        assert row["action"] == "stop" and "sps2" in row["target"] and "speaker" in row["via"].split(",")
+    asyncio.run(go())
+    assert log_rows("sps2") == [("Siren", "replaced"), ("Siren", "stopped"), ("Siren", "stopped")]
+
+
+def test_siren_priority_with_messages_and_hold_to_talk():
+    fake = FakeSpeaker()
+
+    async def go():
+        d = await speaker_cam(fake, "sps3")
+        sp = db.speaker("sps3")
+        # a recorded message playing: the siren replaces it
+        talkdown.manager.play(sp, talkdown.Message("Long one", g711=tone(10)), "a@example")
+        await until(playing("sps3", "Long one"))
+        msg_job = talkdown.manager.current("sps3")
+        await d.turn("siren", True, seconds=30, by="op@example")
+        await asyncio.to_thread(msg_job.thread.join, 5)
+        assert msg_job.result["result"] == "replaced" and msg_job.replaced_by == "Siren"
+        await until(playing("sps3", "Siren"))
+        # a person holding to talk wins: Hold to Talk replaces the siren, and the camera's state follows
+        siren_job = talkdown.manager.current("sps3")
+        live = talkdown.manager.talk(sp, "p@example")
+        await asyncio.to_thread(siren_job.thread.join, 5)
+        assert siren_job.result["result"] == "replaced" and not d.public_state()["siren"]["on"]
+        await until(playing("sps3", "Live talk"))
+        # ... and a siren asked for while someone talks is refused (logged as failed); the talk goes on
+        try:
+            await d.turn("siren", True, seconds=10, by="q@example")
+            raise AssertionError("a siren must not cut off a person talking")
+        except deterrence.Busy as e:
+            assert "p@example" in str(e) and "Hold to Talk" in str(e)
+        assert talkdown.manager.current("sps3") is live
+        row = last_deter()
+        assert (row["action"], row["result"], row["via"], row["by"]) == ("siren", "failed", "speaker", "q@example")
+        live.feed.end()
+        await asyncio.to_thread(live.thread.join, 5)
+        # a rule's message waits for the siren and plays when it has sounded to its end
+        await d.turn("siren", True, seconds=1)
+        r = talkdown.manager.play(sp, talkdown.Message("After", g711=tone(0.2)), "rule R", after_siren=True)
+        assert r["queued"] and r["replaced"] is None and talkdown.manager.status("sps3")["queued"] == "After"
+        await until(lambda: ("After", "played") in log_rows("sps3"))
+        # a waiting message is dropped when the siren is stopped (or replaced)
+        await d.turn("siren", True, seconds=30)
+        await until(playing("sps3", "Siren"))
+        talkdown.manager.play(sp, talkdown.Message("Dropped", g711=tone(0.2)), "rule R", after_siren=True)
+        await d.turn("siren", False)
+        await until(lambda: talkdown.manager.current("sps3") is None)
+        # an operator's message replaces a siren, as anything the operator plays does
+        await d.turn("siren", True, seconds=30)
+        await until(playing("sps3", "Siren"))
+        sj = talkdown.manager.current("sps3")
+        r = talkdown.manager.play(sp, talkdown.Message("Operator", g711=tone(0.2)), "o@example")
+        assert r["replaced"] == "Siren" and not r["queued"]
+        await asyncio.to_thread(sj.thread.join, 5)
+        await asyncio.to_thread(talkdown.manager.wait, "sps3", 10)
+    asyncio.run(go())
+    assert log_rows("sps3") == [("Long one", "replaced"), ("Siren", "replaced"), ("Live talk", "played"), ("Siren", "played"),
+                                ("After", "played"), ("Siren", "stopped"), ("Dropped", "dropped"), ("Siren", "replaced"), ("Operator", "played")]
+    dropped = db.one("SELECT * FROM talkdown_log WHERE speaker_id='sps3' AND message='Dropped'")
+    assert dropped["by"] == "rule R" and "siren" in dropped["error"]
+
+
+def test_rule_siren_goes_through_the_speaker_and_the_message_waits():
+    fake = FakeSpeaker()
+    played = []
+    orig = talkdown.manager.play
+    talkdown.manager.play = lambda sp, msg, by, after_siren=False: played.append((sp["id"], msg.name, by, after_siren)) or {}
+    try:
+        async def go():
+            d = await speaker_cam(fake, "sps4")
+            deterrence.manager.cameras["cam7"] = d
+            deterrence.manager.last_fired.clear()
+            mid = talkdown.add_text_message("Leave too", "Leave now.")["id"]
+            rules = deterrence.clean_rules([{"name": "Siren then talk", "when": "always", "actions": ["siren"], "seconds": 5,
+                                             "speaker_id": "sps4", "message_id": mid}])
+            db.set_deterrence_rules("cam7", rules)
+            eid = db.create_event(camera_id="cam7", track_id="t9", camera_class="person", camera_conf=0.9, start_ts=time.time(),
+                                  end_ts=time.time(), path=event()["path"], status="verified")
+            assert await deterrence.manager.on_verified(eid) == [rules[0]["id"]]
+            # the siren on the speaker (not the camera's silent relay), then the message asked to wait for it
+            assert talkdown.manager.status("sps4")["siren"] and not sent_writes()
+            assert played == [("sps4", "Leave too", "rule Siren then talk", True)]
+            row = last_deter(source="rule")
+            assert (row["action"], row["via"], row["target"], row["event_id"], row["seconds"]) == ("siren", "speaker", "sps4", eid, 5.0)
+            talkdown.manager.stop("sps4")
+            await asyncio.to_thread(talkdown.manager.wait, "sps4", 5)
+            db.set_deterrence_rules("cam7", [])
+        asyncio.run(go())
+    finally:
+        talkdown.manager.play = orig
+
+
+def test_routes_say_which_way_the_siren_goes_and_take_the_setting():
+    fake = FakeSpeaker()
+    unlink_speakers()
+    db.upsert_speaker(fake.speaker("sps5", cams=("cam7",)))
+    sound(EMPTY)
+    try:
+        deterrence.manager.cameras.clear()
+        deterrence.manager.sync(db.cameras(enabled_only=True))
+        j = call("GET", "/api/cameras/cam7/deterrence", role="operator").json()
+        assert j["siren"]["via"] == "speaker" and j["siren"]["speaker_id"] == "sps5" and j["siren"]["source"] == "auto"
+        assert j["actions"]["siren"]["via"] == "speaker" and j["actions"]["siren"]["label"] == "Siren through Speaker sps5"
+        r = call("POST", "/api/cameras/cam7/deterrence", {"action": "siren", "seconds": 1}, role="operator", user="op@example")
+        assert r.status_code == 200, r.text
+        assert r.json()["result"] == {"action": "siren", "on": True, "seconds": 1.0, "via": "speaker", "speaker_id": "sps5"}
+        talkdown.manager.wait("sps5")
+        log = call("GET", "/api/cameras/cam7/deterrence/log", role="operator").json()
+        assert log[0]["action"] == "siren" and log[0]["via"] == "speaker" and log[0]["target"] == "sps5"
+        assert call("GET", "/api/cameras/cam7/deterrence", role="operator").json()["last"]["via"] == "speaker"
+        # someone holding to talk on that speaker: 409
+        live = talkdown.manager.talk(db.speaker("sps5"), "p@example")
+        asyncio.run(until(playing("sps5", "Live talk")))
+        r = call("POST", "/api/cameras/cam7/deterrence", {"action": "siren"}, role="operator")
+        assert r.status_code == 409 and "Hold to Talk" in r.text
+        live.feed.end()
+        talkdown.manager.wait("sps5")
+        # the setting: read with the rules, pinned to the camera's own output, checked; kept when left out
+        j = call("GET", "/api/cameras/cam7/deterrence/rules", role="operator").json()
+        assert j["config"] == {"siren_source": "auto"} and j["siren"]["via"] == "speaker" and j["caps"]["siren"] is True
+        assert call("PUT", "/api/cameras/cam7/deterrence/rules", {"rules": [], "config": {"siren_source": "relay"}}, role="operator").status_code == 403
+        assert call("PUT", "/api/cameras/cam7/deterrence/rules", {"rules": [], "config": {"siren_source": "horn"}}, role="admin").status_code == 422
+        r = call("PUT", "/api/cameras/cam7/deterrence/rules", {"rules": [], "config": {"siren_source": "relay"}}, role="admin")
+        assert r.status_code == 200, r.text
+        assert r.json()["config"] == {"siren_source": "relay"} and r.json()["siren"]["via"] == "relay"
+        j = call("GET", "/api/cameras/cam7/deterrence", role="operator").json()
+        assert j["siren"]["via"] == "relay" and j["actions"]["siren"]["target"] == "Sounder"   # pinned: the relay even though it is silent
+        r = call("PUT", "/api/cameras/cam7/deterrence/rules", {"rules": []}, role="admin")
+        assert r.json()["config"] == {"siren_source": "relay"}
+        # a config export carries it and a restore puts it back
+        exp = siteconfig.export_config()
+        assert next(c for c in exp["cameras"] if c["id"] == "cam7")["deterrence_config"] == {"siren_source": "relay"}
+        db.set_deterrence_config("cam7", None)
+        siteconfig.import_config(exp)
+        assert next(c for c in db.cameras() if c["id"] == "cam7")["deterrence_config"] == {"siren_source": "relay"}
+        # back to automatic; a sound file loaded on the camera since: ?refresh=1 asks it again
+        call("PUT", "/api/cameras/cam7/deterrence/rules", {"rules": [], "config": {"siren_source": "auto"}}, role="admin")
+        assert next(c for c in db.cameras() if c["id"] == "cam7")["deterrence_config"] == {}   # the default is stored as NULL
+        assert call("GET", "/api/cameras/cam7/deterrence", role="operator").json()["siren"]["via"] == "speaker"
+        sound(LOADED)
+        deterrence.manager.get("cam7").caps["probed_at"] -= 60
+        j = call("GET", "/api/cameras/cam7/deterrence?refresh=1", role="operator").json()
+        assert j["siren"]["via"] == "relay" and j["siren"]["camera_sounds"] is True
+    finally:
+        sound(LOADED)
+        unlink_speakers()
 
 
 if __name__ == "__main__":

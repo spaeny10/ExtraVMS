@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { MAX_RULES, type DeterRule, type Deterrence, type MilesightExtras, anyOn, armedText, countdownText, deterButtons, deterRequest, errorStatus,
   hasDeterrence, lastText, milesightChanges, milesightDraft, milesightProblems, newRule, normalizeRule, offerCameraSpeaker, outputNow, ruleProblems,
-  rulesDirty, rulesHaveNothing, rulesProblems, secondsChoices, sectionBody, unavailableText } from "./deterrence";
+  rulesDirty, rulesHaveNothing, rulesProblems, secondsChoices, sectionBody, sirenSourceChoices, sirenSourceName, sirenSpeakerTitle, sirenWayText,
+  unavailableText, type SirenRoute } from "./deterrence";
 
 const act = (via: "aux" | "relay", target: string, label: string, timed = true, pulse_s: number | null = null) => ({ via, target, label, timed, pulse_s });
 const base: Deterrence = {
@@ -221,5 +222,41 @@ describe("Milesight extras", () => {
   it("a camera that isn't a Milesight drafts defaults without failing", () => {
     expect(milesightDraft({ supported: false, reason: "not a Milesight" }).white_light.mode).toBe("auto");
     expect(milesightChanges({ supported: false }, milesightDraft({ supported: false }))).toEqual({});
+  });
+});
+
+describe("the siren through a speaker", () => {
+  const spk = (own: boolean) => ({ via: "speaker" as const, target: "spk3", label: "Siren through the camera's speaker", timed: true, pulse_s: null,
+    speaker_id: "spk3", speaker: "Q gate speaker", own_speaker: own });
+  const route = (p: Partial<SirenRoute>): SirenRoute => ({ via: "speaker", source: "auto", speaker_id: "spk3", speaker: "Q gate speaker", own_speaker: true,
+    camera_sounds: false, has_output: true, speakers: 1, reason: "the camera's siren has no sound file loaded", ...p });
+  it("the button says which way it goes", () => {
+    const d = { ...base, actions: { ...base.actions, siren: spk(true) },
+      relays: [{ token: "Sounder", mode: "monostable" as const, delay_s: 10, idle_state: "closed", role: "siren" as const }] };
+    const b = deterButtons(d);
+    expect(b.map((x) => x.key)).toEqual(["siren"]);   // the silent Sounder relay is the siren's, not a button of its own
+    expect(b[0]).toMatchObject({ action: "siren", label: "Siren", timed: true, title: "Siren — through the camera's speaker" });
+    expect(sirenSpeakerTitle(spk(false))).toBe("Siren — through speaker Q gate speaker");
+    expect(sirenSpeakerTitle({ ...spk(false), speaker: null })).toBe("Siren — through speaker spk3");
+    expect(deterRequest(b[0], false, 30)).toEqual({ action: "siren", on: true, seconds: 30 });
+  });
+  it("the last action says it went through the speaker", () => {
+    const last = { ts: 1, action: "siren", on: true, seconds: 10, by: "op@x", source: "manual" as const, result: "ok" as const, error: null };
+    expect(lastText({ ...last, via: "speaker" })).toBe("Siren on for 10 s through the speaker · op@x");
+    expect(lastText({ ...last, via: "relay" })).toBe("Siren on for 10 s · op@x");
+  });
+  it("the setting offers only the ways the camera has, and says which way it goes now", () => {
+    expect(sirenSourceChoices(route({}))).toEqual(["auto", "relay", "speaker"]);
+    expect(sirenSourceChoices(route({ has_output: false }))).toEqual(["auto", "speaker"]);
+    expect(sirenSourceChoices(route({ speakers: 0 }))).toEqual(["auto", "relay"]);
+    expect(sirenSourceChoices(route({ speakers: 0 }), "speaker")).toEqual(["auto", "relay", "speaker"]);   // the saved one stays listed
+    expect(sirenSourceChoices(null)).toEqual(["auto"]);
+    expect(sirenSourceName("relay")).toBe("The camera's own siren");
+    expect(sirenWayText(route({}))).toBe("The siren sounds through the camera's speaker (the camera's siren has no sound file loaded).");
+    expect(sirenWayText(route({ own_speaker: false, reason: "" }))).toBe("The siren sounds through speaker Q gate speaker.");
+    expect(sirenWayText(route({ via: "relay", reason: "the camera has a siren sound loaded" })))
+      .toBe("The siren sounds on the camera's own siren output (the camera has a siren sound loaded).");
+    expect(sirenWayText(route({ via: null, reason: "no siren output" }))).toBe("No siren (no siren output).");
+    expect(sirenWayText(null)).toMatch(/hasn't been asked/);
   });
 });

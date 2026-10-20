@@ -12,12 +12,35 @@ export const DETER_ACTIONS: readonly DeterAction[] = ["strobe", "siren", "light"
 
 /** GET /api/cameras: what the camera can drive (null = nothing, or not asked yet). */
 export type DeterrenceBrief = { strobe: boolean; siren: boolean; light: boolean; relays: number };
-/** How an action reaches the camera: an auxiliary command, or an alarm relay (a monostable one pulses `pulse_s` by itself). */
-export type DeterAct = { via: "aux" | "relay"; target: string; label: string; timed: boolean; pulse_s: number | null };
+/**
+ * How an action reaches the camera: an auxiliary command, an alarm relay (a monostable one pulses `pulse_s` by itself), or
+ * for the siren a talk-down speaker linked to the camera (the server's built-in siren sound; `target` is the speaker).
+ */
+export type DeterAct = {
+  via: "aux" | "relay" | "speaker"; target: string; label: string; timed: boolean; pulse_s: number | null;
+  speaker_id?: string; speaker?: string | null; own_speaker?: boolean;
+};
+/** The camera's setting for the siren: automatic (its own siren only when it can sound, else a linked speaker), or pinned. */
+export type SirenSource = "auto" | "relay" | "speaker";
+export const SIREN_SOURCES: readonly SirenSource[] = ["auto", "relay", "speaker"];
+export type DeterConfig = { siren_source: SirenSource };
+/**
+ * Which way the siren goes now (backend deterrence.resolve_siren): "relay" = the camera's own siren output, "speaker" = the
+ * built-in siren on a linked speaker, null = no siren. `camera_sounds`: a Milesight with a sound file loaded (true), with
+ * none (false), or unknown (null: another maker, or its files couldn't be read).
+ */
+export type SirenRoute = {
+  via: "relay" | "speaker" | null; source: SirenSource; speaker_id: string | null; speaker: string | null; own_speaker: boolean;
+  camera_sounds: boolean | null; has_output: boolean; speakers: number; reason: string;
+};
 export type DeterRelay = { token: string; mode: "bistable" | "monostable"; delay_s: number; idle_state: string | null; role: "strobe" | "siren" | null };
 /** One output's state; `remaining_s` counts down from the server's `now` (null = on until switched off). */
 export type DeterOutput = { on: boolean; until: number | null; remaining_s: number | null; by: string | null; started_at: number | null };
-export type DeterLast = { ts: number; action: string; on: boolean; seconds: number | null; by: string; source: "manual" | "rule"; result: "ok" | "failed"; error: string | null };
+export type DeterLast = {
+  ts: number; action: string; on: boolean; seconds: number | null; by: string; source: "manual" | "rule"; result: "ok" | "failed"; error: string | null;
+  /** how it went: relay | aux | speaker (a stop lists each, comma-separated) */
+  via?: string | null;
+};
 /** GET / POST /api/cameras/{id}/deterrence. `state` keys: "strobe" | "siren" | "light" | "relay:<token>". */
 export type Deterrence = {
   camera_id: string; probed: boolean; available: boolean; error: string | null; milesight: boolean; audio_outputs: number;
@@ -26,6 +49,8 @@ export type Deterrence = {
   relays: DeterRelay[];
   state: Record<string, DeterOutput>;
   last: DeterLast | null;
+  /** which way the siren goes (null before the camera answered the probe) */
+  siren?: SirenRoute | null;
 };
 export type DeterRequest = { action: DeterAction | "stop" | "relay"; on?: boolean; token?: string; seconds?: number };
 
@@ -44,6 +69,9 @@ export type DeterRules = {
   rules: DeterRule[]; zones: string[]; speakers: { id: string; name: string }[]; messages: { id: number; name: string }[];
   armed: { known: boolean; armed: boolean | null; reason: string | null };
   caps: Record<DeterAction, boolean>;
+  /** the camera's deterrence settings, and which way its siren goes with them */
+  config?: DeterConfig;
+  siren?: SirenRoute | null;
 };
 
 export const DEFAULT_S = 10;
@@ -79,7 +107,8 @@ export function deterButtons(d: Pick<Deterrence, "actions" | "relays">): DeterBu
     const act = d.actions[a];
     if (!act) continue;
     const how = act.pulse_s ? ` (pulses ${act.pulse_s} s by itself)` : act.timed ? "" : " (stays on until switched off)";
-    out.push({ key: a, action: a, label: NAMES[a], icon: ICONS[a], title: `${act.label || NAMES[a]}${how}`, timed: act.timed });
+    const title = act.via === "speaker" ? sirenSpeakerTitle(act) : `${act.label || NAMES[a]}${how}`;
+    out.push({ key: a, action: a, label: NAMES[a], icon: ICONS[a], title, timed: act.timed });
   }
   const used = new Set(DETER_ACTIONS.map((a) => d.actions[a]).filter((x) => x?.via === "relay").map((x) => x!.target));
   d.relays.forEach((r, i) => {
@@ -89,6 +118,11 @@ export function deterButtons(d: Pick<Deterrence, "actions" | "relays">): DeterBu
       title: `Alarm output ${r.token}${pulse ? ` (pulses ${r.delay_s} s by itself)` : ""}`, timed: !pulse });
   });
   return out;
+}
+
+/** The siren button's title when it sounds through a talk-down speaker: "Siren — through the camera's speaker". */
+export function sirenSpeakerTitle(act: Pick<DeterAct, "own_speaker" | "speaker" | "target">): string {
+  return `Siren — through ${act.own_speaker ? "the camera's speaker" : `speaker ${act.speaker || act.target}`}`;
 }
 
 /** An output now, `sinceFetch` seconds after it was read: on, and the seconds left (null = on until switched off). */
@@ -126,7 +160,7 @@ export function lastText(last: DeterLast | null | undefined, buttons: DeterButto
   if (!last) return "";
   const what = last.action === "stop" ? "Everything off"
     : `${buttons.find((b) => b.key === last.action)?.label ?? (NAMES[last.action as DeterAction] || last.action)} ${last.on ? "on" : "off"}`
-      + (last.on && last.seconds ? ` for ${last.seconds} s` : "");
+      + (last.on && last.seconds ? ` for ${last.seconds} s` : "") + (last.action === "siren" && last.via === "speaker" ? " through the speaker" : "");
   const who = last.source === "rule" ? `rule ${last.by}` : last.by;
   return [what, who, last.result === "failed" ? `failed${last.error ? `: ${last.error}` : ""}` : ""].filter(Boolean).join(" · ");
 }
@@ -141,6 +175,32 @@ export function unavailableText(d: Pick<Deterrence, "probed" | "available" | "er
 function clampInt(v: unknown, min: number, max: number, def: number): number {
   const n = Math.round(Number(v));
   return Number.isFinite(n) && v !== "" && v !== null ? Math.min(max, Math.max(min, n)) : def;
+}
+
+/* ------------------------------------------------------------------ the siren's way (the rules editor's setting) */
+
+const SOURCE_NAMES: Record<SirenSource, string> = {
+  auto: "Automatic",
+  relay: "The camera's own siren",
+  speaker: "A linked talk-down speaker",
+};
+export const sirenSourceName = (s: SirenSource) => SOURCE_NAMES[s];
+
+/** The setting's choices: automatic always; a pinned way only where the camera has it (or it is the saved setting). */
+export function sirenSourceChoices(route: Pick<SirenRoute, "has_output" | "speakers"> | null | undefined, saved: SirenSource = "auto"): SirenSource[] {
+  return SIREN_SOURCES.filter((s) => s === "auto" || s === saved
+    || (s === "relay" ? !!route?.has_output : (route?.speakers ?? 0) > 0));
+}
+
+/** One line under the setting: which way the siren goes now, and why. */
+export function sirenWayText(route: SirenRoute | null | undefined): string {
+  if (!route) return "The camera hasn't been asked what it can drive yet.";
+  const why = route.reason ? ` (${route.reason})` : "";
+  if (route.via === "relay") return `The siren sounds on the camera's own siren output${why}.`;
+  if (route.via === "speaker") {
+    return `The siren sounds through ${route.own_speaker ? "the camera's speaker" : `speaker ${route.speaker || route.speaker_id}`}${why}.`;
+  }
+  return `No siren${why}.`;
 }
 
 /* ------------------------------------------------------------------ automatic rules */

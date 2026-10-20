@@ -123,6 +123,17 @@ def _deterrence_rules(c: dict) -> list[dict]:
         return []
 
 
+def _deterrence_config(c: dict) -> dict | None:
+    """A camera's deterrence settings (the siren's source) from an export, checked like PUT .../deterrence/rules; invalid
+    ones fall back to the defaults (None)."""
+    from . import deterrence
+    try:
+        return deterrence.stored_config(deterrence.clean_config(c.get("deterrence_config")))
+    except ValueError:
+        log.warning("camera %s: its deterrence settings in the export are invalid and were left out", c.get("id"))
+        return None
+
+
 def export_config() -> dict:
     cams = []
     for c in db.cameras():
@@ -156,6 +167,8 @@ def import_config(data: dict, replace_identities: bool = False) -> dict:
             db.set_ptz_config(c["id"], c["ptz_config"])
         if c.get("deterrence_rules") is not None:
             db.set_deterrence_rules(c["id"], _deterrence_rules(c))
+        if c.get("deterrence_config") is not None:
+            db.set_deterrence_config(c["id"], _deterrence_config(c))
         counts["cameras"] += 1
     if speakers is not None:
         counts["speakers"] = _import_speakers(speakers)
@@ -252,6 +265,8 @@ def merge_cameras(data: dict) -> dict:
             db.set_ptz_config(new_id, c["ptz_config"])
         if c.get("deterrence_rules") is not None:
             db.set_deterrence_rules(new_id, _deterrence_rules(c))
+        if c.get("deterrence_config") is not None:
+            db.set_deterrence_config(new_id, _deterrence_config(c))
     counts = {"cameras": len(ids), "updated": updated, "camera_links": 0, "identities": 0, "ids": ids}
     with db.lock:
         for l in data.get("camera_links", []):

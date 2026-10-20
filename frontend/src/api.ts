@@ -6,7 +6,7 @@ import type { CameraStreams } from "./cameraStreams";
 import type { AnalyticsRule, AudioEncoder, CameraDevice, CameraTime, ClockResult, ImagingSource, TimeBody, TimeDefaults, VideoEncoder } from "./cameraDevice";
 import type { CatalogVoice, Spoken, VoiceEngines, VoiceSetting } from "./talkdownVoice";
 import type { LiveCodecs } from "./codecs";
-import type { DeterRequest, DeterRule, DeterRules, Deterrence, DeterrenceBrief, MilesightExtras, MilesightWrite } from "./deterrence";
+import type { DeterConfig, DeterRequest, DeterRule, DeterRules, Deterrence, DeterrenceBrief, MilesightExtras, MilesightWrite } from "./deterrence";
 /** include = detect only here; exclude = mask out; area = just a name for a place (never filters);
  * ppe = people who stay in it must wear the required items (backend/nvr/ppe.py; never filters) */
 export type ZoneType = "include" | "exclude" | "area" | "ppe";
@@ -175,6 +175,10 @@ export type SpeakerStatus = {
   elapsed_s: number | null; duration_s: number | null;
   /** a live talk (Hold to Talk, newer servers): no duration, the message is "Live talk" */
   live?: boolean;
+  /** the built-in siren (deterrence through this speaker; newer servers): the message is "Siren" */
+  siren?: boolean;
+  /** an automatic rule's message waiting for the siren to end (newer servers) */
+  queued?: string | null;
   last: { message: string; by: string; result: "played" | "stopped" | "replaced" | "failed"; error: string | null; at: number; played_s: number;
     /** who spoke a text (newer servers; null for a recording or when it failed before speaking) */
     tts?: Spoken | null;
@@ -716,11 +720,14 @@ export function makeApi(base: string, opts: ApiOptions = {}) {
   relay: (cam: string, on: boolean) => req<{ state: boolean; mode: string }>(`/api/cameras/${cam}/relay`, json("POST", { on })),
   // deterrence (deterrence.py): the camera's strobe / siren / light (operator), its automatic rules (admin). An action on
   // an output replaces the one running there; "stop" turns everything off (keepalive: it still goes out when the tab closes)
-  deterrence: (cam: string) => req<Deterrence>(`/api/cameras/${cam}/deterrence`),
-  deter: (cam: string, b: DeterRequest) => req<Deterrence & { result: { action: string; on: boolean; seconds: number | null } }>(
+  // refresh: ask the camera again first (a siren sound loaded on it since)
+  deterrence: (cam: string, refresh = false) => req<Deterrence>(`/api/cameras/${cam}/deterrence${refresh ? "?refresh=1" : ""}`),
+  deter: (cam: string, b: DeterRequest) => req<Deterrence & { result: { action: string; on: boolean; seconds: number | null; via?: string; speaker_id?: string } }>(
     `/api/cameras/${cam}/deterrence`, { ...json("POST", b), keepalive: b.action === "stop" }),
   deterrenceRules: (cam: string) => req<DeterRules>(`/api/cameras/${cam}/deterrence/rules`),
-  saveDeterrenceRules: (cam: string, rules: DeterRule[]) => req<DeterRules>(`/api/cameras/${cam}/deterrence/rules`, json("PUT", { rules })),
+  /** config left out = kept */
+  saveDeterrenceRules: (cam: string, rules: DeterRule[], config?: DeterConfig) =>
+    req<DeterRules>(`/api/cameras/${cam}/deterrence/rules`, json("PUT", config ? { rules, config } : { rules })),
   // talk-down (talkdown.py): speakers (admin), play / stop / describe (operator), the message library (admin)
   speakers: () => req<Speaker[]>("/api/speakers"),
   saveSpeaker: (s: Omit<Speaker, "check" | "checked_at" | "status"> & { password?: string }) => req<Speaker>(`/api/speakers/${s.id}`, json("PUT", s)),

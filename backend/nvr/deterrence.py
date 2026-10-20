@@ -14,6 +14,21 @@ Mapping (plan()):
   light    the Light aux command (On, then back to Auto when the camera offers it: Off would leave a light that runs on its
            own day/night logic dark until someone fixed it on the camera's page)
   relay    any relay by token (cameras of other makers name them AlarmOut_0 / RelayOutputToken1 and so on)
+The siren's way (resolve_siren(), again after every probe and on every action: speakers can be linked at any time):
+  relay    the camera's own siren output (a relay such as Milesight's "Sounder", or a siren aux command) only when the
+           camera can make a sound with it. A Milesight plays one of its alarm-sound file slots, and they ship empty (the
+           MS-CQ8231 sounded nothing): its web API's get.audio.file is read with the probe (milesight.siren_sound) and the
+           relay counts only with a loaded slot (path != "0"), the selected audioPlayFileIndex one when it names a slot.
+           Another maker's siren output can't be checked: it is used as before.
+  speaker  otherwise the built-in siren (siren.py) on a talk-down speaker linked to the camera (enabled; the camera's own
+           speaker, at its address, first): exactly `seconds`, through talkdown.Talkdown.siren(), so it takes its turn
+           with talk-down on that speaker (talkdown.py's module doc: Hold to Talk wins, a siren replaces a message, a
+           rule's message waits for the siren). Switching it off or Stop ends it; a newer siren replaces it.
+  none     otherwise the camera has no siren to offer (a Milesight with empty slots and no speaker).
+  When a Milesight's files can't be read the speaker is preferred, the relay used when there is no speaker.
+  The camera's settings (cameras.deterrence_config, clean_config(): PUT .../deterrence/rules with `config`, a config
+  export / restore) can pin it: siren_source auto (the above, the default) | relay | speaker (only that way, or none).
+  Every siren action's log row says which way it went (deterrence_log.via: relay / aux / speaker).
 Durations: a monostable relay pulses by itself (its DelayTime); a longer time re-pulses it. A bistable relay or an aux
 On gets its Off after `seconds` (DEFAULT_S, at most MAX_S). A newer action on the same output cancels that timer and
 starts its own, so the last operator's choice wins. Stop turns the strobe and siren off whatever we think their state is,
@@ -47,9 +62,12 @@ import uuid
 from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, field_validator
 
 from . import aischedule
+from . import milesight
 from . import onvif_soap as soap
 from . import zones as zonelib
 from .db import db
@@ -67,6 +85,8 @@ LABELS = ("person", "vehicle")
 MAX_RULES = 8
 DEFAULT_COOLDOWN_S = 120
 LOG_KEEP = 20000            # deterrence_log rows kept (the oldest go)
+REFRESH_MIN_S = 5.0         # GET .../deterrence?refresh=1 probes again at most this often
+SIREN_SOURCES = ("auto", "relay", "speaker")
 
 STROBE_AUX = re.compile(r"warning|strobe|flash|beacon", re.I)
 SIREN_AUX = re.compile(r"siren|sounder|horn|buzzer", re.I)
@@ -81,6 +101,10 @@ class NoOutput(Exception):
 
 class NotReady(Exception):
     """The camera hasn't been probed yet, or the probe failed (answered 503)."""
+
+
+class Busy(Exception):
+    """The siren's speaker is in use by someone talking on it (Hold to Talk wins; answered 409)."""
 
 
 # ---------------------------------------------------------------- parsers (unit-tested on the probed camera's XML)
@@ -166,6 +190,79 @@ def plan(relays: list[dict], device_aux: list[str], ptz_aux: list[str]) -> dict[
 
 def relay_role(token: str, actions: dict) -> str | None:
     return next((k for k in ("strobe", "siren") if (actions.get(k) or {}).get("via") == "relay" and actions[k]["target"] == token), None)
+
+
+# ---------------------------------------------------------------- the siren's way, and the camera's settings
+
+class Config(BaseModel):
+    """A camera's deterrence settings (cameras.deterrence_config)."""
+    siren_source: Literal["auto", "relay", "speaker"] = "auto"
+
+
+def clean_config(raw) -> dict:
+    """Stored or sent settings, checked (ValueError), with the defaults filled in."""
+    if raw in (None, ""):
+        return Config().model_dump()
+    if not isinstance(raw, dict):
+        raise ValueError("the deterrence settings must be an object")
+    return Config.model_validate(raw).model_dump()
+
+
+def stored_config(cfg: dict) -> dict | None:
+    """What cameras.deterrence_config keeps: None for the defaults."""
+    return None if cfg == Config().model_dump() else cfg
+
+
+def linked_speakers(camera_id: str, host: str | None = None) -> list[dict]:
+    """The enabled talk-down speakers linked to the camera, its own (at the camera's address) first, then by id."""
+    sps = [s for s in db.speakers(enabled_only=True) if camera_id in (s.get("camera_ids") or [])]
+    return sorted(sps, key=lambda s: (not host or s.get("host") != host, s["id"]))
+
+
+def resolve_siren(camera_act: dict | None, is_milesight: bool, sound: dict | None, speakers: list[dict],
+                  source: str = "auto", host: str | None = None) -> dict:
+    """Which way the siren goes (the module doc): {via: "relay" (the camera's own output: a relay or an aux command) |
+    "speaker" | None, source, speaker_id, speaker, own_speaker, camera_sounds: True (a Milesight with a sound loaded) /
+    False (a Milesight with none) / None (can't tell), reason}. Pure: the probe's answers and the linked speakers in."""
+    sounds = (sound or {}).get("loaded") if is_milesight else None
+    sp = speakers[0] if speakers else None
+    base = {"source": source, "speaker_id": None, "speaker": None, "own_speaker": False, "camera_sounds": sounds,
+            "has_output": camera_act is not None, "speakers": len(speakers)}
+
+    def camera(reason: str) -> dict:
+        return {**base, "via": "relay", "reason": reason}
+
+    def speaker(reason: str) -> dict:
+        return {**base, "via": "speaker", "speaker_id": sp["id"], "speaker": sp["name"],
+                "own_speaker": bool(host) and sp.get("host") == host, "reason": reason}
+
+    def none(reason: str) -> dict:
+        return {**base, "via": None, "reason": reason}
+
+    if source == "relay":
+        return camera("set to the camera's own siren output") if camera_act else none("set to the camera's own siren output, and it has none")
+    if source == "speaker":
+        return speaker("set to a talk-down speaker") if sp else none("set to a talk-down speaker, and none is linked to this camera")
+    if camera_act and sounds is True:
+        return camera("the camera has a siren sound loaded")
+    if camera_act and sounds is None and not is_milesight:
+        return camera("the camera's own siren output")
+    if sp:
+        why = ("the camera's siren has no sound file loaded" if camera_act and sounds is False
+               else "the camera's sound files couldn't be read" if camera_act else "the camera has no siren output")
+        return speaker(why)
+    if camera_act and sounds is None:
+        return camera("the camera's sound files couldn't be read, and no speaker is linked")
+    if camera_act:
+        return none("the camera's siren has no sound file loaded, and no talk-down speaker is linked to it")
+    return none("the camera has no siren output, and no talk-down speaker is linked to it")
+
+
+def speaker_act(route: dict) -> dict:
+    """The siren as an output on the route's speaker (what the camera's answer shows under actions.siren)."""
+    name = "the camera's speaker" if route.get("own_speaker") else (route.get("speaker") or route["speaker_id"])
+    return {"via": "speaker", "target": route["speaker_id"], "label": f"Siren through {name}", "timed": True, "pulse_s": None,
+            "speaker_id": route["speaker_id"], "speaker": route.get("speaker"), "own_speaker": bool(route.get("own_speaker"))}
 
 
 def clamp_seconds(seconds: float | None) -> float:
@@ -321,16 +418,16 @@ def check_rule(rule: dict, event: dict, zones: list[dict] | None, armed: bool | 
 # ---------------------------------------------------------------- one camera
 
 def _log(camera_id: str, action: str, target: str | None, on: bool, seconds: float | None, by: str, source: str,
-         event_id: int | None, error: str | None) -> None:
+         event_id: int | None, error: str | None, via: str | None = None) -> None:
     try:
-        db.execute("INSERT INTO deterrence_log (ts, camera_id, action, target, on_state, seconds, by, source, event_id, result, error) "
-                   "VALUES (?,?,?,?,?,?,?,?,?,?,?)", [time.time(), camera_id, action, target, int(on), seconds, by, source,
-                                                      event_id, "failed" if error else "ok", error])
+        db.execute("INSERT INTO deterrence_log (ts, camera_id, action, target, on_state, seconds, by, source, event_id, result, error, via) "
+                   "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", [time.time(), camera_id, action, target, int(on), seconds, by, source,
+                                                        event_id, "failed" if error else "ok", error, via])
     except Exception:  # noqa: BLE001 - the audit row must not undo an action already sent
         log.exception("deterrence log row for %s failed", camera_id)
-    log.info("deterrence: %s %s %s%s on %s by %s%s%s", action, target or "", "on" if on else "off",
-             f" {seconds:g} s" if on and seconds else "", camera_id, by, f" (event {event_id})" if event_id else "",
-             f": FAILED {error}" if error else "")
+    log.info("deterrence: %s %s %s%s on %s by %s%s%s%s", action, target or "", "on" if on else "off",
+             f" {seconds:g} s" if on and seconds else "", camera_id, by, f" via {via}" if via else "",
+             f" (event {event_id})" if event_id else "", f": FAILED {error}" if error else "")
 
 
 class DeterrenceCamera:
@@ -344,6 +441,7 @@ class DeterrenceCamera:
         self.next_probe = 0.0
         self.state: dict[str, dict] = {}     # output key -> {on, until, by, started_at}
         self.timers: dict[str, asyncio.Task] = {}
+        self.siren_job: tuple[str, object, float] | None = None   # (speaker id, talkdown.Job, seconds) of a siren on a speaker
 
     # ---- discovery
     def _probe_sync(self) -> dict:
@@ -396,10 +494,12 @@ class DeterrenceCamera:
                                profs[0].get("token") if profs else None)
             except OnvifError:
                 pass
+        is_ms = "milesight" in (info.get("manufacturer") or "").lower()
+        # can its siren output make a sound? (a Milesight plays an alarm-sound file slot: read-only get.audio.file)
+        sound = milesight.siren_sound(self.cam) if is_ms and actions.get("siren") else None
         return {"available": True, "manufacturer": info.get("manufacturer"), "model": info.get("model"),
-                "milesight": "milesight" in (info.get("manufacturer") or "").lower(), "relays": relays,
-                "device_aux": device_aux, "ptz_aux": ptz_aux, "ptz_profile": profile,
-                "audio_outputs": parse_audio_outputs(body), "actions": actions, "probed_at": time.time()}
+                "milesight": is_ms, "relays": relays, "device_aux": device_aux, "ptz_aux": ptz_aux, "ptz_profile": profile,
+                "audio_outputs": parse_audio_outputs(body), "actions": actions, "siren_sound": sound, "probed_at": time.time()}
 
     async def probe(self) -> dict:
         try:
@@ -412,19 +512,38 @@ class DeterrenceCamera:
         self.caps = caps
         acts = [k for k, v in caps["actions"].items() if v]
         if acts or caps["relays"]:
-            log.info("[%s] deterrence: %s; %d relay(s)%s", self.cam["id"], ", ".join(f"{k} ({caps['actions'][k]['target']})" for k in acts) or "no mapped outputs",
-                     len(caps["relays"]), "; Milesight web API" if caps["milesight"] else "")
+            snd = caps.get("siren_sound")
+            log.info("[%s] deterrence: %s; %d relay(s)%s%s", self.cam["id"], ", ".join(f"{k} ({caps['actions'][k]['target']})" for k in acts) or "no mapped outputs",
+                     len(caps["relays"]), "; Milesight web API" if caps["milesight"] else "",
+                     "" if snd is None else "; siren sound loaded" if snd.get("loaded") else "; siren sound files empty" if snd.get("loaded") is False
+                     else f"; siren sound files unreadable ({snd.get('error')})")
         return caps
 
     @property
     def available(self) -> bool:
         return bool(self.caps and self.caps.get("available"))
 
+    def siren_route(self) -> dict | None:
+        """Which way the siren goes now (resolve_siren); None before a successful probe."""
+        if not self.available:
+            return None
+        source = (self.cam.get("deterrence_config") or {}).get("siren_source") or "auto"
+        return resolve_siren(self.caps["actions"].get("siren"), bool(self.caps.get("milesight")), self.caps.get("siren_sound"),
+                             linked_speakers(self.cam["id"], self.cam.get("host")), source, self.cam.get("host"))
+
+    def actions_now(self) -> dict[str, dict | None]:
+        """{strobe, siren, light}: the outputs to drive, the siren as it resolves now (the camera's or a speaker's)."""
+        acts = dict(self.caps["actions"]) if self.available else {}
+        route = self.siren_route()
+        if route is not None:
+            acts["siren"] = (acts.get("siren") if route["via"] == "relay" else speaker_act(route) if route["via"] == "speaker" else None)
+        return acts
+
     def brief(self) -> dict | None:
         """What the camera list carries ({strobe, siren, light, relays}); None when there is nothing to drive."""
         if not self.available:
             return None
-        a = self.caps["actions"]
+        a = self.actions_now()
         out = {"strobe": bool(a.get("strobe")), "siren": bool(a.get("siren")), "light": bool(a.get("light")),
                "relays": len(self.caps["relays"])}
         return out if out["strobe"] or out["siren"] or out["light"] or out["relays"] else None
@@ -464,6 +583,11 @@ class DeterrenceCamera:
             if r is None:
                 raise NoOutput(f"the camera has no relay {token!r}" if token else "name the relay (token)")
             return f"relay:{r['token']}", {**_relay_act(r), "label": r["token"]}
+        if action == "siren":
+            route = self.siren_route()
+            if route["via"] is None:
+                raise NoOutput(f"no siren: {route['reason']}")
+            return action, (speaker_act(route) if route["via"] == "speaker" else self.caps["actions"]["siren"])
         out = self.caps["actions"].get(action)
         if not out:
             raise NoOutput(f"the camera has no {action}")
@@ -500,10 +624,14 @@ class DeterrenceCamera:
         key, out = self.output(action, token)
         secs = clamp_seconds(seconds)
         self._cancel(key)
+        if out["via"] == "speaker":
+            return self._speaker_siren(out, on, secs, by, source, event_id)
+        if action == "siren":
+            self._stop_speaker_siren()   # the way changed (a setting, a file loaded): one siren at a time
         try:
             await self._send(out, on)
         except (OnvifError, OSError) as e:
-            _log(self.cam["id"], action, out["target"], on, secs, by, source, event_id, str(e)[:300])
+            _log(self.cam["id"], action, out["target"], on, secs, by, source, event_id, str(e)[:300], out["via"])
             raise
         now = time.time()
         if on and latch and not out.get("pulse_s"):
@@ -516,8 +644,58 @@ class DeterrenceCamera:
         else:
             self.state[key] = {"on": False, "until": None, "by": by, "started_at": None}
         timed = on and not (latch and not out.get("pulse_s"))
-        _log(self.cam["id"], action, out["target"], on, secs if timed else None, by, source, event_id, None)
-        return {"action": action, "on": on, "seconds": secs if timed else None, **({"token": token} if action == "relay" else {})}
+        _log(self.cam["id"], action, out["target"], on, secs if timed else None, by, source, event_id, None, out["via"])
+        return {"action": action, "on": on, "seconds": secs if timed else None, **({"token": token} if action == "relay" else {}),
+                **({"via": out["via"]} if action == "siren" else {})}
+
+    def _speaker_siren(self, out: dict, on: bool, secs: float, by: str, source: str, event_id: int | None) -> dict:
+        """The siren through a linked speaker: the built-in sound for `secs` on it (talkdown.Talkdown.siren: it takes
+        its turn with talk-down there), or off. Busy while someone holds to talk on it."""
+        from . import talkdown   # late: talkdown pulls in the TTS engines
+        sid = out["speaker_id"]
+        if not on:
+            self._stop_speaker_siren()
+            self.state["siren"] = {"on": False, "until": None, "by": by, "started_at": None}
+            _log(self.cam["id"], "siren", sid, False, None, by, source, event_id, None, "speaker")
+            return {"action": "siren", "on": False, "seconds": None, "via": "speaker", "speaker_id": sid}
+        sp = db.speaker(sid)
+        try:
+            if not sp or not sp.get("enabled"):
+                raise talkdown.TalkdownError(f"the speaker {sid} is gone or turned off")
+            job = talkdown.manager.siren(sp, secs, by)
+        except talkdown.TalkdownError as e:
+            _log(self.cam["id"], "siren", sid, True, secs, by, source, event_id, str(e)[:300], "speaker")
+            if isinstance(e, talkdown.SpeakerBusy):
+                raise Busy(str(e)) from None
+            raise NoOutput(str(e)) from None
+        now = time.time()
+        self.siren_job = (sid, job, secs)
+        self.state["siren"] = {"on": True, "until": now + secs, "by": by, "started_at": now}
+        _log(self.cam["id"], "siren", sid, True, secs, by, source, event_id, None, "speaker")
+        return {"action": "siren", "on": True, "seconds": secs, "via": "speaker", "speaker_id": sid}
+
+    def _stop_speaker_siren(self) -> str | None:
+        """End this camera's siren on its speaker if it is still the one playing there; the speaker's id when it was."""
+        if not self.siren_job:
+            return None
+        from . import talkdown
+        sid, job, _ = self.siren_job
+        self.siren_job = None
+        return sid if talkdown.manager.stop_job(sid, job) else None
+
+    def _sync_speaker_siren(self) -> None:
+        """A siren on a speaker ends on its own (played, replaced by Hold to Talk or a message, failed): the state follows;
+        while it plays its end counts from when the speaker started it."""
+        if not self.siren_job:
+            return
+        from . import talkdown
+        sid, job, secs = self.siren_job
+        st = self.state.get("siren") or {}
+        if talkdown.manager.current(sid) is not job:
+            self.siren_job = None
+            self.state["siren"] = {**st, "on": False, "until": None}
+        elif job.started_at:
+            self.state["siren"] = {**st, "until": job.started_at + secs}
 
     async def stop(self, by: str = "local", source: str = "manual", event_id: int | None = None, quiet: bool = False) -> dict:
         """Everything off: the strobe and siren always, the light and other relays if this server turned them on."""
@@ -525,6 +703,9 @@ class DeterrenceCamera:
             raise NotReady((self.caps or {}).get("error") or "camera not probed yet")
         for key in list(self.timers):
             self._cancel(key)
+        on_speaker = self._stop_speaker_siren()
+        if on_speaker:
+            self.state["siren"] = {"on": False, "until": None, "by": by, "started_at": None}
         targets: dict[str, dict] = {}
         for action in ("strobe", "siren"):
             if self.caps["actions"].get(action):
@@ -543,14 +724,17 @@ class DeterrenceCamera:
                 errors.append(f"{out['target']}: {str(e)[:150]}")
             self.state[key] = {"on": False, "until": None, "by": by, "started_at": None}
         if not quiet:
-            _log(self.cam["id"], "stop", ", ".join(o["target"] for o in targets.values()) or None, False, None, by, source, event_id,
-                 "; ".join(errors) or None)
+            names = [o["target"] for o in targets.values()] + ([on_speaker] if on_speaker else [])
+            vias = list(dict.fromkeys([o["via"] for o in targets.values()] + (["speaker"] if on_speaker else [])))
+            _log(self.cam["id"], "stop", ", ".join(names) or None, False, None, by, source, event_id, "; ".join(errors) or None,
+                 ",".join(vias) or None)
         if errors and len(errors) == len(targets):
             raise OnvifError("; ".join(errors))
         return {"action": "stop", "on": False, "seconds": None, "errors": errors}
 
     def public_state(self, now: float | None = None) -> dict:
         now = time.time() if now is None else now
+        self._sync_speaker_siren()
         out = {}
         for key, s in self.state.items():
             until = s.get("until")
@@ -562,18 +746,23 @@ class DeterrenceCamera:
     def public(self) -> dict:
         caps = self.caps or {}
         acts = caps.get("actions") or {}
-        last = db.one("SELECT ts, action, on_state, seconds, by, source, result, error FROM deterrence_log WHERE camera_id=? "
+        now_acts = self.actions_now()
+        route = self.siren_route()
+        last = db.one("SELECT ts, action, on_state, seconds, by, source, result, error, via FROM deterrence_log WHERE camera_id=? "
                       "ORDER BY id DESC LIMIT 1", [self.cam["id"]])
         return {
             "camera_id": self.cam["id"], "probed": self.caps is not None, "available": self.available and self.brief() is not None,
             "error": caps.get("error"), "milesight": bool(caps.get("milesight")), "audio_outputs": int(caps.get("audio_outputs") or 0),
             "default_s": DEFAULT_S, "max_s": MAX_S, "now": time.time(),
-            "actions": {k: ({kk: a[kk] for kk in ("via", "target", "label", "timed", "pulse_s")} if (a := acts.get(k)) else None) for k in ACTIONS},
+            "actions": {k: ({kk: a[kk] for kk in ("via", "target", "label", "timed", "pulse_s", "speaker_id", "speaker", "own_speaker") if kk in a}
+                            if (a := now_acts.get(k)) else None) for k in ACTIONS},
+            # which way the siren goes (resolve_siren) and the Milesight sound-file check behind it
+            "siren": ({**route, "sound": caps.get("siren_sound")} if route else None),
             "relays": [{"token": r["token"], "mode": r["mode"], "delay_s": r.get("delay_s"), "idle_state": r.get("idle_state"),
                         "role": relay_role(r["token"], acts)} for r in caps.get("relays") or []],
             "state": self.public_state(),
             "last": ({"ts": last["ts"], "action": last["action"], "on": bool(last["on_state"]), "seconds": last["seconds"], "by": last["by"],
-                      "source": last["source"], "result": last["result"], "error": last["error"]} if last else None),
+                      "source": last["source"], "result": last["result"], "error": last["error"], "via": last["via"]} if last else None),
         }
 
 
@@ -700,7 +889,7 @@ class DeterrenceManager:
                     await d.turn(action, True, seconds=r.get("seconds"), by=by, source="rule", event_id=e["id"])
                 except NoOutput:
                     pass   # the camera lost that output (another model at the address): nothing to log against it
-                except (NotReady, OnvifError, OSError) as ex:
+                except (Busy, NotReady, OnvifError, OSError) as ex:   # Busy: someone holds to talk on the siren's speaker
                     log.warning("event %s: deterrence %s on %s failed: %s", e["id"], action, cid, ex)
         if r.get("speaker_id") and r.get("message_id"):
             self._talkdown(cid, r, e["id"], by)
@@ -721,7 +910,8 @@ class DeterrenceManager:
         else:
             msg = talkdown.Message(m["name"], text=m["text"], message_id=m["id"], cache=True, voice=talkdown.voice_for(m))
         try:
-            talkdown.manager.play(sp, msg, by)
+            # after_siren: on the speaker sounding this rule's siren the message plays when the siren ends
+            talkdown.manager.play(sp, msg, by, after_siren=True)
         except Exception as ex:  # noqa: BLE001
             log.warning("event %s: deterrence rule's talk-down on %s failed: %s", event_id, sp["id"], ex)
 

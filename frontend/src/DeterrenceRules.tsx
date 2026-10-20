@@ -2,11 +2,14 @@
    one-click "use this camera's own speaker for talk-down". A rule fires on a verified event (people and/or vehicles,
    anywhere or in one named zone, always or only while the Site's SOC monitoring is armed): the camera's strobe, siren
    or light for some seconds, and optionally a talk-down message on a linked speaker, then waits its cooldown. No rules
-   = off, the default. The rules save with their own button (a PUT of the whole list); the checks are deterrence.ts. */
+   = off, the default. The rules save with their own button (a PUT of the whole list); the checks are deterrence.ts.
+   With them, the camera's siren setting: which way "Siren" sounds (automatic: the camera's own siren only when it can make a
+   sound, else the built-in siren on a linked talk-down speaker; or pinned to one of them), and which way it goes now. */
 import { useEffect, useState } from "react";
 import { api, type Camera, type Speaker } from "./api";
-import { DETER_ACTIONS, MAX_COOLDOWN_S, MAX_RULES, MAX_S, type DeterAction, type DeterRule, type DeterRules, actionName, armedText, errorStatus,
-  newRule, normalizeRules, offerCameraSpeaker, ruleProblems, rulesDirty, rulesHaveNothing, rulesProblems } from "./deterrence";
+import { DETER_ACTIONS, MAX_COOLDOWN_S, MAX_RULES, MAX_S, type DeterAction, type DeterRule, type DeterRules, type SirenSource, actionName, armedText,
+  errorStatus, newRule, normalizeRules, offerCameraSpeaker, ruleProblems, rulesDirty, rulesHaveNothing, rulesProblems, sirenSourceChoices,
+  sirenSourceName, sirenWayText } from "./deterrence";
 import { errorText, toast } from "./ui";
 
 export function DeterrenceRulesEditor({ camera }: { camera: Camera }) {
@@ -14,13 +17,15 @@ export function DeterrenceRulesEditor({ camera }: { camera: Camera }) {
   const [edit, setEdit] = useState<DeterRule[]>([]);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
-  const take = (r: DeterRules) => { setData(r); setEdit(r.rules); };
+  const [source, setSource] = useState<SirenSource>("auto");
+  const [seq, setSeq] = useState(0);   // bumped to read again (after asking the camera again)
+  const take = (r: DeterRules) => { setData(r); setEdit(r.rules); setSource(r.config?.siren_source ?? "auto"); };
   useEffect(() => {
     let alive = true;
     api.deterrenceRules(camera.id).then((r) => { if (alive) take(r); })
       .catch((e) => { if (alive) setErr(errorStatus(e) === 503 ? "The camera hasn't been asked what it can drive yet; open this tab again in a few seconds." : errorText(e)); });
     return () => { alive = false; };
-  }, [camera.id]);
+  }, [camera.id, seq]);
 
   if (err) return <p className="small error">{err}</p>;
   if (!data) return <p className="muted small">Reading the rules…</p>;
@@ -29,12 +34,25 @@ export function DeterrenceRulesEditor({ camera }: { camera: Camera }) {
   }
   const armed = armedText(data.armed);
   const problems = rulesProblems(edit, data.caps);
-  const dirty = rulesDirty(data.rules, edit);
+  const saved = data.config?.siren_source ?? "auto";
+  const sourceDirty = !!data.config && source !== saved;
+  const dirty = rulesDirty(data.rules, edit) || sourceDirty;
   const set = (i: number, p: Partial<DeterRule>) => setEdit(edit.map((r, k) => (k === i ? { ...r, ...p } : r)));
+  const recheck = async () => {
+    setBusy(true);
+    try {
+      await api.deterrence(camera.id, true);
+      setSeq((n) => n + 1);
+    } catch (e) {
+      toast.error(e);
+    } finally {
+      setBusy(false);
+    }
+  };
   const save = async () => {
     setBusy(true);
     try {
-      take(await api.saveDeterrenceRules(camera.id, normalizeRules(edit)));
+      take(await api.saveDeterrenceRules(camera.id, normalizeRules(edit), sourceDirty ? { siren_source: source } : undefined));
       toast.success(`${camera.name}: deterrence rules saved`);
     } catch (e) {
       toast.error(e);
@@ -45,6 +63,18 @@ export function DeterrenceRulesEditor({ camera }: { camera: Camera }) {
   return (
     <>
       <p className="small"><span className={`dot ${armed.tone}`} aria-hidden="true" /> {armed.text}</p>
+      {data.config && (
+        <div className="row small">
+          <span>Siren sounds through</span>
+          <select value={source} aria-label="Siren sounds through" onChange={(e) => setSource(e.target.value as SirenSource)}
+            title="Automatic: the camera's own siren only when it can make a sound (a Milesight with a sound file loaded), else the built-in siren on a talk-down speaker linked to the camera">
+            {sirenSourceChoices(data.siren, saved).map((s) => <option key={s} value={s}>{sirenSourceName(s)}</option>)}
+          </select>
+          <span className="muted">{sourceDirty ? "Save to apply." : sirenWayText(data.siren)}</span>
+          <button className="ghost small" disabled={busy} onClick={recheck}
+            title="Ask the camera again what it can drive (after loading a siren sound file on it)">Check again</button>
+        </div>
+      )}
       {!edit.length && <p className="muted small">No rules: nothing switches on by itself on this camera.</p>}
       {edit.map((r, i) => (
         <RuleCard key={i} r={r} data={data} problems={ruleProblems(r, data.caps)} onChange={(p) => set(i, p)}
@@ -54,7 +84,7 @@ export function DeterrenceRulesEditor({ camera }: { camera: Camera }) {
         <button className="ghost small" disabled={edit.length >= MAX_RULES} onClick={() => setEdit([...edit, newRule(edit)])}
           title={edit.length >= MAX_RULES ? `At most ${MAX_RULES} rules per camera` : "A rule for people, only while the Site is armed; pick what it switches on"}>+ Rule</button>
         <span className="spacer" />
-        {dirty && <button className="ghost small" disabled={busy} onClick={() => setEdit(data.rules)}>Undo</button>}
+        {dirty && <button className="ghost small" disabled={busy} onClick={() => { setEdit(data.rules); setSource(saved); }}>Undo</button>}
         <button className="small" disabled={busy || !dirty || problems.length > 0} onClick={save}
           title={problems.length ? problems.join("; ") : undefined}>{busy ? "Saving…" : "Save rules"}</button>
       </div>
