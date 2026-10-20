@@ -1,0 +1,103 @@
+<ns0:Body xmlns:ns0="http://www.w3.org/2003/05/soap-envelope" xmlns:ns10="http://www.onvif.org/ver10/replay/wsdl" xmlns:ns11="http://www.onvif.org/ver10/deviceIO/wsdl" xmlns:ns4="http://www.onvif.org/ver10/events/wsdl" xmlns:ns5="http://www.onvif.org/ver20/ptz/wsdl" xmlns:ns8="http://www.onvif.org/ver10/recording/wsdl" xmlns:ns9="http://www.onvif.org/ver10/search/wsdl" xmlns:tan="http://www.onvif.org/ver20/analytics/wsdl" xmlns:tds="http://www.onvif.org/ver10/device/wsdl" xmlns:timg="http://www.onvif.org/ver20/imaging/wsdl" xmlns:tr2="http://www.onvif.org/ver20/media/wsdl" xmlns:trt="http://www.onvif.org/ver10/media/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
+		<tds:GetServicesResponse>
+			<tds:Service>
+				<tds:Namespace>http://www.onvif.org/ver10/device/wsdl</tds:Namespace>
+				<tds:XAddr>http://192.0.2.75:80/onvif/device_service</tds:XAddr>
+				<tds:Capabilities><tds:Capabilities><tds:Network IPFilter="true" ZeroConfiguration="false" IPVersion6="true" DynDNS="true" Dot11Configuration="false" Dot1XConfigurations="0" HostnameFromDHCP="true" NTP="1" DHCPv6="true" /><tds:Security TLS1.0="true" TLS1.1="true" TLS1.2="true" OnboardKeyGeneration="false" AccessPolicyConfig="false" DefaultAccessPolicy="true" Dot1X="false" RemoteUserHandling="false" X.509Token="false" SAMLToken="false" KerberosToken="false" UsernameToken="true" HttpDigest="true" RELToken="false" SupportedEAPMethods="0" /><tds:System DiscoveryResolve="false" DiscoveryBye="true" RemoteDiscovery="true" SystemBackup="false" SystemLogging="true" FirmwareUpgrade="true" HttpFirmwareUpgrade="true" HttpSystemBackup="false" HttpSystemLogging="false" HttpSupportInformation="false" /><tds:Misc AuxiliaryCommands="tt:Disarm|Off tt:Disarm|On tt:IRLamp|On tt:IRLamp|Off tt:IRLamp|Auto tt:Light|Off tt:Light|On tt:Light|Auto tt:LightSmartSwitch|On tt:WarningLight|Off tt:WarningLight|On" /></tds:Capabilities></tds:Capabilities>
+				<tds:Version>
+					<tt:Major>23</tt:Major>
+					<tt:Minor>6</tt:Minor>
+				</tds:Version>
+			</tds:Service>
+			<tds:Service>
+				<tds:Namespace>http://www.onvif.org/ver10/media/wsdl</tds:Namespace>
+				<tds:XAddr>http://192.0.2.75:80/onvif/Media</tds:XAddr>
+				<tds:Capabilities><trt:Capabilities SnapshotUri="true" Rotation="false"> <trt:ProfileCapabilities MaximumNumberOfProfiles="8" /> <trt:StreamingCapabilities RTPMulticast="true" RTP_TCP="true" RTP_RTSP_TCP="true" NonAggregateControl="false"> </trt:StreamingCapabilities></trt:Capabilities></tds:Capabilities>
+				<tds:Version>
+					<tt:Major>23</tt:Major>
+					<tt:Minor>6</tt:Minor>
+				</tds:Version>
+			</tds:Service>
+			<tds:Service>
+				<tds:Namespace>http://www.onvif.org/ver10/events/wsdl</tds:Namespace>
+				<tds:XAddr>http://192.0.2.75:80/onvif/Events</tds:XAddr>
+				<tds:Capabilities><ns4:Capabilities WSSubscriptionPolicySupport="true" WSPullPointSupport="true" WSPausableSubscriptionManagerInterfaceSupport="false" MaxNotificationProducers="32" MaxPullPoints="32" /></tds:Capabilities>
+				<tds:Version>
+					<tt:Major>23</tt:Major>
+					<tt:Minor>6</tt:Minor>
+				</tds:Version>
+			</tds:Service>
+			<tds:Service>
+				<tds:Namespace>http://www.onvif.org/ver20/ptz/wsdl</tds:Namespace>
+				<tds:XAddr>http://192.0.2.75:80/onvif/PTZ</tds:XAddr>
+				<tds:Capabilities><ns5:Capabilities /></tds:Capabilities>
+				<tds:Version>
+					<tt:Major>23</tt:Major>
+					<tt:Minor>6</tt:Minor>
+				</tds:Version>
+			</tds:Service>
+			<tds:Service>
+				<tds:Namespace>http://www.onvif.org/ver20/imaging/wsdl</tds:Namespace>
+				<tds:XAddr>http://192.0.2.75:80/onvif/Imaging</tds:XAddr>
+				<tds:Capabilities><timg:Capabilities ImageStabilization="true" /></tds:Capabilities>
+				<tds:Version>
+					<tt:Major>23</tt:Major>
+					<tt:Minor>6</tt:Minor>
+				</tds:Version>
+			</tds:Service>
+			<tds:Service>
+				<tds:Namespace>http://www.onvif.org/ver20/analytics/wsdl</tds:Namespace>
+				<tds:XAddr>http://192.0.2.75:80/onvif/Analytics</tds:XAddr>
+				<tds:Capabilities><tan:Capabilities RuleSupport="true" AnalyticsModuleSupport="true" CellBasedSceneDescriptionSupported="false" RuleOptionsSupported="true" AnalyticsModuleOptionsSupported="false" SupportedMetadata="true" /></tds:Capabilities>
+				<tds:Version>
+					<tt:Major>23</tt:Major>
+					<tt:Minor>6</tt:Minor>
+				</tds:Version>
+			</tds:Service>
+			<tds:Service>
+				<tds:Namespace>http://www.onvif.org/ver10/recording/wsdl</tds:Namespace>
+				<tds:XAddr>http://192.0.2.75:80/onvif/Recording</tds:XAddr>
+				<tds:Capabilities><ns8:Capabilities DynamicRecordings="false" DynamicTracks="false" Encoding="G711 G726 AAC H264 JPEG H265" MaxRate="16384" MaxTotalRate="16384" MaxRecordings="1" MaxRecordingJobs="1" Options="true"> </ns8:Capabilities></tds:Capabilities>
+				<tds:Version>
+					<tt:Major>23</tt:Major>
+					<tt:Minor>6</tt:Minor>
+				</tds:Version>
+			</tds:Service>
+			<tds:Service>
+				<tds:Namespace>http://www.onvif.org/ver10/search/wsdl</tds:Namespace>
+				<tds:XAddr>http://192.0.2.75:80/onvif/Search</tds:XAddr>
+				<tds:Capabilities><ns9:Capabilities MetadataSearch="false" GeneralStartEvents="false"> </ns9:Capabilities></tds:Capabilities>
+				<tds:Version>
+					<tt:Major>23</tt:Major>
+					<tt:Minor>6</tt:Minor>
+				</tds:Version>
+			</tds:Service>
+			<tds:Service>
+				<tds:Namespace>http://www.onvif.org/ver10/replay/wsdl</tds:Namespace>
+				<tds:XAddr>http://192.0.2.75:80/onvif/Replay</tds:XAddr>
+				<tds:Capabilities><ns10:Capabilities ReversePlayback="false" SessionTimeoutRange="1 60" RTP_RTSP_TCP="true"> </ns10:Capabilities></tds:Capabilities>
+				<tds:Version>
+					<tt:Major>23</tt:Major>
+					<tt:Minor>6</tt:Minor>
+				</tds:Version>
+			</tds:Service>
+			<tds:Service>
+				<tds:Namespace>http://www.onvif.org/ver10/deviceIO/wsdl</tds:Namespace>
+				<tds:XAddr>http://192.0.2.75:80/onvif/deviceIO</tds:XAddr>
+				<tds:Capabilities><ns11:Capabilities VideoSources="1" VideoOutputs="0" AudioSources="1" AudioOutputs="2" RelayOutputs="3" DigitalInputs="1" SerialPorts="0" /></tds:Capabilities>
+				<tds:Version>
+					<tt:Major>23</tt:Major>
+					<tt:Minor>6</tt:Minor>
+				</tds:Version>
+			</tds:Service>
+			<tds:Service>
+				<tds:Namespace>http://www.onvif.org/ver20/media/wsdl</tds:Namespace>
+				<tds:XAddr>http://192.0.2.75:80/onvif/media2</tds:XAddr>
+				<tds:Capabilities><tr2:Capabilities SnapshotUri="true" Mask="true" SourceMask="false" OSD="true" VideoSourceMode="true" TemporaryOSDTex="false" WebRTC="0" Rotation="false"> <tr2:ProfileCapabilities ConfigurationsSupported="VideoSource VideoEncoder AudioSource AudioEncoder AudioOutput AudioDecoder Metadata Analytics PTZ" MaximumNumberOfProfiles="8" /> <tr2:StreamingCapabilities RTPMulticast="true" RTSPStreaming="true" RTP_RTSP_TCP="true" RTSPWebSocketUri="ws:/webstream" NonAggregateControl="false"> </tr2:StreamingCapabilities></tr2:Capabilities></tds:Capabilities>
+				<tds:Version>
+					<tt:Major>23</tt:Major>
+					<tt:Minor>6</tt:Minor>
+				</tds:Version>
+			</tds:Service>
+		</tds:GetServicesResponse>
+	</ns0:Body>

@@ -1,0 +1,9 @@
+<ns0:Body xmlns:ns0="http://www.w3.org/2003/05/soap-envelope" xmlns:tds="http://www.onvif.org/ver10/device/wsdl">
+		<tds:GetDeviceInformationResponse>
+			<tds:Manufacturer>Milesight Technology Co.,Ltd.</tds:Manufacturer>
+			<tds:Model>MS-CQ8231-HYPG1</tds:Model>
+			<tds:FirmwareVersion>CQ_63.8.0.6-r2</tds:FirmwareVersion>
+			<tds:SerialNumber>0000000000000000</tds:SerialNumber>
+			<tds:HardwareId>V1.1</tds:HardwareId>
+		</tds:GetDeviceInformationResponse>
+	</ns0:Body>

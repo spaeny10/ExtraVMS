@@ -28,7 +28,7 @@ from pydantic import BaseModel, Field, model_validator
 from . import assistant, backup, baseline, cells, footage, frames, health, identities, journeys, keep, mediamtx, policy, ptz, retention, streams, zones
 from . import synopsis as vlm
 from . import advisor, ai_serve, detector, direct, hub_agent, lan_cert, lan_guard, sdbackfill, site_actions, siteconfig
-from . import camweb, device_api, speakers_api, talkdown
+from . import camweb, deterrence, deterrence_api, device_api, speakers_api, talkdown
 from . import aischedule, vlmroute
 from . import summary as summary_mod
 from .config import ROOT, settings
@@ -82,6 +82,7 @@ def sync_cameras() -> None:
             ing.start()
             state.ingests[cid] = ing
     state.ptz.sync(cams)
+    deterrence.manager.sync(cams)
 
 
 async def _mediamtx_config_check() -> None:
@@ -123,6 +124,7 @@ async def lifespan(app: FastAPI):
     p.ptz = state.ptz
     p.tracker.away_preset = state.ptz.away_preset
     p.tracker.away_between = state.ptz.away_between
+    p.deterrence = deterrence.manager   # automatic deterrence rules on verified events
     # cameras whose RTSP stream has no metadata track at all: auto mode takes their ONVIF events (ruleevents.py)
     p.tracker.metadata_missing = lambda cid: bool((ing := state.ingests.get(cid)) and ing.meta.no_track)
     state.hub = hub_agent.HubAgent(app, state)
@@ -149,6 +151,7 @@ async def lifespan(app: FastAPI):
         ("stream-health", state.health.run()),
         ("storage-watch", health.StorageWatch().run()),   # write probe of the data disk (health.storage_alert)
         ("ptz", state.ptz.run()),
+        ("deterrence", deterrence.manager.run()),   # what each camera's strobe / siren / light / relays are (read-only ONVIF)
         ("hub-agent", state.hub.run()),
         ("sd-backfill", state.sd.run()),
         ("sd-status", sdbackfill.status_loop()),
@@ -167,6 +170,7 @@ async def lifespan(app: FastAPI):
         ing.stop()
     state.sd.stop_all()   # a recovery in progress keeps what it published and resumes after the restart
     talkdown.manager.stop_all()   # each playback tears its speaker session down
+    await deterrence.manager.shutdown()   # a strobe or siren this server set off is not left on
     await state.mtx.stop()
     state.health.flush()   # bytes received today since the last save
     if state.ollama is not None:   # a site without a local model has no Ollama to stop
@@ -228,6 +232,7 @@ app.include_router(ai_serve.router)   # this site's Qwen for the fleet, tunnel-o
 app.include_router(speakers_api.router)   # IP speakers and talk-down (talkdown.py)
 app.include_router(camweb.router)   # camera web pages through the hub, tunnel-only (see camweb.py)
 app.include_router(device_api.router)   # camera settings over ONVIF: clock, encoders, imaging, rules, reboot (camdevice.py)
+app.include_router(deterrence_api.router)   # strobe / siren / light / relays, and automatic rules (deterrence.py)
 
 
 DIRECT_WRITES = re.compile(r"^/api/whep/")   # WebRTC session lifecycle: the only non-GET a direct browser may send
@@ -680,6 +685,7 @@ async def list_cameras():
             **(ing.status() if ing else {}),
             "health": state.health.camera(c["id"]),
             "ptz": state.ptz.status(c["id"]),
+            "deterrence": deterrence.manager.brief(c["id"]),   # {strobe, siren, light, relays} or None: the tile's control
             "sd": _sd_brief(sdbackfill.cached_status(c["id"])),
             "detections": _detection_status(c["id"]),
         }})
@@ -745,6 +751,8 @@ async def put_camera(camera_id: str, cam: CameraIn):
     if readdressed and data["enabled"] and getattr(state, "streams", None) is not None:
         state.streams.check_soon(camera_id)
     state.ptz.reset(camera_id)  # re-probe with the new host/credentials (ptz_config is kept)
+    if readdressed or not existing or existing.get("enabled") != data["enabled"]:
+        deterrence.manager.reset(camera_id)   # what it can set off may have changed with the address (rules are kept)
     state.pipeline.queue_missing_synopses(camera_id)  # e.g. vehicles just switched on for Qwen
     if policy.recheck(camera_id):  # rules changed: re-judge this week's described vehicles
         pass
@@ -787,15 +795,20 @@ class ToSpeakerIn(BaseModel):
     speaker_id: str | None = Field(None, pattern=speakers_api.ID_RX)    # default: the next free spkN
     name: str | None = Field(None, min_length=1, max_length=80)          # default: the camera's name
     host: str | None = Field(None, pattern=speakers_api.HOST_RX)         # default: the camera's (correct it here if it is wrong)
-    path: str = Field("/main", pattern=speakers_api.PATH_RX)
-    camera_ids: list[str] = Field(default_factory=list, max_length=64)  # cameras to bind (may be empty)
-    disable_camera: bool = True   # the row was never a camera: stop pulling it as one
+    path: str | None = Field(None, pattern=speakers_api.PATH_RX)        # default: /main, or the camera's main stream (kept a camera)
+    camera_ids: list[str] | None = Field(None, max_length=64)           # cameras to bind (may be empty); default: none, or this camera (kept)
+    # True: the row was never a camera, stop pulling it as one. False: a camera with its own speaker (a Milesight Q series'
+    # siren speaker) stays a camera and gets a speaker row too, on the same address and login, bound to itself
+    disable_camera: bool = True
 
 
 @app.post("/api/cameras/{camera_id}/to-speaker")
 async def camera_to_speaker(camera_id: str, body: ToSpeakerIn, request: Request):
     """Admin, one-off: a speaker that was added as a camera becomes a speaker. Its host, ports and login are copied
-    server-side (the password never leaves the server); the camera row is disabled (kept: events may reference it)."""
+    server-side (the password never leaves the server); the camera row is disabled (kept: events may reference it).
+    With disable_camera false, a camera's own speaker is registered instead: the camera stays as it is, the speaker row
+    talks to the same host (the address this server reaches the camera at) over the RTSP backchannel of its main stream
+    (PCMU), bound to that camera unless camera_ids says otherwise."""
     speakers_api.require(request, "admin")
     cam = db.one("SELECT * FROM cameras WHERE id=?", [camera_id])
     if not cam:
@@ -804,15 +817,20 @@ async def camera_to_speaker(camera_id: str, body: ToSpeakerIn, request: Request)
     sid = body.speaker_id or next(f"spk{n}" for n in range(1, 1000) if f"spk{n}" not in taken)
     if sid in taken:
         raise HTTPException(409, f"there is already a speaker {sid}")
-    binds = list(dict.fromkeys(body.camera_ids))
+    keep = not body.disable_camera
+    binds = list(dict.fromkeys(body.camera_ids if body.camera_ids is not None else ([camera_id] if keep else [])))
     speakers_api.check_cameras(binds)
-    db.upsert_speaker({"id": sid, "name": body.name or cam["name"], "host": body.host or cam["host"], "rtsp_port": cam["rtsp_port"],
-                       "onvif_port": cam["onvif_port"], "path": body.path, "username": cam["username"], "password": cam["password"],
-                       "codec": "PCMU", "volume_note": "", "camera_ids": binds, "enabled": True})
+    host, onvif_port, rtsp_port = onvif_soap.outside(cam) if keep else (cam["host"], cam["onvif_port"], cam["rtsp_port"])
+    path = body.path or ((cam.get("main_path") or "/main") if keep else "/main")
+    if not re.match(speakers_api.PATH_RX, path):
+        raise HTTPException(422, "the camera's main stream path can't be a speaker path: give `path`")
+    db.upsert_speaker({"id": sid, "name": body.name or (f"{cam['name']} speaker" if keep else cam["name"]), "host": body.host or host,
+                       "rtsp_port": rtsp_port, "onvif_port": onvif_port, "path": path, "username": cam["username"],
+                       "password": cam["password"], "codec": "PCMU", "volume_note": "", "camera_ids": binds, "enabled": True})
     if body.disable_camera and cam["enabled"]:
         db.execute("UPDATE cameras SET enabled=0 WHERE id=?", [camera_id])
         sync_cameras()
-    log.info("camera %s converted to speaker %s (%d bound cameras)", camera_id, sid, len(binds))
+    log.info("camera %s %s speaker %s (%d bound cameras)", camera_id, "keeps its camera row and gets" if keep else "converted to", sid, len(binds))
     return speakers_api.public_speaker(db.speaker(sid))
 
 
@@ -865,6 +883,7 @@ class PtzConfigIn(BaseModel):
 
 class RelayIn(BaseModel):
     on: bool
+    token: str | None = Field(None, max_length=64)   # which relay; default: the first (what this route always drove)
 
 
 @app.get("/api/cameras/{camera_id}/ptz")
@@ -973,12 +992,30 @@ async def ptz_moves(camera_id: str, since: float | None = None, until: float | N
 
 
 @app.post("/api/cameras/{camera_id}/relay")
-async def relay_set(camera_id: str, body: RelayIn):
-    p = _ptz(camera_id)
+async def relay_set(camera_id: str, body: RelayIn, request: Request):
+    """A relay output on or off (a monostable one pulses). Through the PTZ code on a PTZ camera, as always; a fixed camera
+    without a PTZ service has its relays too, driven through deterrence.py (same answer: {state, mode})."""
+    p = state.ptz.get(camera_id)
+    if p is not None and p.available:
+        try:
+            return await p.set_relay(body.on, body.token)
+        except OnvifError as e:
+            raise HTTPException(503, str(e))
     try:
-        return await p.set_relay(body.on)
+        d = await deterrence.manager.ready(camera_id)
+    except KeyError:
+        raise HTTPException(404, "unknown camera")
+    relays = (d.caps or {}).get("relays") or []
+    token = body.token or (relays[0]["token"] if relays else None)
+    try:
+        await d.turn("relay", body.on, token=token, by=speakers_api.require(request, "operator"), latch=True)
+    except deterrence.NotReady as e:
+        raise HTTPException(503, str(e))
+    except deterrence.NoOutput as e:
+        raise HTTPException(409, str(e))
     except OnvifError as e:
         raise HTTPException(503, str(e))
+    return {"state": body.on, "mode": next((r["mode"] for r in relays if r["token"] == token), None)}
 
 
 # ---------------------------------------------------------------- zones / masks

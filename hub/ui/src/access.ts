@@ -7,6 +7,10 @@ export const isAdmin = (org: Org | undefined, me: Me) => me.user.is_super || org
  *  same for POST /api/speakers/<id>/play, hub roles.py). Only decides whether the tiles offer the button. */
 export const canTalkDown = (org: Org | undefined) => ["operator", "admin", "owner"].includes(org?.role ?? "");
 
+/** May switch a camera's deterrence outputs (strobe, siren, light): the same people as talk-down (the hub's proxy needs
+ *  operator for POST /api/cameras/<id>/deterrence). Only decides whether the tiles and the SOC offer the buttons. */
+export const canDeter = (org: Org | undefined) => canTalkDown(org);
+
 /**
  * May spend CoverageMap units (look a Site up again, check an address): hub administrators; on the paid plan also the
  * customer's admins and owners with a real membership (a customer listed only through the SOC does not count). The hub

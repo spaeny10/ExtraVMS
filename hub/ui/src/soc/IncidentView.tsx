@@ -15,10 +15,12 @@ import { placeholder } from "@site/Events";
 import { NavContext, type TimelineTarget } from "@site/nav";
 import { camKey } from "@site/playback";
 import { confirmDialog } from "@site/ui";
+import { DeterrenceControl } from "@site/DeterrencePanel";
+import { hasDeterrence } from "@site/deterrence";
 import type { Me, Server } from "../api";
 import { DirectChips } from "../DirectChip";
 import { useDirectVersion } from "../direct";
-import { isSocSupervisor } from "../access";
+import { canDeter, isSocSupervisor } from "../access";
 import { mediaApi, siteApi } from "../hubSource";
 import { incidentHref, siteHref } from "../nav";
 import { useSite } from "../SitePage";
@@ -292,6 +294,9 @@ export function IncidentSynopsis({ ev, e, onDetails }: { ev: IncidentEvent; e: N
  * Relays (sirens, floodlights, gate strobes wired to a camera's alarm output) at the incident's servers. The hub
  * switches them through the tunnel and logs it on the incident; the card says exactly what happens before Confirm.
  * Talk-down through a camera speaker is a later stage (site-side audio out), shown disabled so operators know.
+ * The incident's cameras that drive their own strobe, siren or light get those buttons here too (DeterrencePanel.tsx): one
+ * tap, no confirmation card, gated like talk-down on the live tiles (operators, SOC operators included) rather than by
+ * the claim; the camera's server and the hub audit them.
  */
 function DeterrenceCard({ incident: i, me, events }: { incident: Incident; me: Me; events: IncidentEvent[] }) {
   const servers = useMemo(() => [...new Set([...events.map((e) => e.server_id), ...(i.servers ?? []).map((s) => s.id)])], [events, i.servers]);
@@ -299,18 +304,31 @@ function DeterrenceCard({ incident: i, me, events }: { incident: Incident; me: M
   const serverKey = servers.join(",");
   useEffect(() => {
     let alive = true;
-    Promise.all(servers.map((s) => siteApi(s).cameras().then((list) => list.filter((c) => c.status?.ptz?.relay).map((cam) => ({ server: s, serverName: events.find((e) => e.server_id === s)?.server_name ?? i.servers?.find((x) => x.id === s)?.name ?? s, cam }))).catch(() => [])))
+    Promise.all(servers.map((s) => siteApi(s).cameras().then((list) => list.filter((c) => c.status?.ptz?.relay || hasDeterrence(c.status?.deterrence)).map((cam) => ({ server: s, serverName: events.find((e) => e.server_id === s)?.server_name ?? i.servers?.find((x) => x.id === s)?.name ?? s, cam }))).catch(() => [])))
       .then((r) => { if (alive) setCams(r.flat()); });
     return () => { alive = false; };
   }, [serverKey]);  // eslint-disable-line react-hooks/exhaustive-deps
   const [plan, setPlan] = useState<{ server: string; cam: ServerCam; on: boolean } | null>(null);
   const can = claimedByMe(i, me) || (isSocSupervisor(me) && i.state === "claimed");
   const inIncident = (server: string, cam: string) => events.some((e) => e.server_id === server && e.camera_id === cam);
-  const sorted = [...cams].sort((a, b) => Number(inIncident(b.server, b.cam.id)) - Number(inIncident(a.server, a.cam.id)));
+  const sorted = [...cams].filter((c) => c.cam.status?.ptz?.relay).sort((a, b) => Number(inIncident(b.server, b.cam.id)) - Number(inIncident(a.server, a.cam.id)));
+  // the incident's own cameras with a strobe, siren or light (the Site's others are on their live tiles above)
+  const deterCams = canDeter(incidentOrg(me, i)) ? cams.filter((c) => hasDeterrence(c.cam.status?.deterrence) && inIncident(c.server, c.cam.id)) : [];
+  const outputs = deterCams.length > 0 && (
+    <div className="soc-deter-cams">
+      {deterCams.map((c) => (
+        <div key={`${c.server}/${c.cam.id}`} className="talk-panel" role="group" aria-label={`Deterrence at ${c.cam.name}`}>
+          <strong className="small">{c.cam.name}</strong>
+          <DeterrenceControl cameraId={c.cam.id} site={siteApi(c.server)} />
+        </div>
+      ))}
+    </div>
+  );
   if (!sorted.length) {
     return (
       <section className="card soc-deter" aria-label="Deterrence">
         <h3>Deterrence</h3>
+        {outputs}
         <p className="muted small">No relay outputs at this Site's cameras. <button className="ghost small" disabled title="Talk-down through a camera speaker arrives with site-side audio out">🔊 Talk-down (coming)</button></p>
       </section>
     );
@@ -339,6 +357,7 @@ function DeterrenceCard({ incident: i, me, events }: { incident: Incident; me: M
   return (
     <section className="card soc-deter" aria-label="Deterrence">
       <h3>Deterrence</h3>
+      {outputs}
       <div className="row">
         {sorted.map((c) => {
           const relay = c.cam.status!.ptz!.relay!;

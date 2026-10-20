@@ -973,6 +973,28 @@ body:has(.drag-ghost) { cursor: grabbing; user-select: none; }
 .talk-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .talk-chip { padding: 6px 12px; border-radius: 99px; border: 1px solid var(--border); background: var(--panel); color: var(--text); font-size: 13px; }
 .talk-chip.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, var(--panel)); }
+/* Deterrence (DeterrencePanel.tsx): the talk-down panel's look; an output that is on is outlined red with its countdown, and
+   Stop (everything off) is always there */
+.deter { display: flex; flex-direction: column; gap: 8px; }
+.deter.embedded { padding-top: 8px; border-top: 1px solid var(--border); }
+.deter-btns { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 8px; }
+.deter-btn { min-height: 44px; }
+.deter-btn.on { border-color: var(--bad); background: color-mix(in srgb, var(--bad) 12%, var(--panel)); }
+.deter-btn.on .icon { color: var(--bad); }
+.deter-left { font-variant-numeric: tabular-nums; font-weight: 700; color: var(--bad); }
+.deter-stop { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 44px; background: var(--bad); color: #fff;
+  font-weight: 700; letter-spacing: .03em; }
+.deter-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.deter-secs { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+.deter-secs select { min-height: 36px; }
+.deter-last { min-width: 0; overflow-wrap: anywhere; }
+/* Settings › Cameras › Rules & speakers: one automatic rule per card */
+.deter-rule { display: flex; flex-direction: column; gap: 6px; padding: 10px; margin: 6px 0; border: 1px solid var(--border); border-radius: 8px; }
+.deter-rule.off { opacity: .7; }
+.deter-rule .row { flex-wrap: wrap; align-items: center; }
+.deter-rule input[type="number"] { width: 80px; }
+/* Settings › Cameras › Camera: a Milesight part read-only on the camera is a disabled fieldset, drawn as plain fields */
+.ms-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
 .talk-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 /* Settings -> Cameras -> Speakers */
 .speakers { margin-top: 22px; }
@@ -1212,7 +1234,7 @@ body:has(.drag-ghost) { cursor: grabbing; user-select: none; }
     background: var(--panel); box-shadow: -14px 0 10px -6px var(--panel); opacity: 0; transition: opacity .12s ease;
   }
   .tile:hover .tile-acts, .site-live-cell:hover .tile-acts, .tile-acts:focus-within, .tile-acts:has(.open) { opacity: 1; }
-  .tile.painting .tile-acts, .tile.ptz .tile-acts, .tile.talking .tile-acts, .site-live-cell.focused .tile-acts {
+  .tile.painting .tile-acts, .tile.ptz .tile-acts, .tile.talking .tile-acts, .tile.deterring .tile-acts, .site-live-cell.focused .tile-acts {
     position: static; box-shadow: none; padding: 0; min-height: 0; max-width: none; flex-wrap: wrap; opacity: 1;
   }
 }

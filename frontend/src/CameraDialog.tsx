@@ -7,6 +7,7 @@ import { NeighborsEditor } from "./Neighbors";
 import { PolicyForm } from "./RetentionPanel";
 import { PtzSettings } from "./PtzControl";
 import { CameraDevicePanel } from "./DeviceSettings";
+import { CameraSpeakerOffer, DeterrenceRulesEditor } from "./DeterrenceRules";
 import { confirmDialog, errorText, toast, useIsPhone } from "./ui";
 import { detectionsText, streamsText, streamsTitle, suggestText } from "./cameraStreams";
 import { CAMERA_TABS, cameraWebUrl, dirtyTabs, headerSummary, openedLabels, openingTab, setEventLabel, setMotionLabel, visibleTabs,
@@ -41,9 +42,10 @@ export function CameraDialog({ draft, cameras, sitePolicy, reload, onClose, onEd
 
   // the speakers bound to this camera (read-only here; bound in Speakers below the camera list)
   const [speakers, setSpeakers] = useState<Speaker[] | null>(null);
-  useEffect(() => {
+  const loadSpeakers = () => {
     if (!isNew) api.speakers().then((l) => setSpeakers(l.filter((s) => s.camera_ids?.includes(draft.id)))).catch(() => setSpeakers(null));
-  }, [isNew, draft.id]);
+  };
+  useEffect(loadSpeakers, [isNew, draft.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** True when there is nothing unsaved, or the viewer chose to discard it. */
   const asking = useRef(false);
@@ -367,7 +369,13 @@ export function CameraDialog({ draft, cameras, sitePolicy, reload, onClose, onEd
                   ))}
                 </ul>
               ) : <p className="muted small">No speaker is bound to this camera.</p>}
+              {saved && <CameraSpeakerOffer camera={saved} speakers={speakers} onAdded={loadSpeakers} />}
               <p className="muted small">Speakers are added and bound to cameras under Speakers, below the camera list.</p>
+            </>}
+            {saved && <>
+              <h3 className="spaced">Deterrence rules</h3>
+              <SavesNow what="Deterrence rules save with their own “Save rules” button, not with Save below." />
+              <DeterrenceRulesEditor camera={saved} />
             </>}
           </>)}
         </div>

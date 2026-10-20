@@ -6,6 +6,7 @@ import type { CameraStreams } from "./cameraStreams";
 import type { AnalyticsRule, AudioEncoder, CameraDevice, CameraTime, ClockResult, ImagingSource, TimeBody, TimeDefaults, VideoEncoder } from "./cameraDevice";
 import type { CatalogVoice, Spoken, VoiceEngines, VoiceSetting } from "./talkdownVoice";
 import type { LiveCodecs } from "./codecs";
+import type { DeterRequest, DeterRule, DeterRules, Deterrence, DeterrenceBrief, MilesightExtras, MilesightWrite } from "./deterrence";
 /** include = detect only here; exclude = mask out; area = just a name for a place (never filters);
  * ppe = people who stay in it must wear the required items (backend/nvr/ppe.py; never filters) */
 export type ZoneType = "include" | "exclude" | "area" | "ppe";
@@ -142,6 +143,8 @@ export type Camera = {
     metadata_off?: boolean;
     /** seconds to add to the camera's metadata time to get this server's (the metadata reader's measure; null = none yet) */
     clock_offset?: number | null;
+    /** what the camera can drive for deterrence (backend deterrence.py); null = nothing, or not asked yet */
+    deterrence?: DeterrenceBrief | null;
   };
 };
 
@@ -711,10 +714,21 @@ export function makeApi(base: string, opts: ApiOptions = {}) {
   ptzSetHome: (cam: string, token: string | null) => req<PtzInfo>(`/api/cameras/${cam}/ptz/home-preset`, json("POST", { token })),
   ptzConfig: (cam: string, cfg: Partial<Pick<PtzConfig, "return_home_min" | "relay_label" | "input_label">>) => req<PtzInfo>(`/api/cameras/${cam}/ptz/config`, json("PUT", cfg)),
   relay: (cam: string, on: boolean) => req<{ state: boolean; mode: string }>(`/api/cameras/${cam}/relay`, json("POST", { on })),
+  // deterrence (deterrence.py): the camera's strobe / siren / light (operator), its automatic rules (admin). An action on
+  // an output replaces the one running there; "stop" turns everything off (keepalive: it still goes out when the tab closes)
+  deterrence: (cam: string) => req<Deterrence>(`/api/cameras/${cam}/deterrence`),
+  deter: (cam: string, b: DeterRequest) => req<Deterrence & { result: { action: string; on: boolean; seconds: number | null } }>(
+    `/api/cameras/${cam}/deterrence`, { ...json("POST", b), keepalive: b.action === "stop" }),
+  deterrenceRules: (cam: string) => req<DeterRules>(`/api/cameras/${cam}/deterrence/rules`),
+  saveDeterrenceRules: (cam: string, rules: DeterRule[]) => req<DeterRules>(`/api/cameras/${cam}/deterrence/rules`, json("PUT", { rules })),
   // talk-down (talkdown.py): speakers (admin), play / stop / describe (operator), the message library (admin)
   speakers: () => req<Speaker[]>("/api/speakers"),
   saveSpeaker: (s: Omit<Speaker, "check" | "checked_at" | "status"> & { password?: string }) => req<Speaker>(`/api/speakers/${s.id}`, json("PUT", s)),
   deleteSpeaker: (id: string) => req(`/api/speakers/${id}`, { method: "DELETE" }),
+  /** admin: a speaker on the camera's host, ports and login (copied server-side). disable_camera false keeps the camera a
+   *  camera and links the new speaker to it (its own audio output for talk-down); true: the row was never a camera. */
+  cameraToSpeaker: (cam: string, b: { speaker_id?: string; name?: string; host?: string; path?: string; camera_ids?: string[]; disable_camera?: boolean }) =>
+    req<Speaker>(`/api/cameras/${cam}/to-speaker`, json("POST", b)),
   checkSpeaker: (id: string) => req<SpeakerCheck & { checked_at: number }>(`/api/speakers/${id}/check`, { method: "POST" }),
   playSpeaker: (id: string, what: PlayRequest) => req<PlayAnswer>(`/api/speakers/${id}/play`, json("POST", what)),
   /** keepalive: a Stop still goes out when the tab closes */
@@ -772,6 +786,10 @@ export function makeApi(base: string, opts: ApiOptions = {}) {
     req<ImagingSource>(`/api/cameras/${camera}/device/imaging/${encodeURIComponent(source)}`, json("PUT", body)),
   setAnalyticsRule: (camera: string, body: { configuration: string; rule: string; enabled: boolean }) =>
     req<AnalyticsRule>(`/api/cameras/${camera}/device/analytics`, json("PUT", body)),
+  /** Milesight's own web API (milesight.py): white light, red/blue light, siren volume, one-click disarm; writes admin */
+  milesight: (camera: string) => req<MilesightExtras>(`/api/cameras/${camera}/device/milesight`),
+  setMilesight: (camera: string, body: MilesightWrite) =>
+    req<MilesightExtras & { written: Record<string, unknown> }>(`/api/cameras/${camera}/device/milesight`, json("PUT", body)),
   rebootCamera: (camera: string) => req<{ ok: boolean; message: string }>(`/api/cameras/${camera}/device/reboot`, { method: "POST" }),
   cameraSd: (camera: string, refresh = false) => req<SdStatus & { camera_id: string }>(`/api/cameras/${camera}/sd${refresh ? "?refresh=true" : ""}`),
   sdGaps: (camera?: string, hours?: number) => req<SdGaps>(`/api/sd/gaps?${qs({ camera, hours })}`),

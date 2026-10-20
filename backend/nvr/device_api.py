@@ -2,7 +2,8 @@
 
 GET /api/cameras/{id}/device reads everything (each section on its own: {supported: false, reason} where the camera
 can't); PUT .../device/time | video/{token} | audio/{token} | imaging/{source} | analytics and POST
-.../device/time/sync-now | reboot change the camera and return what it reads back. POST /api/cameras/device/time sets
+.../device/time/sync-now | reboot change the camera and return what it reads back. GET / PUT .../device/milesight: a
+Milesight camera's own web API (milesight.py: white light, red/blue light, siren volume, one-click disarm). POST /api/cameras/device/time sets
 the clocks of several cameras at once; GET /api/cameras/device/time gives the defaults (NTP server, time zone).
 
 Roles through the hub (hub/hub/roles.py): reading needs operator (the camera's NTP servers, firmware), every write
@@ -19,7 +20,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from . import camdevice
+from . import camdevice, deterrence, milesight
 from .camdevice import Invalid, Unsupported
 from .db import db
 from .onvif_soap import OnvifError
@@ -270,3 +271,77 @@ async def device_reboot(camera_id: str, request: Request):
     msg = await _run(cam, camdevice.reboot)
     _audit(cam, "reboot", who)
     return {"ok": True, "message": msg}
+
+
+# ---------------------------------------------------------------- Milesight extras (its web API)
+
+def _is_milesight(cam: dict) -> bool:
+    """From the deterrence probe when it has run (GetDeviceInformation), else asked now."""
+    d = deterrence.manager.get(cam["id"])
+    if d is not None and d.available:
+        return bool(d.caps.get("milesight"))
+    c = camdevice.connect(cam)
+    return "milesight" in (camdevice.read_info(c).get("manufacturer") or "").lower()
+
+
+def _milesight_read(cam: dict) -> dict:
+    if not _is_milesight(cam):
+        raise Unsupported("not a Milesight camera")
+    return milesight.read_all(cam)
+
+
+@router.get("/api/cameras/{camera_id}/device/milesight")
+async def device_milesight(camera_id: str, request: Request):
+    """{supported, white_light, red_blue, siren, disarm}: {supported: false, reason} for a camera of another maker or one
+    whose web API doesn't answer."""
+    require(request, "operator")
+    cam = _camera(camera_id)
+    try:
+        return await _run(cam, _milesight_read)
+    except HTTPException as e:
+        if e.status_code in (409, 502):
+            return {"supported": False, "reason": e.detail}
+        raise
+
+
+class WhiteLightIn(BaseModel):
+    mode: Literal["auto", "on", "off", "schedule"] | None = None
+    sensitivity: int | None = Field(None, ge=1, le=5)
+    delay_s: int | None = Field(None, ge=1, le=60)
+    start: str | None = Field(None, max_length=5)
+    stop: str | None = Field(None, max_length=5)
+    brightness: int | None = Field(None, ge=1, le=100)
+
+
+class RedBlueIn(BaseModel):
+    mode: Literal["red_blue", "red", "blue"] | None = None
+    frequency: Literal["low", "medium", "high"] | None = None
+
+
+class DisarmIn(BaseModel):
+    enable: bool | None = None
+    mutes: dict[str, bool] | None = None
+
+
+class MilesightIn(BaseModel):
+    white_light: WhiteLightIn | None = None
+    red_blue: RedBlueIn | None = None
+    speaker_volume: int | None = Field(None, ge=0, le=100)
+    disarm: DisarmIn | None = None
+
+
+@router.put("/api/cameras/{camera_id}/device/milesight")
+async def device_set_milesight(camera_id: str, body: MilesightIn, request: Request):
+    """Change the Milesight settings asked for (each read, changed and sent back whole, as the camera's own page does);
+    returns everything read back, with `before` (the sections changed, as they were) and `written` (what was sent)."""
+    who = require(request, "admin")
+    cam = _camera(camera_id)
+
+    def work(c: dict) -> tuple[dict, dict, dict]:
+        if not _is_milesight(c):
+            raise Unsupported("not a Milesight camera")
+        return milesight.write(c, body.model_dump(exclude_none=True))
+
+    before, after, written = await _run(cam, work)
+    _audit(cam, f"Milesight {', '.join(written)}: {body.model_dump(exclude_none=True)}", who)
+    return {**after, "before": before, "written": written}

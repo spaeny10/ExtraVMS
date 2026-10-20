@@ -31,6 +31,8 @@
  * its own server (its heartbeat summary lists them) and/or to the Site's camera groups on the hub, which may hold
  * cameras of other servers (site/cameraGroups.ts: the union). Play and Stop go to the speaker's own server through the
  * hub (audited there), whatever server the camera is on; the panel reads its status from that server.
+ * Deterrence: a camera with a strobe, siren or light gets the 🚨 button and panel on its tile for the same people
+ * (canDeter); the calls go to the camera's own server through the hub.
  */
 import { useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -52,7 +54,7 @@ import { type Camera as RegistryCam, type Fleet, type Org, type Server, type Sit
   stillUrl } from "./api";
 import { type EventRef, applyLiveEvent, cameraNameFor, checkingText, feedCards, mergePool, regionFeed, removeLiveEvent, siteRegionKeys, tagServer } from "./eventOpen";
 import { HubEventDetail } from "./HubEventDetail";
-import { canTalkDown } from "./access";
+import { canDeter, canTalkDown } from "./access";
 import { useDirect, useDirectVersion } from "./direct";
 import { makeHubSource, mediaApi, siteApi } from "./hubSource";
 import { talkByCamera } from "./site/cameraGroups";
@@ -191,7 +193,7 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
   if (tiles.length === 0) return <p className="muted">{Object.keys(full).length || registry.length ? "No cameras at this site yet." : "Loading cameras…"}</p>;
 
   const tileProps = { source, multi, q, dispatch, activeOf,
-    talkOf: (t: Tile) => (mayTalk ? talk[t.key] : undefined) };
+    talkOf: (t: Tile) => (mayTalk ? talk[t.key] : undefined), deter: canDeter(org) };
   const feed = showFeed ? <SiteActivity site={site} servers={servers} tiles={tiles} multi={multi} activity={activity} onShowAll={() => setFeedAll(true)} /> : null;
   if (isPhone) {
     // the phone shows one camera at a time: a layout only sets which cameras are in the strip and their order
@@ -680,6 +682,8 @@ type TileCommon = {
   activeOf: (key: string) => NvrEvent | undefined;
   /** the speakers this viewer may talk through on the tile's camera (none: no Talk-down button) */
   talkOf: (t: Tile) => TalkSpeaker[] | undefined;
+  /** may switch the cameras' deterrence outputs (the button shows only on a camera that has some) */
+  deter: boolean;
 };
 
 /**
@@ -732,7 +736,7 @@ const STATE_TEXT: Record<Exclude<TileState, "live">, string> = { offline: "Serve
 /** A grid tile's part in a drag (useTileDrag): its grip, and whether it is the one dragged or the one under the pointer. */
 type TileDrag = { onGrip: (e: React.PointerEvent) => void; dragging: boolean; dropTarget: boolean };
 
-function SiteTile({ t, source, multi, q, dispatch, activeOf, talkOf, extra, phone, onSwipe, drag, focused = false }: TileCommon & {
+function SiteTile({ t, source, multi, q, dispatch, activeOf, talkOf, deter, extra, phone, onSwipe, drag, focused = false }: TileCommon & {
   t: Tile; extra?: React.ReactNode; phone?: boolean; onSwipe?: (dir: -1 | 1) => void; drag?: TileDrag;
   /** the tile is the expanded one */
   focused?: boolean;
@@ -760,7 +764,7 @@ function SiteTile({ t, source, multi, q, dispatch, activeOf, talkOf, extra, phon
         // the tidy bar: the name (full in its tooltip) and a status dot; the quality badge and the actions show on
         // hover or keyboard focus on a desktop, always on a touch screen (hub.css .tile-acts)
         <LiveTile c={t.cam} quality={mode} onQuality={pick} focused={focused} port={source.port} iceServers={ice} site={site} regionKey={t.key} phone={phone} poster={hubStill}
-          onSwipe={onSwipe} active={active} speakers={talkOf(t)} tidy actions={extra} bar={() => <>
+          onSwipe={onSwipe} active={active} speakers={talkOf(t)} deter={deter} tidy actions={extra} bar={() => <>
             {grip}
             <span className={`dot ${t.streamReady ? "ok" : "bad"}`} title={t.streamReady ? "Recording" : "No stream"} />
             <span className="tile-name" title={label}>{label}</span>

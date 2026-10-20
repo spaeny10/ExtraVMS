@@ -101,6 +101,7 @@ class Pipeline:
         self.decode = ThreadPoolExecutor(max_workers=2, thread_name_prefix="decode")
         self.clip = None  # OpenCLIP, shared by the footage index and vehicle fingerprints (loaded on the GPU thread)
         self.ptz = None   # ptz.PtzManager, set by the API at startup (PTZ cameras: home/away, relay, digital input)
+        self.deterrence = None   # deterrence.DeterrenceManager, set by the API at startup: automatic rules on verified events
 
     async def get_clip(self):
         if self.clip is None:
@@ -296,6 +297,11 @@ class Pipeline:
                  result.get("yolo_class"), result.get("yolo_hits"))
         if result["status"] != "verified":
             return
+        if self.deterrence is not None:
+            # automatic deterrence (deterrence.py): only ever on a verified event, never on the camera's own detection;
+            # before the merge below, so a long visit's later fragment sets it off as soon as it is verified (the
+            # rule's cooldown keeps the re-verified whole visit from firing it again)
+            self.deterrence.verified(event_id)
         # A continuation of the fragment just before it? Fold it in and verify the whole visit as one event.
         found = merge.candidate(db.event(event_id))
         if not found and (long_a := merge.candidate_long(db.event(event_id))):

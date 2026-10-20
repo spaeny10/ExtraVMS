@@ -30,6 +30,8 @@ router = APIRouter()
 TALKDOWN_PLAY = re.compile(r"^/api/speakers/[^/]+/play$")
 TALKDOWN_DESCRIBE = re.compile(r"^/api/speakers/([^/]+)/describe$")
 TALKDOWN_ANSWER_MAX = 8192
+# a camera's strobe / siren / light / relay / stop (backend deterrence_api.py): audited with what was asked of which camera
+DETERRENCE = re.compile(r"^/api/cameras/([^/]+)/deterrence$")
 # a live view hanging up (WhepPlayer teardown): not audited, every tile closing would write a row (the offer already
 # does). The offers themselves (retries included) make one row per viewing session of a camera (viewing.py).
 WHEP_HANGUP = re.compile(r"^/api/whep/[^/]+/[^/]+$")
@@ -106,7 +108,7 @@ async def proxy_api(site_id: str, path: str, request: Request):
     # allow-listed headers only, never an active content type, always nosniff + a sandboxing CSP (security.py)
     status, resp_headers = s.status, security.filter_proxy_headers(s.headers, site_id)
     answer = bytearray() if TALKDOWN_PLAY.match(api_path) and request.method == "POST" else None
-    described = _describe(api_path, body, conn) if request.method == "POST" else None
+    described = (_describe(api_path, body, conn) or _deterrence(api_path, body, conn)) if request.method == "POST" else None
 
     async def body_iter():
         try:
@@ -178,6 +180,26 @@ def _describe(api_path: str, body: bytes | None, conn) -> dict | None:
     return {"action": "talk-down describe",
             "detail": {"talkdown_describe": {"speaker_id": m.group(1)[:40], "camera_id": camera or None,
                                              "location_id": loc.get("id"), "location_name": loc.get("name")}}}
+
+
+def _deterrence(api_path: str, body: bytes | None, conn) -> dict | None:
+    """{action, detail} for a deterrence action: the camera, the action, on or off, the seconds (None = not one)."""
+    m = DETERRENCE.match(api_path)
+    if not m:
+        return None
+    try:
+        b = json.loads(body or b"{}")
+    except ValueError:
+        b = None
+    b = b if isinstance(b, dict) else {}
+    action = str(b.get("action") or "?")[:12]
+    on = b.get("on") is not False and action != "stop"
+    seconds = b.get("seconds") if isinstance(b.get("seconds"), (int, float)) and not isinstance(b.get("seconds"), bool) else None
+    token = str(b.get("token"))[:64] if action == "relay" and b.get("token") else None
+    loc = getattr(conn, "location", None) or {}
+    return {"action": f"deterrence on {m.group(1)[:40]}: {action}{'' if action == 'stop' else (' on' if on else ' off')}",
+            "detail": {"deterrence": {"camera_id": m.group(1)[:40], "action": action, "on": on, "seconds": seconds, "token": token,
+                                      "location_id": loc.get("id"), "location_name": loc.get("name")}}}
 
 
 def _audit(u: dict, site: dict, request: Request | WebSocket, status: int, dt: float, special: dict | None = None,

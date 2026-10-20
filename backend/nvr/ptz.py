@@ -174,8 +174,9 @@ class PtzCamera:
         self.inputs: list[str] = []
         self.status: dict = {"position": None, "moving": False, "at_home": False, "preset": None, "preset_name": None,
                              "last_command_at": None, "last_error": None, "polled_at": None}
-        self.relay_state: bool | None = None
+        self.relay_state: bool | None = None          # the first relay's (what the tile's relay button shows)
         self.relay_changed_at: float | None = None
+        self.relay_states: dict[str, tuple[bool, float]] = {}   # token -> (state, when) for every relay set from here
         self.input_state: bool | None = None
         self.input_changed_at: float | None = None
         self.moves: deque = deque(maxlen=2000)   # (ts, at_home, label)
@@ -414,17 +415,24 @@ class PtzCamera:
         return cfg
 
     # ---- relay / input
-    async def set_relay(self, on: bool) -> dict:
+    async def set_relay(self, on: bool, token: str | None = None) -> dict:
+        """A relay on or off: `token` picks one of the camera's relays (a Milesight Q series has its warning light and
+        sounder as relays beside AlarmOut_0); none = the first, as the tile's relay button always meant."""
         if not self.relays:
             raise OnvifError("camera has no relay output")
-        relay = self.relays[0]
+        relay = next((r for r in self.relays if r["token"] == token), None) if token else self.relays[0]
+        if relay is None:
+            raise OnvifError(f"camera has no relay {token!r}")
         if relay["mode"] == "monostable":
             on = True  # a pulse: the camera returns it to idle after delay_s
         state = "active" if on else "inactive"
         await self._call("device", f"<tds:SetRelayOutputState><tds:RelayOutputToken>{escape(relay['token'])}</tds:RelayOutputToken>"
                                    f"<tds:LogicalState>{state}</tds:LogicalState></tds:SetRelayOutputState>")
-        self.relay_state, self.relay_changed_at = on, time.time()
-        return {"state": on, "mode": relay["mode"]}
+        now = time.time()
+        self.relay_states[relay["token"]] = (on, now)
+        if relay is self.relays[0]:
+            self.relay_state, self.relay_changed_at = on, now
+        return {"state": on, "mode": relay["mode"], "token": relay["token"]}
 
     def on_io_event(self, topic: str, state: bool | None, ts: float) -> None:
         if state is None:
@@ -475,6 +483,8 @@ class PtzCamera:
             "preset": self.status["preset"], "preset_name": self.status["preset_name"], "position": self.status["position"],
             "home_token": cfg.get("home_token"), "home_name": cfg.get("home_name"), "last_error": self.status["last_error"],
             "relay": {"label": cfg["relay_label"], "state": self.relay_state, "mode": relay["mode"], "changed_at": self.relay_changed_at} if relay else None,
+            "relays": [{"token": r["token"], "mode": r["mode"], "delay_s": r.get("delay_s"),
+                        "state": (self.relay_states.get(r["token"]) or (None,))[0]} for r in self.relays],
             "input": {"label": cfg["input_label"], "state": self.input_state, "changed_at": self.input_changed_at} if self.inputs else None,
         }
 

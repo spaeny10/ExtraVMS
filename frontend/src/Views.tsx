@@ -21,6 +21,8 @@ import { sdStatusText } from "./sdcard";
 import { detectionsText, livePath } from "./cameraStreams";
 import { checkingText, feedCards } from "./liveFeed";
 import { TalkdownPanel } from "./TalkdownPanel";
+import { DeterrencePanel } from "./DeterrencePanel";
+import { hasDeterrence } from "./deterrence";
 import { speakersByCamera, type TalkSpeaker } from "./talkdown";
 import { SpeakersSection } from "./Speakers";
 import { CameraDialog, StreamsLine, blankCamera, zoneSummary } from "./CameraDialog";
@@ -44,12 +46,14 @@ function loadQuality(): Record<string, Quality> {
 export { livePath };   // moved to cameraStreams.ts; kept here for existing importers
 
 /** One live camera: the WHEP player with the paint-a-region overlay and the tile bar; with `speakers` bound to the camera,
- *  the 🔊 Talk-down button and its panel under the picture (TalkdownPanel.tsx). `quality` is the tile's mode (Auto, or
- *  the viewer's SD / HD: LiveQuality.tsx); `bar` gets the tile's Auto · SD · HD control to place.
+ *  the 🔊 Talk-down button and its panel under the picture (TalkdownPanel.tsx); with a strobe, siren or light the camera
+ *  drives (its status.deterrence) and `deter`, the 🚨 Deterrence button and its panel there too (DeterrencePanel.tsx).
+ *  `quality` is the tile's mode (Auto, or the viewer's SD / HD: LiveQuality.tsx); `bar` gets the tile's Auto · SD · HD
+ *  control to place.
  *  `tidy` (the hub's Site Live): `bar` holds only the name side (it gets no control); the quality is one badge and the
  *  actions are icon buttons, all in a `.tile-acts` group with `actions` (e.g. Expand) that the page's CSS shows on hover
  *  or focus on a desktop and always on a touch screen. */
-export function LiveTile({ c, quality, onQuality, focused = false, port, active, bar, phone, onSwipe, iceServers, site = api, regionKey, speakers, poster, tidy = false, actions }: {
+export function LiveTile({ c, quality, onQuality, focused = false, port, active, bar, phone, onSwipe, iceServers, site = api, regionKey, speakers, deter = true, poster, tidy = false, actions }: {
   c: Camera; quality: QualityMode; onQuality: (m: QualityMode) => void;
   /** the tile is the one expanded: Auto may pick HD whatever its width */
   focused?: boolean;
@@ -61,6 +65,9 @@ export function LiveTile({ c, quality, onQuality, focused = false, port, active,
   regionKey?: string;
   /** speakers bound to this camera that the viewer may talk through (none: no Talk-down button) */
   speakers?: TalkSpeaker[];
+  /** the viewer may switch the camera's deterrence outputs (the hub: operators and up); the server's own page has no
+   *  sign-in, so on by default. The button shows only when the camera has outputs. */
+  deter?: boolean;
   /** a picture to show until the live one starts, before the server's own still arrives (the hub's cached still) */
   poster?: string | null;
   /** the compact bar: a quality badge and icon actions revealed on hover (see above) */
@@ -73,6 +80,11 @@ export function LiveTile({ c, quality, onQuality, focused = false, port, active,
   const [painting, setPainting] = useState(false);
   const [talking, setTalking] = useState(false);
   const [ptzOn, setPtzOn] = useState(false);
+  // one panel under the tile at a time: the talk-down panel has the deterrence buttons in it already
+  const [deterring, setDeterring] = useState(false);
+  const canDeter = deter && hasDeterrence(c.status?.deterrence);
+  const toggleTalk = () => { setDeterring(false); setTalking((t) => !t); };
+  const toggleDeter = () => { setTalking(false); setDeterring((t) => !t); };
   const lq = useLiveQuality({ cam: c, site, mode: quality, focused, tileKey: regionKey ?? c.id, box, hold: painting || ptzOn });
   const hd = lq.hd;
   const [hasAudio, setHasAudio] = useState(false);
@@ -80,8 +92,8 @@ export function LiveTile({ c, quality, onQuality, focused = false, port, active,
   const ptz = c.status?.ptz;
   const aspect = hd ? 2592 / 1520 : 4 / 3;
   return (
-    <div ref={box} className={`tile ${active ? "alerting" : ""} ${painting ? "painting" : ""} ${ptzOn ? "ptz" : ""} ${talking ? "talking" : ""}`}
-      {...(phone && onSwipe && !painting && !ptzOn && !talking ? swipeHandlers(onSwipe) : {})}>
+    <div ref={box} className={`tile ${active ? "alerting" : ""} ${painting ? "painting" : ""} ${ptzOn ? "ptz" : ""} ${talking ? "talking" : ""} ${deterring ? "deterring" : ""}`}
+      {...(phone && onSwipe && !painting && !ptzOn && !talking && !deterring ? swipeHandlers(onSwipe) : {})}>
       {/* digital zoom: kept across SD/HD and a fallback to recordings, back to 1× on another camera; off in PTZ mode,
           whose drag / click-to-center / wheel steer the camera and map to the unzoomed picture */}
       <ZoomScope resetKey={c.id} disabled={ptzOn}>
@@ -116,9 +128,13 @@ export function LiveTile({ c, quality, onQuality, focused = false, port, active,
             )}
             {!!speakers?.length && (
               <button type="button" className={`ghost small icon-act talk-btn ${talking ? "on" : ""}`} aria-pressed={talking} aria-label="Talk-down"
-                onClick={() => setTalking((t) => !t)} title={`Talk-down through ${speakers.map((s) => s.name).join(", ")} while watching this camera`}>
+                onClick={toggleTalk} title={`Talk-down through ${speakers.map((s) => s.name).join(", ")} while watching this camera`}>
                 <Icon name="megaphone" size={16} />
               </button>
+            )}
+            {canDeter && (
+              <button type="button" className={`ghost small icon-act ${deterring ? "on" : ""}`} aria-pressed={deterring} aria-label="Deterrence"
+                onClick={toggleDeter} title="Deterrence: the camera's strobe, siren or light"><Icon name="siren" size={16} /></button>
             )}
             {ptz?.available && (
               <button type="button" className={`ghost small icon-act ${ptzOn ? "on" : ""}`} aria-pressed={ptzOn} disabled={painting}
@@ -135,8 +151,12 @@ export function LiveTile({ c, quality, onQuality, focused = false, port, active,
         {!painting && <RegionBadge cam={regionKey ?? c.id} onEdit={() => setPainting(true)} />}
         {hasAudio && <button className={`ghost small ${sound ? "on" : ""}`} title={sound ? "Mute" : "Listen"} onClick={() => setSound((s) => !s)}>{sound ? "🔊" : "🔇"}</button>}
         {!!speakers?.length && (
-          <button className={`ghost small talk-btn ${talking ? "on" : ""}`} aria-pressed={talking} onClick={() => setTalking((t) => !t)}
+          <button className={`ghost small talk-btn ${talking ? "on" : ""}`} aria-pressed={talking} onClick={toggleTalk}
             title={`Talk-down through ${speakers.map((s) => s.name).join(", ")} while watching this camera`}>🔊 Talk-down</button>
+        )}
+        {canDeter && (
+          <button className={`ghost small talk-btn ${deterring ? "on" : ""}`} aria-pressed={deterring} onClick={toggleDeter}
+            title="Deterrence: the camera's strobe, siren or light">🚨 Deter</button>
         )}
         {ptz?.available && (
           <button className={`ghost small ${ptzOn ? "on" : ""}`} title={ptz.pan_tilt === false ? "Zoom, relay, digital input" : "Pan / tilt / zoom, presets, relay"} disabled={painting}
@@ -147,7 +167,8 @@ export function LiveTile({ c, quality, onQuality, focused = false, port, active,
       </div>}
       {/* under the tile, never over the picture: the operator must see the person while talking to them (over the
           picture it hid half a desktop tile and nearly all of a phone's 1920x576 panorama) */}
-      {talking && !!speakers?.length && <TalkdownPanel speakers={speakers} site={site} cameraId={c.id} onClose={() => setTalking(false)} />}
+      {talking && !!speakers?.length && <TalkdownPanel speakers={speakers} site={site} cameraId={c.id} deter={canDeter} onClose={() => setTalking(false)} />}
+      {deterring && canDeter && <DeterrencePanel cameraId={c.id} site={site} onClose={() => setDeterring(false)} />}
     </div>
   );
 }

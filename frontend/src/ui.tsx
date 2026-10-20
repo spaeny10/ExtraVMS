@@ -52,6 +52,10 @@ const PATHS: Record<string, string> = {
   move: "M12 3v18M3 12h18M12 3 9.5 5.5M12 3l2.5 2.5M12 21l-2.5-2.5M12 21l2.5-2.5M3 12l2.5-2.5M3 12l2.5 2.5M21 12l-2.5-2.5M21 12l-2.5 2.5",
   pencil: "M4 20h4L19 9l-4-4L4 16zM13.5 6.5l4 4",
   sliders: "M4 7h10M18 7h2M4 17h4M12 17h8M16 5v4M10 15v4",
+  // deterrence (DeterrencePanel.tsx): strobe, white light, an alarm output
+  zap: "M13 2 4 14h7l-1 8 9-12h-7z",
+  bulb: "M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2V16h5v-.1c0-.8.4-1.5 1-2A6 6 0 0 0 12 3z",
+  toggle: "M8 7h8a5 5 0 0 1 0 10H8A5 5 0 0 1 8 7zM16 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z",
 };
 
 export function Icon({ name, size = 18, className = "" }: { name: keyof typeof PATHS | string; size?: number; className?: string }) {

@@ -1,7 +1,9 @@
 /* Settings → Cameras → Edit → Camera: the camera's own settings over ONVIF (backend camdevice.py), changed from here
    instead of the camera's web page: its clock, video and audio encoders, imaging, analytics rules, reboot. Each section
    has its own Apply that writes to the camera at once (not with the dialog's Save) and shows what the camera reads
-   back. "Fix clocks…" (Settings › Cameras) sets several cameras' clocks at once. Pure logic: cameraDevice.ts. */
+   back. "Fix clocks…" (Settings › Cameras) sets several cameras' clocks at once. Pure logic: cameraDevice.ts.
+   A Milesight camera that answers its web API also gets its lights, siren volume and one-click disarm here
+   (backend milesight.py; the form's logic is deterrence.ts). */
 import { useEffect, useId, useState } from "react";
 import { BASE, api, type Camera } from "./api";
 import { cameraWebUrl } from "./cameraEdit";
@@ -11,6 +13,8 @@ import {
   type AnalyticsRule, type AudioEncoder, type CameraDevice, type CameraTime, type ClockResult, type ImagingField, type ImagingSource,
   type TimeDefaults, type Unsupported, type VideoEncoder,
 } from "./cameraDevice";
+import { MUTE_LABELS, type MilesightDraft, type MilesightExtras, type MilesightWrite, type MsSection, milesightChanges, milesightDraft,
+  milesightProblems, sectionBody } from "./deterrence";
 import { confirmDialog, errorText, toast } from "./ui";
 
 export function CameraDevicePanel({ camera, active }: { camera: Camera; active: boolean }) {
@@ -77,6 +81,8 @@ export function CameraDevicePanel({ camera, active }: { camera: Camera; active: 
           onRule={(cfg, r) => patch({ analytics: { ...an, supported: true, configurations: an.configurations.map((c) => (c.configuration === cfg
             ? { ...c, rules: c.rules.map((x) => (x.name === r.name ? r : x)) } : c)) } })} />}</Supported>
         <WebPageNote camera={camera} />
+
+        <MilesightSection camera={camera} />
 
         <h3 className="spaced">Restart</h3>
         <RebootSection camera={camera} />
@@ -413,6 +419,144 @@ function RebootSection({ camera }: { camera: Camera }) {
       {err && <span className="small error">{err}</span>}
     </div>
   );
+}
+
+/* ------------------------------------------------------------------ Milesight extras */
+
+const WHITE_MODES: Record<MilesightDraft["white_light"]["mode"], string> = { auto: "Automatic (on detection)", on: "Always on", off: "Off", schedule: "On a schedule" };
+const RB_MODES: Record<MilesightDraft["red_blue"]["mode"], string> = { red_blue: "Red and blue", red: "Red", blue: "Blue" };
+const FREQS: Record<MilesightDraft["red_blue"]["frequency"], string> = { low: "Slow", medium: "Medium", high: "Fast" };
+
+/** A Milesight part the camera doesn't have, or that its web API refused (its reason). */
+function MsUnsupported({ part }: { part: { supported: boolean; reason?: string } | undefined }) {
+  return <p className="small muted">Not supported by this camera{part?.reason ? ` (${part.reason})` : ""}.</p>;
+}
+
+/** Shown only when the camera answers Milesight's web API; each part has its own Apply, and a part it won't let us
+ *  write is shown read-only. */
+function MilesightSection({ camera }: { camera: Camera }) {
+  const [m, setM] = useState<MilesightExtras | null>(null);
+  const [d, setD] = useState<MilesightDraft | null>(null);
+  useEffect(() => {
+    let alive = true;
+    api.milesight(camera.id).then((x) => { if (alive) { setM(x); setD(milesightDraft(x)); } }).catch(() => {});   // not a Milesight: nothing shown
+    return () => { alive = false; };
+  }, [camera.id]);
+  if (!m?.supported || !d) return null;
+  const body = milesightChanges(m, d);
+  const problems = milesightProblems(m, d);
+  /** the camera's answer: what it reads back replaces that part of the form (the other parts keep what was typed) */
+  const saved = (part: MsSection) => (r: MilesightExtras) => {
+    setM(r);
+    const fresh = milesightDraft(r);
+    setD((cur) => (cur ? { ...cur, [part]: fresh[part] } : fresh));
+  };
+  const apply = (part: MsSection, label: string) => (
+    <MsApply camera={camera} body={sectionBody(body, part)} problems={problems[part] ?? []} label={label} onSaved={saved(part)} />
+  );
+  const wl = m.white_light, rb = m.red_blue, siren = m.siren, dz = m.disarm;
+  const w = d.white_light;
+  const mutes = dz ? [...Object.keys(MUTE_LABELS).filter((k) => k in dz.mutes), ...Object.keys(dz.mutes).filter((k) => !(k in MUTE_LABELS))] : [];
+  return <>
+    <h3 className="spaced">White light</h3>
+    {!wl?.supported ? <MsUnsupported part={wl} /> : (
+      <div className="device-card">
+        <fieldset disabled={!wl.writable} className="row ms-fields">
+          <Labeled label="Mode">
+            <select value={w.mode} onChange={(e) => setD({ ...d, white_light: { ...w, mode: e.target.value as typeof w.mode } })}>
+              {Object.entries(WHITE_MODES).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+            </select>
+          </Labeled>
+          {w.mode === "auto" && <>
+            <Labeled label="Sensitivity" hint="1–5"><input type="number" min={1} max={5} value={w.sensitivity} onChange={(e) => setD({ ...d, white_light: { ...w, sensitivity: e.target.value } })} /></Labeled>
+            <Labeled label="Stays on (s)" hint="1–60 after the detection"><input type="number" min={1} max={60} value={w.delay_s} onChange={(e) => setD({ ...d, white_light: { ...w, delay_s: e.target.value } })} /></Labeled>
+          </>}
+          {w.mode === "schedule" && <>
+            <Labeled label="On at"><input type="time" value={w.start} onChange={(e) => setD({ ...d, white_light: { ...w, start: e.target.value } })} /></Labeled>
+            <Labeled label="Off at"><input type="time" value={w.stop} onChange={(e) => setD({ ...d, white_light: { ...w, stop: e.target.value } })} /></Labeled>
+          </>}
+          {w.mode !== "off" && (
+            <Labeled label="Brightness" hint="1–100"><input type="number" min={1} max={100} value={w.brightness} onChange={(e) => setD({ ...d, white_light: { ...w, brightness: e.target.value } })} /></Labeled>
+          )}
+        </fieldset>
+        {wl.writable ? apply("white_light", "white light") : <p className="small muted">Read-only on this camera.</p>}
+      </div>
+    )}
+
+    <h3 className="spaced">Red and blue light</h3>
+    {!rb?.supported ? <MsUnsupported part={rb} /> : (
+      <div className="device-card">
+        <fieldset disabled={!rb.writable} className="row ms-fields">
+          <Labeled label="Colours">
+            <select value={d.red_blue.mode} onChange={(e) => setD({ ...d, red_blue: { ...d.red_blue, mode: e.target.value as typeof d.red_blue.mode } })}>
+              {Object.entries(RB_MODES).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+            </select>
+          </Labeled>
+          <Labeled label="Flashing">
+            <select value={d.red_blue.frequency} onChange={(e) => setD({ ...d, red_blue: { ...d.red_blue, frequency: e.target.value as typeof d.red_blue.frequency } })}>
+              {Object.entries(FREQS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+            </select>
+          </Labeled>
+        </fieldset>
+        {rb.writable ? apply("red_blue", "red and blue light") : <p className="small muted">Read-only on this camera.</p>}
+      </div>
+    )}
+
+    <h3 className="spaced">Siren</h3>
+    {!siren?.supported ? <MsUnsupported part={siren} /> : (
+      <div className="device-card">
+        <p className="small">
+          Sound: {siren.files.find((f) => f.index === siren.play_index)?.name ?? `file ${siren.play_index}`}
+          {siren.files.length > 1 && <span className="muted"> · on the camera: {siren.files.filter((f) => f.present).map((f) => f.name).join(", ") || "none"}</span>}
+        </p>
+        {!siren.file_writable && <p className="small muted">The sound is picked on the camera's own web page.</p>}
+        {siren.volume_writable ? <>
+          <div className="row">
+            <Labeled label="Speaker volume" hint="0–100">
+              <input type="number" min={0} max={100} value={d.speaker_volume} onChange={(e) => setD({ ...d, speaker_volume: e.target.value })} />
+            </Labeled>
+          </div>
+          {apply("speaker_volume", "speaker volume")}
+        </> : <p className="small muted">Speaker volume {siren.speaker_volume} (read-only on this camera).</p>}
+      </div>
+    )}
+
+    <h3 className="spaced">One-click disarm</h3>
+    {!dz?.supported ? <MsUnsupported part={dz} /> : (
+      <div className="device-card">
+        <p className="hint small">While disarm is on, the camera's own alarm actions ticked below are muted. Deterrence switched from this server is not affected.</p>
+        <fieldset disabled={!dz.writable} className="ms-fields">
+          <label className="row small">
+            <input type="checkbox" checked={d.disarm.enable} onChange={(e) => setD({ ...d, disarm: { ...d.disarm, enable: e.target.checked } })} /> Disarm on
+          </label>
+          <div className="row">
+            {mutes.map((k) => (
+              <label key={k} className="row small">
+                <input type="checkbox" checked={!!d.disarm.mutes[k]} onChange={(e) => setD({ ...d, disarm: { ...d.disarm, mutes: { ...d.disarm.mutes, [k]: e.target.checked } } })} />
+                {MUTE_LABELS[k] ?? k}
+              </label>
+            ))}
+          </div>
+        </fieldset>
+        {dz.writable ? apply("disarm", "disarm") : <p className="small muted">Read-only on this camera.</p>}
+      </div>
+    )}
+  </>;
+}
+
+function MsApply({ camera, body, problems, label, onSaved }: {
+  camera: Camera; body: MilesightWrite; problems: string[]; label: string; onSaved: (r: MilesightExtras) => void;
+}) {
+  const { busy, err, run } = useApply();
+  const go = () => run(async () => {
+    onSaved(await api.setMilesight(camera.id, body));
+    toast.success(`${camera.name}: ${label} saved on the camera`);
+  });
+  return <>
+    {problems.map((p) => <p key={p} className="small error">{p}</p>)}
+    <button disabled={busy || !Object.keys(body).length || problems.length > 0} onClick={go}>{busy ? "Applying…" : "Apply"}</button>
+    {err && <p className="small error">{err}</p>}
+  </>;
 }
 
 /* ------------------------------------------------------------------ Fix clocks… */

@@ -1,0 +1,5 @@
+<ns0:Body xmlns:ns0="http://www.w3.org/2003/05/soap-envelope" xmlns:ns1="http://www.onvif.org/ver10/deviceIO/wsdl">
+		<ns1:GetDigitalInputsResponse>
+			<ns1:DigitalInputs token="AlarmIn_0" IdleState="open" />
+		</ns1:GetDigitalInputsResponse>
+	</ns0:Body>

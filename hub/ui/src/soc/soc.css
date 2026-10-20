@@ -109,6 +109,9 @@ kbd, .soc-kbd { display: inline-block; font: 600 11px/1.4 ui-monospace, SFMono-R
 .soc-timeline > summary h3::before { content: "▸ "; color: var(--muted); }
 .soc-timeline[open] > summary h3::before { content: "▾ "; }
 .soc-deter .row { gap: 6px; flex-wrap: wrap; }
+/* the incident cameras' own strobe / siren / light (@site/Deterrence), one framed control per camera */
+.soc-deter-cams { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 8px; margin-bottom: 8px; }
+.soc-deter-cams .talk-panel { margin: 0; }
 .soc-deter h3, .soc-log-card h3 { margin-top: 0; }
 
 /* log (append-only, newest at the bottom, its own scroll box) */

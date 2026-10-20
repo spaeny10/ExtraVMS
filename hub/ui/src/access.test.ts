@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { accessLabel, canEditMonitoring, canTalkDown, digestPartsFor, isSocSupervisor, isSocUser, lastEventBySite, ofTotal, socLanding, socRole, toggleAccess } from "./access";
+import { accessLabel, canDeter, canEditMonitoring, canTalkDown, digestPartsFor, isSocSupervisor, isSocUser, lastEventBySite, ofTotal, socLanding, socRole, toggleAccess } from "./access";
 import type { Me, Org } from "./api";
 
 describe("toggleAccess", () => {
@@ -101,5 +101,14 @@ describe("canTalkDown", () => {
     expect(["viewer", "operator", "admin", "owner"].map((r) => canTalkDown(org(r)))).toEqual([false, true, true, true]);
     expect(canTalkDown(org("operator", true))).toBe(true);
     expect(canTalkDown(undefined)).toBe(false);
+  });
+});
+
+describe("canDeter", () => {
+  const org = (role: string, soc = false): Org => ({ id: "o_1", name: "Acme", slug: "acme", role, soc });
+  it("operators and up, SOC operators too; never viewers", () => {
+    expect(["viewer", "operator", "admin", "owner"].map((r) => canDeter(org(r)))).toEqual([false, true, true, true]);
+    expect(canDeter(org("operator", true))).toBe(true);
+    expect(canDeter(undefined)).toBe(false);
   });
 });

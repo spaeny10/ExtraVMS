@@ -13,6 +13,8 @@
  * Describe & warn (with text-to-speech): Qwen looks at this camera's current picture (on the camera's server) and says
  * how to address the person ("You in the red shirt by the white truck"); the operator picks a template, checks and edits
  * the text, and plays it like typed text. Nothing plays until they press Play.
+ * Deterrence: when the camera has a strobe, siren or light (read on the camera's server), its buttons and Stop sit
+ * under the speakers' bar (DeterrencePanel.tsx), so a warning and the siren are one panel apart.
  */
 import { useEffect, useReducer, useRef, useState } from "react";
 import { api, type PlayRequest, type SiteApi, type SpeakerStatus, type TalkdownLibrary } from "./api";
@@ -20,18 +22,21 @@ import { ALL, DESCRIBE_EVERY_MS, type SpeakerHealth, type TalkSpeaker, TALK_IDLE
   fileToBase64, isActive, lastResult, messageOn, micProblem, onlineCount, playOutcome, playableMessages, playingBar, presetLook, serversOf, speakerKey,
   speakerState, splitPresets, talkLabel, talkReducer, targets, uploadProblem, warnChoices, warnReducer } from "./talkdown";
 import { browserMic, startTalk, type TalkSession } from "./talkMic";
+import { DeterrenceControl } from "./DeterrencePanel";
 import { Icon, errorText, toast } from "./ui";
 
 const POLL_MS = 1000;
 const TICK_MS = 250;   // the playing bar and the talk clock move between polls
 
-export function TalkdownPanel({ speakers, site = api, cameraId, onClose }: {
+export function TalkdownPanel({ speakers, site = api, cameraId, deter = true, onClose }: {
   speakers: TalkSpeaker[];
   /** the camera's server (default: this server); its writes go through the hub on the hub. A speaker that brings its
    *  own server's client (`site` on the speaker: the hub) is reached through that instead. */
   site?: SiteApi;
   /** the camera the panel is on (on `site`): what Describe & warn looks at; absent = no Describe & warn */
   cameraId?: string;
+  /** the viewer may switch the camera's deterrence outputs (shown only when the camera has some) */
+  deter?: boolean;
   onClose: () => void;
 }) {
   // per server ("" = `site`): its message library, or why it couldn't be read
@@ -327,6 +332,8 @@ export function TalkdownPanel({ speakers, site = api, cameraId, onClose }: {
           </div>
         ) : last ? <div className={last.failed ? "talk-error" : "talk-dim"}>{last.text}</div> : null}
       </div>
+
+      {deter && cameraId && <DeterrenceControl cameraId={cameraId} site={site} embedded />}
 
       <div className="talk-hw">
         <div className="talk-hw-title">Hardware state</div>

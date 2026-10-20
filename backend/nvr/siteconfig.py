@@ -13,11 +13,14 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import re
 import time
 
 from . import __version__
 from .db import db
+
+log = logging.getLogger("nvr.siteconfig")
 
 SETTINGS_KEYS = ("retention_policy", "briefing", "synopsis_min_conf")   # synopsis_min_conf: the Qwen confidence gate
 
@@ -109,6 +112,17 @@ def _merge_identities(idents: list[dict], now: float) -> int:
     return n
 
 
+def _deterrence_rules(c: dict) -> list[dict]:
+    """A camera's automatic deterrence rules from an export, checked like PUT .../deterrence/rules; rules that don't pass
+    are dropped (the camera itself still comes in). A speaker or zone they name that isn't here just never fires."""
+    from . import deterrence
+    try:
+        return deterrence.clean_rules(c.get("deterrence_rules"))
+    except ValueError:
+        log.warning("camera %s: its deterrence rules in the export are invalid and were left out", c.get("id"))
+        return []
+
+
 def export_config() -> dict:
     cams = []
     for c in db.cameras():
@@ -140,6 +154,8 @@ def import_config(data: dict, replace_identities: bool = False) -> dict:
         db.upsert_camera(cam)
         if c.get("ptz_config") is not None:
             db.set_ptz_config(c["id"], c["ptz_config"])
+        if c.get("deterrence_rules") is not None:
+            db.set_deterrence_rules(c["id"], _deterrence_rules(c))
         counts["cameras"] += 1
     if speakers is not None:
         counts["speakers"] = _import_speakers(speakers)
@@ -234,6 +250,8 @@ def merge_cameras(data: dict) -> dict:
         db.upsert_camera(cam)
         if c.get("ptz_config") is not None:
             db.set_ptz_config(new_id, c["ptz_config"])
+        if c.get("deterrence_rules") is not None:
+            db.set_deterrence_rules(new_id, _deterrence_rules(c))
     counts = {"cameras": len(ids), "updated": updated, "camera_links": 0, "identities": 0, "ids": ids}
     with db.lock:
         for l in data.get("camera_links", []):

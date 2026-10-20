@@ -300,6 +300,22 @@ CREATE TABLE IF NOT EXISTS talkdown_log (
     duration_s  REAL
 );
 CREATE INDEX IF NOT EXISTS talkdown_log_ts ON talkdown_log(ts);
+-- Every deterrence action (deterrence.py): an operator's strobe / siren / light / relay / stop, or an automatic rule's
+CREATE TABLE IF NOT EXISTS deterrence_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          REAL NOT NULL,
+    camera_id   TEXT NOT NULL,
+    action      TEXT NOT NULL,                    -- strobe | siren | light | relay | stop
+    target      TEXT,                             -- the aux command or relay token sent
+    on_state    INTEGER NOT NULL DEFAULT 1,
+    seconds     REAL,
+    by          TEXT,
+    source      TEXT NOT NULL DEFAULT 'manual',   -- manual | rule
+    event_id    INTEGER,                          -- the verified event a rule fired on
+    result      TEXT NOT NULL,                    -- ok | failed
+    error       TEXT
+);
+CREATE INDEX IF NOT EXISTS deterrence_log_cam ON deterrence_log(camera_id, ts);
 CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(synopsis, labels, content='', contentless_delete=1);
 CREATE VIRTUAL TABLE IF NOT EXISTS events_vec USING vec0(embedding float[{EMBED_DIM}]);
 """
@@ -350,6 +366,8 @@ MIGRATIONS = [
     ("cameras", "public_web_port", "INTEGER"),
     # "Open events for" (ruleevents.opens): JSON ["person", "vehicle", "motion"] subset; NULL = all of them
     ("cameras", "event_labels", "TEXT"),
+    # automatic deterrence on verified events (deterrence.py): JSON [rule, ...]; NULL / [] = off (every camera's default)
+    ("cameras", "deterrence_rules", "TEXT"),
 ]
 JSON_FIELDS = ("path", "rules", "detections", "synopsis_json", "synopsis_original", "feedback", "anomaly_json", "areas", "policy", "migrated_from")
 
@@ -652,12 +670,17 @@ class Database:
             c["event_labels"] = ruleevents.event_labels(json.loads(c["event_labels"])) if c.get("event_labels") else None
             c["policies"] = json.loads(c["policies"]) if c.get("policies") else []
             c["ptz_config"] = json.loads(c["ptz_config"]) if c.get("ptz_config") else None
+            c["deterrence_rules"] = json.loads(c["deterrence_rules"]) if c.get("deterrence_rules") else []
             c["streams"] = json.loads(c["streams"]) if c.get("streams") else None
         return cams
 
     def set_ptz_config(self, camera_id: str, cfg: dict) -> None:
         """Only ptz.py writes this; the camera form never touches it."""
         self.execute("UPDATE cameras SET ptz_config=? WHERE id=?", [json.dumps(cfg), camera_id])
+
+    def set_deterrence_rules(self, camera_id: str, rules: list[dict]) -> None:
+        """Only deterrence.py writes this (its own route, a config restore); the camera form never touches it."""
+        self.execute("UPDATE cameras SET deterrence_rules=? WHERE id=?", [json.dumps(rules) if rules else None, camera_id])
 
     def upsert_camera(self, cam: dict) -> None:
         cols = ["id", "name", "host", "onvif_port", "rtsp_port", "username", "password",

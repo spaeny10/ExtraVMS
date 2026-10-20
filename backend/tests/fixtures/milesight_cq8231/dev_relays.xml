@@ -1,0 +1,25 @@
+<ns0:Body xmlns:ns0="http://www.w3.org/2003/05/soap-envelope" xmlns:tds="http://www.onvif.org/ver10/device/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
+		<tds:GetRelayOutputsResponse>
+			<tds:RelayOutputs token="AlarmOut_0">
+				<tt:Properties>
+					<tt:Mode>Bistable</tt:Mode>
+					<tt:DelayTime>PT00H00M10S</tt:DelayTime>
+					<tt:IdleState>open</tt:IdleState>
+				</tt:Properties>
+			</tds:RelayOutputs>
+			<tds:RelayOutputs token="Warning Light">
+				<tt:Properties>
+					<tt:Mode>Monostable</tt:Mode>
+					<tt:DelayTime>PT00H00M10S</tt:DelayTime>
+					<tt:IdleState>closed</tt:IdleState>
+				</tt:Properties>
+			</tds:RelayOutputs>
+			<tds:RelayOutputs token="Sounder">
+				<tt:Properties>
+					<tt:Mode>Monostable</tt:Mode>
+					<tt:DelayTime>PT00H00M10S</tt:DelayTime>
+					<tt:IdleState>closed</tt:IdleState>
+				</tt:Properties>
+			</tds:RelayOutputs>
+		</tds:GetRelayOutputsResponse>
+	</ns0:Body>

@@ -1,0 +1,1 @@
+{"enable": 0, "codec": 2, "source": 0, "mode": 2, "denoise": 1, "inputGain": 50, "alarmLevel": 75, "outputAgc": 0, "outputVolume": 50, "sampleRate": 0, "bitRate": 64, "externCodecType": 0, "speakerVolume": 50, "twoWayOutputVolume": 50, "twoWaySpeakerVolume": 50}
