@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { SiteAskSource } from "../api";
 import { askQuery, buildReferences, citations, citedSource, clockIn, groupSources, looksLikeQuestion, orderThreads, parseAnswer, parseInline, pickAnswer,
-  refCountsLine, sendKey, serversLine } from "./siteAskData";
+  refCountsLine, sendKey, serversLine, splitCards, splitSources } from "./siteAskData";
 
 const src = (o: Partial<SiteAskSource>): SiteAskSource => ({ kind: "event", server_id: "s1", server_name: "Alpha", ...o });
 
@@ -150,5 +150,36 @@ describe("References panel", () => {
     expect(clockIn(Date.UTC(2026, 9, 7, 3, 5) / 1000, "America/New_York", now)).toBe("Oct 6 11:05 PM");
     expect(clockIn(Date.UTC(2026, 9, 7, 3, 5) / 1000, "Asia/Tokyo", now)).toBe("Oct 7 12:05 PM");   // already Oct 8 there
     expect(clockIn(now, "Not/AZone", now)).toMatch(/^\d{1,2}:\d{2} [AP]M$/);
+  });
+});
+
+describe("references: what the answer cites shown, the other events searched folded", () => {
+  const items = [
+    src({ ref: "36", event_id: 36, camera: "Gate", ts: 900, label: "person" }),
+    src({ ref: "35", event_id: 35, camera: "Gate", ts: 800, label: "vehicle", plate: "ABC1234", plate_region: "TX" }),
+    src({ ref: "34", event_id: 34, camera: "Yard", ts: 700, label: "vehicle" }),
+    src({ ref: "F1", kind: "footage", camera_id: "c2", camera: "Dock", ts: 600 }),
+    src({ kind: "gap", camera: "Dock", ts: 300, minutes: 20 }),
+    src({ kind: "note", text: "recorded continuously: Lobby" }),
+  ];
+  const text = "The white Nissan came at 8:00 [#34], described as likely a Nissan Titan; plate ABC 1234 [#35].";
+
+  it("the References panel: cited cards in citation order, the rest apart", () => {
+    const r = buildReferences(items, text);
+    const { cited, other } = splitCards(r);
+    expect(cited.map((x) => x.ref)).toEqual(["34", "35"]);
+    expect(other.map((x) => x.ref)).toEqual(["36", "F1"]);
+    expect(cited[1].plate).toBe("ABC1234");
+    const none = splitCards(buildReferences(items, "Nothing matched."));
+    expect(none.cited).toEqual([]);
+    expect(none.other.map((x) => x.ref)).toEqual(["36", "35", "34", "F1"]);
+  });
+
+  it("the Sources disclosure: cited sightings, the others by camera with their count", () => {
+    const s = splitSources(items, text);
+    expect(s.cited.map((x) => x.ref)).toEqual(["34", "35"]);
+    expect(s.other.map((g) => g.camera)).toEqual(["Gate", "Dock", "Other"]);
+    expect(s.otherCount).toBe(2);   // event 36 and footage F1 (a recording gap or a note is no event)
+    expect(splitSources(items, "").cited).toEqual([]);
   });
 });

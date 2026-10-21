@@ -14,7 +14,7 @@ export const OUTSIDE_HELP: Record<AiOutside, string> = {
 
 /** What each job kind the servers report is called (backend aischedule.KINDS); an unknown one keeps its code. */
 export const KIND_LABEL: Record<string, string> = {
-  synopsis: "Event descriptions", catchup: "Caught-up descriptions", ppe: "PPE checks", ask: "Ask and clip chat",
+  synopsis: "Event descriptions", catchup: "Caught-up descriptions", ppe: "PPE checks", plate: "Plate reads", ask: "Ask and clip chat",
   talkdown: "Describe & warn", briefing: "Briefings", journey: "Journeys", hub: "Shared AI for the hub", test: "Tests and warm-ups",
 };
 export const kindLabel = (k: string) => KIND_LABEL[k] ?? k;

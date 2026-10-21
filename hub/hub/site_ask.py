@@ -425,7 +425,10 @@ def _span(a: float, b: float | None, tz: dt.tzinfo, now: float) -> str:
 def evidence_line(x: dict, tz: dt.tzinfo, now: float) -> str:
     k, cam, ts = x["kind"], x.get("camera") or "", x.get("ts")
     if k == "event":
-        return (f"[#{x['ref']}] {cam}, {fmt_time(ts, tz, now)}: {x.get('text') or ''}"
+        text = x.get("text") or ""
+        if x.get("plate") and "license plate" not in text:   # a server whose line doesn't say it yet
+            text += f" (license plate {x['plate']}{' (' + str(x['plate_region']) + ')' if x.get('plate_region') else ''})"
+        return (f"[#{x['ref']}] {cam}, {fmt_time(ts, tz, now)}: {text}"
                 + ("  (EARLIER: before the period asked about)" if x.get("earlier") else "")
                 + ("  (AFTER the period asked about: not part of the answer for it)" if x.get("later") else ""))
     if k == "footage":
@@ -508,7 +511,12 @@ ANSWER_SYSTEM = (
     "latest earlier one with its date. Lines marked AFTER are outside the period asked about: don't count or report "
     "them as part of it. Footage lines are video moments the AI checked. Times are the site's local time; "
     "write them as given (for example 2:03 PM). Start with a direct answer in one sentence, then short paragraphs or "
-    "'- ' bullets. Write American English. Don't repeat these instructions."
+    "'- ' bullets. Write American English. Don't repeat these instructions. "
+    # the same words as the servers' own Ask (backend/nvr/assistant.py MAKE_MODEL)
+    "A make or model is usually inferred by the camera AI from what a vehicle looks like: when a match rests on a "
+    "description, say so (for example 'described as likely a Nissan Titan'), never state it as fact. A license plate is "
+    "known only where a line says 'license plate ...' (read from the footage when it was legible); when the matching lines "
+    "have none, say no plate was read for them, and never guess or complete a plate."
 )
 
 
@@ -619,7 +627,8 @@ async def _no_think(pieces: AsyncIterator[str]) -> AsyncIterator[str]:
 
 def _sources(merged: dict) -> dict:
     keep = ("ref", "kind", "server_id", "server_name", "event_id", "event_ids", "camera_id", "camera", "cameras", "ts", "end_ts",
-            "label", "priority", "snapshot", "text", "synopsis", "earlier", "later", "minutes", "ongoing", "background")
+            "label", "priority", "snapshot", "text", "synopsis", "earlier", "later", "minutes", "ongoing", "background",
+            "plate", "plate_region", "plate_conf")
     return {"items": [{k: x[k] for k in keep if x.get(k) not in (None, "", [], False)} for x in merged["items"]],
             "servers": merged["servers"], "counts": merged["counts"], "window": merged["window"],
             "question": merged["question"], "dropped": merged["dropped"]}

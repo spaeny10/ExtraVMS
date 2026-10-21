@@ -51,11 +51,34 @@ PRIORITY_WORDS = re.compile(r"\b(unusual|odd|strange|weird|suspicious|threat|thr
 LISTING_WORDS = re.compile(r"^(list|show|what were|what are|latest|recent|last \d+|give me)\b")
 
 
-def query_label(q: str) -> str | None:
-    """Restrict to one class when the text clearly names only people or only vehicles."""
-    words = {w.strip(".,!?'\"").lower() for w in q.split()}
-    person, vehicle = bool(words & PERSON_WORDS), bool(words & VEHICLE_WORDS)
+# a plate, a make or a model is about a vehicle too ("white nissan tag number?" listed person events and a black SUV).
+# Only unambiguous names: no "ram", "mack", "lincoln", "escape", "charger", "explorer", "accord", "rogue".
+PLATE_WORDS = {"plate", "plates", "tag", "tags", "license", "licence", "registration", "reg", "anpr", "lpr", "alpr"}
+MAKE_WORDS = {"nissan", "ford", "chevy", "chevrolet", "toyota", "honda", "dodge", "gmc", "jeep", "tesla", "hyundai", "kia",
+              "subaru", "mazda", "bmw", "mercedes", "benz", "audi", "volkswagen", "vw", "lexus", "acura", "infiniti",
+              "buick", "cadillac", "chrysler", "volvo", "mitsubishi", "freightliner", "peterbilt", "kenworth", "isuzu",
+              "hino", "porsche", "landrover", "rivian", "polaris", "kubota", "caterpillar", "bobcat", "yamaha", "harley"}
+MODEL_WORDS = {"f-150", "f150", "f-250", "f250", "f-350", "silverado", "tacoma", "tundra", "camry", "corolla", "civic",
+               "altima", "sentra", "titan", "maxima", "pathfinder", "wrangler", "mustang", "tahoe", "suburban", "malibu",
+               "impala", "odyssey", "highlander", "rav4", "prius", "outback", "durango", "sprinter",
+               "escalade", "yukon", "4runner", "elantra", "sonata", "cybertruck", "forklift", "tractor", "minivan",
+               "hatchback", "coupe", "convertible", "wagon", "crossover", "box-truck", "flatbed", "tow", "towing"}
+PERSON_MORE = {"lady", "ladies", "guys", "employee", "employees", "customer", "customers", "pedestrians", "kids",
+               "teenager", "teenagers", "adult", "adults", "persons", "humans", "intruders", "trespasser", "trespassers"}
+
+
+def class_intent(q: str) -> str | None:
+    """'vehicle' when the question is clearly about vehicles only (a vehicle word, a plate or tag, a make or a model),
+    'person' when it is clearly about people only, else None (mixed or unclear: both classes, as before)."""
+    words = set(re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)?", q.lower().replace("'s", "")))
+    person = bool(words & (PERSON_WORDS | PERSON_MORE))
+    vehicle = bool(words & (VEHICLE_WORDS | PLATE_WORDS | MAKE_WORDS | MODEL_WORDS))
     return "person" if person and not vehicle else "vehicle" if vehicle and not person else None
+
+
+def query_label(q: str) -> str | None:
+    """Restrict to one class when the text clearly names only people or only vehicles (class_intent)."""
+    return class_intent(q)
 
 
 class Context:
@@ -153,6 +176,9 @@ def _event_line(e: dict) -> str:
         wc = json.loads(wc)
     if wc is None and isinstance(e.get("synopsis_json"), dict):
         wc = e["synopsis_json"].get("weapon_check")
+    if e.get("plate"):  # read by Qwen from a full-resolution crop, only when legible (plate.py)
+        extra.append(f"license plate {e['plate']}" + (f" ({e['plate_region']})" if e.get("plate_region") else "")
+                     + (f", {e['plate_conf']} confidence" if e.get("plate_conf") else ""))
     if wc and wc.get("verdict"):  # the description mentioned a weapon; the full-resolution second look decided (weaponcheck)
         extra.append({"confirmed": "WEAPON CONFIRMED", "not_confirmed": "weapon NOT confirmed"}.get(
             wc["verdict"], "possible weapon, UNCONFIRMED, needs a person to look") + ": " + (wc.get("reason") or "")[:160])
@@ -180,7 +206,8 @@ class Refs:
 
     def event(self, e: dict) -> None:
         self.events[e["id"]] = {"camera_id": e["camera_id"], "camera": _cam_name(e["camera_id"]), "start_ts": e["start_ts"],
-                                "label": e["camera_class"], "snapshot": bool(e.get("snapshot"))}
+                                "label": e["camera_class"], "snapshot": bool(e.get("snapshot")),
+                                **({"plate": e["plate"], "plate_region": e.get("plate_region")} if e.get("plate") else {})}
 
     def moment(self, m: dict) -> str:
         key = f"F{len(self.footage) + 1}"
@@ -309,7 +336,7 @@ def check_plan(raw: dict, question: str, now: float) -> list[dict]:
             out.append({"tool": tool, "args": args})
     if not out:
         out = [{"tool": "search_events", "args": {"text": question[:200], "camera": None, "since": None, "until": None,
-                                                  "label": None, "min_priority": None, "group_by": None}}]
+                                                  "label": query_label(question), "min_priority": None, "group_by": None}}]
     win = time_window(question, now)
     if win:  # a time phrase in the question ("today", "last night", "past 3 hours") beats the planner's guess
         for c in out:
@@ -622,7 +649,7 @@ def _where(a: dict, extra: list[str] | None = None) -> tuple[str, list]:
 
 
 EVENT_COLS = ("id, camera_id, camera_class, yolo_class, start_ts, end_ts, synopsis, snapshot, priority, anomaly, "
-              "anomaly_json, feedback, journey_id, watched, areas, policy, "
+              "anomaly_json, feedback, journey_id, watched, areas, policy, plate, plate_region, plate_conf, "
               "json_extract(CASE WHEN json_valid(synopsis_json) THEN synopsis_json END, '$.towing_check') AS towing_check, "
               "json_extract(CASE WHEN json_valid(synopsis_json) THEN synopsis_json END, '$.weapon_check') AS weapon_check")
 
@@ -946,6 +973,14 @@ async def run_calls(calls: list[dict], refs: Refs, question: str | None = None) 
 
 # ---------------------------------------------------------------- answer
 
+# shared with the hub's Site Ask answer (hub/hub/site_ask.py ANSWER_SYSTEM says the same)
+MAKE_MODEL = (
+    "A make or model is usually inferred by the camera AI from what a vehicle looks like: when a match rests on a "
+    "description, say so (for example 'described as likely a Nissan Titan'), never state it as fact. A license plate is "
+    "known only where a line says 'license plate ...' (read from the footage when it was legible); when the matching lines "
+    "have none, say no plate was read for them, and never guess or complete a plate."
+)
+
 ANSWER_SYSTEM = (
     "You are the assistant of an AI security camera system (NVR) for one site. Answer the operator's question using "
     "ONLY the lookup results provided. Each result line starts with a handle in square brackets; when you mention "
@@ -961,7 +996,7 @@ ANSWER_SYSTEM = (
     "and never take a 'most recent sighting' from it; only event lines and EARLIER lines are sightings. "
     "For 'when was X last seen' questions, compare the dates of ALL matching event lines and CHECKED footage lines and "
     "answer with the most recent one (results marked NEWEST FIRST list their latest match first); mention an older "
-    "match only as extra context."
+    "match only as extra context. " + MAKE_MODEL
 )
 
 

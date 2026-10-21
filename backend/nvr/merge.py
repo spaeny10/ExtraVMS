@@ -255,6 +255,14 @@ def people_at_once(tracks: list[dict]) -> int:
     return max(1, best)
 
 
+def _plate_of(a: dict, b: dict) -> dict:
+    """The plate columns A keeps when B folds into it: B's when only B has one or B's is more confident."""
+    rank = {"medium": 1, "high": 2}
+    if b.get("plate") and (not a.get("plate") or rank.get(b.get("plate_conf") or "", 0) > rank.get(a.get("plate_conf") or "", 0)):
+        return {k: b.get(k) for k in ("plate", "plate_raw", "plate_region", "plate_conf")}
+    return {}
+
+
 def apply(a: dict, b: dict, reason: str = "") -> dict:
     """Fold B into A: one span, one path; A goes back to `pending` for a fresh verification; B is gone.
     The path is kept in time order (a group's tracks overlap); A keeps B's tracks in `tracks` and, for people,
@@ -270,7 +278,10 @@ def apply(a: dict, b: dict, reason: str = "") -> dict:
                     cells=cells.for_event(path), status="pending", tracks=tracks, people=people,
                     camera_conf=max(a.get("camera_conf") or 0, b.get("camera_conf") or 0),
                     synopsis=None, synopsis_json=None, threat=None, error=None, detections=None, snapshot=None, clip=None,
-                    areas=None, anomaly=None, anomaly_json=None, priority=None, policy=None, watched=None)
+                    areas=None, anomaly=None, anomaly_json=None, priority=None, policy=None, watched=None,
+                    # one vehicle: a plate either fragment had read stays (the more confident); the merged event is
+                    # described again, and that reads the plate only when it has none (plate.py)
+                    **_plate_of(a, b))
     partners = [r["x"] for r in db.all("SELECT CASE WHEN a=? THEN b ELSE a END AS x FROM event_links WHERE (a=? OR b=?) "
                                        "AND status='confirmed'", [b["id"], b["id"], b["id"]])]
     with db.lock:

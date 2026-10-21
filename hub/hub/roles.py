@@ -4,7 +4,7 @@ viewer   watch: every GET (but the talk-down voice, a camera's own settings and 
          signaling (offer and hang-up), media, playback, frames
 operator act: PTZ / relay / presets, talk-down (play / stop a message on a speaker, Hold to Talk, Describe & warn, the voice and its
          preview), deterrence (a camera's strobe, siren, light and relays, and reading what it has), naming people and
-         vehicles, feedback and synopsis edits, locks, Ask and clip chat, reprocess, briefings on demand
+         vehicles, reading a vehicle's plate, feedback and synopsis edits, locks, Ask and clip chat, reprocess, briefings on demand
 admin    configure: cameras (and their own settings over ONVIF: clock, encoders, imaging, rules, reboot; their automatic
          deterrence rules; a Milesight's white light, warning light, siren volume and one-click disarm), speakers and
          their message library, the talk-down voice, zones, retention, topology, remote AI, backups, site rules, SD card recovery
@@ -43,6 +43,7 @@ RULES: list[tuple[set[str], re.Pattern, str]] = [
     ({"PUT"}, re.compile(r"^/api/talkdown/voice$"), "admin"),             # the voice (the hub pushes its Site setting)
     ({"PUT", "POST", "DELETE"}, re.compile(r"^/api/(speakers|talkdown)(/|$)"), "admin"),  # speakers, Check, the message library
     ({"POST", "PUT", "DELETE"}, re.compile(r"^/api/identities(/|$)"), "operator"),
+    ({"POST"}, re.compile(r"^/api/events/\d+/plate$"), "operator"),   # Read plate: one Qwen look at a vehicle's plate, like naming it
     ({"PUT", "POST", "DELETE"}, re.compile(r"^/api/events/\d+/(feedback|synopsis|synopsis/generate|synopsis/revert|reprocess|identity|lock|watch)(/|$)"), "operator"),
     ({"PUT", "DELETE"}, re.compile(r"^/api/events/\d+/chat(/|$)"), "operator"),        # keep/forget clip-chat notes
     ({"POST"}, re.compile(r"^/api/links/\d+/reject$"), "operator"),                       # "not the same person"

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 import struct
 import threading
@@ -375,6 +376,13 @@ MIGRATIONS = [
     # group of people the most of them in view at once (>= 2; NULL = one person / never merged)
     ("events", "tracks", "TEXT"),
     ("events", "people", "INTEGER"),
+    # a vehicle's license plate, only when Qwen read it clearly (plate.py): normalized (uppercase letters and digits,
+    # no spaces or dashes), as read ("ABC-1234"), the state / region printed on it, and medium | high. NULL = not read
+    # or not readable (what was tried is in detections.plate_read).
+    ("events", "plate", "TEXT"),
+    ("events", "plate_raw", "TEXT"),
+    ("events", "plate_region", "TEXT"),
+    ("events", "plate_conf", "TEXT"),
 ]
 JSON_FIELDS = ("path", "rules", "detections", "synopsis_json", "synopsis_original", "feedback", "anomaly_json", "areas", "policy",
                "migrated_from", "tracks")
@@ -909,6 +917,8 @@ class Database:
         ok = (lambda i: True) if eligible is None else eligible.__contains__
         words = [t.strip("?.,!:;'") for t in query.replace('"', " ").lower().split()]
         words = [t for t in words if t and t not in STOPWORDS]
+        # "ABC-1234" / "abc.123": also the plate as it is indexed (letters and digits only, plate.search_terms)
+        words += [c for t in words if re.search(r"\d", t) and (c := re.sub(r"[^a-z0-9]", "", t)) and c != t and len(c) >= 3]
         if words:
             terms = " OR ".join(f'"{t}"' for t in words)
             rows = self.all("SELECT rowid FROM events_fts WHERE events_fts MATCH ? ORDER BY rank LIMIT 4000", [terms])

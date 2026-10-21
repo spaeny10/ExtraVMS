@@ -26,9 +26,11 @@ import { go, navigate, siteAskHref } from "../nav";
 import { siteTimelineHref } from "../timelineLink";
 import { ACTIONS_PATH } from "../customer/fleetActions";
 import {
-  type AnswerKey, type Inline, type References, SUGGESTIONS, askQuery, buildReferences, citedSource, clockIn, groupSources, orderThreads, parseAnswer,
-  pickAnswer, refCountsLine, sendKey, serversLine,
+  type AnswerKey, type Inline, type References, SUGGESTIONS, askQuery, buildReferences, citedSource, clockIn, orderThreads, parseAnswer,
+  pickAnswer, refCountsLine, sendKey, serversLine, splitCards, splitSources,
 } from "./siteAskData";
+import { formatPlate, otherLabel } from "@site/plate";
+import { PlateBadge, ReadPlate } from "@site/PlateRead";
 
 type Pending = {
   question: string; answer: string; status?: string; sources?: SiteAskSources; model?: string | null; fallback?: string; error?: string;
@@ -384,7 +386,7 @@ function AskAnswer({ siteId, tz, text, status, sources, model, fallback, onOpen,
           {plain && <span title={String(plain)}>plain summary (the AI was unavailable)</span>}
         </div>
       )}
-      {show && sources && !compact && <SourcesList sources={sources} siteId={siteId} onOpen={onOpen} asked={asked} />}
+      {show && sources && !compact && <SourcesList sources={sources} text={text} siteId={siteId} onOpen={onOpen} asked={asked} />}
     </div>
   );
 }
@@ -409,46 +411,60 @@ function Cite({ src, siteId, tz, onOpen, hot, onHot }: {
   const id = src.event_id;
   return (
     <button className={`cite${hot ? " hot" : ""}`} onClick={() => onOpen({ server: src.server_id, id })} {...hover}
-      title={`${src.kind === "journey" ? "Journey" : "Event"} #${id} · ${src.camera ?? ""} · ${src.ts ? fmtTime(src.ts) : ""}`}>
+      title={`${src.kind === "journey" ? "Journey" : "Event"} #${id} · ${src.camera ?? ""} · ${src.ts ? fmtTime(src.ts) : ""}${src.plate ? ` · plate ${formatPlate(src.plate, src.plate_region)}` : ""}`}>
       {src.kind === "journey" ? "↔" : src.label === "vehicle" ? "🚗" : "🧍"} {src.kind === "journey" ? (src.cameras ?? []).join(" → ") || src.camera : src.camera} {when}
       {src.snapshot && <img className="cite-preview" src={mediaApi(src.server_id).media({ id }, "snapshot.jpg", 320)} alt="" loading="lazy" />}
     </button>
   );
 }
 
-function SourcesList({ sources, siteId, onOpen, asked }: { sources: SiteAskSources; siteId: string; onOpen: (o: Open) => void; asked?: string }) {
-  const groups = useMemo(() => groupSources(sources.items), [sources.items]);
+function SourcesList({ sources, text, siteId, onOpen, asked }: {
+  sources: SiteAskSources; text: string; siteId: string; onOpen: (o: Open) => void; asked?: string;
+}) {
+  const split = useMemo(() => splitSources(sources.items, text), [sources.items, text]);
   const w = sources.window;
   const trouble = sources.servers.filter((s) => s.status !== "ok");
+  const item = (x: SiteAskSource, i: number, cited: boolean) => {
+    const label = (x.synopsis || x.text || x.kind).slice(0, 160);
+    const tag = x.ref ? (x.ref.startsWith("F") ? `[${x.ref}]` : `#${x.ref}`) : "";
+    return (
+      <li key={`${x.server_id}/${x.ref ?? i}`}>
+        {x.ts != null && <span className="sa-src-time">{fmtTime(x.ts)}</span>}
+        {tag && <code>{tag}</code>}
+        {cited && x.camera && <span>{x.camera} · </span>}
+        {x.event_id != null
+          ? <button className="linkish" onClick={() => onOpen({ server: x.server_id, id: x.event_id! })}>{label}</button>
+          : x.kind === "footage" && x.camera_id && x.ts
+            ? <a href={siteTimelineHref(siteId, x.server_id, x.camera_id, null, x.ts)} onClick={go(siteTimelineHref(siteId, x.server_id, x.camera_id, null, x.ts))}>{label}</a>
+            : <span>{label}</span>}
+        {(x.earlier || x.later) && <span className="muted"> ({x.earlier ? "before" : "after"} the period asked about)</span>}
+        <span className="muted"> · {x.server_name}</span>
+        {x.kind === "event" && x.label === "vehicle" && x.event_id != null && (cited
+          ? <> <ReadPlate id={x.event_id} plate={x.plate} region={x.plate_region} site={mediaApi(x.server_id)} compact /></>
+          : x.plate ? <> <PlateBadge plate={x.plate} region={x.plate_region} conf={x.plate_conf} /></> : null)}
+      </li>
+    );
+  };
+  const groups = (gs: typeof split.other) => gs.map((g) => (
+    <div key={g.camera} className="sa-src-group">
+      <div className="sa-src-cam">{g.camera}</div>
+      <ul>{g.items.map((x, i) => item(x, i, false))}</ul>
+    </div>
+  ));
   return (
     <div className="sa-sources small">
       {w && <p className="muted">Period checked{w.label ? ` (${w.label})` : ""}: {fmtTime(w.from)} – {fmtTime(w.to)}</p>}
       {sources.question && sources.question.trim().toLowerCase() !== asked?.trim().toLowerCase() && <p className="muted">Looked up as: “{sources.question}”</p>}
-      {groups.length === 0 && <p className="muted">Nothing matched.</p>}
-      {groups.map((g) => (
-        <div key={g.camera} className="sa-src-group">
-          <div className="sa-src-cam">{g.camera}</div>
-          <ul>
-            {g.items.map((x, i) => {
-              const label = (x.synopsis || x.text || x.kind).slice(0, 160);
-              const tag = x.ref ? (x.ref.startsWith("F") ? `[${x.ref}]` : `#${x.ref}`) : "";
-              return (
-                <li key={`${x.server_id}/${x.ref ?? i}`}>
-                  {x.ts != null && <span className="sa-src-time">{fmtTime(x.ts)}</span>}
-                  {tag && <code>{tag}</code>}
-                  {x.event_id != null
-                    ? <button className="linkish" onClick={() => onOpen({ server: x.server_id, id: x.event_id! })}>{label}</button>
-                    : x.kind === "footage" && x.camera_id && x.ts
-                      ? <a href={siteTimelineHref(siteId, x.server_id, x.camera_id, null, x.ts)} onClick={go(siteTimelineHref(siteId, x.server_id, x.camera_id, null, x.ts))}>{label}</a>
-                      : <span>{label}</span>}
-                  {(x.earlier || x.later) && <span className="muted"> ({x.earlier ? "before" : "after"} the period asked about)</span>}
-                  <span className="muted"> · {x.server_name}</span>
-                </li>
-              );
-            })}
-          </ul>
+      {split.cited.length === 0 && split.other.length === 0 && <p className="muted">Nothing matched.</p>}
+      {split.cited.length > 0 && (
+        <div className="sa-src-group">
+          <div className="sa-src-cam">Cited in the answer</div>
+          <ul>{split.cited.map((x, i) => item(x, i, true))}</ul>
         </div>
-      ))}
+      )}
+      {split.other.length > 0 && (split.cited.length > 0
+        ? <details className="sa-src-other"><summary className="muted">{otherLabel(split.otherCount)}</summary>{groups(split.other)}</details>
+        : groups(split.other))}
       {sources.dropped > 0 && <p className="muted">…and {sources.dropped} more sightings that were not used.</p>}
       {trouble.length > 0 && (
         <p className="muted">Not checked: {trouble.map((s) => `${s.server_name} (${s.status === "offline" ? `offline${s.last_seen_at ? `, last seen ${ago(s.last_seen_at)}` : ""}` : s.error ?? s.status})`).join("; ")}</p>
@@ -484,6 +500,53 @@ function ReferencesPanel({ siteId, tz, sel, refs, hot, onHot, onOpen, open, onCl
   const hotRef = hot?.ref ?? null;
   const hover = (x: SiteAskSource) => (x.ref ? { onMouseEnter: () => onHot(x.ref!), onMouseLeave: () => onHot(null) } : {});
   const goFootage = (x: SiteAskSource) => { if (x.camera_id && x.ts != null) navigate(siteTimelineHref(siteId, x.server_id, x.camera_id, null, x.ts)); };
+  const cards = splitCards(refs);
+  const card = (x: SiteAskSource) => {
+    const cited = !!x.ref && refs.cited.has(x.ref);
+    const event = x.kind === "event" && x.event_id != null;
+    const thumb = event
+      ? (x.snapshot ? mediaApi(x.server_id).media({ id: x.event_id! }, "snapshot.jpg", 320) : null)
+      : mediaApi(x.server_id).frameUrl(x.camera_id!, x.ts!, 320);
+    const pri = x.priority === "high" || x.priority === "medium" ? x.priority : null;
+    const body = (x.synopsis || x.text || "").trim();
+    const key = `${x.server_id}/${x.ref ?? x.event_id ?? x.ts}`;
+    const button = (
+      <button key={key} type="button" data-ref={x.ref}
+        className={`sa-ref-card${cited ? " cited" : ""}${x.ref && x.ref === hotRef ? " hot" : ""}`}
+        onClick={() => (event ? onOpen({ server: x.server_id, id: x.event_id! }) : goFootage(x))} {...hover(x)}
+        title={event ? `Open event ${tagOf(x)} · ${x.camera ?? ""} · ${x.ts ? fmtTime(x.ts) : ""}` : `Open the Timeline at ${x.ts ? fmtTime(x.ts) : ""}`}>
+        <span className="sa-ref-thumb">
+          <span className="sa-ref-ph" aria-hidden>{labelIcon(x)}</span>
+          {thumb && <img src={thumb} alt="" loading="lazy" onError={(e) => { e.currentTarget.style.visibility = "hidden"; }} />}
+          {x.kind === "footage" && <span className="sa-ref-kind">Footage</span>}
+        </span>
+        <span className="sa-ref-body">
+          <span className="sa-ref-top">
+            {x.ref && <code className="sa-ref-tag">{tagOf(x)}</code>}
+            <span className="sa-ref-cam">{x.camera ?? "Camera"}</span>
+            {x.ts != null && <span className="sa-ref-time">{clockIn(x.ts, tz)}</span>}
+          </span>
+          {(pri || x.earlier || x.later) && (
+            <span className="sa-ref-badges">
+              {pri && <span className={`badge threat-${pri}`}>{pri}</span>}
+              {(x.earlier || x.later) && <span className="muted small">{x.earlier ? "before" : "after"} the period asked about</span>}
+            </span>
+          )}
+          {body && <span className="sa-ref-text">{body}</span>}
+          {!cited && x.plate && <span className="sa-ref-badges"><PlateBadge plate={x.plate} region={x.plate_region} conf={x.plate_conf} /></span>}
+        </span>
+      </button>
+    );
+    if (!(cited && event && x.label === "vehicle")) return button;
+    return (
+      <div key={key} className="sa-ref-wrap">
+        {button}
+        <div className="sa-ref-plate small">
+          <ReadPlate id={x.event_id!} plate={x.plate} region={x.plate_region} site={mediaApi(x.server_id)} compact />
+        </div>
+      </div>
+    );
+  };
 
   return (
     <aside id="sa-refs" className={`sa-refs${open ? " open" : ""}`} aria-label="References">
@@ -503,41 +566,13 @@ function ReferencesPanel({ siteId, tz, sel, refs, hot, onHot, onOpen, open, onCl
         {!sel && <p className="muted small sa-refs-empty">Events the answer relies on appear here.</p>}
         {sel && !sources && !sel.streaming && <p className="muted small sa-refs-empty">This answer has no saved references.</p>}
         {sources && !refs.cards.length && !refs.rows.length && <p className="muted small sa-refs-empty">No events matched this question.</p>}
-        {refs.cards.map((x) => {
-          const cited = !!x.ref && refs.cited.has(x.ref);
-          const event = x.kind === "event" && x.event_id != null;
-          const thumb = event
-            ? (x.snapshot ? mediaApi(x.server_id).media({ id: x.event_id! }, "snapshot.jpg", 320) : null)
-            : mediaApi(x.server_id).frameUrl(x.camera_id!, x.ts!, 320);
-          const pri = x.priority === "high" || x.priority === "medium" ? x.priority : null;
-          const body = (x.synopsis || x.text || "").trim();
-          return (
-            <button key={`${x.server_id}/${x.ref ?? x.event_id ?? x.ts}`} type="button" data-ref={x.ref}
-              className={`sa-ref-card${cited ? " cited" : ""}${x.ref && x.ref === hotRef ? " hot" : ""}`}
-              onClick={() => (event ? onOpen({ server: x.server_id, id: x.event_id! }) : goFootage(x))} {...hover(x)}
-              title={event ? `Open event ${tagOf(x)} · ${x.camera ?? ""} · ${x.ts ? fmtTime(x.ts) : ""}` : `Open the Timeline at ${x.ts ? fmtTime(x.ts) : ""}`}>
-              <span className="sa-ref-thumb">
-                <span className="sa-ref-ph" aria-hidden>{labelIcon(x)}</span>
-                {thumb && <img src={thumb} alt="" loading="lazy" onError={(e) => { e.currentTarget.style.visibility = "hidden"; }} />}
-                {x.kind === "footage" && <span className="sa-ref-kind">Footage</span>}
-              </span>
-              <span className="sa-ref-body">
-                <span className="sa-ref-top">
-                  {x.ref && <code className="sa-ref-tag">{tagOf(x)}</code>}
-                  <span className="sa-ref-cam">{x.camera ?? "Camera"}</span>
-                  {x.ts != null && <span className="sa-ref-time">{clockIn(x.ts, tz)}</span>}
-                </span>
-                {(pri || x.earlier || x.later) && (
-                  <span className="sa-ref-badges">
-                    {pri && <span className={`badge threat-${pri}`}>{pri}</span>}
-                    {(x.earlier || x.later) && <span className="muted small">{x.earlier ? "before" : "after"} the period asked about</span>}
-                  </span>
-                )}
-                {body && <span className="sa-ref-text">{body}</span>}
-              </span>
-            </button>
-          );
-        })}
+        {cards.cited.map((x) => card(x))}
+        {cards.other.length > 0 && (
+          <details className="sa-refs-other" key={String(sel?.key)}>
+            <summary className="muted small">{otherLabel(cards.other.length)}</summary>
+            {cards.other.map((x) => card(x))}
+          </details>
+        )}
         {refs.rows.length > 0 && (
           <ul className="sa-ref-rows small">
             {refs.rows.map((x, i) => {

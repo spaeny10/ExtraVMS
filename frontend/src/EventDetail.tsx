@@ -8,6 +8,7 @@ import { EventPlayer, type EventPlayerHandle } from "./EventPlayer";
 import { clipOrigin } from "./eventPlayback";
 import { StatusBadge, eventLabel, placeholder, rejectedReason } from "./Events";
 import { useNav } from "./nav";
+import { ReadPlate } from "./PlateRead";
 import { Icon, confirmDialog, toast, useIsPhone } from "./ui";
 
 const REASONS = ["Wrong object", "Missed detail", "Made something up", "Threat too high", "Threat too low", "Too vague"];
@@ -379,6 +380,12 @@ function Details({ e, site, setE, notes, onUnsave, seek }: {
             <p className="d-summary">{e.synopsis ?? <span className="muted">{placeholder(e)}</span>}</p>
             {e.areas?.length ? (
               <div className="d-line" title="Named places the person walked into, in order">📍 {e.areas.map((a) => `${a.name} (+${Math.max(0, Math.round(a.from - e.start_ts))} s)`).join(" → ")}</div>
+            ) : null}
+            {e.camera_class === "vehicle" && e.status === "verified" ? (
+              <div className="d-line plate-line" title="Read by Qwen from the sharpest full-resolution frames of this vehicle, only when the plate is clearly legible">
+                🔢 <ReadPlate key={`${e.id}/${e.plate ?? ""}`} id={e.id} plate={e.plate} region={e.plate_region} site={site}
+                  onRead={(_r, next) => { if (next) setE(next); }} />
+              </div>
             ) : null}
             {e.ptz_preset ? (
               <div className="d-line" title="Zones, named places, painted regions and the learned baseline describe the home view and were not applied">↗ Camera was turned away from its home view{e.ptz_preset !== "away" ? ` (at preset '${e.ptz_preset}')` : ""}</div>

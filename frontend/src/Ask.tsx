@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { api, fmtTime, type AskMeta, type Briefing, type BriefingSettings, type CiteRefs, type SiteApi } from "./api";
 import { useNav } from "./nav";
+import { otherLabel, splitCited } from "./plate";
+import { PlateBadge, ReadPlate } from "./PlateRead";
 import { Skeleton, toast } from "./ui";
 
 export function Answer({ text, meta, model, fallback, onEvent, streaming }: {
@@ -10,6 +12,7 @@ export function Answer({ text, meta, model, fallback, onEvent, streaming }: {
   return (
     <div className={`ask-msg assistant${streaming ? " streaming" : ""}`}>
       <div className="ask-text"><Cited text={text} refs={meta?.refs} onEvent={onEvent} /></div>
+      {meta?.refs && !streaming && <AnswerRefs text={text} refs={meta.refs} onEvent={onEvent} />}
       <div className="ask-meta muted small">
         {meta?.calls?.length ? (
           <button className="linkish small" onClick={() => setShowCalls(!showCalls)}>
@@ -24,6 +27,40 @@ export function Answer({ text, meta, model, fallback, onEvent, streaming }: {
           {meta.calls.map((c, i) => <li key={i}><code>{c.label}</code> → {c.count}</li>)}
           {meta.planner && <li className="muted">planned by {meta.planner}</li>}
         </ul>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The events the lookups found, the ones the answer cites first (in citation order, with the plate or "Read plate"
+ * for a vehicle), the rest folded under "Other events searched (N)" (collapsed).
+ */
+export function AnswerRefs({ text, refs, onEvent, site = api }: { text: string; refs: CiteRefs; onEvent: (id: number) => void; site?: SiteApi }) {
+  const ids = Object.keys(refs.events).sort((a, b) => refs.events[b].start_ts - refs.events[a].start_ts);
+  const { cited, other } = splitCited(ids, (x) => x, text);
+  if (!ids.length) return null;
+  const row = (id: string, withPlate: boolean) => {
+    const r = refs.events[id];
+    return (
+      <li key={id}>
+        <button className="linkish" onClick={() => onEvent(Number(id))} title={`Event #${id} · ${r.camera} · ${fmtTime(r.start_ts)}`}>
+          {r.label === "vehicle" ? "🚗" : "🧍"} {r.camera} {clock(r.start_ts)}
+        </button>
+        {r.label === "vehicle" && (withPlate
+          ? <ReadPlate id={Number(id)} plate={r.plate} region={r.plate_region} site={site} compact />
+          : <PlateBadge plate={r.plate} region={r.plate_region} />)}
+      </li>
+    );
+  };
+  return (
+    <div className="ask-refs small">
+      {cited.length > 0 && <ul className="ask-refs-cited">{cited.map((id) => row(id, true))}</ul>}
+      {other.length > 0 && (
+        <details className="ask-refs-other">
+          <summary className="muted">{otherLabel(other.length)}</summary>
+          <ul>{other.map((id) => row(id, false))}</ul>
+        </details>
       )}
     </div>
   );

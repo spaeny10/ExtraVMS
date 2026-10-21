@@ -13,7 +13,7 @@ import cv2
 import httpx
 import numpy as np
 
-from . import aischedule, baseline, cells, detector, frames, identities, journeys, policy, ppe, retention, vlmroute, weaponcheck, zones, merge
+from . import aischedule, baseline, cells, detector, frames, identities, journeys, plate, policy, ppe, retention, vlmroute, weaponcheck, zones, merge
 from . import synopsis as vlm
 from .config import settings
 from .db import db
@@ -673,6 +673,13 @@ class Pipeline:
             log.info("event %s changed while Qwen described it (merged): description dropped", event_id)
             return
         db.update_event(event_id, synopsis=summary, synopsis_json=result, threat=result.get("threat_level"), error=None)
+        if settings.plate_read and plate.is_vehicle(e) and not now_e.get("plate"):
+            # the plate, when legible, from a full-resolution crop of the vehicle (plate.py): it rides on the
+            # description, so it follows its AI-schedule handling; a plate read earlier is never undone here
+            try:
+                await plate.run(event_id, self.plate_crops, "synopsis", plate.SYNOPSIS_CROPS, "background", keep_plate=True)
+            except Exception as ex:  # noqa: BLE001 - the description stands without it
+                log.warning("event %s: plate read failed (%s: %s)", event_id, type(ex).__name__, ex)
         if not e.get("ptz_preset"):
             await policy.confirm_towing(event_id)   # a towing claim needs a second, focused look before a rule can break
             policy.check(event_id, camera)          # site rules (who may tow what) now that Qwen has looked
@@ -680,6 +687,10 @@ class Pipeline:
         await self.reindex(event_id)
         self.synopsis_times.append(round(time.time() - t0, 1))
         log.info("event %s synopsis in %.1fs: %s", event_id, time.time() - t0, summary[:120])
+
+    async def plate_crops(self, e: dict, n: int) -> dict:
+        """Full-resolution crops of the vehicle for plate.read, decoded on a decode thread (plate.gather)."""
+        return await asyncio.get_running_loop().run_in_executor(self.decode, plate.gather, e, n)
 
     async def weapon_evidence(self, e: dict) -> dict:
         """Full-resolution crops of every person in the event for weaponcheck: the clip is decoded on a decode thread,
@@ -746,6 +757,8 @@ class Pipeline:
         if ppe_res and ppe_res.get("verdict") == "compliant":  # so "who wore a hard hat in the yard" finds it too
             notes.append(f"Wore the required PPE in '{ppe_res.get('zone')}': "
                          + ", ".join(ppe.ITEM_WORDS[i] for i in ppe_res.get("required") or []))
+        if e.get("plate"):  # so "plate ABC123", a partial plate and "tag number" find it (plate.search_terms)
+            notes.append(f"License plate {plate.display(e['plate'], e.get('plate_region'))}")
         if e.get("ptz_preset"):  # so "when the camera was on the parking lot" finds it
             notes.append("Camera turned away from its usual view" + (f" (at preset '{e['ptz_preset']}')" if e["ptz_preset"] != "away" else ""))
         if e.get("journey_id"):  # cross-camera narrative, so e.g. "went outside" finds every leg
@@ -757,6 +770,7 @@ class Pipeline:
             e["camera_class"], e["yolo_class"], *s.get("tags", []), *(o.get("type", "") for o in s.get("objects", [])),
             *ppe.tags(ppe_res),
             (fb.get("verdict") or "").replace("_", " "), fb.get("correct_class"),
+            plate.search_terms(e.get("plate"), e.get("plate_raw"), e.get("plate_region")),
         ]))
         doc = " ".join(filter(None, [
             e["synopsis"], s.get("activity"), s.get("threat_reason"),

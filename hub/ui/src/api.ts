@@ -674,6 +674,8 @@ export type SiteAskSource = {
   server_id: string; server_name: string; event_id?: number; event_ids?: number[]; camera_id?: string; camera?: string; cameras?: string[];
   ts?: number; end_ts?: number; label?: string; priority?: string; snapshot?: boolean; text?: string; synopsis?: string; earlier?: boolean; later?: boolean;
   minutes?: number; ongoing?: boolean; background?: boolean;
+  /** a vehicle's license plate when the server read it (backend plate.py) */
+  plate?: string; plate_region?: string; plate_conf?: string;
 };
 export type SiteAskServer = { server_id: string; server_name: string; status: "ok" | "offline" | "error" | "timeout"; error?: string; last_seen_at?: number; duration_ms?: number };
 export type SiteAskCounts = { events?: number; by_label?: Record<string, number>; by_camera?: Record<string, number>; people?: [number, number] };

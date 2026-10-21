@@ -51,7 +51,7 @@ KIND_RX = re.compile(r"^[a-z][a-z0-9_]{0,23}$")
 DAY_RX = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 MONTH_RX = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 # the job kinds the servers report (nvr/aischedule.py KINDS), in the order the UI lists them; others come after
-KIND_ORDER = ("synopsis", "catchup", "ppe", "ask", "talkdown", "briefing", "journey", "hub", "test")
+KIND_ORDER = ("synopsis", "catchup", "ppe", "plate", "ask", "talkdown", "briefing", "journey", "hub", "test")
 
 _last: dict[str, tuple[str, float]] = {}   # server id -> (key pushed, when)
 _tasks: set[asyncio.Task] = set()

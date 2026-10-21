@@ -141,7 +141,19 @@ def event_item(e: dict) -> dict:
     return {"kind": "event", "event_id": e["id"], "ts": e["start_ts"], "end_ts": e.get("end_ts") or e["start_ts"],
             "camera_id": e["camera_id"], "camera_name": A._cam_name(e["camera_id"]), "label": e.get("camera_class"),
             "priority": e.get("priority") or "none", "snapshot": bool(e.get("snapshot")), "text": _event_text(e),
-            "synopsis": (e.get("synopsis") or "").strip()[:400], "journey_id": e.get("journey_id"), "calls": []}
+            "synopsis": (e.get("synopsis") or "").strip()[:400], "journey_id": e.get("journey_id"), "calls": [],
+            **({"plate": e["plate"], "plate_region": e.get("plate_region"), "plate_conf": e.get("plate_conf")} if e.get("plate") else {})}
+
+
+def keep_class(items: list[dict], intent: str | None) -> list[dict]:
+    """A question clearly about vehicles (a plate, a make, "truck") or clearly about people (assistant.class_intent):
+    the other class's events leave the evidence and the references; journeys (people across cameras) go with people.
+    Mixed or unclear questions keep everything."""
+    if intent not in ("person", "vehicle"):
+        return items
+    other = "vehicle" if intent == "person" else "person"
+    return [x for x in items if not ((x["kind"] == "event" and x.get("label") == other)
+                                     or (x["kind"] == "journey" and intent == "vehicle"))]
 
 
 def _journey_items(a: dict) -> list[dict]:
@@ -402,6 +414,7 @@ async def _retrieve(question: str, history: list[dict] | None, now: float | None
     ev = Evidence()
     summary, items, more, unfinished_cams = await run(calls, ev, used, now, t0 + BUDGET_S, t0 + HARD_S)
     notes += more
+    items = keep_class(items, A.class_intent(used))
     window = _window(used, calls, now)
     if window and A.time_window(used, now):
         # a fallback lookup widens the period ("nothing overnight: the latest since then"): say which side each is on

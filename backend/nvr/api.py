@@ -29,7 +29,7 @@ from . import assistant, backup, baseline, cells, footage, frames, health, ident
 from . import synopsis as vlm
 from . import advisor, ai_serve, detector, direct, hub_agent, lan_cert, lan_guard, sdbackfill, site_actions, siteconfig
 from . import camweb, deterrence, deterrence_api, device_api, speakers_api, talkdown
-from . import aischedule, vlmroute
+from . import aischedule, plate, vlmroute
 from . import summary as summary_mod
 from .config import ROOT, settings
 from .db import JOURNEY_CAMS_SQL, LOCKED_SQL, PRIORITY_RANK_SQL, db, event_filters
@@ -1169,7 +1169,7 @@ async def list_events(camera: str | None = None, status: str | None = None, labe
         ids = await asyncio.to_thread(_region_ids, where, params, order, region, limit, max(0, int(offset or 0)))
         where, params, offset = [f"id IN ({','.join('?' * len(ids))})"] if ids else ["0"], list(ids), 0
     sql = ("SELECT id, camera_id, track_id, camera_class, camera_conf, start_ts, end_ts, status, yolo_class, "
-           "yolo_conf, yolo_hits, snapshot, clip, synopsis, threat, priority, anomaly, anomaly_json, watched, areas, policy, cells, ptz_preset, error, corrected_at, feedback, people, "
+           "yolo_conf, yolo_hits, snapshot, clip, synopsis, threat, priority, anomaly, anomaly_json, watched, areas, policy, cells, ptz_preset, error, corrected_at, feedback, people, plate, plate_region, plate_conf, "
            f"{LOCKED_SQL} AS locked, journey_id, {JOURNEY_CAMS_SQL} AS journey_cameras FROM events"
            + (f" WHERE {' AND '.join(where)}" if where else "") + f" ORDER BY {order} LIMIT ? OFFSET ?")
     rows = db.all(sql, [*params, limit, max(0, int(offset or 0))])
@@ -1401,6 +1401,39 @@ async def generate_synopsis(event_id: int):
     state.pipeline.queue_synopsis(event_id, user=True)   # a person asked: written whatever the AI schedule says
     state.pipeline.publish(event_id)
     return {"ok": True}
+
+
+@app.post("/api/events/{event_id}/plate")
+async def read_plate(event_id: int, request: Request):
+    """"Read plate": Qwen reads a vehicle event's license plate now, from the sharpest full-resolution crops across the
+    event (plate.py), stores the result and returns it: {result: read | unreadable | skipped, plate, plate_raw, region,
+    confidence, reason, event}. A person asked, so it runs outside the Site's AI hours too, metered as "plate". One run
+    per event every plate_rate_s (429 with Retry-After). Through the hub an operator's (roles.py), as naming a vehicle."""
+    role = _hub_role(request)
+    if role is not None and role not in ("operator", "admin", "owner"):
+        raise HTTPException(403, "reading a plate needs the operator role")
+    e = _require_event(event_id)
+    if not plate.is_vehicle(e):
+        raise HTTPException(400, "plates are read on vehicle events only")
+    if not state.pipeline.vlm_ready:
+        raise HTTPException(503, "Qwen is not ready yet")
+    wait = plate.limiter.wait_s(event_id)
+    if wait > 0:
+        raise HTTPException(429, f"this plate was just read; try again in {wait:.0f} s", headers={"Retry-After": str(int(wait) + 1)})
+    plate.limiter.start(event_id)
+    try:
+        result = await plate.run(event_id, state.pipeline.plate_crops, "user", plate.ON_DEMAND_CROPS, "chat")
+    except (asyncio.TimeoutError, httpx.TimeoutException):
+        raise HTTPException(504, "Qwen took too long to read the plate; try again in a moment")
+    except Exception as ex:  # noqa: BLE001 - the model is down or misconfigured
+        log.warning("event %s: plate read failed: %s", event_id, ex)
+        raise HTTPException(502, f"the plate could not be read: {str(ex)[:200]}")
+    finally:
+        plate.limiter.done(event_id)
+    await state.pipeline.reindex(event_id)
+    state.pipeline.publish(event_id)
+    out = {k: result.get(k) for k in ("result", "plate", "plate_raw", "region", "confidence", "reason", "model", "crops")}
+    return {**out, "event": db.event(event_id)}
 
 
 @app.put("/api/events/{event_id}/feedback")

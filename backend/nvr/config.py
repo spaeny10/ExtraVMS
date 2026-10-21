@@ -112,6 +112,13 @@ class Settings(BaseSettings):
     chat_frames: int = 4                   # frames per chat question (~1,050 tokens each)
     embed_model: str = "nomic-embed-text"
     synopsis_images: int = 4
+    # License plates (plate.py): a vehicle's description also asks Qwen for its plate, from a full-resolution crop of
+    # the vehicle in the recording, only when the plate is clearly legible. A vehicle box shorter than plate_min_px
+    # (pixels at the recorded resolution) is never asked about: its plate is a few pixels. "Read plate" on an event
+    # runs it on demand (one run per event every plate_rate_s).
+    plate_read: bool = True
+    plate_min_px: int = 120
+    plate_rate_s: float = 30.0
     # Back-to-back fragments of one visit on a camera merge into one event before Qwen describes it (merge.py)
     track_merge_gap: float = 10.0           # a fragment starting within this of the previous one may merge
     merge_max_seconds: float = 300.0        # never grow one event beyond this

@@ -5,6 +5,7 @@ while the playhead is dragged. `exact=True` decodes forward to the frame nearest
 """
 from __future__ import annotations
 
+import gc
 import threading
 import time
 from collections import OrderedDict
@@ -12,6 +13,7 @@ from pathlib import Path
 
 import av
 import cv2
+import numpy as np
 
 from .config import settings
 from .fmp4 import segment_start
@@ -76,6 +78,60 @@ def release(path: Path) -> None:
     _listing.clear()
 
 
+def _seek_frame(c, s, target: int, exact: bool):
+    """The keyframe at or before pts `target`, or (exact) the decoded frame nearest it."""
+    c.seek(max(s.start_time or 0, target), stream=s, backward=True, any_frame=False)
+    frame = None
+    for fr in c.decode(s):
+        if fr.pts is None:
+            continue
+        if frame is None or not exact:
+            frame = fr
+        if not exact:
+            break
+        if fr.pts >= target:  # first frame at/after t; keep the closer of it and the previous one
+            if abs(fr.pts - target) < abs(frame.pts - target):
+                frame = fr
+            break
+        frame = fr
+    return frame
+
+
+def video_height(path: Path) -> int | None:
+    """The recorded picture's height in pixels (from the stream header; nothing is decoded)."""
+    with av.open(str(path)) as c:
+        s = c.streams.video[0]
+        return int(s.codec_context.height or 0) or None
+
+
+def frames_at(path: Path, offsets: list[float]) -> dict[float, np.ndarray]:
+    """Full-resolution BGR frames nearest each offset (seconds from the file's first frame), one seek each: for a few
+    frames of a long clip much less work than decoding it from the start (verifier.grab_frames). Offsets the file
+    doesn't reach are left out."""
+    out: dict[float, np.ndarray] = {}
+    try:
+        with av.open(str(path)) as c:
+            s = c.streams.video[0]
+            tb = float(s.time_base)
+            base = s.start_time or 0
+            for off in sorted(set(offsets)):
+                fr = _seek_frame(c, s, base + int(max(0.0, off) / tb), exact=True)
+                if fr is not None and abs((fr.pts - base) * tb - off) <= 1.0:
+                    out[off] = fr.to_ndarray(format="bgr24")
+    finally:
+        gc.collect()   # PyAV frames are freed late (see verifier.grab_frames)
+    return out
+
+
+def recorded_frame(camera_id: str, t: float) -> np.ndarray | None:
+    """The recorded frame nearest epoch t at full resolution (BGR), or None where nothing is recorded."""
+    seg = find_segment(camera_id, t)
+    if not seg:
+        return None
+    path, seg_start, _live = seg
+    return frames_at(path, [t - seg_start]).get(t - seg_start)
+
+
 def preview_jpeg(camera_id: str, t: float, width: int = 960, exact: bool = False) -> tuple[bytes, float, bool] | None:
     """JPEG of the frame at (or the keyframe before) epoch t. Returns (jpeg, frame_epoch, is_live) or None."""
     seg = find_segment(camera_id, t)
@@ -97,20 +153,7 @@ def preview_jpeg(camera_id: str, t: float, width: int = 960, exact: bool = False
             if not live and c.duration and t - seg_start > c.duration / 1e6 + 1:
                 return None  # in a gap after this segment
             target = base + int((t - seg_start) / tb)
-            c.seek(max(base, target), stream=s, backward=True, any_frame=False)
-            frame = None
-            for fr in c.decode(s):
-                if fr.pts is None:
-                    continue
-                if frame is None or not exact:
-                    frame = fr
-                if not exact:
-                    break
-                if fr.pts >= target:  # first frame at/after t; keep the closer of it and the previous one
-                    if abs(fr.pts - target) < abs(frame.pts - target):
-                        frame = fr
-                    break
-                frame = fr
+            frame = _seek_frame(c, s, target, exact)
             if frame is None:
                 return None
             frame_epoch = seg_start + (frame.pts - base) * tb

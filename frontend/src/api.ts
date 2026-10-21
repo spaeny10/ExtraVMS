@@ -308,6 +308,12 @@ export type NvrEvent = {
   lock?: Lock | null;
   journey_id?: number | null;
   journey_cameras?: number | null;
+  /** a vehicle's license plate, only when Qwen read it clearly (backend plate.py): letters and digits, its state or
+   *  region when printed and readable, medium | high */
+  plate?: string | null;
+  plate_raw?: string | null;
+  plate_region?: string | null;
+  plate_conf?: "medium" | "high" | null;
   score?: number;
   // detail only
   path?: number[][];
@@ -320,7 +326,9 @@ export type NvrEvent = {
     /** "onvif_event": opened by the camera's ONVIF detection event, no camera boxes (backend/nvr/ruleevents.py) */
     source?: string;
     /** no Qwen synopsis: YOLO was below the site's confidence gate, e.g. "No synopsis: YOLO 45% < 60%" */
-    synopsis_skipped?: string };
+    synopsis_skipped?: string;
+    /** the last plate read (backend plate.py): with the synopsis or a person's "Read plate" */
+    plate_read?: { at: number; source: "synopsis" | "user"; result: PlateResult; reason?: string; model?: string; crops?: number } };
   synopsis_json?: Synopsis | null;
   synopsis_original?: Synopsis | null;
   clip_start?: number | null;
@@ -814,6 +822,8 @@ export function makeApi(base: string, opts: ApiOptions = {}) {
   correctSynopsis: (id: number, s: Synopsis) => req<NvrEvent>(`/api/events/${id}/synopsis`, json("PUT", s)),
   revertSynopsis: (id: number) => req<NvrEvent>(`/api/events/${id}/synopsis/correction`, { method: "DELETE" }),
   generateSynopsis: (id: number) => req(`/api/events/${id}/synopsis/generate`, { method: "POST" }),
+  /** "Read plate": Qwen reads a vehicle event's license plate now (backend plate.py; operator through the hub) */
+  readPlate: (id: number) => req<PlateRead>(`/api/events/${id}/plate`, { method: "POST" }),
   feedback: (id: number, f: Feedback) => req<NvrEvent>(`/api/events/${id}/feedback`, json("PUT", f)),
   detections: (cam: string, hours = 24) => req<DetectionPoint[]>(`/api/cameras/${cam}/detections?hours=${hours}`),
   previewZones: (cam: string, zones: Zone[]) =>
@@ -887,8 +897,14 @@ export type ApiResolver = (server: string) => SiteApi;
 export const localApi: ApiResolver = () => api;
 
 /* ---- Ask the NVR */
+/** POST /api/events/{id}/plate: read (a plate), unreadable (nothing legible) or skipped (no crop: too small, no footage) */
+export type PlateResult = "read" | "unreadable" | "skipped";
+export type PlateRead = {
+  result: PlateResult; plate: string | null; plate_raw: string | null; region: string | null; confidence: "medium" | "high" | null;
+  reason: string | null; model?: string | null; crops?: number | null; event?: NvrEvent;
+};
 export type CiteRefs = {
-  events: Record<string, { camera_id: string; camera: string; start_ts: number; label: string; snapshot: boolean }>;
+  events: Record<string, { camera_id: string; camera: string; start_ts: number; label: string; snapshot: boolean; plate?: string; plate_region?: string | null }>;
   footage: Record<string, { camera_id: string; camera: string; ts: number; tile: number }>;
 };
 export type AskCall = { tool: string; label: string; count: number };

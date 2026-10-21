@@ -7,8 +7,9 @@
  *  - orderThreads: conversations newest first;
  *  - looksLikeQuestion: Find's hint ("Looks like a question — Ask this site");
  *  - sendKey, askQuery: Enter sends (Shift+Enter is a new line); a question prefilled from ?q=;
- *  - pickAnswer, buildReferences, refCountsLine, clockIn: the References panel (the evidence of the selected answer,
- *    cited first) and its times in the Site's time zone.
+ *  - pickAnswer, buildReferences, splitCards, refCountsLine, clockIn: the References panel (the evidence of the
+ *    selected answer, cited first, the rest folded under "Other events searched (N)") and its times in the Site's time
+ *    zone; splitSources does the same for the Sources disclosure.
  */
 import type { SiteAskMessage, SiteAskServer, SiteAskSource, SiteAskThread } from "../api";
 import { looksLikeInstruction } from "../customer/fleetActions";
@@ -185,6 +186,24 @@ export function buildReferences(items: readonly SiteAskSource[] | undefined, tex
   const n = (k: SiteAskSource["kind"]) => list.filter((x) => x.kind === k).length;
   return { cards, rows, cited: new Set(order.keys()), events: cards.filter((x) => x.kind === "event").length, footage: n("footage"),
     journeys: n("journey"), gaps: n("gap") };
+}
+
+/**
+ * The References cards split for the panel: what the answer cites (in citation order) shown, the rest folded under
+ * "Other events searched (N)", collapsed. The Sources disclosure splits its items the same way (splitSources).
+ */
+export function splitCards(r: Pick<References, "cards" | "cited">): { cited: SiteAskSource[]; other: SiteAskSource[] } {
+  const isCited = (x: SiteAskSource) => !!x.ref && r.cited.has(x.ref);
+  return { cited: r.cards.filter(isCited), other: r.cards.filter((x) => !isCited(x)) };
+}
+
+/** The Sources disclosure: the cited sightings (citation order), and the others grouped by camera (groupSources). */
+export function splitSources(items: readonly SiteAskSource[], text: string): { cited: SiteAskSource[]; other: SourceGroup[]; otherCount: number } {
+  const order = new Map(citations(text).map((ref, i) => [ref, i]));
+  const isCited = (x: SiteAskSource) => !!x.ref && order.has(x.ref) && TIMED.has(x.kind);
+  const cited = items.filter(isCited).sort((a, b) => order.get(a.ref!)! - order.get(b.ref!)!);
+  const rest = items.filter((x) => !isCited(x));
+  return { cited, other: groupSources(rest), otherCount: rest.filter((x) => x.kind === "event" || x.kind === "footage" || x.kind === "journey").length };
 }
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;

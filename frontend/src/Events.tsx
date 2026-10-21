@@ -1,4 +1,5 @@
 import { api, fmtDuration, fmtWhen, ppeBadge, UNUSUAL_MIN, type NvrEvent, type SiteApi } from "./api";
+import { PlateBadge } from "./PlateRead";
 
 const STATUS_LABEL: Record<string, string> = {
   open: "Tracking",
@@ -72,13 +73,14 @@ export function EventCard({ e, cameraName, onOpen, site = api, siteName, focused
           <span className="muted" title={new Date(e.start_ts * 1000).toLocaleString()}>{fmtWhen(e.start_ts)} · {fmtDuration(e)}</span>
         </div>
         <p className={e.synopsis ? "synopsis" : "synopsis muted"}>{e.synopsis ?? placeholder(e)}</p>
-        {/* fixed order, every slot optional, so footers line up: priority, rule, unusual, watched, places,
+        {/* fixed order, every slot optional, so footers line up: priority, rule, unusual, watched, plate, places,
             journey, camera away, lock / corrected / false alarm, then the confidence line on the right */}
         <div className="event-foot">
           <CardStatus e={e} />
           {e.policy ? <span className={`badge trunc threat-${e.policy.priority === "medium" ? "medium" : "high"}`} title={e.policy.text}>{e.policy.kind === "ppe" ? `🦺 ${ppeBadge(e.policy)}` : `🚫 ${clip(e.policy.text || "Site rule")}`}</span> : null}
           {unusual ? <span className="badge trunc unusual-badge" title={`Unusual for this camera:\n${reasons.join("\n")}`}>⚠ Unusual{reasons[0] ? ` · ${reasons[0]}` : ""}</span> : null}
           {e.watched ? <span className="badge threat-medium" title="On the watch list">👁 {e.watched}</span> : null}
+          {e.camera_class === "vehicle" && <PlateBadge plate={e.plate} region={e.plate_region} conf={e.plate_conf} />}
           {e.areas?.length ? <span className="badge trunc area-badge" title={`Went to: ${e.areas.map((x) => x.name).join(" → ")}`}>📍 {e.areas.map((x) => x.name).join(" → ")}</span> : null}
           {e.journey_cameras && e.journey_cameras > 1 ? <span className="badge journey-badge" title="Same person seen on other cameras">🔗 {e.journey_cameras} cams</span> : null}
           {e.ptz_preset ? <span className="badge ptz-badge" title="The camera was turned away from its home view: zones, places and the learned baseline did not apply">↗ {e.ptz_preset === "away" ? "camera away" : e.ptz_preset}</span> : null}

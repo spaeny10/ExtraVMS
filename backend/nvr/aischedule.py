@@ -11,8 +11,8 @@ Mode "soc": full Qwen while the Site's SOC monitoring is armed, by the hub's own
 an unexpired override, then a holiday on the local date, then the weekly windows; a monitored Site with no windows is
 armed around the clock, an unmonitored one never). Outside those hours ("limited"):
   always     PPE second looks (ppe_vlm_all counts as off), every request a person starts (Ask, clip chat, footage search,
-             Describe & warn, Generate with Qwen, briefings, Optimize my system, the remote AI test), and the second looks
-             a description takes when one runs (weapon check, towing)
+             Describe & warn, Generate with Qwen, Read plate, briefings, Optimize my system, the remote AI test), and the
+             second looks a description takes when one runs (weapon check, towing, the vehicle's plate: plate.py)
   outside    event descriptions, by the Site's option: "catchup" (default) waits in a queue of its own and runs one at a
              time when Qwen has nothing else to do here (and, on a central instance, the shared vLLM is not busy);
              "skip" is never described: the event says "No description (outside AI hours)" and is never retried
@@ -52,7 +52,7 @@ STATE_TTL_S = 15.0     # the evaluated state is reused this long (never past its
 # vlmroute task -> metering kind; a job (job()) names its own kind instead, e.g. a catch-up description
 KINDS = {"synopsis": "synopsis", "unusual_review": "synopsis", "journey": "journey", "ppe": "ppe",
          "assistant": "ask", "chat": "ask", "footage_verify": "ask", "briefing": "briefing", "talkdown": "talkdown",
-         "hub": "hub", "test": "test"}
+         "hub": "hub", "test": "test", "plate": "plate"}
 JOB: contextvars.ContextVar[str | None] = contextvars.ContextVar("ai_job", default=None)
 
 
