@@ -2086,6 +2086,16 @@ async def put_briefing_settings(body: BriefingSettingsIn):
     return assistant.briefing_settings()
 
 
+@app.get("/api/digest/facts")
+async def digest_facts(since: float | None = None, until: float | None = None):
+    """The structured facts the hub's customer digest is written from (summary.digest_facts): weapons with the second
+    look's verdict, unreviewed high-priority events, unusual events, site rules, PPE by zone. Read-only; no Qwen.
+    Default period: the last 24 hours."""
+    now = time.time()
+    since = since if since is not None else now - 86400
+    return await asyncio.to_thread(summary_mod.digest_facts, max(0.0, since), until or now)
+
+
 # ---------------------------------------------------------------- Qwen confidence gate (pipeline.synopsis_gate)
 
 class AiSettingsIn(BaseModel):

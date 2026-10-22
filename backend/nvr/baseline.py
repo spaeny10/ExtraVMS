@@ -20,6 +20,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import re
 import time
 from collections import defaultdict
 
@@ -151,6 +152,22 @@ def _hour_label(h: int) -> str:
     return "midnight" if h == 0 else "noon" if h == 12 else f"{h % 12} {'am' if h < 12 else 'pm'}"
 
 
+def dwell_reason(dur: float, share: float) -> str:
+    """"Stayed 12 min, longer than 96% of visits"; at the top (anything that rounds to 100%): "Stayed 45 min, the
+    longest visit on record" ("longer than 100% of previous visits" read like nonsense in the hub's digest)."""
+    pct = round(share * 100)
+    return (f"Stayed {dur / 60:.0f} min, the longest visit on record" if pct >= 100
+            else f"Stayed {dur / 60:.0f} min, longer than {pct}% of visits")
+
+
+_LONGEST_RE = re.compile(r"longer than 100% of (?:all |previous |earlier )?visits", re.I)
+
+
+def reason_text(reason: str) -> str:
+    """A stored reason as it reads today (events scored before dwell_reason say "longer than 100% of visits")."""
+    return _LONGEST_RE.sub("the longest visit on record", str(reason))
+
+
 def score(e: dict, base: dict | None = None) -> dict:
     """How unusual is this event for its camera and label? Excludes the event itself from the baseline."""
     base = base or current()
@@ -208,7 +225,7 @@ def score(e: dict, base: dict | None = None) -> dict:
             shorter = int(np.searchsorted(durs, dur, side="left"))
             parts["dwell"] = round(shorter / len(durs), 3)
             if parts["dwell"] >= REASON_MIN:
-                reasons.append(f"Stayed {dur / 60:.0f} min, longer than {parts['dwell'] * 100:.0f}% of visits")
+                reasons.append(dwell_reason(dur, parts["dwell"]))
 
     return {"score": max(parts.values(), default=0.0), "parts": parts, "reasons": reasons,
             "learning": not parts, "baseline_at": base["built_at"]}

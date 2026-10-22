@@ -77,6 +77,19 @@ def test_place_and_dwell():
     assert "dwell" not in short["parts"], short
 
 
+def test_longest_visit_wording():
+    # every visit on "busy" lasted 20 s: 10 min is the longest on record, never "longer than 100% of visits"
+    long = baseline.score(event("busy", today_at(12, 10), dur=600))
+    assert long["parts"]["dwell"] == 1.0 and "Stayed 10 min, the longest visit on record" in long["reasons"], long
+    assert not any("100%" in r for r in long["reasons"]), long["reasons"]
+    assert baseline.dwell_reason(720, 0.96) == "Stayed 12 min, longer than 96% of visits"
+    assert baseline.dwell_reason(720, 0.996) == "Stayed 12 min, the longest visit on record"   # rounds to 100%
+    # reasons stored before the change read the new way
+    assert baseline.reason_text("Stayed 45 min, longer than 100% of visits") == "Stayed 45 min, the longest visit on record"
+    assert baseline.reason_text("Stayed 45 min, longer than 100% of previous visits") == "Stayed 45 min, the longest visit on record"
+    assert baseline.reason_text("Stayed 9 min, longer than 97% of visits") == "Stayed 9 min, longer than 97% of visits"
+
+
 def test_learning():
     s = baseline.score(event("new", today_at(3)))
     assert s["learning"] and s["score"] == 0 and not s["reasons"], s

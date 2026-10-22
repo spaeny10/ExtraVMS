@@ -1,4 +1,5 @@
 /** Hub API client. Same shape as the site's api.ts: relative URLs, cookie session, errors as `${status} ${text}`. */
+import type { DigestRef } from "./digestText";
 import type { NvrEvent, SavedFindView } from "@site/api";
 import type { Spoken, VoiceEngines, VoiceSetting } from "@site/talkdownVoice";
 import type { ActionCardData, ActionExtras, ActionPlanCore, ActionResult } from "@site/ActionCard";
@@ -251,6 +252,8 @@ export type Site = {
   servers: Server[];
   /** SOC monitoring opted in (newer hubs only; absent = ask /monitoring). */
   monitored?: boolean;
+  /** PPE in the customer digest: one summary line for the Site (true, the default) or left out (newer hubs only). */
+  digest_ppe?: boolean;
   /** Where the Site is (newer hubs; null = not located yet). `address` stays the one-line address people read. */
   lat?: number | null; lon?: number | null; address_parts?: AddressParts | null; geocoded_at?: number | null; geocode_source?: GeocodeSource | null;
 };
@@ -323,12 +326,20 @@ export type DigestPart = ServerTag & {
   online: boolean; headline: string | null; text: string | null; today: Record<string, number>; cameras_down: string[];
   open_alerts: { kind: string; detail: Record<string, unknown> }[];
 };
-/** `data` is what the text was written from; `locations` groups its servers by Site (absent on digests older than Sites). */
+/** One Site's part of a digest (newer hubs): its attention items and section, with its own references. */
+export type DigestSection = { location_id: string | null; name: string; servers: string[]; text: string; refs: DigestRef[] };
+/**
+ * `data` is what the text was written from; `locations` groups its servers by Site (absent on digests older than Sites).
+ * Newer hubs add `refs` (every [#id] of `text`, in order, with its server) and `sections` (each Site's own part).
+ */
 export type Digest = {
   id: number; org_id: string; day: string; created_at: number; text: string; model: string | null;
   /** cut down to the Sites this member can see (a Site-restricted member: the hub rebuilds the text from those servers) */
   scoped?: boolean;
-  data?: { generated_at?: number; sites?: DigestPart[]; locations?: { id: string | null; name: string; servers: string[] }[] } | null;
+  data?: {
+    generated_at?: number; sites?: DigestPart[]; locations?: { id: string | null; name: string; servers: string[] }[];
+    refs?: DigestRef[]; sections?: DigestSection[];
+  } | null;
 };
 /** A pending invite link (GET /api/orgs/{org}/invites). `email` "" = anyone holding the link may accept it. */
 export type Invite = {
@@ -476,7 +487,7 @@ export const api = {
   /** The IANA time zone at a point (offline on the hub). */
   geocodeTimezone: (lat: number, lon: number) => req<{ timezone: string | null }>(`/api/geocode/timezone?${qs({ lat, lon })}`),
   createLocation: (org: string, b: { name: string; address?: string; timezone?: string } & PlaceBody) => req<Site>(`/api/orgs/${org}/locations`, json("POST", b)),
-  updateLocation: (id: string, b: { name?: string; address?: string; timezone?: string | null; notes?: string | null } & PlaceBody) => req<Site>(`/api/locations/${id}`, json("PATCH", b)),
+  updateLocation: (id: string, b: { name?: string; address?: string; timezone?: string | null; notes?: string | null; digest_ppe?: boolean } & PlaceBody) => req<Site>(`/api/locations/${id}`, json("PATCH", b)),
   /** 409 while servers remain unless moveTo names another Site of the customer. */
   deleteLocation: (id: string, moveTo?: string) => req<{ ok: boolean; moved: number }>(`/api/locations/${id}?${qs({ move_to: moveTo })}`, { method: "DELETE" }),
   locationCameras: (id: string) => req<Camera[]>(`/api/locations/${id}/cameras`),

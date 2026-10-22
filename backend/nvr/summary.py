@@ -98,6 +98,121 @@ async def site_summary(state, since: float | None = None, version: str = "") -> 
     }
 
 
+# ---------------------------------------------------------------- the hub's customer digest
+
+DIGEST_ATTENTION_MAX = 10
+DIGEST_UNUSUAL_MAX = 3
+_WC_SQL = "json_extract(CASE WHEN json_valid(synopsis_json) THEN synopsis_json END, '$.weapon_check')"
+_PPE_SQL = "json_extract(CASE WHEN json_valid(detections) THEN detections END, '$.ppe.{}')"
+
+
+def _reviewed(e: dict) -> bool:
+    """Someone looked: an operator's verdict on the event, or a corrected description."""
+    fb = e.get("feedback")
+    if isinstance(fb, str):
+        with contextlib.suppress(ValueError):
+            fb = json.loads(fb)
+    return bool((isinstance(fb, dict) and fb.get("verdict")) or e.get("corrected_at"))
+
+
+def digest_facts(since: float, until: float | None = None) -> dict:
+    """What the hub's customer digest is written from (GET /api/digest/facts), as structured facts rather than prose,
+    so the hub words weapons itself and can't upgrade a possible weapon to a confirmed one:
+    - weapons: every event in the period whose description claimed a weapon and was not cleared, with the second
+      look read under today's rules (weaponcheck.effective: confirmed takes a HIGH-confidence, consistent answer);
+    - attention: high-priority events nobody has reviewed yet (and every unconfirmed weapon), PPE left out (PPE has
+      its own one-line summary), newest first;
+    - unusual: the most unusual other events, with their reasons ("the longest visit on record");
+    - rules: broken site rules other than PPE, by kind; ppe: violations by zone; counts by label.
+    No descriptions for weapon events: the model's own wording is what the second look corrects."""
+    from . import baseline, weaponcheck
+    until = until or time.time()
+    names = {c["id"]: c["name"] for c in db.cameras()}
+    cam = lambda cid: names.get(cid, cid)  # noqa: E731
+    where = f"{_OK} AND start_ts >= ? AND start_ts <= ?"
+    p = [since, until]
+    counts: dict[str, int] = {}
+    for r in db.all(f"SELECT camera_class, COUNT(*) n FROM events WHERE {where} GROUP BY 1", p):
+        counts[r["camera_class"]] = r["n"]
+
+    def policy(r: dict) -> dict:
+        pol = r.get("policy")
+        if isinstance(pol, str):
+            with contextlib.suppress(ValueError):
+                pol = json.loads(pol)
+        return pol if isinstance(pol, dict) else {}
+
+    weapons, weapon_ids = [], set()
+    for r in db.all(f"SELECT id, camera_id, camera_class, start_ts, priority, feedback, corrected_at, {_WC_SQL} AS wc "
+                    f"FROM events WHERE {where} AND {_WC_SQL} IS NOT NULL ORDER BY start_ts DESC LIMIT 50", p):
+        with contextlib.suppress(ValueError, TypeError):
+            eff = weaponcheck.effective(json.loads(r["wc"]))
+            if not eff or eff["verdict"] == "not_confirmed":
+                continue
+            weapons.append({"id": r["id"], "camera_id": r["camera_id"], "camera": cam(r["camera_id"]), "label": r["camera_class"],
+                            "start_ts": r["start_ts"], "priority": r["priority"], "reviewed": _reviewed(r), **eff})
+            weapon_ids.add(r["id"])
+
+    attention = []
+    for r in db.all(f"SELECT id, camera_id, camera_class, start_ts, priority, watched, policy, synopsis, feedback, corrected_at, "
+                    f"threat FROM events WHERE {where} AND (priority = 'high' OR id IN ({','.join('?' * len(weapon_ids)) or 'NULL'})) "
+                    f"ORDER BY start_ts DESC LIMIT 200", [*p, *weapon_ids]):
+        if _reviewed(r) or (policy(r).get("kind") == "ppe" and r["id"] not in weapon_ids):
+            continue
+        w = next((x for x in weapons if x["id"] == r["id"]), None)
+        attention.append({"id": r["id"], "camera_id": r["camera_id"], "camera": cam(r["camera_id"]), "label": r["camera_class"],
+                          "start_ts": r["start_ts"], "priority": r["priority"], "watched": r["watched"],
+                          "policy": policy(r).get("text"),
+                          # weapon events carry the check, not the model's description of the weapon
+                          "weapon": w, "synopsis": None if w else (r["synopsis"] or "")[:200]})
+        if len(attention) >= DIGEST_ATTENTION_MAX:
+            break
+    listed = {a["id"] for a in attention} | weapon_ids
+
+    unusual = []
+    for r in db.all(f"SELECT id, camera_id, camera_class, start_ts, anomaly, anomaly_json, synopsis, policy FROM events "
+                    f"WHERE {where} AND COALESCE(anomaly, 0) >= ? ORDER BY anomaly DESC, start_ts DESC LIMIT 20",
+                    [*p, baseline.PRIORITY_LOW]):
+        if r["id"] in listed or policy(r).get("kind") == "ppe":
+            continue
+        an = json.loads(r["anomaly_json"]) if r["anomaly_json"] else {}
+        unusual.append({"id": r["id"], "camera_id": r["camera_id"], "camera": cam(r["camera_id"]), "label": r["camera_class"],
+                        "start_ts": r["start_ts"], "score": round(r["anomaly"] or 0, 3),
+                        "reasons": [baseline.reason_text(x) for x in an.get("reasons") or []],
+                        "synopsis": (r["synopsis"] or "")[:160]})
+        if len(unusual) >= DIGEST_UNUSUAL_MAX:
+            break
+
+    rules: dict[str, dict] = {}
+    for r in db.all(f"SELECT id, policy FROM events WHERE {where} AND policy IS NOT NULL ORDER BY start_ts DESC", p):
+        pol = policy(r)
+        if not pol or pol.get("kind") == "ppe":
+            continue
+        k = rules.setdefault(pol.get("kind") or "rule", {"kind": pol.get("kind") or "rule", "count": 0, "priority": pol.get("priority"),
+                                                         "text": (pol.get("text") or "")[:160], "examples": []})
+        k["count"] += 1
+        if len(k["examples"]) < 2:
+            k["examples"].append(r["id"])
+
+    zones: dict[tuple, dict] = {}
+    missing: dict[str, int] = {}
+    total = 0
+    for r in db.all(f"SELECT id, camera_id, {_PPE_SQL.format('zone')} AS zone, {_PPE_SQL.format('violation')} AS missing "
+                    f"FROM events WHERE {where} AND {_PPE_SQL.format('verdict')} = 'violation'", p):
+        total += 1
+        z = zones.setdefault((r["camera_id"], r["zone"] or "PPE zone"), {"zone": r["zone"] or "PPE zone", "camera": cam(r["camera_id"]),
+                                                                          "count": 0, "example": r["id"]})
+        z["count"] += 1
+        with contextlib.suppress(ValueError, TypeError):
+            for item in json.loads(r["missing"] or "[]"):
+                missing[item] = missing.get(item, 0) + 1
+    from . import ppe
+    return {"version": 1, "since": since, "until": until, "counts": counts, "weapons": weapons, "attention": attention,
+            "unusual": unusual, "rules": sorted(rules.values(), key=lambda k: -k["count"]),
+            "ppe": {"count": total, "zones": sorted(zones.values(), key=lambda z: -z["count"])[:5],
+                    "missing": {ppe.ITEM_WORDS.get(k, k): v for k, v in sorted(missing.items(), key=lambda kv: -kv[1])}}}
+
+
 def _talkdown_voice() -> dict | None:
     try:
         return tts.summary()

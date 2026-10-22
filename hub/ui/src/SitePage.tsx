@@ -236,9 +236,9 @@ function SettingsSections({ site, org, me, section, admin, onChanged, cov, setCo
 
 const ZONES: string[] = typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [];
 
-type SettingsForm = PlaceForm & { name: string; notes: string };
+type SettingsForm = PlaceForm & { name: string; notes: string; digest_ppe: boolean };
 const formOf = (site: Site): SettingsForm => ({
-  name: site.name, notes: site.notes ?? "", address: site.address ?? "", timezone: site.timezone ?? "",
+  name: site.name, notes: site.notes ?? "", address: site.address ?? "", timezone: site.timezone ?? "", digest_ppe: site.digest_ppe !== false,
   lat: site.lat ?? null, lon: site.lon ?? null, address_parts: site.address_parts ?? null, source: site.geocode_source ?? null, autoTz: null,
 });
 
@@ -253,12 +253,13 @@ function SettingsTab({ site, admin, onChanged, me, org, cov, setCov }: {
     api.geocodeTimezone(site.lat, site.lon).then((r) => { if (r.timezone && r.timezone === site.timezone) setF((x) => (x.timezone === r.timezone ? { ...x, autoTz: r.timezone } : x)); }).catch(() => {});
   }, [site.id, site.lat, site.lon, site.timezone]);
   const place = placePatch(f, site);
-  const dirty = f.name !== site.name || f.address !== (site.address ?? "") || f.timezone !== (site.timezone ?? "") || f.notes !== (site.notes ?? "") || Object.keys(place).length > 0;
+  const dirty = f.name !== site.name || f.address !== (site.address ?? "") || f.timezone !== (site.timezone ?? "") || f.notes !== (site.notes ?? "") || f.digest_ppe !== (site.digest_ppe !== false) || Object.keys(place).length > 0;
   // the backend counts retired servers too: they still belong to the site until moved or removed
   const remaining = site.servers_total + site.retired_servers;
   const save = async () => {
     try {
-      const saved = await api.updateLocation(site.id, { name: f.name.trim(), address: f.address.trim(), timezone: f.timezone.trim() || null, notes: f.notes.trim() || null, ...place });
+      const saved = await api.updateLocation(site.id, { name: f.name.trim(), address: f.address.trim(), timezone: f.timezone.trim() || null, notes: f.notes.trim() || null,
+        ...(f.digest_ppe !== (site.digest_ppe !== false) ? { digest_ppe: f.digest_ppe } : {}), ...place });
       setF((x) => ({ ...formOf(saved), autoTz: saved.timezone && saved.timezone === x.autoTz ? x.autoTz : null }));
       toast.success(saved.lat == null && saved.address ? "Saved. The hub will try to put this address on the map." : "Saved");
       onChanged();
@@ -280,6 +281,11 @@ function SettingsTab({ site, admin, onChanged, me, org, cov, setCov }: {
         <label className="field"><span>Time zone</span><input value={f.timezone} disabled={!admin} list="tz-list" placeholder="e.g. America/Chicago (set from the address)" onChange={(e) => setF({ ...f, timezone: e.target.value })} /></label>
         <datalist id="tz-list">{ZONES.map((z) => <option key={z} value={z} />)}</datalist>
         <label className="field"><span>Notes</span><textarea value={f.notes} disabled={!admin} maxLength={2000} rows={4} onChange={(e) => setF({ ...f, notes: e.target.value })} /></label>
+        {/* the customer digest: PPE violations as one summary line for this Site (count and top zones), or left out */}
+        {site.digest_ppe !== undefined && (
+          <label className="row small digest-ppe"><input type="checkbox" checked={f.digest_ppe} disabled={!admin} onChange={(e) => setF({ ...f, digest_ppe: e.target.checked })} />
+            Include PPE in the digest <span className="muted">(one line: violations and the top zones)</span></label>
+        )}
         {admin && (
           <div className="row">
             <button disabled={!dirty || !f.name.trim()} onClick={save}>Save</button>

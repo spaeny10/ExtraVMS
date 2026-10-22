@@ -180,10 +180,15 @@ def _event_line(e: dict) -> str:
         extra.append(f"license plate {e['plate']}" + (f" ({e['plate_region']})" if e.get("plate_region") else "")
                      + (f", {e['plate_conf']} confidence" if e.get("plate_conf") else ""))
     if wc and wc.get("verdict"):  # the description mentioned a weapon; the full-resolution second look decided (weaponcheck)
+        from . import weaponcheck
+        eff = weaponcheck.effective(wc) or {}   # read under today's rules: confirmed takes a HIGH-confidence answer
+        seen = f" ({eff['object'] or eff['kind']}, {eff['confidence']} confidence)" if eff.get("confidence") else ""
         extra.append({"confirmed": "WEAPON CONFIRMED", "not_confirmed": "weapon NOT confirmed"}.get(
-            wc["verdict"], "possible weapon, UNCONFIRMED, needs a person to look") + ": " + (wc.get("reason") or "")[:160])
+            eff.get("verdict"), "possible weapon, UNCONFIRMED, needs a person to look") + seen
+            # (a reason written under the old rule would say "confirmed": left out when the verdict changed)
+            + (": " + (wc.get("reason") or "")[:160] if eff.get("verdict") == wc["verdict"] else ""))
     if an and an.get("reasons"):
-        extra.append("unusual: " + "; ".join(an["reasons"]))
+        extra.append("unusual: " + "; ".join(baseline.reason_text(r) for r in an["reasons"]))
     fb = e.get("feedback")
     if isinstance(fb, str):
         fb = json.loads(fb)

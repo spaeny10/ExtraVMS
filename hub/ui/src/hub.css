@@ -251,6 +251,15 @@ a.icon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px
 .find-hit-out { align-self: flex-end; padding: 0 4px; }
 .find-moment { display: inline-flex; align-items: center; gap: 4px; }
 .digest-part { margin-top: 8px; }
+/* the digest (and SOC shift report) text: the hub's small markdown (DigestView.tsx) */
+.digest-text { margin-top: 8px; line-height: 1.5; overflow-wrap: anywhere; }
+.digest-text p { margin: 10px 0 4px; }
+.digest-text p:first-child { margin-top: 0; }
+.digest-text ul { margin: 0 0 8px; padding-left: 20px; }
+.digest-text li + li { margin-top: 2px; }
+.digest-text > :last-child { margin-bottom: 0; }
+.digest-text a.digest-ref { white-space: nowrap; }
+.soc-report-text.digest-text { white-space: normal; }
 /* Invites */
 .invite-form { align-items: flex-end; }
 .invite-form .field { margin: 0; }

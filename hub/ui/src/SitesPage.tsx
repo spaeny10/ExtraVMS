@@ -6,6 +6,9 @@ import { useCallback, useEffect, useState } from "react";
 import { toast } from "@site/ui";
 import { type Digest, type DigestPart, type Fleet, type Me, type Org, type Server, type Site, ago, api } from "./api";
 import { digestPartsFor, isAdmin, lastEventBySite, ofTotal } from "./access";
+import { DigestText } from "./DigestView";
+import { type EventRef, cameraNameFor } from "./eventOpen";
+import { HubEventDetail, useCameraNames } from "./HubEventDetail";
 import { go, navigate, settingsHref, siteHref } from "./nav";
 import { SiteMap } from "./map/LazyMap";
 import { PIN_COLOUR, type PinStatus, cityState, hasPoint, pinColour, pinStatus } from "./place";
@@ -123,29 +126,42 @@ export function ServerDot({ v, now }: { v: Server; now: number }) {
 }
 
 /**
- * The customer's latest digest. With `site`: only that Site's servers, from the data the digest was written from
- * (one line per server, named only when the Site has several); an older digest without that data shows its whole text.
+ * The customer's latest digest: "Needs your attention", then a section per Site (bullets and bold rendered, each event
+ * reference a link that opens the event viewer in place). With `site`: only that Site's part (the digest's own
+ * section for it; one line per server from the data on digests older than sections); an older digest without
+ * either shows its whole text.
  */
 export function DigestCard({ org, site }: { org: Org; site?: Site }) {
   const [rows, setRows] = useState<Digest[]>([]);
   const [busy, setBusy] = useState(false);
+  const [open, setOpen] = useState<EventRef | null>(null);
+  const names = useCameraNames(org, site, !!open);
   const load = useCallback(() => api.digests(org.id).then(setRows).catch(() => setRows([])), [org.id]);
   useEffect(() => { load(); }, [load]);
   const d = rows[0];
-  const parts = site && d ? digestPartsFor(d.data, site) : null;
+  const section = site && d?.data?.sections ? d.data.sections.find((x) => x.location_id === site.id) ?? null : null;
+  const parts = site && d && !d.data?.sections ? digestPartsFor(d.data, site) : null;
+  const whole = d && <DigestText text={d.text} refs={d.data?.refs} onOpen={setOpen} />;
   return (
     <div className="card" style={{ marginTop: 12 }}>
       <div className="row"><h3 style={{ margin: 0 }}>Digest</h3><span className="muted small">{d ? `${d.day}${d.model ? ` · ${d.model}` : ""}${d.scoped ? " · your Sites only" : ""}` : "none yet"}</span><span className="spacer" />
         {(org.role === "admin" || org.role === "owner") && !d?.scoped && <button className="ghost small" disabled={busy} onClick={async () => { setBusy(true); try { await api.digestNow(org.id); await load(); } catch (e) { toast.error(e); } finally { setBusy(false); } }}>Generate now</button>}</div>
-      {d && (!site || !parts) && <pre style={{ whiteSpace: "pre-wrap", margin: "8px 0 0", font: "inherit" }}>{d.text}</pre>}
+      {d && site && section && (
+        <>
+          <DigestText text={section.text} refs={section.refs} onOpen={setOpen} />
+          <details className="small" style={{ marginTop: 8 }}><summary className="muted">Whole customer's digest</summary>{whole}</details>
+        </>
+      )}
+      {d && site && d.data?.sections && !section && <p className="muted small" style={{ marginBottom: 0 }}>This site had no servers when the digest was made.</p>}
+      {d && (!site || (!d.data?.sections && !parts)) && whole}
       {d && parts && parts.length === 0 && <p className="muted small" style={{ marginBottom: 0 }}>This site had no servers when the digest was made.</p>}
       {d && parts && parts.length > 0 && (
         <>
           {parts.map((p) => <DigestPartView key={p.site_id} p={p} named={parts.length > 1} />)}
-          <details className="small" style={{ marginTop: 8 }}><summary className="muted">Whole customer's digest</summary>
-            <pre style={{ whiteSpace: "pre-wrap", margin: "6px 0 0", font: "inherit" }}>{d.text}</pre></details>
+          <details className="small" style={{ marginTop: 8 }}><summary className="muted">Whole customer's digest</summary>{whole}</details>
         </>
       )}
+      {open && <HubEventDetail ev={open} cameraName={cameraNameFor(names, open.server)} onClose={() => setOpen(null)} />}
     </div>
   );
 }
@@ -155,7 +171,7 @@ function DigestPartView({ p, named }: { p: DigestPart; named: boolean }) {
     <div className="digest-part">
       {named && <strong>{p.server_name ?? p.site_name}{p.online ? "" : " (offline)"} </strong>}
       <span>{p.headline ?? (p.online ? "No briefing yet." : "Offline when the digest was made.")}</span>
-      {p.text && <p className="small" style={{ margin: "4px 0 0" }}>{p.text}</p>}
+      {p.text && <DigestText className="small" text={p.text} />}
       {(p.cameras_down.length > 0 || p.open_alerts.length > 0) && (
         <div className="muted small">
           {p.cameras_down.length > 0 && `Cameras down: ${p.cameras_down.join(", ")}`}

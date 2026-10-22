@@ -148,6 +148,89 @@ def test_decide_all_outcomes():
     assert wc.decide([], 0, False, "no evidence") == "error"
 
 
+# event 22909: one man leaving with nothing in his hands; the second look said this for one of 3 people
+HOLSTERED = {"object": "holstered handgun", "held": ["holstered handgun"], "weapon": "yes", "confidence": "medium",
+             "held_by": "hand", "resembles_weapon": "yes"}
+
+
+def test_confirmed_needs_high_confidence():
+    medium = person("yes", "medium", ("black pistol",), "black pistol")
+    assert not wc.is_confirmed(medium) and wc.holding_weapon(medium)
+    assert wc.decide([medium], 1, True, None) == "unclear"               # never confirmed...
+    assert wc.decide([person(), medium], 2, True, None) == "unclear"     # ...and never cleared
+    assert wc.decide([medium, person("yes", "high", ("black pistol",), "black pistol")], 2, True, None) == "confirmed"
+    assert wc.decide([dict(HOLSTERED), person(), person()], 3, True, None) == "unclear"
+
+
+def test_contradictions():
+    assert wc.contradiction(HOLSTERED) == "said holstered, yet held in a hand"
+    assert wc.contradiction({**HOLSTERED, "object": "pistol in a holster", "held": ["pistol in a holster"]})
+    assert wc.contradiction({**HOLSTERED, "object": "sheathed knife", "held": ["sheathed knife"]})
+    assert wc.contradiction({**HOLSTERED, "held_by": "holster", "object": "pistol in his hand"}) == \
+        "said held in a hand, yet held by holster"                        # the reverse
+    assert wc.contradiction({**HOLSTERED, "object": "black pistol", "held": ["black pistol"], "resembles_weapon": "no"}) == \
+        "said weapon, yet nothing held resembles one"
+    assert wc.contradiction({**HOLSTERED, "object": "black pistol", "held": [], "held_by": "none"}) == \
+        "said weapon, yet the hands were empty"
+    # judge_person derives held_by / resembles_weapon: a "yes" with empty hands or nothing weapon-like contradicts itself
+    empty_yes = wc.judge_person({"held": [], "most_weapon_like": "none", "weapon": "yes", "confidence": "high"})
+    assert wc.contradiction(empty_yes) and not wc.is_confirmed(empty_yes)
+    bottle_yes = wc.judge_person({"held": ["water bottle"], "most_weapon_like": "none", "weapon": "yes", "confidence": "high"})
+    assert wc.contradiction(bottle_yes) == "said weapon, yet nothing held resembles one" and not wc.is_confirmed(bottle_yes)
+    # consistent answers: no contradiction, whatever the verdict
+    gun = person("yes", "high", ("black pistol",), "black pistol")
+    assert wc.contradiction(gun) is None and wc.is_confirmed(gun)
+    assert wc.contradiction(person()) is None
+    assert wc.contradiction({**HOLSTERED, "weapon": "no", "held": ["phone holster"], "object": "phone holster"})
+    high_holstered = {**HOLSTERED, "confidence": "high"}
+    assert not wc.is_confirmed(high_holstered)                            # high confidence, but contradicts itself
+
+
+def test_effective_reads_old_checks_under_the_new_rule():
+    old = check("confirmed", [person(), dict(HOLSTERED), person(held=("phone",), like="phone")])
+    eff = wc.effective(old)
+    assert eff["verdict"] == "unclear" and not eff["confirmed"] and eff["needs_review"]
+    assert eff["confidence"] == "medium" and eff["object"] == "holstered handgun"
+    assert eff["contradiction"] == "said holstered, yet held in a hand"
+    gun = person("yes", "high", ("black pistol",), "black pistol")
+    eff = wc.effective(check("confirmed", [gun]))
+    assert eff["verdict"] == "confirmed" and eff["confidence"] == "high" and eff["object"] == "black pistol"
+    eff = wc.effective(check("error", []))
+    assert eff["verdict"] == "error" and eff["needs_review"] and eff["confidence"] is None and eff["object"] is None
+    assert wc.effective(check("not_confirmed", [person()]))["needs_review"] is False
+    assert wc.effective(None) is None and wc.effective({}) is None
+
+
+def test_event_22909_is_unclear_and_drops_the_invented_person():
+    syn = {**SYN_9118,
+           "summary": "A man with a beard, wearing a black t-shirt, entered through the South Exterior Door. Another person "
+                      "wearing an orange and blue cap is visible in the foreground holding a black handgun."}
+    persons = [person(held=("phone",), like="phone"), dict(HOLSTERED), person(held=(), like="none")]
+    verdict = wc.decide(persons, 3, True, None)
+    assert verdict == "unclear"
+    c = {**check(verdict, persons), "reason": wc._reason(verdict, "firearm", persons, None, {"complete": True})}
+    assert "could not confirm" in c["reason"] and "medium confidence, holstered handgun" in c["reason"]
+    assert "said holstered, yet held in a hand" in c["reason"]
+    out = wc.apply(EVENT, syn, c)
+    assert out["summary"] == ("A man with a beard, wearing a black t-shirt, entered through the South Exterior Door. "
+                              "Possible holstered handgun seen on a second look (medium confidence): needs review.")
+    assert "Another person" not in out["summary"] and "handgun." not in out["summary"].replace("handgun seen", "")
+    assert out["activity"] == "The primary subject walked toward the camera."   # the second individual went too
+    assert out["threat_level"] == "high" and "possible_weapon" in out["tags"] and out["weapon_check"]["needs_review"]
+    assert not wc.mentions(out["activity"]) and out["threat_reason"].startswith("Possible firearm, unconfirmed: ")
+
+
+def test_unclear_with_someone_holding_keeps_the_rewrite_and_adds_the_note():
+    medium = person("yes", "medium", ("black pistol",), "black pistol")
+    out = wc.apply(EVENT, SYN_9118, check("unclear", [person(), medium]))
+    # somebody WAS seen holding something gun-like: the sentence stays, reworded as unconfirmed
+    assert "is visible in the foreground holding a black object (possible firearm, unconfirmed)." in out["summary"]
+    assert out["summary"].endswith("Possible black pistol seen on a second look (medium confidence): needs review.")
+    # a claim that can't be reworded ("He is armed.") gives way to the note
+    out = wc.apply(EVENT, {**QUIET, "summary": "A man at the door. He is armed."}, check("unclear", [medium]))
+    assert out["summary"] == "A man at the door. Possible black pistol seen on a second look (medium confidence): needs review."
+
+
 # ---------------------------------------------------------------- the rewritten text and the threat
 
 def check(verdict, persons, kind="firearm", reason="test"):
@@ -189,10 +272,16 @@ def test_rewrite_shapes():
 
 
 def test_unclear_wording_and_priority():
+    # nothing seen in anyone's hand: the second person who only appears with the "handgun" goes; the note says why
     out = wc.apply(EVENT, SYN_9118, check("unclear", [person("unclear", "low")], reason="it could not tell"))
+    assert out["summary"].startswith("A man with a beard") and "Another person" not in out["summary"]
+    assert out["summary"].endswith("South Exterior Door. Possible firearm: a second look could not tell (low confidence), needs review.")
+    assert out["activity"] == "The primary subject walked toward the camera."
+    assert "(possible firearm, unconfirmed)" in out["objects"][1]["description"] and out["objects"][1]["type"] == "person"
+    # no answer at all (timeout, model down): the claim is reworded in place, nothing is dropped
+    out = wc.apply(EVENT, SYN_9118, check("error", [], reason="it timed out"))
     assert out["summary"].endswith("holding a black object (possible firearm, unconfirmed).")
     assert out["activity"].endswith("holding an object (possible firearm, unconfirmed).")
-    assert "(possible firearm, unconfirmed)" in out["objects"][1]["description"] and out["objects"][1]["type"] == "person"
     assert out["threat_level"] == "high" and out["threat_reason"].startswith("Possible firearm, unconfirmed: ")
     assert "possible_weapon" in out["tags"] and "firearm" not in out["tags"]
     # a firearm the model itself rated low is still HIGH until someone looks
@@ -214,7 +303,8 @@ def test_unclear_wording_and_priority():
 def test_confirmed_keeps_the_claim():
     gun = person("yes", "high", ("black pistol",), "black pistol")
     out = wc.apply(EVENT, {**SYN_9118, "threat_level": "medium"}, check("confirmed", [gun], reason="Weapon confirmed"))
-    assert "holding a black handgun" in out["summary"] and out["summary"].endswith("Weapon confirmed by a second look at full resolution.")
+    assert "holding a black handgun" in out["summary"]
+    assert out["summary"].endswith("Weapon confirmed by a second look at full resolution: black pistol (high confidence).")
     assert out["threat_level"] == "high" and "firearm" in out["tags"] and out["threat_reason"] == "Weapon confirmed"
     knife = {**QUIET, "summary": "He cuts a pastry with a knife.", "threat_level": "none"}
     out = wc.apply(EVENT, knife, check("confirmed", [person("yes", "high", ("kitchen knife",), "kitchen knife")], kind="knife"))
@@ -309,7 +399,15 @@ def test_review_unclear_stays_high():
     out, original = run(wc.review(EVENT, SYN_9118, collector(evidence(2))))
     w = out["weapon_check"]
     assert w["verdict"] == "unclear" and w["needs_review"] and "could not rule it out" in w["reason"]
-    assert out["threat_level"] == "high" and "(possible firearm, unconfirmed)" in out["summary"] and original == SYN_9118
+    assert out["threat_level"] == "high" and "possible_weapon" in out["tags"] and original == SYN_9118
+    assert out["summary"].endswith("Possible firearm: a second look could not tell (low confidence), needs review.")
+    # a medium-confidence "yes" asks everyone (it is not enough to stop at) and stays unclear
+    medium = {**GUN, "confidence": "medium"}
+    asked = fake_model([medium, BOTTLE])
+    out, original = run(wc.review(EVENT, SYN_9118, collector(evidence(2))))
+    assert len(asked) == 2 and out["weapon_check"]["verdict"] == "unclear" and not out["weapon_check"]["confirmed"]
+    assert out["summary"].endswith("Possible black pistol seen on a second look (medium confidence): needs review.")
+    assert out["threat_level"] == "high" and original == SYN_9118
     # every "no", but only the stored crops (not everyone in view): never cleared
     fake_model([BOTTLE])
     out, _ = run(wc.review(EVENT, SYN_9118, collector(evidence(1, complete=False, kind="keyframes"))))

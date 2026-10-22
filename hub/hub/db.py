@@ -85,7 +85,10 @@ locations = Table("locations", metadata,
                   # the Site's AI schedule (ai_schedule.py), set by hub administrators: NULL = full time (every Site until
                   # switched) | "soc" (full Qwen only while its SOC monitoring is armed); outside those hours descriptions
                   # catch up when Qwen is idle (NULL) or are skipped ("skip")
-                  Column("ai_mode", String(8), nullable=True), Column("ai_outside", String(8), nullable=True))
+                  Column("ai_mode", String(8), nullable=True), Column("ai_outside", String(8), nullable=True),
+                  # the customer digest (digest.py) includes the Site's PPE violations as one summary line; false leaves
+                  # PPE out of that Site's digest. Set by the Site's admins (PATCH /api/locations/{id} {digest_ppe})
+                  Column("digest_ppe", Boolean, nullable=False, default=True, server_default=sa.text("true")))
 location_grants = Table("location_grants", metadata,
                         Column("user_id", String(24), primary_key=True), Column("location_id", String(24), primary_key=True))
 cameras = Table("cameras", metadata,
@@ -437,7 +440,8 @@ ADDED_COLUMNS = [("sites", "retired_at"), ("sites", "location_id"), ("membership
                  ("locations", "arm_override"), ("locations", "soc_group_minutes"),
                  ("locations", "lat"), ("locations", "lon"), ("locations", "address_parts"), ("locations", "geocoded_at"),
                  ("locations", "geocode_source"), ("users", "totp_last_step"), ("central_instances", "camera_network"),
-                 ("central_instances", "camera_limit"), ("locations", "ai_mode"), ("locations", "ai_outside")]
+                 ("central_instances", "camera_limit"), ("locations", "ai_mode"), ("locations", "ai_outside"),
+                 ("locations", "digest_ppe")]
 
 
 def upgrade(eng: Engine) -> None:

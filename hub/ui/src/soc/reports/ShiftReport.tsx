@@ -12,6 +12,7 @@ import { breakdowns } from "./normalize";
 import { socReportsApi } from "../socApi";
 import type { ShiftReport as Report } from "../types";
 import { Breakdowns, copyText, reportError, useReport } from "./common";
+import { DigestText } from "../../DigestView";
 
 const span = (r: Pick<Report, "period_start" | "period_end">) => {
   const a = new Date(r.period_start * 1000), b = new Date(r.period_end * 1000);
@@ -90,7 +91,8 @@ export function ShiftReport({ me }: { me: Me }) {
               </div>
               {tiles.length > 0 && <div className="soc-tiles small">{tiles.map((t) => <div key={t.key} className="soc-tile"><span className="soc-tile-value">{t.value}</span><span className="soc-tile-name">{t.label}</span></div>)}</div>}
               {lines.length > 0 && <Breakdowns lines={lines} />}
-              {full.text ? <pre className="soc-report-text">{full.text}</pre> : <p className="muted">This report has no text.</p>}
+              {/* the model writes bullets and **bold**: rendered, not shown raw (Copy still gives the text as written) */}
+              {full.text ? <DigestText className="soc-report-text" text={full.text} /> : <p className="muted">This report has no text.</p>}
             </>)}
           </div>
         </div>

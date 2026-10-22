@@ -828,6 +828,7 @@ def _location_rollups(locs: list[dict], cards: list[dict], include_retired: bool
         out.append({**{k: loc[k] for k in ("id", "org_id", "name", "address", "timezone", "notes", "created_at", "updated_at")},
                     **geocode.place_of(loc),
                     "monitored": bool(loc.get("monitored")),   # watched by the SOC (soc.py)
+                    "digest_ppe": loc.get("digest_ppe") is not False,   # PPE in the customer digest (digest.py)
                     "servers_total": len(live), "servers_online": sum(1 for c in live if c["online"]),
                     "cameras_total": sum(c["cameras_total"] for c in live), "cameras_online": sum(c["cameras_online"] for c in live),
                     "open_alerts": sum(c["open_alerts"] for c in live), "retired_servers": len(mine) - len(live),
@@ -868,6 +869,7 @@ class LocationPatch(BaseModel):
     address: str | None = Field(None, max_length=200)
     timezone: str | None = Field(None, max_length=64)
     notes: str | None = Field(None, max_length=2000)
+    digest_ppe: bool | None = None   # PPE in the customer digest (digest.py): one summary line for the Site, or left out
     lat: float | None = Field(None, ge=-90, le=90)     # lat and lon go together; both null clears the point
     lon: float | None = Field(None, ge=-180, le=180)
     address_parts: dict | None = None
@@ -943,7 +945,8 @@ async def get_location(location_id: str, include_retired: bool = False, u: dict 
 async def update_location(location_id: str, body: LocationPatch, u: dict = Depends(user)):
     loc, _ = auth.location_access(u, location_id)
     auth.require_role(u, loc["org_id"], "admin")
-    vals = _place_vals({k: v for k, v in body.model_dump(exclude_unset=True).items() if k != "name" or v}, loc)
+    vals = _place_vals({k: v for k, v in body.model_dump(exclude_unset=True).items()
+                        if (k != "name" or v) and (k != "digest_ppe" or v is not None)}, loc)
     if "name" in vals:
         vals["name"] = vals["name"].strip()
         if _name_taken(loc["org_id"], vals["name"], exclude=location_id):
@@ -953,7 +956,8 @@ async def update_location(location_id: str, body: LocationPatch, u: dict = Depen
         registry.refresh_location(location_id)   # welcome/proxy/broadcasts carry the Site name
         if "timezone" in vals and vals["timezone"] != loc.get("timezone"):
             ai_schedule.push_soon(location_id, registry)   # the servers evaluate the Site's SOC hours in its timezone
-        _audit(u, loc["org_id"], None, f"site updated: {vals.get('name', loc['name'])}", {"location_id": location_id})
+        _audit(u, loc["org_id"], None, f"site updated: {vals.get('name', loc['name'])}", {"location_id": location_id}
+               | ({"digest_ppe": vals["digest_ppe"]} if "digest_ppe" in vals else {}))
         if "address" in vals and (vals["address"] or "").strip() and vals.get("lat", loc.get("lat")) is None:
             geocode.locate_soon(location_id)
         if {"lat", "lon", "address"} & set(vals):

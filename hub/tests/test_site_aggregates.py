@@ -163,13 +163,13 @@ def test_digest_grouped_by_site(world):
     db.run(sa.update(db.alerts).where(db.alerts.c.org_id == oid).values(closed_at=time.time()))   # test_alerts_per_site's
     data = asyncio.run(digest.collect(oid))
     assert {p["site_id"]: p["location_name"] for p in data["sites"]} == {a["id"]: "Campus", b["id"]: "Campus", solo["id"]: "Solo"}
-    assert data["locations"] == [{"id": campus["id"], "name": "Campus", "servers": [a["id"], b["id"]]},
-                                 {"id": solo["location_id"], "name": "Solo", "servers": [solo["id"]]}]
-    text = digest._plain(data["sites"])
-    assert text.splitlines() == ["Campus (2 servers)", "  • Gate — quiet. All calm at Gate", "  • Yard — quiet. All calm at Yard",
-                                 "• Solo — quiet. All calm at Solo"]
-    facts = digest._facts(data["sites"])
-    assert facts.startswith("Site: Campus (2 servers)\nServer: Gate (online)") and "\n\nSite: Solo (online)" in facts
+    assert [(g["id"], g["name"], g["servers"]) for g in data["locations"]] == [(campus["id"], "Campus", [a["id"], b["id"]]),
+                                                                             (solo["location_id"], "Solo", [solo["id"]])]
+    text, refs, sections = digest.compose(data)
+    # a section per Site with its servers under it ("Site · Server" labels are gone); these servers only have briefings
+    assert text.split("\n\n")[1:] == ["**Campus**\n- Gate: All calm at Gate.\n- Yard: All calm at Yard.",
+                                      "**Solo**\n- Solo: All calm at Solo."]
+    assert refs == [] and [x["name"] for x in sections] == ["Campus", "Solo"]
 
 
 def test_push_title_names_the_site(world):

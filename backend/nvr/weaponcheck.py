@@ -18,15 +18,26 @@ So, like policy.confirm_towing, a weapon claim is checked before it is stored or
 3. One strict JSON question per person (TIMEOUT_S for all of them): everything they hold; the held object most like
    a gun or knife; is it a firearm or knife?
 4. decide() + apply():
-   - confirmed (someone holds a weapon, medium/high confidence): tags kept, summary kept with
-     "Weapon confirmed by a second look at full resolution." appended, threat per kept_level() (a firearm: high;
-     a knife: the model's own level, so a kitchen knife in use is no alarm);
+   - confirmed (someone holds a weapon, HIGH confidence, and the answer does not contradict itself): tags kept,
+     summary kept with "Weapon confirmed by a second look at full resolution: <object> (high confidence)."
+     appended, threat per kept_level() (a firearm: high; a knife: the model's own level, so a kitchen knife in use is
+     no alarm). A medium "yes" is never enough (event 22909: a "holstered handgun" the second look said was held in
+     a hand, medium confidence, on a man with nothing in his hands);
+   - a "yes" that is only medium/low confidence, or that contradicts itself (contradiction(): "holstered" yet held in
+     a hand, weapon "yes" yet nothing resembling one, weapon "yes" with empty hands) is unclear (below), never
+     confirmed and never cleared;
    - not_confirmed (every person was seen and judged "no" with medium/high confidence and a plausible object): the
      weapon words leave the tags, the threat drops to what is left without the weapon, and the weapon phrase in the
      summary becomes the object ("holding a black towel"), or a note is appended when that can't be done safely;
-   - unclear / error (timeout, model down, no evidence): NEVER downgraded. Threat per kept_level() (a firearm:
-     high), the wording becomes "possible firearm, unconfirmed" (tag `possible_weapon`) and
-     weapon_check.needs_review asks a person to look.
+   - unclear / error (an unsure or contradictory answer, timeout, model down, no evidence): NEVER downgraded.
+     Threat per kept_level() (a firearm: high), the wording becomes "possible firearm, unconfirmed" (tag
+     `possible_weapon`) and weapon_check.needs_review asks a person to look. When the second look did answer, the
+     summary says what it saw and how sure it was ("Possible holstered handgun seen on a second look (medium
+     confidence): needs review."), and when nobody was seen holding a weapon, a sentence that brings in another person
+     only to give them the weapon ("Another person ... in the foreground holding a black handgun", event 22909) is
+     dropped rather than kept as "holding an object (possible firearm, unconfirmed)".
+   effective() reads a stored weapon_check under these rules (an older "confirmed" on a medium answer reads as
+   unclear), for the briefing and the hub's digest.
 The outcome is synopsis_json["weapon_check"]; the model's own JSON is kept in synopsis_json["weapon_check"]["original"]
 when the text was changed (shown read-only in the event viewer; never events.synopsis_original, which holds the model's
 version an operator corrected and offers "Revert to original"). The pipeline stores the synopsis only after this, so
@@ -565,8 +576,37 @@ def plausible(p: dict) -> bool:
     return (obj in EMPTY or (obj not in VAGUE and not mentions(obj))) and not any(mentions(h) for h in p.get("held") or [])
 
 
+HOLSTERED_RE = re.compile(r"\b(?:holster\w*|sheath(?:ed)?|in (?:a|the|his|her|their) (?:holster|sheath|waistband)|"
+                          r"on (?:a|the|his|her|their) (?:belt|hip)|(?:belt|hip|waistband)[\s-]*(?:mounted|worn|clipped))\b", re.I)
+IN_HAND_RE = re.compile(r"\b(?:in (?:a|the|his|her|their|one|both) hands?|held in hand|hand[\s-]?held)\b", re.I)
+
+
+def contradiction(p: dict) -> str | None:
+    """Why an answer for one person contradicts itself (then it can never confirm a weapon), or None. Event 22909:
+    {"object": "holstered handgun", "held": ["holstered handgun"], "weapon": "yes", "confidence": "medium",
+    "held_by": "hand", "resembles_weapon": "yes"}: a holstered gun is not in anyone's hand."""
+    words = " ".join([str(p.get("object") or "")] + [str(h) for h in p.get("held") or []])
+    by = str(p.get("held_by") or "").lower()
+    if HOLSTERED_RE.search(words) and by == "hand":
+        return "said holstered, yet held in a hand"
+    if by and by not in ("hand", "none") and IN_HAND_RE.search(words):
+        return f"said held in a hand, yet held by {by}"
+    if p.get("weapon") == "yes":
+        if p.get("resembles_weapon") == "no":
+            return "said weapon, yet nothing held resembles one"
+        if not (p.get("held") or []) or by == "none":
+            return "said weapon, yet the hands were empty"
+    return None
+
+
 def is_confirmed(p: dict) -> bool:
-    return p["weapon"] == "yes" and p["confidence"] in ("medium", "high")
+    """A weapon is confirmed only by a HIGH-confidence "yes" that does not contradict itself."""
+    return p.get("weapon") == "yes" and p.get("confidence") == "high" and contradiction(p) is None
+
+
+def holding_weapon(p: dict) -> bool:
+    """Was this person seen holding a weapon at all (any confidence, a consistent answer)?"""
+    return p.get("weapon") == "yes" and contradiction(p) is None
 
 
 def decide(persons: list[dict], expected: int, complete: bool, error: str | None) -> str:
@@ -729,6 +769,80 @@ def kept_level(level: str | None, kind: str) -> str:
     return "high" if kind == "firearm" else level
 
 
+CONF_RANK = {"low": 0, "medium": 1, "high": 2}
+# "Another person ... holding a black handgun": someone brought into the description only with the weapon
+OTHER_PERSON_RE = re.compile(r"\b(?:another|a second|second|other|an additional|additional|a third|third)\s+"
+                             r"(?:person|persons|man|men|woman|women|individual|individuals|figure|subject|people)\b|"
+                             r"\bsomeone else\b|\bin the (?:fore|back)ground\b", re.I)
+
+
+def _named(obj) -> bool:
+    """An object worth naming in a note ("holstered handgun"), not "nothing" or "dark object"."""
+    o = clean_object(obj)
+    return bool(o) and o not in VAGUE and o not in EMPTY
+
+
+def _top(persons: list[dict]) -> dict | None:
+    """The answer a note is about: a "yes" before anything else, then the most confident."""
+    if not persons:
+        return None
+    return max(persons, key=lambda p: (p.get("weapon") == "yes", p.get("weapon") == "unclear",
+                                       CONF_RANK.get(p.get("confidence") or "", -1)))
+
+
+def review_note(check: dict) -> str:
+    """What the second look saw, how sure it was, and that a person needs to look, e.g. "Possible holstered handgun
+    seen on a second look (medium confidence): needs review." """
+    kind = check.get("kind") or "weapon"
+    p = _top([p for p in check.get("persons") or [] if isinstance(p, dict)])
+    if p is None:
+        return f"Possible {kind}, unconfirmed: needs review."
+    conf = p.get("confidence") or "low"
+    if p.get("weapon") == "yes":
+        what = clean_object(p.get("object")) if _named(p.get("object")) else kind
+        return f"Possible {what} seen on a second look ({conf} confidence): needs review."
+    if p.get("weapon") == "unclear":
+        return f"Possible {kind}: a second look could not tell ({conf} confidence), needs review."
+    return f"Possible {kind}: a second look did not rule it out ({conf} confidence), needs review."
+
+
+def _unconfirmed_sentences(text: str, drop_other: bool, drop_unrewritable: bool) -> str:
+    """Each sentence with a weapon claim reworded as "possible ..., unconfirmed"; with `drop_other`, one that brings
+    in another person to hold the weapon is left out; with `drop_unrewritable`, so is one that can't be reworded
+    safely ("He is armed."; the caller's note says what the second look saw)."""
+    out = []
+    for sent in re.split(r"(?<=[.!?])\s+", (text or "").strip()):
+        if not sent or not mentions(sent):
+            out.append(sent)
+            continue
+        if drop_other and OTHER_PERSON_RE.search(sent):
+            continue
+        new = rewrite(sent, as_unconfirmed)
+        if new is None:
+            if drop_unrewritable:
+                continue
+            new = sent.rstrip() + " (unconfirmed)"
+        out.append(new)
+    return " ".join(x for x in out if x)
+
+
+def effective(check: dict | None) -> dict | None:
+    """A stored weapon_check read under today's rules: {verdict, confirmed, needs_review, kind, confidence, object,
+    contradiction}. A check stored as "confirmed" on a medium-confidence or self-contradicting answer (before the
+    rule changed: event 22909) reads as unclear and needs review. None when there is no check."""
+    if not isinstance(check, dict) or not check.get("verdict"):
+        return None
+    persons = [p for p in check.get("persons") or [] if isinstance(p, dict)]
+    verdict = check["verdict"]
+    if verdict == "confirmed" and not any(is_confirmed(p) for p in persons):
+        verdict = "unclear"
+    p = next((p for p in persons if is_confirmed(p)), None) if verdict == "confirmed" else _top(persons)
+    return {"verdict": verdict, "confirmed": verdict == "confirmed", "needs_review": verdict in ("unclear", "error"),
+            "kind": check.get("kind") or "weapon", "confidence": (p or {}).get("confidence"),
+            "object": clean_object(p.get("object")) if p and _named(p.get("object")) else None,
+            "contradiction": contradiction(p) if p else None}
+
+
 def apply(e: dict, result: dict, check: dict) -> dict:
     """The synopsis with the check's outcome applied (a new dict; `result` is left as the model wrote it)."""
     out = copy.deepcopy(result)
@@ -738,7 +852,9 @@ def apply(e: dict, result: dict, check: dict) -> dict:
     tags = [t for t in out.get("tags") or []]
     level = out.get("threat_level") or "none"
     if verdict == "confirmed":
-        out["summary"] = (summary.rstrip() + " " if summary.strip() else "") + "Weapon confirmed by a second look at full resolution."
+        p = next((p for p in check.get("persons") or [] if is_confirmed(p)), None)
+        seen = f": {p['object']} ({p['confidence']} confidence)" if p and _named(p.get("object")) else " (high confidence)"
+        out["summary"] = (summary.rstrip() + " " if summary.strip() else "") + f"Weapon confirmed by a second look at full resolution{seen}."
         out["threat_level"] = kept_level(level, kind)
         if not (out.get("threat_reason") or "").strip():
             out["threat_reason"] = check["reason"]
@@ -774,12 +890,25 @@ def apply(e: dict, result: dict, check: dict) -> dict:
         return out
     # unclear / error: never quietly dropped. High, worded as unconfirmed, and a person is asked to look. The
     # summary is what the hub and the alert show, so it says so even when only another field had the weapon.
-    new = rewrite(summary, as_unconfirmed) if mentions(summary) else None
-    if new is None:
-        new = f"Possible {kind}, unconfirmed (a person needs to look): {summary.strip()}".rstrip(": ")
-    out["summary"] = new
-    if out.get("activity") and mentions(out["activity"]):
-        out["activity"] = rewrite(out["activity"], as_unconfirmed) or out["activity"].rstrip() + " (unconfirmed)"
+    persons = [p for p in check.get("persons") or [] if isinstance(p, dict)]
+    if persons:
+        # the second look answered: say what it saw and how sure it was. Nobody seen holding a weapon: a sentence that
+        # only brings in someone else to hand them the weapon goes (event 22909's "Another person ... holding a black
+        # handgun"); the note says what is left to check
+        drop_other = not any(holding_weapon(p) for p in persons)
+        new = _unconfirmed_sentences(summary, drop_other, drop_unrewritable=True)
+        out["summary"] = (new.rstrip() + " " if new.strip() else "") + review_note(check)
+        if out.get("activity") and mentions(out["activity"]):
+            act = _unconfirmed_sentences(out["activity"], drop_other, drop_unrewritable=False)
+            out["activity"] = act if act.strip() else (rewrite(out["activity"], as_unconfirmed)
+                                                       or out["activity"].rstrip() + " (unconfirmed)")
+    else:
+        new = rewrite(summary, as_unconfirmed) if mentions(summary) else None
+        if new is None:
+            new = f"Possible {kind}, unconfirmed (a person needs to look): {summary.strip()}".rstrip(": ")
+        out["summary"] = new
+        if out.get("activity") and mentions(out["activity"]):
+            out["activity"] = rewrite(out["activity"], as_unconfirmed) or out["activity"].rstrip() + " (unconfirmed)"
     for o in out.get("objects") or []:
         if not isinstance(o, dict):
             continue
@@ -805,6 +934,11 @@ def _reason(verdict: str, kind: str, persons: list[dict], error: str | None, ev:
     if verdict == "error":
         why = "it timed out" if error == "timeout" else "the model was unavailable" if error else "there was nothing to look at"
         return f"the second look could not run ({why}). A person needs to look."
+    yes = [p for p in persons if p["weapon"] == "yes"]
+    if yes:   # someone said "yes", but not with high confidence, or the answer contradicted itself
+        return ("the second look could not confirm it (it said " + "; ".join(
+            f"yes ({p['confidence']} confidence, {p['object'] or 'unknown object'}"
+            + (f"; {contradiction(p)}" if contradiction(p) else "") + ")" for p in yes) + "). A person needs to look.")
     if not ev.get("complete"):
         why = ("not everyone in view could be checked" if ev.get("skipped") else
                "someone in view was too small to judge" if ev.get("too_small") else
