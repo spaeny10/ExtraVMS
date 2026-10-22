@@ -25,7 +25,7 @@ import av
 import cv2
 import numpy as np
 
-from . import frames, parked, ruleevents, zones
+from . import frames, parked, ruleevents, snapshots, zones
 from .config import ROOT, settings
 
 log = logging.getLogger("nvr.verifier")
@@ -614,9 +614,10 @@ class Verifier:
         # Snapshot: best matching frame, or the middle sample if nothing matched.
         snap_ts, snap_match, snap_cam = best if best else (ts_list[len(ts_list) // 2], None,
                                                            tuple(sample_by_ts[ts_list[len(ts_list) // 2]][1:5]))
-        snapshot = out_dir / "snapshot.jpg"
-        snap_img = zones.draw_outlines(annotate(frames[snap_ts], snap_cam, snap_match), zone_list)
-        cv2.imwrite(str(snapshot), snap_img, [cv2.IMWRITE_JPEG_QUALITY, 88])
+        # at most snapshot_max_px (1280) on the long side, boxes drawn after scaling (snapshots.py): anything that
+        # needs full resolution reads the recording, or the keyframe crops below
+        snapshot = snapshots.write(out_dir / "snapshot.jpg", zones.draw_outlines(
+            annotate(snapshots.fit(frames[snap_ts]), snap_cam, snap_match), zone_list))
         keyframes = save_keyframes(out_dir, frames, detections)
         reid_vec = self._reid_embedding(frames, detections) if verified and label == "person" else None
         return {

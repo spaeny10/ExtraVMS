@@ -176,6 +176,14 @@ class Settings(BaseSettings):
                                             # (at 0 bytes the database cannot open and the service restart-loops)
     event_rate_max_per_hour: int = 600      # per camera; above it events still open but keep no clip/crops
                                             # (snapshot only). 0 = no limit
+    # Event snapshots (snapshots.py): the picture the event list, alerts and the viewer's poster show. Full resolution
+    # (2592 px, ~1 MB) filled a central instance's data dataset (47.6 GB for 48,929 snapshots); anything that needs
+    # full resolution reads the recording (frames.recording_frames / verifier.event_frames).
+    snapshot_max_px: int = 1280             # longest side of a new snapshot.jpg
+    snapshot_quality: int = 80              # its JPEG quality (~150-250 KB)
+    rejected_media_days: float = 3          # NVR_REJECTED_MEDIA_DAYS: rejected events older than this lose their
+                                            # snapshot, wide shot and crops (a 320 px thumbnail stays); never events
+                                            # with feedback, a lock or a keep-rule reason. 0 = keep them
 
     # Talk-down speakers (talkdown.py, tts.py): text-to-speech is a Piper neural voice when the piper-tts package (or a
     # `piper` binary) and at least one voice are installed, else Windows SAPI, else espeak-ng / espeak; none = no "Say"

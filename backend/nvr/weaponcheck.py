@@ -14,8 +14,9 @@ So, like policy.confirm_towing, a weapon claim is checked before it is stored or
    (the verifier's model, on the GPU thread) for person boxes, people followed across frames by position AND clothing
    colors (two people who cross are not swapped), up to 4 padded crops (hands included, the person marked with green
    corners) per person, spread over time, largest first. Someone too small to judge, more than 4 people, or video
-   that could not be read in time leaves the evidence incomplete. No video: the snapshot and the stored crops (which
-   can confirm a weapon but never clear one, since they do not show every person throughout).
+   that could not be read in time leaves the evidence incomplete. No video: the snapshot (at most 1280 px since
+   2026-10-22) and the stored crops (which can confirm a weapon but never clear one, since they do not show every
+   person throughout).
 3. One strict JSON question per person (TIMEOUT_S for all of them): everything they hold; the held object most like
    a gun or knife; is it a firearm or knife?
 4. decide() + apply():
@@ -536,8 +537,11 @@ def gather_evidence(e: dict, predict: Callable[[list], list] | None, deadline: f
                 return keyframe_evidence(e)
             except Exception as ex:  # noqa: BLE001 - fall back to what else there is
                 log.warning("event %s: weapon check could not read the %s (%s: %s)", e["id"], what, type(ex).__name__, ex)
+        # No video: the snapshot (1280 px since 2026-10-22, a full frame before; snapshot_shrink leaves a kept event's
+        # full-size one alone when its recording is gone), never a rejected event's leftover 320 px thumbnail
         snap = settings.data_dir / (e.get("snapshot") or "")
-        if e.get("snapshot") and snap.is_file() and time.time() < deadline:   # past it: no more YOLO, only the crops
+        if (e.get("snapshot") and snap.name == "snapshot.jpg" and snap.is_file()
+                and time.time() < deadline):   # past it: no more YOLO, only the crops
             img = cv2.imread(str(snap))
             if img is not None:
                 ev = image_evidence(img, predict)

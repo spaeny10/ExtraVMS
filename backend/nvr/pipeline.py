@@ -14,6 +14,7 @@ import httpx
 import numpy as np
 
 from . import aischedule, baseline, cells, detector, frames, identities, journeys, plate, policy, ppe, retention, vlmroute, weaponcheck, zones, merge
+from . import reverify as reverify_mod
 from . import synopsis as vlm
 from .config import settings
 from .db import db
@@ -70,6 +71,9 @@ class Pipeline:
         # verified, so the whole activity is verified once, when they are in (hold_tick releases them)
         self.verify_hold: set[int] = set()
         self._reverify_polled = 0.0
+        # events nvr.reverify handed back (an outage's errors): verified again one at a time, in the background
+        self._bg_reverify_polled = 0.0
+        self.bg_reverify: tuple[int, float] | None = None   # (event id, handed to the verifier at)
         self.synopsis_times: deque[float] = deque(maxlen=50)  # seconds per synopsis, for Optimize my system
         self.synopsis_failed_at = 0.0    # last synopsis that ended in an error (retry_loop backs off from it)
         # Outside the Site's AI schedule (aischedule.py): descriptions set to "catch up when idle" wait here, (priority,
@@ -441,6 +445,47 @@ class Pipeline:
                 if e and e["status"] == "pending":
                     log.info("event %s: verifying again (merged by merge_groups)", event_id)
                     self.reverify(event_id)
+        try:
+            self.background_reverify_tick(now)
+        except Exception:  # noqa: BLE001 - the held descriptions above matter more; try again next tick
+            log.exception("background re-verification failed")
+
+    BG_REVERIFY_S = 2.0            # how often the reverify queue is looked at
+    BG_REVERIFY_MAX_SYNOPSIS = 2   # ... and only while Qwen has fewer than this many descriptions waiting
+    BG_REVERIFY_STUCK_S = 600.0    # an event handed over this long ago and still pending: stop waiting for it
+
+    def background_reverify_tick(self, now: float) -> int | None:
+        """One event from nvr.reverify's queue (an outage's failed verifications) back to verification, at a background
+        priority: only when nothing waits for the verifier, Qwen's queue is short, the verifier isn't stalled, and the
+        previous one has finished. It goes back to `pending` as the event viewer's Reprocess does; its description then
+        follows the AI schedule like any other. Returns the id handed over, if any."""
+        if now - self._bg_reverify_polled < self.BG_REVERIFY_S:
+            return None
+        self._bg_reverify_polled = now
+        if self.bg_reverify is not None:
+            cur, since = self.bg_reverify
+            e = db.event(cur)
+            if e and e["status"] == "pending" and now - since < self.BG_REVERIFY_STUCK_S:
+                return None
+            self.bg_reverify = None
+        if (self.verifier is None or self.verify_q.qsize() or self.synopsis_q.qsize() >= self.BG_REVERIFY_MAX_SYNOPSIS
+                or self.verify_stall.get("stalled")):
+            return None
+        event_id = reverify_mod.take_next(db)
+        if event_id is None:
+            return None
+        e = db.event(event_id)
+        if not e or e["status"] != "error" or e["end_ts"] is None:
+            log.info("event %s: not verified again (now %s)", event_id, e["status"] if e else "gone")
+            return None
+        db.update_event(event_id, status="pending", synopsis=None, synopsis_json=None, synopsis_original=None,
+                        corrected_at=None, threat=None, error=None)
+        db.unindex_event(event_id)
+        self.bg_reverify = (event_id, now)
+        log.info("event %s: verifying again in the background (was: %s)", event_id, (e.get("error") or "")[:80])
+        self.verify_q.put_nowait(event_id)
+        self.publish(event_id)
+        return event_id
 
     async def hold_loop(self) -> None:
         while True:

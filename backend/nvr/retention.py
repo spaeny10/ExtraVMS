@@ -14,6 +14,10 @@
   own floor, measured on that filesystem: below it media goes oldest-first whatever the keep rules say (see
   enforce_disk_floor), files first and rows after, so a database that can't write doesn't stop the space being freed.
   A camera opening too many events keeps snapshots only.
+- Rejected events (YOLO found nothing to confirm) older than `rejected_media_days` (3) lose their snapshot, wide shot
+  and crops; a 320 px thumbnail (thumb_320.jpg) stays for the event list and review, and the `snapshot` column points
+  at it. Never an event with operator feedback, a correction or a saved note, a lock, or a keep-rule reason
+  (purge_rejected_media).
 """
 from __future__ import annotations
 
@@ -27,7 +31,7 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from . import diskguard, fmp4, frames, keep
+from . import diskguard, fmp4, frames, keep, snapshots
 from .config import settings
 from .db import LOCKED_SQL, db
 from .fmp4 import segment_start  # noqa: F401  (re-exported; older imports use retention.segment_start)
@@ -43,6 +47,8 @@ alert: dict | None = None    # set when the continuous window can't be held, or 
 last_pass: dict = {}
 _continuous_breach: dict | None = None   # set by enforce_disk_floor; one input to `alert`
 _prune_cursor: dict[str, tuple[float, int]] = {}   # camera -> last (start_ts, id) prune_event_media looked at
+_rejected_cursor: tuple[float, int] = (float("-inf"), -1)   # last (start_ts, id) purge_rejected_media looked at
+REJECTED_PAGE = 2000          # rejected events purge_rejected_media looks at per pass
 
 
 def free_gb() -> float:
@@ -434,6 +440,83 @@ def prune_event_media(now: float, dry_run: bool, stats: Counter) -> None:
         _prune_cursor[cam_id] = cursor
 
 
+def rejected_kept(e: dict, policy: dict, noted: bool) -> str | None:
+    """Why a rejected event keeps its pictures (None: it doesn't): operator feedback, a correction or a saved chat note,
+    a lock on the event or over its time, or any keep-rule reason of its own (keep.own_reasons)."""
+    if e.get("feedback") or e.get("corrected_at") or noted:
+        return "feedback"
+    if e.get("locked") or keep.is_locked(e["camera_id"], e["start_ts"], e["end_ts"] or e["start_ts"]):
+        return "locked"
+    reasons = keep.own_reasons(e, policy["keep"], noted)
+    return reasons[0] if reasons else None
+
+
+def purge_rejected_media(now: float, dry_run: bool, stats: Counter, page: int = REJECTED_PAGE) -> None:
+    """Rejected events older than rejected_media_days keep only a 320 px thumbnail: their snapshot.jpg, wide.jpg,
+    crop_*.jpg and other cached pictures go (a legacy clip.mp4 is clip_cleanup's and prune_event_media's). The
+    thumbnail is made from the snapshot first (the event list and review still show the moment); an event whose
+    snapshot is unreadable keeps it. Files first, then the rows: `snapshot` becomes the thumbnail's path (NULL when
+    there is no picture at all; the UI shows the label). A row whose update failed is picked up again next pass (its
+    column still names snapshot.jpg). Kept events are walked past with a cursor, so they never block the rest."""
+    global _rejected_cursor
+    days = float(settings.rejected_media_days or 0)
+    if days <= 0:
+        return
+    cutoff = now - days * 86400
+    policies = {c["id"]: keep.policy_for(c) for c in db.cameras()}
+    site = keep.site_policy()
+    rows = db.all(f"SELECT {keep.EVENT_COLS}, camera_id, {LOCKED_SQL} AS locked FROM events "
+                  "WHERE status='rejected' AND start_ts < ? AND snapshot IS NOT NULL AND instr(snapshot, 'thumb_') = 0 "
+                  "AND (start_ts > ? OR (start_ts = ? AND id > ?)) ORDER BY start_ts, id LIMIT ?",
+                  [cutoff, _rejected_cursor[0], _rejected_cursor[0], _rejected_cursor[1], page])
+    if len(rows) < page:
+        _rejected_cursor = (float("-inf"), -1)   # caught up: start over next pass (rows that failed come back)
+    else:
+        _rejected_cursor = (rows[-1]["start_ts"], rows[-1]["id"])
+    noted = keep.saved_notes(db, [r["id"] for r in rows])
+    updates: list[tuple[str | None, int]] = []
+    for e in rows:
+        if rejected_kept(e, policies.get(e["camera_id"], site), e["id"] in noted):
+            stats["rejected_media_kept"] += 1
+            continue
+        d = settings.data_dir / "events" / str(e["id"])
+        if dry_run:
+            stats["dry_rejected_media"] += 1
+            continue
+        thumb = snapshots.ensure_kept_thumb(d)
+        if thumb is None and (d / "snapshot.jpg").is_file():
+            stats["rejected_media_unreadable"] += 1   # no thumbnail could be made: the snapshot stays
+            continue
+        freed = 0
+        try:
+            files = [f for f in d.iterdir() if f.suffix.lower() == ".jpg" and f.name != diskguard.THUMB_KEPT]
+        except OSError:
+            files = []
+        for f in files:
+            try:
+                size = f.stat().st_size
+                f.unlink()
+                freed += size
+            except OSError:   # in use or gone: the next pass gets it
+                pass
+        stats["rejected_media_deleted"] += 1
+        stats["freed_bytes"] += freed
+        stats["rejected_media_bytes"] += freed
+        updates.append((thumb.relative_to(settings.data_dir).as_posix() if thumb else None, e["id"]))
+    if updates:
+        try:
+            for k in range(0, len(updates), 400):
+                chunk = updates[k:k + 400]
+                db.execute(f"UPDATE events SET snapshot = CASE id {' '.join('WHEN ? THEN ?' for _ in chunk)} END "
+                           f"WHERE id IN ({','.join('?' * len(chunk))})",
+                           [v for snap, i in chunk for v in (i, snap)] + [i for _, i in chunk])
+        except sqlite3.Error as ex:   # the files are gone; the rows are fixed next pass
+            log.warning("rejected events' pictures deleted, but updating %d rows failed (%s); retrying next pass",
+                        len(updates), ex)
+        log.info("rejected events older than %g days: kept a thumbnail only for %d events (%.1f MB freed)",
+                 days, len(updates), stats["rejected_media_bytes"] / 1e6)
+
+
 # ---------------------------------------------------------------- event-rate guard
 
 class EventRateGuard:
@@ -531,6 +614,7 @@ def enforce() -> dict:
     if not early:
         prune_event_media(now, dry_run, stats)
     purge_masked(now, dry_run, stats)
+    purge_rejected_media(now, dry_run, stats)
     _update_alert()
     last_pass = {"at": now, "dry_run": dry_run, **{k: round(v, 1) for k, v in stats.items()}}
     if any(v for k, v in stats.items() if k != "deferred"):

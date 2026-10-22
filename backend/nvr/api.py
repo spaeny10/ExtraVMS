@@ -29,7 +29,7 @@ from . import assistant, backup, baseline, cells, footage, frames, health, ident
 from . import synopsis as vlm
 from . import advisor, ai_serve, detector, direct, hub_agent, lan_cert, lan_guard, sdbackfill, site_actions, siteconfig
 from . import camweb, deterrence, deterrence_api, device_api, speakers_api, talkdown
-from . import aischedule, plate, vlmroute
+from . import aischedule, plate, snapshots, vlmroute
 from . import summary as summary_mod
 from .config import ROOT, settings
 from .db import JOURNEY_CAMS_SQL, LOCKED_SQL, PRIORITY_RANK_SQL, db, event_filters
@@ -1259,31 +1259,19 @@ def _event_file(event_id: int, name: str) -> Path:
     return f
 
 
-THUMB_WIDTHS = (320, 480, 640, 960)   # the sizes a thumbnail may be asked for (w is rounded up to one of these)
-
-
-def _thumb_width(w: int) -> int:
-    return next((t for t in THUMB_WIDTHS if t >= w), THUMB_WIDTHS[-1])
-
-
-def _make_thumb(src: Path, dest: Path, width: int) -> None:
-    """Shrink a snapshot (2592x1520, ~1.2 MB) to `width` px wide (~30 KB) once; later requests read the file."""
-    from PIL import Image
-    with Image.open(src) as im:
-        im = im.convert("RGB")
-        if im.width > width:
-            im = im.resize((width, max(1, round(im.height * width / im.width))), Image.LANCZOS)
-        tmp = dest.with_suffix(".tmp")
-        im.save(tmp, "JPEG", quality=78, optimize=True)
-        tmp.replace(dest)
+# thumbnails of event snapshots: snapshots.py (the names stay for older imports and tests)
+THUMB_WIDTHS = snapshots.THUMB_WIDTHS
+_thumb_width = snapshots.thumb_width
+_make_thumb = snapshots.make_thumb
 
 
 @app.get("/api/events/{event_id}/media/{name}")
 async def event_media(event_id: int, name: str, w: int | None = Query(None, ge=160, le=1280)):
     """An event's clip, snapshot or crop. `w` (snapshot.jpg only): a thumbnail at most that wide, generated on first
-    request and kept beside the snapshot as thumb_<w>.jpg. Cards through the hub tunnel load ~30 KB instead of 1.2 MB.
-    A clip whose file is gone (the desktop's failed SSD took every clip of 2026-10-06..09 with it; retention may also
-    have pruned it) plays the same span from the continuous recording instead, while that is still kept."""
+    request and kept beside the snapshot as thumb_<w>.jpg. Cards through the hub tunnel load ~30 KB instead of 200 KB.
+    A rejected event older than rejected_media_days keeps only thumb_320.jpg (retention.purge_rejected_media): asked
+    for its snapshot, the stored thumbnail is served. A clip whose file is gone (the desktop's failed SSD took every
+    clip of 2026-10-06..09 with it; retention may also have pruned it) plays the same span from the continuous recording instead, while that is still kept."""
     if name == "clip.mp4" and not (settings.data_dir / "events" / str(int(event_id)) / name).is_file():
         e = db.event(event_id)
         if not e:
@@ -1292,6 +1280,9 @@ async def event_media(event_id: int, name: str, w: int | None = Query(None, ge=1
         end = (e.get("end_ts") or e["start_ts"]) + settings.clip_post_roll
         return await playback(e["camera_id"], start, min(3600.0, max(5.0, end - start)), None, None)
     if name == "snapshot.jpg" and not (settings.data_dir / "events" / str(int(event_id)) / name).is_file():
+        thumb = snapshots.stored_thumb(settings.data_dir / "events" / str(int(event_id)), w)
+        if thumb is not None:   # retention kept only the thumbnail (a rejected event), or one was cached before a loss
+            return FileResponse(thumb, headers={"Cache-Control": "max-age=86400"})
         e = db.event(event_id)   # the same loss: a frame from the recording a moment into the event
         if not e:
             raise HTTPException(404)

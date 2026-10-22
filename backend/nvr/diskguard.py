@@ -30,7 +30,8 @@ from pathlib import Path
 
 log = logging.getLogger("nvr.diskguard")
 
-KEEP_FILES = {"snapshot.jpg"}   # small, and the only picture the event list and alerts have
+THUMB_KEPT = "thumb_320.jpg"    # a rejected event's only picture once its snapshot is gone (retention.purge_rejected_media)
+KEEP_FILES = {"snapshot.jpg", THUMB_KEPT}   # small, and the only picture the event list and alerts have
 cleared: list[int] = []         # event ids emptied before the database was open (db.py nulls their clip)
 BACKUPS_KEPT = 2                # nightly database backups an emergency never deletes (backup.py keeps 14)
 EMERGENCY_MAX_FRAC = 0.25       # never aim for more than this share of a (small) volume free
@@ -59,7 +60,7 @@ def emergency_target(path: Path, gb: float) -> int:
 
 
 def has_media(d: Path) -> bool:
-    """Does this event folder hold anything besides what is always kept (the snapshot)?"""
+    """Does this event folder hold anything besides what is always kept (the snapshot, the 320 px thumbnail)?"""
     try:
         with os.scandir(d) as it:
             return any(f.name not in KEEP_FILES for f in it)
@@ -68,7 +69,7 @@ def has_media(d: Path) -> bool:
 
 
 def delete_event_media(d: Path) -> int:
-    """Delete everything in one event folder except the snapshot; returns the bytes freed."""
+    """Delete everything in one event folder except the snapshot and the 320 px thumbnail; returns the bytes freed."""
     freed = 0
     try:
         files = list(d.iterdir())

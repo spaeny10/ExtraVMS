@@ -26,7 +26,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from . import aischedule, zones
+from . import aischedule, snapshots, zones
 from .config import ROOT, settings
 
 log = logging.getLogger("nvr.ppe")
@@ -378,11 +378,12 @@ def save_marked(event_id: int, result: dict, images: dict) -> str | None:
     bad = result["verdict"] == "violation"
     text = ("No " + " / no ".join(ITEM_WORDS[i] for i in result["violation"])) if bad else \
         "PPE ok" if result["verdict"] == "compliant" else "PPE unclear"
-    img = mark(images[f["ts"]], f["box"], text, bad)
     d = event_dir(event_id)
-    cv2.imwrite(str(d / "ppe.jpg"), img, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    # ppe.jpg: the marked frame at full resolution (from the recording), the evidence of the check; the event's
+    # snapshot, a violation's, at snapshot size (snapshots.py), marked after scaling so the box and label stay legible
+    cv2.imwrite(str(d / "ppe.jpg"), mark(images[f["ts"]], f["box"], text, bad), [cv2.IMWRITE_JPEG_QUALITY, 88])
     if bad:
-        cv2.imwrite(str(d / "snapshot.jpg"), img, [cv2.IMWRITE_JPEG_QUALITY, 88])
+        snapshots.write(d / "snapshot.jpg", mark(snapshots.fit(images[f["ts"]]), f["box"], text, bad))
     return "ppe.jpg"
 
 
