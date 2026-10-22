@@ -254,18 +254,15 @@ def live_pipeline():
 
 
 class Live:
-    """Clip fetches, the recording lag and the post-roll out of the way, so _verify runs at once."""
+    """The recording lag and the post-roll out of the way, so _verify runs at once (no clip is fetched: the verifier
+    reads the recording)."""
     def __enter__(self):
-        self.old = (pl.fetch_clip, settings.recording_lag, settings.clip_post_roll)
-
-        async def no_fetch(*a, **k):
-            return None
-        pl.fetch_clip = no_fetch
+        self.old = (settings.recording_lag, settings.clip_post_roll)
         settings.recording_lag, settings.clip_post_roll = -1e12, 0
         return self
 
     def __exit__(self, *exc):
-        pl.fetch_clip, settings.recording_lag, settings.clip_post_roll = self.old
+        settings.recording_lag, settings.clip_post_roll = self.old
 
 
 def drain(p):

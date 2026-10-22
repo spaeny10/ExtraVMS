@@ -8,6 +8,9 @@ What needs attention (`problems`), per instance:
   down      not running: failed, its container not running on the host, or "running" with its server not connected
             to the hub while the host is online (an offline host is its own line)
   storage   using STORAGE_FULL of its quota or more
+  data      its data area (/data: database, event media; host agent 0.3.2+) using DATA_FULL of its own quota or more
+            (ZFS: the instances/<id> dataset). When it fills up every database write fails; instances without a data
+            quota of their own (XFS, no quota) or not reporting it never have this problem
   queue     its YOLO verify queue above hosts.GROW_MIN events (the growing alert's floor), or growing over 15 minutes
   image     its container runs another Docker image ID than the one its host creates new instances from (image_id
             and capacity.image_id, agent 0.3.1+). Tags are never compared: instances run git-rev tags
@@ -26,7 +29,8 @@ import re
 from . import hosts
 
 STORAGE_FULL = 0.9
-INSTANCE_PROBLEMS = ("down", "storage", "queue", "image", "cameras")
+DATA_FULL = 0.85             # below the instance_data_full alert's 90 % (hosts.DATA_OPEN): the list warns first
+INSTANCE_PROBLEMS = ("down", "storage", "data", "queue", "image", "cameras")
 HOST_PROBLEMS = ("offline", "agent", "queue")
 INSTANCE_SORTS = ("created", "site", "customer", "host", "storage", "cameras", "queue")
 HOST_SORTS = ("name", "load", "free", "instances")
@@ -60,6 +64,11 @@ def storage_frac(c: dict) -> float | None:
     return used / quota if used is not None and quota and quota > 0 else None
 
 
+def data_frac(c: dict) -> float | None:
+    """The data area's use of its own quota (hosts.data_frac), None when unknown or it has none."""
+    return hosts.data_frac(c)
+
+
 def verify_q(c: dict) -> float | None:
     return _num((c.get("work") or {}).get("verify_q"))
 
@@ -75,6 +84,9 @@ def instance_problems(c: dict) -> list[str]:
     frac = storage_frac(c)
     if frac is not None and frac >= STORAGE_FULL:
         out.append("storage")
+    dfrac = data_frac(c)
+    if dfrac is not None and dfrac >= DATA_FULL:
+        out.append("data")
     q = verify_q(c)
     if (q is not None and q > hosts.GROW_MIN) or c.get("queue_growing"):
         out.append("queue")

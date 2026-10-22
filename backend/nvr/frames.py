@@ -1,11 +1,16 @@
-"""Single preview frames straight from the recorded fMP4 segments (timeline scrubbing).
+"""Frames straight from the recorded fMP4 segments: timeline scrubbing, and every event's video.
 
 A seek + keyframe decode of a 5 MP H.265 segment takes ~40 ms, so the UI can show ~10 frames/s
 while the playhead is dragged. `exact=True` decodes forward to the frame nearest the requested time.
+
+Events keep no clip.mp4 of their own (2026-10-22: per-event clips filled an instance's 50 GB data dataset in a
+week): an event's video is its stretch of the continuous recording, which retention keeps around events (keep.py).
+Verification, PPE, the weapon check, plates and clip chat read their frames here (iter_recording / recording_frames).
 """
 from __future__ import annotations
 
 import gc
+import logging
 import threading
 import time
 from collections import OrderedDict
@@ -18,6 +23,7 @@ import numpy as np
 from .config import settings
 from .fmp4 import segment_start
 
+log = logging.getLogger("nvr.frames")
 _listing: dict[str, tuple[float, list[tuple[float, Path]]]] = {}
 _listing_ttl = 5.0
 
@@ -30,18 +36,20 @@ _jpegs_lock = threading.Lock()
 _MAX_JPEGS = 300
 
 
-def _segments(camera_id: str) -> list[tuple[float, Path]]:
+def _segments(camera_id: str, fresh: bool = False) -> list[tuple[float, Path]]:
+    """The camera's segments (start epoch, path), oldest first. Cached for a few seconds for scrubbing; `fresh` lists
+    the folder again (an event that just closed may lie in a segment MediaMTX opened a moment ago)."""
     cached = _listing.get(camera_id)
-    if cached and time.time() - cached[0] < _listing_ttl:
+    if cached and not fresh and time.time() - cached[0] < _listing_ttl:
         return cached[1]
     segs = sorted((ts, f) for f in (settings.recordings_dir / camera_id).glob("*.mp4") if (ts := segment_start(f)))
     _listing[camera_id] = (time.time(), segs)
     return segs
 
 
-def find_segment(camera_id: str, t: float) -> tuple[Path, float, bool] | None:
+def find_segment(camera_id: str, t: float, fresh: bool = False) -> tuple[Path, float, bool] | None:
     """(segment path, segment start epoch, is_live) for time t, or None if t is before all recordings."""
-    segs = _segments(camera_id)
+    segs = _segments(camera_id, fresh)
     best = None
     for i, (start, f) in enumerate(segs):
         if start > t:
@@ -121,6 +129,97 @@ def frames_at(path: Path, offsets: list[float]) -> dict[float, np.ndarray]:
     finally:
         gc.collect()   # PyAV frames are freed late (see verifier.grab_frames)
     return out
+
+
+class Recording:
+    """A frame source: the camera's continuous recording (verifier.grab_frames takes this or a legacy clip path)."""
+    __slots__ = ("camera_id",)
+
+    def __init__(self, camera_id: str) -> None:
+        self.camera_id = camera_id
+
+    def __repr__(self) -> str:
+        return f"Recording({self.camera_id!r})"
+
+
+SEEK_GAP_S = 3.0   # a target further than this past the last decoded frame is reached by a seek, not by decoding on
+
+
+def iter_recording(camera_id: str, targets: list[float], tol: float = 0.6, seek_gap: float = SEEK_GAP_S):
+    """Yield (target, BGR frame) for the recorded frame nearest each target epoch (within `tol` s), in time order,
+    full resolution. Close targets share one forward decode (like verifier.grab_frames over a clip); a far one is
+    reached with a seek to its keyframe. Targets with nothing recorded near them are left out. Blocking."""
+    wanted = sorted({float(t) for t in targets})
+    if not wanted:
+        return
+    segs = _segments(camera_id, fresh=True)
+    groups: list[tuple[Path, float, list[float]]] = []
+    for w in wanted:
+        best = None
+        for start, f in segs:
+            if start > w + tol:   # a target just before a segment's first frame may still be within tol of it
+                break
+            best = (f, start)
+        if best is None:
+            continue
+        if groups and groups[-1][0] == best[0]:
+            groups[-1][2].append(w)
+        else:
+            groups.append((best[0], best[1], [w]))
+    for path, seg_start, ws in groups:
+        try:
+            yield from _decode_segment(path, seg_start, ws, tol, seek_gap)
+        except (av.FFmpegError, OSError) as e:   # a damaged or vanished segment: the other segments still count
+            log.warning("reading %s/%s failed: %s", camera_id, path.name, e)
+        finally:
+            gc.collect()   # PyAV frames are freed late (see verifier.grab_frames)
+
+
+def _decode_segment(path: Path, seg_start: float, ws: list[float], tol: float, seek_gap: float):
+    with av.open(str(path)) as c:
+        s = c.streams.video[0]
+        s.thread_type = "AUTO"
+        tb = float(s.time_base)
+        base = s.start_time or 0
+        best: dict[float, tuple[float, object]] = {}   # target -> (distance, av frame): converted once, when yielded
+        i, it, pos, sought = 0, None, None, -1
+        while i < len(ws):
+            if it is None or pos is None or (ws[i] - tol) - pos > seek_gap:
+                c.seek(base + int(max(0.0, ws[i] - tol - seg_start) / tb), stream=s, backward=True, any_frame=False)
+                it, sought = c.decode(s), i
+            reseek = False
+            for fr in it:
+                if fr.pts is None:
+                    continue
+                ft = seg_start + (fr.pts - base) * tb
+                pos = ft
+                j = i
+                while j < len(ws) and ws[j] - tol < ft:   # targets whose window this frame has reached
+                    d = abs(ws[j] - ft)
+                    if d < tol and (ws[j] not in best or d < best[ws[j]][0]):
+                        best[ws[j]] = (d, fr)
+                    j += 1
+                while i < len(ws) and ft > ws[i] + tol:   # windows this frame has passed: done
+                    if ws[i] in best:
+                        yield ws[i], best.pop(ws[i])[1].to_ndarray(format="bgr24")
+                    i += 1
+                # far from the next target: seek, unless this decode began with a seek for it (a long GOP: the seek
+                # lands on a keyframe further back than seek_gap, and seeking again would land there again)
+                if i < len(ws) and i != sought and (ws[i] - tol) - ft > seek_gap:
+                    reseek = True
+                    break
+                if i >= len(ws):
+                    break
+            if not reseek:   # the segment ended (or everything was found): what is left has what it has
+                for w in ws[i:]:
+                    if w in best:
+                        yield w, best.pop(w)[1].to_ndarray(format="bgr24")
+                return
+
+
+def recording_frames(camera_id: str, targets: list[float], tol: float = 0.6) -> dict[float, np.ndarray]:
+    """{target epoch: full-resolution BGR frame} from the recording, for the targets anything was recorded near."""
+    return dict(iter_recording(camera_id, targets, tol))
 
 
 def recorded_frame(camera_id: str, t: float) -> np.ndarray | None:

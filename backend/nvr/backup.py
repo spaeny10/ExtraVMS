@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
+import shutil
 import time
 
 from .config import settings
@@ -15,9 +16,29 @@ log = logging.getLogger("nvr.backup")
 KEEP = 14
 
 
+MIN_SPARE_BYTES = 2e9   # a backup must leave at least this much free besides itself
+
+
+def room_for_backup(out_dir, db_bytes: int) -> bool:
+    """Is there room for one more copy of the database? On a central instance the backups share the quota'd /data
+    dataset with nvr.db and event media: a copy that fills it stops the database (2026-10-22)."""
+    try:
+        free = shutil.disk_usage(out_dir).free
+    except OSError:
+        return False
+    return free >= 1.2 * db_bytes + MIN_SPARE_BYTES
+
+
 def run() -> dict:
     out_dir = settings.backup_dir
     out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        db_bytes = (settings.data_dir / "nvr.db").stat().st_size
+    except OSError:
+        db_bytes = 0
+    if not room_for_backup(out_dir, db_bytes):
+        log.warning("database backup skipped: not enough free space in %s for a %.1f GB copy", out_dir, db_bytes / 1e9)
+        return {"at": time.time(), "skipped": "no space"}
     path = out_dir / f"nvr-{dt.datetime.now():%Y%m%d-%H%M}.db"
     t0 = time.time()
     with db.lock:

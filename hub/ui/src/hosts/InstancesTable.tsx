@@ -9,7 +9,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { confirmDialog, menuKeys, promptDialog, toast, useDismiss } from "@site/ui";
 import { type CentralInstance, type FleetSummary, api } from "../api";
 import {
-  PHASE_LABEL, camerasText, fmtGB, overLimit, parseCameraLimit, queueText, queueTitle, quotaText, resourcesFormError, resourcesText, settling, shortGpu,
+  PHASE_LABEL, camerasText, dataText, dataTitle, fmtGB, overLimit, parseCameraLimit, queueText, queueTitle, quotaText, resourcesFormError, resourcesText,
+  settling, shortGpu,
 } from "../central";
 import { go, hostHref, siteHref } from "../nav";
 import {
@@ -98,7 +99,7 @@ export function InstancesTable({ query, setQuery, fixedHost, hosts, onChanged, r
           <table className="hub-table stack instances-table">
             <thead><tr>
               <th><input type="checkbox" className="row-tick" aria-label="Select every instance on this page" checked={allTicked}
-                onChange={(e) => setSelected(e.target.checked ? new Map(items.map((c) => [c.id, c])) : new Map())} /> Site</th><th>Customer</th>{!fixedHost && <th>Host</th>}<th>Network</th><th>GPU</th><th>Storage</th><th>Cameras</th><th>Queues</th><th>Qwen</th><th>State</th><th />
+                onChange={(e) => setSelected(e.target.checked ? new Map(items.map((c) => [c.id, c])) : new Map())} /> Site</th><th>Customer</th>{!fixedHost && <th>Host</th>}<th>Network</th><th>GPU</th><th>Storage</th><th>Data</th><th>Cameras</th><th>Queues</th><th>Qwen</th><th>State</th><th />
             </tr></thead>
             <tbody>{items.map((c) => (
               <Row key={c.id} c={c} showHost={!fixedHost} ticked={selected.has(c.id)} onTick={(on) => tick(c, on)} onChanged={changed}
@@ -142,6 +143,9 @@ function Row({ c, showHost, ticked, onTick, onChanged, onNetworks, onResources, 
       <td className="small" data-label="GPU">{c.gpu != null ? `${c.gpu}${c.gpu_name ? ` · ${shortGpu(c.gpu_name)}` : ""}` : "CPU"}
         {(c.cpus != null || c.mem_gb != null) && <span className="muted"> · {resourcesText(c.cpus, c.mem_gb)}</span>}</td>
       <td className={`small ${c.problems?.includes("storage") ? "warn-text" : ""}`} data-label="Storage">{quotaText(c.used_gb, c.quota_gb)}</td>
+      {/* its data area (database, event media; agent 0.3.2+): "12 GB of 150 GB" */}
+      <td className={`small ${c.problems?.includes("data") ? "bad" : ""}`} data-label="Data"
+        title={dataTitle(c.instance_used_gb, c.instance_quota_gb, c.instance_free_gb)}>{dataText(c.instance_used_gb, c.instance_quota_gb)}</td>
       <td className={`small ${overLimit(c.camera_count, c.camera_limit) ? "bad" : ""}`} data-label="Cameras">{camerasText(c.camera_count, c.camera_limit)}
         {down > 0 && <span className="warn-text"> · {down} down</span>}</td>
       <td className={`small queue-cell ${c.queue_growing ? "warn" : !w ? "muted" : w.ok ? "" : "bad"}`} data-label="Queues" title={queueTitle(w, !!c.queue_growing)}>
@@ -209,6 +213,18 @@ function InstanceMenu({ ci, onChanged, onNetworks, onResources, onRemove }: { ci
     if (!/^\d+$/.test(v.trim()) || q < 10) { toast.error("The storage quota is a whole number of GB, at least 10"); return; }
     try { await api.updateCentral(ci.location_id, ci.id, { quota_gb: q }); toast.success(`Storage set to ${fmtGB(q)}`); onChanged(); } catch (e) { toast.error(e); }
   };
+  // the data dataset (ZFS hosts, agent 0.3.2+): instance_quota_gb null = none of its own (XFS / no quota) or not reported yet
+  const hasDataQuota = ci.instance_quota_gb != null;
+  const dataStorage = async () => {
+    const used = ci.instance_used_gb;
+    const v = await promptDialog(`Data storage for ${site} (GB)`, { initial: String(Math.round(ci.instance_quota_gb ?? 50)), label: "GB",
+      message: `Its database and event media${used != null ? ` (${fmtGB(used)} used now)` : ""}. The server stops storing events when this is full; `
+        + "a quota below what it uses is refused. Raising it takes effect at once." });
+    if (v == null) return;
+    const q = Number(v.trim());
+    if (!/^\d+$/.test(v.trim()) || q < 1) { toast.error("The data storage quota is a whole number of GB, at least 1"); return; }
+    try { await api.setCentralDataQuota(ci.location_id, ci.id, { quota_gb: q }); toast.success(`Data storage set to ${fmtGB(q)}`); onChanged(); } catch (e) { toast.error(e); }
+  };
   const limit = async () => {
     const count = ci.camera_count ?? 0;
     const v = await promptDialog(`Camera limit for ${site}`, { initial: ci.camera_limit == null ? "" : String(ci.camera_limit), label: "Cameras (blank = no limit)",
@@ -231,6 +247,9 @@ function InstanceMenu({ ci, onChanged, onNetworks, onResources, onRemove }: { ci
       {open && (
         <div ref={menu} className="menu-pop instance-menu-pop" role="menu" aria-label={`Actions for ${site}`} onKeyDown={menuKeys}>
           <button role="menuitem" disabled={!live || offline} title={offlineTitle} onClick={item(storage)}>Change storage…</button>
+          <button role="menuitem" disabled={!live || offline || !hasDataQuota}
+            title={offlineTitle ?? (hasDataQuota ? "The quota of its database and event media" : "Only for instances with a data quota of their own (ZFS hosts, agent 0.3.2+); here it shares the storage quota")}
+            onClick={item(dataStorage)}>Change data storage…</button>
           <button role="menuitem" disabled={!live || offline} title={offlineTitle ?? "CPU and memory limits (the instance restarts)"} onClick={item(onResources)}>Change CPU/memory…</button>
           <button role="menuitem" disabled={!live} onClick={item(limit)}>Change camera limit…</button>
           <button role="menuitem" disabled={!live || offline} title={offlineTitle} onClick={item(onNetworks)}>Site networks…</button>

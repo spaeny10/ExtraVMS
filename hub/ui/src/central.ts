@@ -95,6 +95,23 @@ export function quotaText(used: number | null | undefined, quota: number): strin
   return used == null ? `${fmtGB(quota)} quota` : `${fmtGB(used)} of ${fmtGB(quota)}${p != null ? ` (${p}%)` : ""}`;
 }
 
+/**
+ * "12 GB of 150 GB" for a central instance's data area (its database and event media; host agent 0.3.2+). Without a
+ * quota of its own (XFS / no quota: it shares the recordings' quota) just the use, "—" when nothing is reported.
+ */
+export function dataText(used: number | null | undefined, quota: number | null | undefined): string {
+  if (quota != null && quota > 0) return used == null ? `${fmtGB(quota)} quota` : `${fmtGB(used)} of ${fmtGB(quota)}`;
+  return used == null ? "—" : fmtGB(used);
+}
+
+/** The Data cell's tooltip: the free space and what the data area holds. */
+export function dataTitle(used: number | null | undefined, quota: number | null | undefined, free: number | null | undefined): string {
+  const what = "Database and event media (/data)";
+  if (quota == null || !(quota > 0)) return `${what}: no quota of its own, it shares the storage quota${free != null ? `; ${fmtGB(free)} free` : ""}`;
+  const p = pct(used, quota);
+  return `${what}: ${p != null ? `${p}% used, ` : ""}${free != null ? `${fmtGB(free)} free` : "free space unknown"}. Its server stops storing events when it is full`;
+}
+
 /** Port-forward mode: camera k (1-based) is reached at the Site's public IP on RTSP base+k and ONVIF base+k. */
 export type ForwardRow = { camera: number; name: string | null; rtsp: number; onvif: number };
 export function forwardRows(count: number, rtspBase = 5540, onvifBase = 8080, names: (string | null)[] = []): ForwardRow[] {

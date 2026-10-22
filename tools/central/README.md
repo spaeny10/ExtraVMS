@@ -184,6 +184,8 @@ What `create-instance` does, in order (if a step fails, the earlier ones are rol
 axiom_host.py list                                   # state, cameras, quota/used, GPU, mode
 axiom_host.py capacity                               # what the hub sees for placement
 axiom_host.py set-quota --id acme-gate --quota-gb 6000
+axiom_host.py set-instance-quota --id acme-gate --quota-gb 150   # ZFS: the data dataset (nvr.db, events/), below
+axiom_host.py preflight                              # before restarts / redeploys: room for every database? (below)
 axiom_host.py set-camera-network --id acme-gate --subnet 192.168.105.0/24 --dry-run   # camera addresses (below)
 axiom_host.py restart-instance --id acme-gate        # docker restart
 axiom_host.py restart-instance --id acme-gate --image axiom/instance:<tag>    # upgrade one instance (only images under host.json image_prefix, default axiom/instance:)
@@ -197,7 +199,22 @@ axiom_host.py reconcile                              # re-apply firewall/quotas/
 
 CPU and memory: `set-resources` (hub: Hosts → Central instances → "Change CPU/memory…") saves the new `--cpus` / `--memory` in the registry and applies them to the running container with `docker update`, with no recording gap; only if Docker refuses (for example memory below what the instance uses now) is the container recreated with them, about 30 s without recording. Don't edit `registry.json` by hand for this: the change would only apply at the next recreate, and nothing checks it (CPUs 1-64 and at most the host's, memory 2-512 GB). If the container does not start with the new limits, the old ones are restored.
 
-Upgrading every instance: build and tag the new image, then `restart-instance --image` one instance at a time, checking each comes back on the hub before the next. Each restart is a ~30 s recording gap for that Site (cameras keep recording to their SD cards).
+Upgrading every instance: run `axiom_host.py preflight` first (below), then build and tag the new image, then `restart-instance --image` one instance at a time, checking each comes back on the hub before the next. Each restart is a ~30 s recording gap for that Site (cameras keep recording to their SD cards).
+
+**Data space and preflight.** Each instance's `/data` (its database `nvr.db`, event media under `events/`, backups) is a separate area from its recordings: on ZFS the dataset `axiom/instances/<id>` with its own quota (`instance_dir_quota_gb`, default 50 GB), elsewhere the same quota or filesystem as the recordings. When it fills up, every database write fails ("disk I/O error", "database or disk is full") and a restart crash-loops (2026-10-22: one instance's data dataset reached 0 bytes free and its server ran ~30 h on failing writes). The hub's Hosts page shows it as **Data** ("12 GB of 150 GB") next to Storage, flags an instance at 85 % (`data` problem) and opens the `instance_data_full` alert at 90 %.
+
+- `preflight [--id X] [--min-free-gb N] [--json]` reads the registry and `zfs` / `statvfs` only (no hub, no Docker) and prints, per instance, the data area's use, quota and free space, the free space it needs and the recordings' free space (shown only: the server fills its recordings to their quota on purpose). It exits **1** when any data area has less free space than it needs, or its free space can't be read. The default need is **max(2 GB, 10 % of the instance's data quota)** (5 GB for the default 50 GB); an instance without a data quota of its own (XFS, `none`) needs the 2 GB floor. `--min-free-gb` replaces the default for every instance. Run it before `restart-instance`, image upgrades or a host reboot; script it as `axiom_host.py preflight && ...`.
+
+  ```
+  INSTANCE   QUOTA  DATA USED  DATA QUOTA  DATA FREE  NEEDS  RECORDINGS FREE  STATUS
+  acme-gate  zfs    46 GB      50 GB       4 GB       5 GB   1.3 GB           SHORT: data has 4 GB free, needs 5 GB
+  beta-yard  zfs    12.3 GB    150 GB      137.7 GB   15 GB  790 GB           ok
+  SHORT: 1 of 2 instance(s) short of data space: acme-gate: data has 4 GB free, needs 5 GB
+  ```
+
+- Instances created before 2026-10-22 still hold per-event clips in `/data/events`. Clear the ones the recording covers with the server's own tool, dry run first: `docker exec <container> python -m nvr.clip_cleanup` prints what it would delete (event folders with a clip, how many the recording covers and their GB, how many it keeps because their recording is gone); add `--apply` to delete them. It never touches snapshots, keyframes or crops.
+
+- `set-instance-quota --id X --quota-gb N [--force] [--dry-run]` (hub: Hosts → Central instances → ⋯ → "Change data storage…") sets the quota of the instance's data dataset with `zfs set quota=<bytes>` and saves it in the registry (`instance_quota_gb`; `reconcile` re-applies it). Refused below the current data use unless `--force`; it says so when the new quota leaves less free space than preflight wants. ZFS only: on XFS and `none` the data shares the recordings' quota (`set-quota`), so it refuses and changes nothing. Raising the quota takes effect at once, no restart needed: a server that was failing its writes recovers on its next write.
 
 ### Camera addresses (mixing LAN, VPN and remote cameras in one instance)
 
@@ -289,7 +306,7 @@ Read-only root: if a library needs to write outside `/tmp`, `/data` or `/recordi
 
 ## 4. Storage quota
 
-**ZFS** (`quota_mode: zfs`): the instance's `/recordings` is the dataset `axiom/recordings/<id>` and its `/data` lives in `axiom/instances/<id>`, each a filesystem of its own with a ZFS quota, so `statfs` inside the container reports the quota as the disk size. The server's retention works unchanged: its free-space floor (`keep.default_min_free_gb`: 10 % of the disk, at most 200 GB, editable under System → Retention) applies to the recordings quota, and continuous footage is trimmed before the dataset reaches it. Recordings and `/data` are separate filesystems, so `retention.same_volume()` is false and the database/event media side gets the server's own small emergency floor (5-20 GB) inside the instance dataset's quota. `quota_gb` limits the recordings dataset only; each instance also takes up to `instance_dir_quota_gb` (default 50 GB, set in `host.json` before creating; raise it for Sites that keep many event clips). `used_gb` in the heartbeat is the `used` of both datasets (exact, read with `zfs get -Hp`), and `set-quota` refuses a quota below the recordings dataset's own `used` unless forced. A ZFS quota counts snapshots too: another reason not to snapshot recordings.
+**ZFS** (`quota_mode: zfs`): the instance's `/recordings` is the dataset `axiom/recordings/<id>` and its `/data` lives in `axiom/instances/<id>`, each a filesystem of its own with a ZFS quota, so `statfs` inside the container reports the quota as the disk size. The server's retention works unchanged: its free-space floor (`keep.default_min_free_gb`: 10 % of the disk, at most 200 GB, editable under System → Retention) applies to the recordings quota, and continuous footage is trimmed before the dataset reaches it. Recordings and `/data` are separate filesystems, so `retention.same_volume()` is false and the database/event media side gets the server's own floor inside the instance dataset's quota (10 % of it, at least 2 GB, at most 20 GB: 5 GB of the default 50), measured with statvfs on `/data` itself; below it the server deletes event keyframes and crops oldest-first (files first, rows after, so it works while the database can't write), and before SQLite opens it frees space from the filesystem alone (`nvr.diskguard.preopen`). `quota_gb` limits the recordings dataset only; each instance also takes up to `instance_dir_quota_gb` (default 50 GB, set in `host.json` before creating; per instance later with `set-instance-quota`). Events no longer keep a clip.mp4 of their own (their video is the recording), so `/data` holds the database, snapshots (~1.3 MB each), keyframes and crops. `used_gb` in the heartbeat is the `used` of both datasets (exact, read with `zfs get -Hp`), and `set-quota` refuses a quota below the recordings dataset's own `used` unless forced. A ZFS quota counts snapshots too: another reason not to snapshot recordings.
 
 The agent's ZFS commands, all on exactly `<dataset at /srv/axiom/recordings>/<id>` and `<dataset at /srv/axiom/instances>/<id>` (it refuses any name in the registry that is not that direct child, so it can never act on a parent, a sibling or the pool):
 
@@ -298,10 +315,11 @@ The agent's ZFS commands, all on exactly `<dataset at /srv/axiom/recordings>/<id
 | detect (`auto`) | `findmnt -n -o FSTYPE,SOURCE --mountpoint /srv/axiom/recordings` (and `.../instances`) |
 | `create-instance` | `zfs list -H -o name <ds>` (refuse if it exists), `zfs create -o quota=<instance_dir_quota_gb × 10⁹> axiom/instances/<id>`, `zfs create -o quota=<quota_gb × 10⁹> axiom/recordings/<id>`; rolled back with `zfs destroy <ds>` if a later step fails |
 | `set-quota` | `zfs get -Hp -o name,property,value used axiom/recordings/<id>`, then `zfs set quota=<bytes> axiom/recordings/<id>` |
+| `set-instance-quota` | `zfs get -Hp -o name,property,value used axiom/instances/<id>`, then `zfs set quota=<bytes> axiom/instances/<id>` |
 | `delete-instance --purge` | `zfs destroy axiom/recordings/<id>`, `zfs destroy axiom/instances/<id>` (no `-r`, no `-f`; a failure is reported in the result, not forced) |
 | `delete-instance --keep-data` | none: both datasets stay, quotas included, and block re-creating the same id |
 | `reconcile` | `zfs set quota=...` on both datasets again (repairs hand edits) |
-| usage, capacity | `zfs get -Hp -o name,property,value used <both datasets>`; host disk: `zfs get ... used,available axiom axiom/recordings` |
+| usage, capacity, preflight | `zfs get -Hp -o name,property,value used,quota,available <both datasets>` (one per instance per heartbeat); host disk: `zfs get ... used,available axiom axiom/recordings` |
 
 Host capacity on ZFS: `disks[0].total_gb` is the pool's usable size (`used` + `available` of the `axiom` dataset, after raidz2 parity) and `free_gb` is `available` of `axiom/recordings`. `statvfs` on `/srv/axiom` would be wrong there (it leaves out every child dataset's data).
 

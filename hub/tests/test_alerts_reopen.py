@@ -1,6 +1,7 @@
 """An acknowledged event alert stays closed: the same site event is re-published many times (heartbeat attention
 lists, synopsis, feedback, lock), and each used to open (and push) the alert again. Condition alerts (disk, offline)
 still re-open when the condition returns. Events marked false alarm, or ranked priority none, raise nothing."""
+import asyncio
 import time
 
 import sqlalchemy as sa
@@ -134,3 +135,50 @@ def test_storage_failing_alert_follows_the_heartbeat(client, superuser):
         alerts.on_open = prev
     assert "storage_failing" in alerts.KINDS and "storage_failing" in alerts.HEALTH_KINDS
     assert "storage_failing" in push.DEFAULT_KINDS and "storage_failing" in push.CUSTOMER_KINDS
+
+
+def test_db_errors_alert_follows_the_heartbeat(client, superuser):
+    """summary.db_errors (database statements that failed with a storage error in the last 15 minutes): open while it is
+    above 0, with the count and summary.storage's last error; closed at 0 and when absent (servers from before it),
+    never opened by anything but a positive int. Pushed with its own title, by default."""
+    from hub import push
+    oid = _org(client, superuser, "dberr-co")
+    s = server(oid, "Desktop")
+    opened = []
+    prev, alerts.on_open = alerts.on_open, lambda org_id, site, kind, detail: opened.append((kind, detail))
+    open_rows = lambda: [r for r in _rows(s, "db_errors") if r["closed_at"] is None]  # noqa: E731
+    try:
+        for summary in ({}, {"db_errors": 0}, {"db_errors": None}, {"db_errors": "3"}, {"db_errors": True}, {"db_errors": -2},
+                        {"db_errors": 2.5}):
+            alerts.on_heartbeat(s, summary, 0)
+            assert open_rows() == [], summary
+        storage = {"ok": True, "error": "disk I/O error", "failing_since": None, "last_ok": time.time(), "reopens": 1, "errors_total": 41}
+        alerts.on_heartbeat(s, {"db_errors": 3, "storage": storage}, 0)
+        alerts.on_heartbeat(s, {"db_errors": 5, "storage": storage}, 0)   # still one row
+        rows = open_rows()
+        assert len(rows) == 1
+        assert rows[0]["detail"] == {"count": 3, "error": "disk I/O error", "errors_total": 41,
+                                     "text": "3 database writes failed in the last 15 minutes: disk I/O error"}
+        assert [k for k, _ in opened] == ["db_errors"]
+        alerts.on_heartbeat(s, {"db_errors": 0, "storage": storage}, 0)   # 15 minutes without one
+        assert open_rows() == []
+        alerts.on_heartbeat(s, {"db_errors": 1}, 0)                       # no storage object: count only
+        assert open_rows()[0]["detail"] == {"count": 1, "text": "1 database write failed in the last 15 minutes"}
+        alerts.on_heartbeat(s, {"cameras": []}, 0)                         # an older server: absent closes it
+        assert open_rows() == []
+        assert len(_rows(s, "db_errors")) == 2
+        # pushed like storage_failing: customers choose it, on by default, with its own title
+        sent: list[dict] = []
+        push.set_sender(lambda sub, payload: sent.append(payload) or True)
+        push.subscribe(superuser["id"], {"endpoint": "https://fcm.googleapis.com/fcm/send/root-dberr"}, None, "t")
+        try:
+            asyncio.run(push.notify_alert(oid, s, "db_errors", alerts.db_errors_detail(4, {"error": "database or disk is full"})))
+        finally:
+            push.set_sender(None)
+            push.unsubscribe(superuser["id"], "https://fcm.googleapis.com/fcm/send/root-dberr")
+        assert sent and sent[0]["title"] == "Desktop: database write errors"
+        assert sent[0]["body"] == "4 database writes failed in the last 15 minutes: database or disk is full"
+    finally:
+        alerts.on_open = prev
+    assert "db_errors" in alerts.KINDS and "db_errors" not in alerts.HUB_KINDS and "db_errors" not in alerts.HEALTH_KINDS
+    assert "db_errors" in push.DEFAULT_KINDS and "db_errors" in push.CUSTOMER_KINDS

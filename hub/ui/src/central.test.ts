@@ -3,6 +3,7 @@ import {
   CENTRAL_TAG, addCamerasHint, addressParts, allocateFormError, cameraEntryError, cameraNetworkError, cameraNetworkOf, cameraNetworkSummary, camerasText, capacityBars,
   centralFormError, cleanCameraNetwork, defaultSubnet, fmtGB, fmtMbps, forwardCount, forwardRows, forwardTargets, isHostName, lanGateway,
   nextSiteNumber, overLimit, parseCameraLimit, parseIPv4, pct, phaseStep, quotaText, resolvedLines, settling, siteBandwidth, sitesWithoutCentral,
+  dataText, dataTitle,
   connectionText, datacenterLine, instanceFor, limitText, reachableText, unenrolledInstances, uploadLine,
 } from "./central";
 import type { HubSitesOrg, ServerSummary, Site } from "./api";
@@ -35,6 +36,16 @@ describe("formatting", () => {
     expect(quotaText(null, 4000)).toBe("4.0 TB quota");
     expect(pct(5000, 4000)).toBe(100);
     expect(pct(1, 0)).toBeNull();
+  });
+  it("data area used of its own quota", () => {
+    expect(dataText(12, 150)).toBe("12 GB of 150 GB");
+    expect(dataText(12.34, 50)).toBe("12.3 GB of 50 GB");
+    expect(dataText(null, 50)).toBe("50 GB quota");
+    expect(dataText(3.5, null)).toBe("3.5 GB");          // XFS / no quota: no quota of its own
+    expect(dataText(null, null)).toBe("—");               // an older agent
+    expect(dataText(undefined, 0)).toBe("—");
+    expect(dataTitle(46, 50, 4)).toBe("Database and event media (/data): 92% used, 4 GB free. Its server stops storing events when it is full");
+    expect(dataTitle(3.5, null, 800)).toBe("Database and event media (/data): no quota of its own, it shares the storage quota; 800 GB free");
   });
 });
 

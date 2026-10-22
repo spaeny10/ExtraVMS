@@ -11,6 +11,8 @@ to cameras behind a Site's Axiom Bridge: the agent listens on each instance's ga
         --mode vpn --subnet 10.20.7.0/24 --quota-gb 4000 --gpu 1 --enroll-token-file /root/t [--dry-run]
     axiom_host.py delete-instance --id acme-gate --keep-data | --purge
     axiom_host.py set-quota --id acme-gate --quota-gb 6000
+    axiom_host.py set-instance-quota --id acme-gate --quota-gb 150     # ZFS: the data dataset (nvr.db, events/)
+    axiom_host.py preflight [--id acme-gate] [--min-free-gb 5] [--json]  # before restarts and redeploys
     axiom_host.py set-camera-network --id acme-gate --subnet 192.168.105.0/24 --public-ip 203.0.113.7 \
         --host cam1.example.net [--clear subnets|public-ips|hosts|all] [--dry-run]
     axiom_host.py restart-instance --id acme-gate [--recreate] [--image axiom/instance:2026.10.06]
@@ -49,7 +51,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, wait as futures_wait
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 PROTO = 1
 log = logging.getLogger("axiom-host")
 
@@ -377,6 +379,23 @@ def _chain(rec: dict) -> str:
 def gb_bytes(gb: float) -> int:
     """quota_gb is decimal GB (like the server's own disk figures); zfs's G suffix is GiB, so quotas go in bytes."""
     return int(round(float(gb) * 1e9))
+
+
+def bytes_gb(n: int | float | None) -> float | None:
+    return None if n is None else round(n / 1e9, 1)
+
+
+PREFLIGHT_MIN_FREE_GB = 2.0        # preflight: an instance's data area needs at least this much free space ...
+PREFLIGHT_MIN_FREE_FRACTION = 0.10  # ... and at least this share of its own data quota (ZFS), whichever is more
+
+
+def preflight_min_free_gb(instance_quota_gb: float | None) -> float:
+    """Free space an instance's data area (nvr.db, events/, backups) needs before a restart or redeploy:
+    max(2 GB, 10% of its own data quota). Without a quota of its own (XFS / no quota: data/ shares the recordings'
+    space, which the server fills on purpose) it is the 2 GB floor alone."""
+    if not instance_quota_gb:
+        return PREFLIGHT_MIN_FREE_GB
+    return round(max(PREFLIGHT_MIN_FREE_GB, PREFLIGHT_MIN_FREE_FRACTION * float(instance_quota_gb)), 1)
 
 
 def parse_zfs_get(text: str) -> dict[str, dict[str, int | None]]:
@@ -799,6 +818,7 @@ class Host:
         self._inst_locks: dict[str, threading.Lock] = collections.defaultdict(threading.Lock)
         self.probe_cache: dict[str, dict] = {}       # id -> {"at", "cameras", "enrolled"}
         self.du_cache: dict[str, float] = {}         # id -> used GB (hosts without XFS or ZFS quotas)
+        self.data_du_cache: dict[str, float] = {}    # id -> data/ used GB (instances without a data dataset of their own)
         self.work = WorkMonitor(self)                # capacity.work: vLLM and per-instance queues
         # Axiom Bridge relay (the agent's Relay fills these): {id: {"listening": [port], "errors": {port: why}}}
         self.relay_status: dict[str, dict] = {}
@@ -1393,6 +1413,41 @@ class Host:
         note = "" if rec["quota_mode"] in ("xfs", "zfs") else " (not enforced: no ZFS dataset or XFS project quota)"
         return {"detail": f"{rec['id']} quota {quota:g} GB{note}", "instance": self.view(rec)}
 
+    def set_instance_quota(self, a: dict) -> dict:
+        """Quota of the instance's data dataset (ZFS instances/<id>: the container's /data with nvr.db, events/ and
+        backups; host.json instance_dir_quota_gb at create). Only ZFS instances have one: on XFS the data directory
+        shares the recordings' project quota and without quotas the filesystem, so there is nothing to set and this
+        refuses (set_quota covers those). Refuses a quota below the current data use unless `force`: a full data
+        dataset stops the server's database writes."""
+        try:
+            quota = float(a.get("quota_gb"))
+        except (TypeError, ValueError):
+            raise OpError("quota_gb is required (GB)") from None
+        if not 1 <= quota <= 10_000_000:
+            raise OpError("quota_gb must be between 1 and 10,000,000")
+        with self.locked():
+            reg = self.load()
+            rec = self._get(reg, a)
+            ds = self.zfs_owned(rec, "instance") if rec["quota_mode"] == "zfs" else None
+            if not ds:
+                shared = {"xfs": "the recordings' XFS project quota", "zfs": "the filesystem at "
+                          f"{self.root / 'instances'} (not a ZFS dataset)"}.get(rec["quota_mode"], "the host filesystem")
+                raise OpError(f"{rec['id']} has no data dataset of its own: its data shares {shared}, so there is no "
+                              "data quota to set (set_quota sets the instance's quota)")
+            used = self.zfs_used_gb([ds])
+            if used is not None and quota < used and not a.get("force"):
+                raise OpError(f"{rec['id']} data already uses {used:.1f} GB; a {quota:g} GB quota would leave its "
+                              "database no room to write (pass force to do it anyway)")
+            rec["instance_quota_gb"] = quota
+            self.exe.run(["zfs", "set", f"quota={gb_bytes(quota)}", ds])
+            self.save(reg)
+        view = self.view(rec)
+        note = ""
+        free, need = view.get("instance_free_gb"), preflight_min_free_gb(quota)
+        if free is not None and free < need and not self.exe.dry_run:
+            note = f"; only {free:g} GB free under it (preflight wants {need:g} GB)"
+        return {"detail": f"{rec['id']} data quota {quota:g} GB{note}", "instance": view} | _plan(self)
+
     def set_camera_network(self, a: dict) -> dict:
         """Replace the instance's camera allow-list. Each of subnets / public_ips / hosts that is sent (a list, or a
         comma-separated string; [] empties it) replaces that list; one left out (or null) stays as it is. The
@@ -1555,7 +1610,8 @@ class Host:
 
     def dispatch(self, op: str, args: dict) -> dict:
         ops = {"create_instance": self.create_instance, "delete_instance": self.delete_instance,
-               "set_quota": self.set_quota, "set_camera_network": self.set_camera_network,
+               "set_quota": self.set_quota, "set_instance_quota": self.set_instance_quota,
+               "set_camera_network": self.set_camera_network,
                "restart_instance": self.restart_instance, "set_resources": self.set_resources,
                "set_relay": self.set_relay, "list": self.list_instances}
         if op not in ops:
@@ -1624,19 +1680,113 @@ class Host:
         return self.du_cache.get(rec["id"])
 
     def refresh_du(self) -> None:
+        """The periodic du pass (Agent.DU_S): total use of instances without XFS or ZFS quotas, and the data/ use of
+        every instance without a data dataset of its own (ZFS reads that exactly, for free)."""
         for rec in self.load()["instances"].values():
-            if rec.get("quota_mode") in ("xfs", "zfs"):   # exact usage is free to read there
+            data = str(self.inst_dir(rec["id"]) / "data")
+            if rec.get("quota_mode") in ("xfs", "zfs"):   # exact total usage is free to read there
+                if rec.get("quota_mode") == "zfs" and (rec.get("datasets") or {}).get("instance"):
+                    continue
+                r = self.exe.query(["du", "-s", "-B1", data], timeout=1800)
+                if r.rc == 0 and r.out.split():
+                    self.data_du_cache[rec["id"]] = bytes_gb(int(r.out.split()[0]))
                 continue
-            r = self.exe.query(["du", "-s", "-B1", str(self.rec_dir(rec["id"])), str(self.inst_dir(rec["id"]) / "data")],
-                               timeout=1800)
+            r = self.exe.query(["du", "-s", "-B1", str(self.rec_dir(rec["id"])), data], timeout=1800)
             if r.rc == 0:
-                self.du_cache[rec["id"]] = round(sum(int(l.split()[0]) for l in r.out.splitlines() if l.strip()) / 1e9, 1)
+                lines = [l.split(None, 1) for l in r.out.splitlines() if l.strip()]
+                self.du_cache[rec["id"]] = bytes_gb(sum(int(l[0]) for l in lines))
+                for l in lines:
+                    if len(l) == 2 and l[1].strip() == data:
+                        self.data_du_cache[rec["id"]] = bytes_gb(int(l[0]))
+
+    @staticmethod
+    def fs_free_gb(path: Path) -> float | None:
+        """Free space where `path` lives (statvfs f_bavail; on an XFS project-quota directory, the project's)."""
+        try:
+            return bytes_gb(shutil.disk_usage(path).free)
+        except OSError:
+            return None
+
+    def storage(self, rec: dict) -> dict:
+        """An instance's storage figures. used_gb: recordings + data, as always. instance_*: its data area (the
+        container's /data: nvr.db, events/, backups). ZFS with a data dataset: that dataset's used and quota, and
+        free = quota - used (capped by what the pool still has). Otherwise (XFS, no quota, or a ZFS host whose
+        instances/ is no dataset): used from the periodic du pass (None until the first), no quota of its own (None:
+        data/ shares the recordings' quota or filesystem), free = the filesystem's free space there.
+        recordings_free_gb likewise for the recordings area. ZFS reads both datasets in one `zfs get`: this runs for
+        every instance on every heartbeat."""
+        iid = rec["id"]
+        out: dict[str, float | None] = {"used_gb": None, "instance_used_gb": None, "instance_quota_gb": None,
+                                        "instance_free_gb": None, "recordings_free_gb": None}
+        ds = {k: n for k, n in (rec.get("datasets") or {}).items() if n} if rec.get("quota_mode") == "zfs" else {}
+        props = self.zfs_get(list(ds.values()), ("used", "quota", "available"))
+
+        def zfs_fig(name: str) -> tuple[int | None, int | None, int | None]:
+            p = props.get(name) or {}
+            used, quota, avail = p.get("used"), p.get("quota") or None, p.get("available")   # quota 0 = none
+            free = max(quota - used, 0) if quota is not None and used is not None else None
+            if avail is not None:
+                free = avail if free is None else min(free, avail)
+            return used, quota, free
+
+        if rec.get("quota_mode") == "zfs":
+            useds = [zfs_fig(n)[0] for n in ds.values()]
+            out["used_gb"] = bytes_gb(sum(useds)) if useds and None not in useds else None
+        else:
+            out["used_gb"] = self.used_gb(rec)
+        if ds.get("instance"):
+            used, quota, free = zfs_fig(ds["instance"])
+            out.update(instance_used_gb=bytes_gb(used), instance_quota_gb=bytes_gb(quota), instance_free_gb=bytes_gb(free))
+        else:
+            out.update(instance_used_gb=self.data_du_cache.get(iid), instance_free_gb=self.fs_free_gb(self.inst_dir(iid) / "data"))
+        out["recordings_free_gb"] = (bytes_gb(zfs_fig(ds["recordings"])[2]) if ds.get("recordings")
+                                     else self.fs_free_gb(self.rec_dir(iid)))
+        return out
+
+    def preflight(self, a: dict | None = None) -> dict:
+        """Before restarting or redeploying instances: is there room for each one's database? One row per instance
+        (or just `id`): its data area's use, quota and free space, the free space it needs (min_free_gb, or
+        preflight_min_free_gb of its data quota) and the recordings' free space (shown only: the server fills the
+        recordings to their quota on purpose). ok is False when any data area has less free space than it needs, or
+        its free space can't be read. Reads the registry and zfs / statvfs only: no hub, no Docker."""
+        a = a or {}
+        min_free = a.get("min_free_gb")
+        if min_free is not None:
+            try:
+                min_free = float(min_free)
+            except (TypeError, ValueError):
+                raise OpError("min_free_gb must be a number (GB)") from None
+            if not 0 <= min_free <= 10_000_000:
+                raise OpError("min_free_gb must be between 0 and 10,000,000")
+        reg = self.load()
+        recs = ([self._get(reg, a)] if a.get("id")
+                else sorted(reg["instances"].values(), key=lambda r: r["slot"]))
+        rows = []
+        for rec in recs:
+            s = self.storage(rec)
+            need = min_free if min_free is not None else preflight_min_free_gb(s["instance_quota_gb"])
+            free = s["instance_free_gb"]
+            problem = ("data free space unreadable" if free is None
+                       else f"data has {free:g} GB free, needs {need:g} GB" if free < need else None)
+            rows.append({"id": rec["id"], "name": rec["name"], "quota_mode": rec.get("quota_mode"),
+                         "data_used_gb": s["instance_used_gb"], "data_quota_gb": s["instance_quota_gb"],
+                         "data_free_gb": free, "min_free_gb": need, "recordings_free_gb": s["recordings_free_gb"],
+                         "ok": problem is None, "problem": problem})
+        bad = [r for r in rows if not r["ok"]]
+        detail = (f"{len(rows)} instance(s) ok" if not bad else
+                  f"{len(bad)} of {len(rows)} instance(s) short of data space: "
+                  + "; ".join(f"{r['id']}: {r['problem']}" for r in bad))
+        return {"ok": not bad, "detail": detail, "instances": rows}
 
     def view(self, rec: dict, states: dict[str, str] | None = None, images: dict[str, str] | None = None) -> dict:
         probe = self.probe_cache.get(rec["id"], {})
         state = (states or {}).get(rec["id"], "missing") if states is not None else ("planned" if self.exe.dry_run else "created")
+        st = self.storage(rec)
         return {"id": rec["id"], "location_id": rec["location_id"], "name": rec["name"], "state": state,
-                "cameras": probe.get("cameras"), "quota_gb": rec["quota_gb"], "used_gb": self.used_gb(rec),
+                "cameras": probe.get("cameras"), "quota_gb": rec["quota_gb"], "used_gb": st["used_gb"],
+                # the data area (/data: nvr.db, events/, backups); quota None = none of its own (see storage)
+                "instance_used_gb": st["instance_used_gb"], "instance_quota_gb": st["instance_quota_gb"],
+                "instance_free_gb": st["instance_free_gb"],
                 "gpu": rec.get("gpu"), "mode": rec["mode"], "subnets": rec.get("subnets", []),
                 "public_ips": rec.get("public_ips", []), "hosts": rec.get("hosts", []),
                 "host_ips": rec.get("host_ips", {}), "quota_mode": rec.get("quota_mode"),
@@ -2592,6 +2742,19 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--force", action="store_true", help="allow a quota below current usage")
     q.add_argument("--dry-run", action="store_true")
 
+    iq = sub.add_parser("set-instance-quota", help="ZFS: change the quota of an instance's data dataset (nvr.db, events/)")
+    iq.add_argument("--id", required=True)
+    iq.add_argument("--quota-gb", type=float, required=True)
+    iq.add_argument("--force", action="store_true", help="allow a quota below the current data use")
+    iq.add_argument("--dry-run", action="store_true")
+
+    pf = sub.add_parser("preflight", help="before restarts / redeploys: does every instance's data area have room? "
+                        "Exit 1 when one is short")
+    pf.add_argument("--id", help="just this instance")
+    pf.add_argument("--min-free-gb", type=float, help="free space each data area needs (default: max(2 GB, 10%% of "
+                    "its data quota); 2 GB where it has no quota of its own)")
+    pf.add_argument("--json", action="store_true", help="print the rows as JSON instead of a table")
+
     cn = sub.add_parser("set-camera-network", help="replace an instance's camera allow-list; lists not named stay as they are")
     cn.add_argument("--id", required=True)
     cn.add_argument("--subnet", action="append", help="LAN / VPN subnet, any protocol (repeat or comma-separate)")
@@ -2660,6 +2823,13 @@ def main(argv: list[str] | None = None) -> int:
             _print(host.delete_instance({"id": ns.id, "keep_data": not ns.purge}) | _plan(host))
         elif ns.cmd == "set-quota":
             _print(host.set_quota({"id": ns.id, "quota_gb": ns.quota_gb, "force": ns.force}) | _plan(host))
+        elif ns.cmd == "set-instance-quota":
+            _print(host.set_instance_quota({"id": ns.id, "quota_gb": ns.quota_gb, "force": ns.force}))
+        elif ns.cmd == "preflight":
+            out = host.preflight({"id": ns.id, "min_free_gb": ns.min_free_gb})
+            _print(out if ns.json else format_preflight(out))
+            if not out["ok"]:
+                return 1
         elif ns.cmd == "set-camera-network":
             out = host.set_camera_network(camera_args(ns))
             fw = out.pop("dry_run", {}).get("firewall")
@@ -2733,6 +2903,20 @@ def camera_args(ns: argparse.Namespace) -> dict:
         vals = [s.strip() for v in given or [] for s in v.split(",") if s.strip()]
         args[key] = vals if vals or flag in clear or "all" in clear else None
     return args
+
+
+def format_preflight(out: dict) -> str:
+    """Host.preflight -> a fixed-width table and a closing OK / SHORT line."""
+    def gb(v: float | None) -> str:
+        return "-" if v is None else f"{v:g} GB"
+    head = ("INSTANCE", "QUOTA", "DATA USED", "DATA QUOTA", "DATA FREE", "NEEDS", "RECORDINGS FREE", "STATUS")
+    rows = [head] + [(r["id"], r["quota_mode"] or "-", gb(r["data_used_gb"]), gb(r["data_quota_gb"]),
+                      gb(r["data_free_gb"]), gb(r["min_free_gb"]), gb(r["recordings_free_gb"]),
+                      "ok" if r["ok"] else "SHORT: " + r["problem"]) for r in out["instances"]]
+    widths = [max(len(row[i]) for row in rows) for i in range(len(head) - 1)]
+    lines = ["  ".join(c.ljust(w) for c, w in zip(row, widths)) + "  " + row[-1] for row in rows]
+    lines.append(("OK: " if out["ok"] else "SHORT: ") + out["detail"])
+    return "\n".join(lines) + "\n"
 
 
 def _plan(host: Host) -> dict:

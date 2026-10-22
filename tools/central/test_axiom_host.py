@@ -385,6 +385,45 @@ class Isolation(unittest.TestCase):
         self.assertFalse(self.exe.cmds("zfs"))
         self.assertFalse(self.host.rec_dir("nq").exists())
 
+    def test_data_area_without_its_own_quota(self):
+        # XFS / no quota: data/ shares the recordings' quota or filesystem. Its use comes from the du pass, its free
+        # space from the filesystem, and it has no quota of its own
+        view = {v["id"]: v for v in self.host.list_instances()["instances"]}["acme-gate"]
+        self.assertIsNone(view["instance_used_gb"])                  # no du pass yet
+        self.assertIsNone(view["instance_quota_gb"])
+        self.assertIsInstance(view["instance_free_gb"], float)       # statvfs of the (temp) directory
+        reg = self.host.load()
+        reg["instances"]["beta-yard"]["quota_mode"] = "none"
+        self.host.save(reg)
+        a_data, b_data = (str(self.host.inst_dir(i) / "data") for i in ("acme-gate", "beta-yard"))
+        self.exe.answers["du -s -B1"] = f"2500000000000\t{self.host.rec_dir('beta-yard')}\n3500000000\t{b_data}\n"
+        self.host.refresh_du()
+        self.assertIn(["du", "-s", "-B1", a_data], self.exe.calls)  # XFS: data/ alone (the total is statvfs)
+        self.assertEqual(self.host.du_cache, {"beta-yard": 2503.5})
+        self.assertEqual(self.host.data_du_cache["beta-yard"], 3.5)
+        self.assertEqual(self.host.data_du_cache["acme-gate"], 2500.0)  # the canned answer's first figure
+        views = {v["id"]: v for v in self.host.list_instances()["instances"]}
+        self.assertEqual(views["beta-yard"]["instance_used_gb"], 3.5)
+        self.assertEqual(views["beta-yard"]["used_gb"], 2503.5)
+        self.assertIsNone(views["beta-yard"]["instance_quota_gb"])
+        # nothing to set: set_instance_quota refuses, changes nothing
+        for iid in ("acme-gate", "beta-yard"):
+            with self.assertRaises(ah.OpError) as cm:
+                self.host.set_instance_quota({"id": iid, "quota_gb": 100})
+            self.assertIn("no data dataset of its own", str(cm.exception))
+        self.assertNotIn("instance_quota_gb", self.host.load()["instances"]["acme-gate"])
+        self.assertFalse(self.exe.cmds("zfs"))
+        # preflight: the 2 GB floor (no data quota), or the threshold given
+        rows = {r["id"]: r for r in self.host.preflight()["instances"]}
+        self.assertEqual(rows["acme-gate"]["min_free_gb"], 2.0)
+        self.assertTrue(self.host.preflight({"min_free_gb": 0})["ok"])
+        out = self.host.preflight({"id": "beta-yard", "min_free_gb": 10_000_000})
+        self.assertFalse(out["ok"])
+        self.assertEqual([r["id"] for r in out["instances"]], ["beta-yard"])
+        self.assertIn("beta-yard: data has", out["detail"])
+        with self.assertRaises(ah.OpError):
+            self.host.preflight({"min_free_gb": -1})
+
     def test_finish_enroll_scrubs_token(self):
         self.exe.answers["docker exec axiom-acme-gate"] = json.dumps({"enrolled": True, "site_id": "s1", "cameras": 0})
         self.assertTrue(self.host.finish_enroll(self.host.load()["instances"]["acme-gate"]))
@@ -565,6 +604,128 @@ class ZfsMode(unittest.TestCase):
         self.assertEqual(self.zfs_calls("set")[-1], ["zfs", "set", "quota=1000000000000", REC_DS])
         self.assertEqual(self.host.load()["instances"]["acme-gate"]["quota_gb"], 1000)
         self.assertFalse(self.exe.cmds("xfs_quota"))
+
+    def test_data_dataset_figures(self):
+        self.host.create_instance(dict(ZVPN))
+        self.state.datasets[REC_DS]["used"] = 812_400_000_000
+        self.state.datasets[INST_DS]["used"] = 42_500_000_000
+        self.exe.calls.clear()
+        view = self.host.list_instances()["instances"][0]
+        self.assertEqual(view["used_gb"], 854.9)                         # recordings + data, as before
+        self.assertEqual((view["instance_used_gb"], view["instance_quota_gb"], view["instance_free_gb"]),
+                         (42.5, 50.0, 7.5))                             # free = quota - used
+        # one zfs get for both datasets per instance (every heartbeat), no du
+        self.assertEqual([c for c in self.zfs_calls("get") if INST_DS in c],
+                         [["zfs", "get", "-Hp", "-o", "name,property,value", "used,quota,available", INST_DS, REC_DS]])
+        self.assertFalse(self.exe.cmds("du"))
+        self.state.datasets[INST_DS]["available"] = 3_000_000_000       # the pool itself is nearly full
+        self.assertEqual(self.host.storage(self.host.load()["instances"]["acme-gate"])["instance_free_gb"], 3.0)
+        self.state.datasets[INST_DS]["quota"] = 0                       # cleared by hand: no quota, pool space
+        self.assertEqual(self.host.list_instances()["instances"][0]["instance_quota_gb"], None)
+        del self.state.datasets[INST_DS]                                 # unreadable: unknown, not 0
+        view = self.host.list_instances()["instances"][0]
+        self.assertEqual((view["used_gb"], view["instance_used_gb"], view["instance_free_gb"]), (None, None, None))
+
+    def test_set_instance_quota(self):
+        self.host.create_instance(dict(ZVPN))
+        self.state.datasets[INST_DS]["used"] = 42_500_000_000
+        for bad in (0.5, 20_000_000, None, "x"):
+            with self.assertRaises(ah.OpError):
+                self.host.set_instance_quota({"id": "acme-gate", "quota_gb": bad})
+        with self.assertRaises(ah.OpError) as cm:                       # below the data use
+            self.host.set_instance_quota({"id": "acme-gate", "quota_gb": 40})
+        self.assertIn("already uses 42.5 GB", str(cm.exception))
+        self.assertFalse(self.zfs_calls("set"))
+        out = self.host.set_instance_quota({"id": "acme-gate", "quota_gb": 150})
+        self.assertEqual(self.zfs_calls("set"), [["zfs", "set", "quota=150000000000", INST_DS]])   # decimal GB in bytes
+        self.assertEqual(out["detail"], "acme-gate data quota 150 GB")
+        self.assertEqual((out["instance"]["instance_quota_gb"], out["instance"]["instance_free_gb"]), (150.0, 107.5))
+        rec = self.host.load()["instances"]["acme-gate"]
+        self.assertEqual((rec["instance_quota_gb"], rec["quota_gb"]), (150, 4000))   # recordings untouched
+        self.assertEqual(self.state.datasets[REC_DS]["quota"], 4_000_000_000_000)
+        # allowed, but says it leaves less than preflight wants (max(2 GB, 10% of 45 GB))
+        self.assertIn("only 2.5 GB free under it (preflight wants 4.5 GB)",
+                      self.host.set_instance_quota({"id": "acme-gate", "quota_gb": 45})["detail"])
+        self.host.set_instance_quota({"id": "acme-gate", "quota_gb": 10, "force": True})
+        self.assertEqual(self.state.datasets[INST_DS]["quota"], 10_000_000_000)
+        # reconcile re-applies the stored value
+        self.state.datasets[INST_DS]["quota"] = 0
+        self.host.reconcile()
+        self.assertEqual(self.state.datasets[INST_DS]["quota"], 10_000_000_000)
+        # a dry run plans the zfs set and changes nothing
+        dry = ZfsExec(self.state, dry_run=True)
+        out = make_host(self.tmp, dry).set_instance_quota({"id": "acme-gate", "quota_gb": 60})
+        self.assertEqual([s["cmd"] for s in out["dry_run"]["steps"]], [["zfs", "set", "quota=60000000000", INST_DS]])
+        self.assertFalse([c for c in dry.calls if c[:2] == ["zfs", "set"]])
+        self.assertEqual(self.host.load()["instances"]["acme-gate"]["instance_quota_gb"], 10)
+        # the hub's command
+        out = self.host.dispatch("set_instance_quota", {"id": "acme-gate", "quota_gb": 60})
+        self.assertEqual(out["instance"]["instance_quota_gb"], 60.0)
+        with self.assertRaises(ah.OpError):
+            self.host.dispatch("set_instance_quota", {"id": "nope", "quota_gb": 60})
+
+    def test_set_instance_quota_without_a_data_dataset(self):
+        tmp = Path(tempfile.mkdtemp())
+        exe = ZfsExec(ZfsState(tmp / "srv", instances_on_zfs=False))
+        host = make_host(tmp, exe)
+        host.create_instance(dict(ZVPN))
+        with self.assertRaises(ah.OpError) as cm:
+            host.set_instance_quota({"id": "acme-gate", "quota_gb": 100})
+        self.assertIn("not a ZFS dataset", str(cm.exception))
+        self.assertFalse([c for c in exe.calls if c[:2] == ["zfs", "set"]])
+        view = host.list_instances()["instances"][0]
+        self.assertIsNone(view["instance_quota_gb"])
+        self.assertIsInstance(view["instance_free_gb"], float)          # the filesystem's free space
+        host.refresh_du()                                                # data/ is measured by du there
+        self.assertIn(["du", "-s", "-B1", str(host.inst_dir("acme-gate") / "data")], exe.calls)
+
+    def test_preflight(self):
+        self.host.create_instance(dict(ZVPN))
+        self.host.create_instance(dict(ZFWD))
+        self.state.datasets[INST_DS]["used"] = 42_500_000_000              # 7.5 GB free of 50: needs 5
+        self.state.datasets[REC_DS]["used"] = 3_999_000_000_000
+        out = self.host.preflight()
+        self.assertTrue(out["ok"])
+        row = out["instances"][0]
+        self.assertEqual(row, {"id": "acme-gate", "name": "Acme Gate · Central", "quota_mode": "zfs",
+                               "data_used_gb": 42.5, "data_quota_gb": 50.0, "data_free_gb": 7.5, "min_free_gb": 5.0,
+                               "recordings_free_gb": 1.0, "ok": True, "problem": None})
+        self.state.datasets[INST_DS]["used"] = 46_000_000_000              # 4 GB free: short
+        out = self.host.preflight()
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["detail"], "1 of 2 instance(s) short of data space: acme-gate: data has 4 GB free, needs 5 GB")
+        self.assertTrue(out["instances"][1]["ok"])
+        self.assertTrue(self.host.preflight({"min_free_gb": 3})["ok"])
+        self.assertTrue(self.host.preflight({"id": "beta-yard"})["ok"])
+        del self.state.datasets[INST_DS]
+        self.assertEqual(self.host.preflight({"id": "acme-gate"})["instances"][0]["problem"], "data free space unreadable")
+        self.state.datasets[INST_DS] = {"used": 46_000_000_000, "quota": 50_000_000_000, "available": 4_000_000_000}
+        self.assertFalse(self.exe.cmds("docker ps"))                     # registry and zfs only
+        # the CLI: a table, exit 1 when short; --json; --min-free-gb
+        cfg = self.tmp / "host.json"
+        cfg.write_text(json.dumps({"root": str(self.tmp / "srv"), "hub_ips": [HUB], "ai_env": str(self.tmp / "ai.env")}))
+        from unittest import mock
+
+        def cli(*args):
+            buf = __import__("io").StringIO()
+            with mock.patch.object(ah, "Exec", lambda dry_run=False: self.exe), contextlib.redirect_stdout(buf):
+                rc = ah.main(["--config", str(cfg), "preflight", *args])
+            return rc, buf.getvalue()
+
+        rc, text = cli()
+        self.assertEqual(rc, 1)
+        lines = text.splitlines()
+        self.assertTrue(lines[0].startswith("INSTANCE   QUOTA  DATA USED  DATA QUOTA  DATA FREE"))
+        self.assertIn("acme-gate", lines[1])
+        self.assertTrue(lines[1].endswith("SHORT: data has 4 GB free, needs 5 GB"))
+        self.assertTrue(lines[2].startswith("beta-yard") and lines[2].endswith("  ok"))
+        self.assertTrue(lines[-1].startswith("SHORT: 1 of 2"))
+        rc, text = cli("--min-free-gb", "3")
+        self.assertEqual(rc, 0)
+        self.assertTrue(text.splitlines()[-1].startswith("OK: 2 instance(s) ok"))
+        rc, text = cli("--id", "acme-gate", "--json")
+        self.assertEqual(rc, 1)
+        self.assertEqual(json.loads(text)["instances"][0]["data_free_gb"], 4.0)
 
     def test_delete_purge_destroys_only_the_two_children(self):
         self.host.create_instance(dict(ZVPN))

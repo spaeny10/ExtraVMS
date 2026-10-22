@@ -344,7 +344,10 @@ export type RetentionPolicy = {
   continuous_days: number;
   pad_before_s: number;
   pad_after_s: number;
-  keep: { person: boolean; qwen_analyzed: boolean; rule_events: boolean; feedback: boolean; vehicles_in_detect_zones: boolean };
+  keep: {
+    person: boolean; qwen_analyzed: boolean; rule_events: boolean; feedback: boolean; vehicles_in_detect_zones: boolean;
+    weapon_check: boolean; high_priority: boolean; ppe_violations: boolean; plates: boolean;
+  };
   rule_topics: string[];
   min_free_gb: number;
 };

@@ -9,7 +9,8 @@ import sqlalchemy as sa
 from . import cameras, db
 
 KINDS = ("offline", "camera_down", "disk", "clock", "detector_fallback", "detector_stalled", "vlm_fallback_active", "event_high", "event_policy", "event_watched",
-         "site_link_down", "host_offline", "coverage_budget", "host_queue_growing", "storage_failing", "bridge_offline")
+         "site_link_down", "host_offline", "coverage_budget", "host_queue_growing", "storage_failing", "bridge_offline",
+         "instance_data_full", "db_errors")
 # site_link_down  the server's heartbeat says every camera is unreachable at once (summary.site_link_down): the link to
 #                 the Site (SpeedFusion tunnel, port forwards, the BR1's cellular uplink) is probably down. One alert for
 #                 the server instead of one camera_down per camera; cameras flagged link_down raise no camera_down.
@@ -24,7 +25,14 @@ KINDS = ("offline", "camera_down", "disk", "clock", "detector_fallback", "detect
 # bridge_offline  an Axiom Bridge (bridges.py) stopped heartbeating: the central instance cannot reach the Site's cameras
 #                 through it. The customer's row (org_id = the bridge's customer, site_id = the bridge id, detail.location_id):
 #                 its members who see that Site are notified, and hub administrators (like camera_down). Closes on reconnect.
-HUB_KINDS = ("host_offline", "coverage_budget", "host_queue_growing")
+# instance_data_full  a central instance's data area (its /data: database, event media; host agent 0.3.2+ reports
+#                 instance_used_gb / instance_quota_gb) is 90 % full or more (hosts.check_data_alerts). Hub-level like
+#                 host_offline (site_id = the host id, key = the instance id); closes below 88 % or when the instance goes.
+# db_errors       the server's heartbeat counts database statements that failed with a storage error ("disk I/O error",
+#                 "database or disk is full", ...) in the last 15 minutes (summary.db_errors): open while that is above 0.
+#                 Catches transient write failures that storage_failing (a minute or more without a write) misses.
+#                 Servers that don't send db_errors never open it.
+HUB_KINDS = ("host_offline", "coverage_budget", "host_queue_growing", "instance_data_full")
 # Server detector health, from the heartbeat's `health_alerts` list (backend nvr/detector.py): open while listed.
 #   detector_fallback  the Hailo accelerator is missing or failing; YOLO runs on the CPU (or nothing can detect)
 #   vlm_fallback_active  the main local Qwen (e.g. the 27B) is down and the fallback model (the 9B) is answering
@@ -117,12 +125,26 @@ def on_heartbeat(site: dict, summary: dict, skew_s: float) -> None:
             open(site, kind, "", {k: a[k] for k in ("text", "since", "error", "queue") if a.get(k) is not None})
         else:
             close(site, kind)
+    n = summary.get("db_errors")
+    if isinstance(n, int) and not isinstance(n, bool) and n > 0:
+        open(site, "db_errors", "", db_errors_detail(n, summary.get("storage")))
+    else:   # 0, absent (servers from before db_errors) or malformed
+        close(site, "db_errors")
     if abs(skew_s) > 30:
         open(site, "clock", "", {"skew_s": round(skew_s)})
     else:
         close(site, "clock")
     for e in summary.get("attention") or []:
         _from_event(site, e)
+
+
+def db_errors_detail(n: int, storage) -> dict:
+    """{count, error?, errors_total?, text} for a db_errors alert: summary.db_errors and summary.storage's last error."""
+    st = storage if isinstance(storage, dict) else {}
+    err = str(st["error"])[:300] if st.get("error") else None
+    total = st.get("errors_total") if isinstance(st.get("errors_total"), int) and not isinstance(st.get("errors_total"), bool) else None
+    text = f"{n} database write{'s' if n != 1 else ''} failed in the last 15 minutes{f': {err}' if err else ''}"
+    return {"count": n, "text": text, **({"error": err} if err else {}), **({"errors_total": total} if total is not None else {})}
 
 
 def on_event(site: dict, msg: dict) -> None:

@@ -8,7 +8,7 @@ import pytest
 import sqlalchemy as sa
 from fastapi.testclient import TestClient
 
-from hub import auth, db, hostlist, hosts
+from hub import alerts, auth, db, hostlist, hosts
 
 PW = "hostlist-pass-12345"
 NEW, OLD = "sha256:" + "1" * 64, "sha256:" + "2" * 64   # Docker image IDs: what the host creates now, and an older build
@@ -229,3 +229,73 @@ def test_pure_helpers():
     assert [r["id"] for r in hostlist.sort_instances(rows, "storage")] == ["b", "c", "a"]           # ties A-Z, unknown last
     assert [r["id"] for r in hostlist.sort_instances(rows, "storage", "asc")] == ["b", "c", "a"]
     assert hostlist.page(list(range(7)), 3, 6) == ([6], 7) and hostlist.page(list(range(3)), None, 1) == ([1, 2], 3)
+    # the data area (agent 0.3.2+): 85 % of its own quota or more; no quota of its own (XFS / none) or unknown = never
+    assert hostlist.instance_problems({**base, "instance_used_gb": 42.5, "instance_quota_gb": 50}) == ["data"]
+    assert hostlist.instance_problems({**base, "instance_used_gb": 42.4, "instance_quota_gb": 50}) == []
+    assert hostlist.instance_problems({**base, "instance_used_gb": 42.5, "instance_quota_gb": None}) == []
+    assert hostlist.instance_problems({**base, "instance_used_gb": None, "instance_quota_gb": 50}) == []
+    assert hostlist.instance_problems({**base, "used_gb": 95, "instance_used_gb": 50, "instance_quota_gb": 50}) == ["storage", "data"]
+    assert "data" in hostlist.INSTANCE_PROBLEMS
+
+
+def _data_alerts(host_id):
+    return {r["key"]: r for r in db.rows(sa.select(db.alerts).where(db.alerts.c.site_id == host_id, db.alerts.c.kind == hosts.DATA_KIND,
+                                                                     db.alerts.c.closed_at.is_(None)))}
+
+
+def test_heartbeat_data_area_problem_and_alert(fleet, monkeypatch):
+    """A 0.3.2 agent's instance_used_gb / instance_quota_gb / instance_free_gb: kept in the instance's info and served,
+    the `data` problem at 85 % (filter and summary count), instance_data_full at 90 % (hub-level, key = the instance id)
+    and closed below 88 % or when the instance is gone."""
+    monkeypatch.setattr(alerts, "on_open", None)
+    ci = fleet.ci["ok"]
+    row = db.one(sa.select(db.hosts).where(db.hosts.c.id == fleet.big))
+    conn = SimpleNamespace(host_id=fleet.big, host=row)
+
+    def beat(used, quota=50.0, *more):
+        insts = [{"id": ci, "state": "running", "used_gb": 101.0, "quota_gb": 1000, "image_id": NEW,
+                  "instance_used_gb": used, "instance_quota_gb": quota, "instance_free_gb": None if used is None or quota is None else quota - used},
+                 *more]
+        hosts.registry._on_heartbeat(conn, {"t": "heartbeat", "capacity": _cap(), "instances": insts})
+
+    beat(12.3, 150.0)
+    info = db.one(sa.select(db.central_instances.c.info).where(db.central_instances.c.id == ci))["info"]
+    assert (info["instance_used_gb"], info["instance_quota_gb"], info["instance_free_gb"]) == (12.3, 150.0, 137.7)
+    item = next(c for c in fleet.root.get("/api/hub/central", params={"host": fleet.big}).json()["items"] if c["id"] == ci)
+    assert (item["instance_used_gb"], item["instance_quota_gb"], item["instance_free_gb"], item["problems"]) == (12.3, 150.0, 137.7, [])
+    assert _data_alerts(fleet.big) == {}
+
+    beat(43.0)                                                    # 86 %: the problem, no alert yet
+    get = lambda **p: fleet.root.get("/api/hub/central", params={"host": fleet.big, **p}).json()  # noqa: E731
+    assert [c["id"] for c in get(problem="data")["items"]] == [ci]
+    after = fleet.root.get("/api/hub/fleet-summary").json()
+    assert after["instances"]["data"] - fleet.before["instances"].get("data", 0) == 1
+    assert _data_alerts(fleet.big) == {}
+
+    beat(45.5)                                                    # 91 %: opens, once
+    beat(46.0)
+    rows = _data_alerts(fleet.big)
+    assert list(rows) == [ci] and rows[ci]["org_id"] == hosts.HUB_ORG
+    d = rows[ci]["detail"]
+    assert (d["used_gb"], d["quota_gb"], d["free_gb"], d["instance_id"], d["site"]) == (45.5, 50.0, 4.5, ci, "HL Alpha")   # as it opened
+    assert d["text"].startswith(f"HL Alpha on HL big {fleet.tag}: data storage 91% full (45.5 of 50 GB)")
+    assert hosts.DATA_KIND in alerts.KINDS and hosts.DATA_KIND in alerts.HUB_KINDS
+
+    beat(44.5)                                                    # 89 %: between the two, stays open
+    assert list(_data_alerts(fleet.big)) == [ci]
+    beat(None)                                                    # unknown: stays open
+    assert list(_data_alerts(fleet.big)) == [ci]
+    beat(43.5)                                                    # 87 %: closes (the problem stays at 85 %)
+    assert _data_alerts(fleet.big) == {}
+    beat(48.0, 50.0)
+    assert list(_data_alerts(fleet.big)) == [ci]
+    beat(48.0, None)                                              # no quota of its own any more: closes
+    assert _data_alerts(fleet.big) == {}
+    beat(48.0, 50.0)
+    assert list(_data_alerts(fleet.big)) == [ci]
+    hosts.registry._on_heartbeat(conn, {"t": "heartbeat", "capacity": _cap(), "instances": []})   # the instance is gone
+    assert _data_alerts(fleet.big) == {}
+    # an older agent (no data figures) never opens it
+    hosts.registry._on_heartbeat(conn, {"t": "heartbeat", "capacity": _cap(), "instances": [{"id": ci, "state": "running", "used_gb": 1.0}]})
+    assert _data_alerts(fleet.big) == {}
+    assert hosts.data_frac({"instance_used_gb": 45, "instance_quota_gb": 0}) is None

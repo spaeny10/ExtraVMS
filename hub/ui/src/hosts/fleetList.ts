@@ -14,7 +14,7 @@ export const HOST_STATUSES = ["online", "offline", "agent", "attention"] as cons
 export const HOST_SORTS = ["name", "load", "free", "instances"] as const;
 export const INSTANCE_STATES = ["running", "provisioning", "failed", "deleting"] as const;
 export const INSTANCE_MODES = ["vpn", "forward", "bridge"] as const;
-export const INSTANCE_PROBLEMS = ["any", "down", "storage", "queue", "image", "cameras"] as const;
+export const INSTANCE_PROBLEMS = ["any", "down", "storage", "data", "queue", "image", "cameras"] as const;
 export const INSTANCE_SORTS = ["created", "site", "customer", "host", "storage", "cameras", "queue"] as const;
 
 export const HOST_STATUS_LABEL: Record<(typeof HOST_STATUSES)[number], string> = { online: "Online", offline: "Offline", agent: "Older agent", attention: "Needs attention" };
@@ -22,7 +22,8 @@ export const HOST_SORT_LABEL: Record<(typeof HOST_SORTS)[number], string> = { na
 export const STATE_LABEL: Record<(typeof INSTANCE_STATES)[number], string> = { running: "Running", provisioning: "Provisioning", failed: "Failed", deleting: "Removing" };
 export const MODE_LABEL: Record<(typeof INSTANCE_MODES)[number], string> = { vpn: "SpeedFusion VPN", forward: "Port forwarding", bridge: "Axiom Bridge" };
 export const PROBLEM_LABEL: Record<(typeof INSTANCE_PROBLEMS)[number], string> = {
-  any: "Any problem", down: "Not running", storage: "Storage ≥ 90 %", queue: "Queue backing up", image: "Other image", cameras: "Cameras down",
+  any: "Any problem", down: "Not running", storage: "Storage ≥ 90 %", data: "Data storage nearly full", queue: "Queue backing up", image: "Other image",
+  cameras: "Cameras down",
 };
 export const HOST_PROBLEM_LABEL: Record<HostProblem, string> = { offline: "Offline", agent: "Older agent", queue: "Queue alert" };
 export const INSTANCE_SORT_LABEL: Record<(typeof INSTANCE_SORTS)[number], string> = {
@@ -121,6 +122,8 @@ export function attentionItems(s: FleetSummary | null | undefined): AttentionIte
   add("down", i.down, `${n(i.down, "instance")} not running`, "bad", { tab: "instances", problem: "down" },
     "Failed, its container stopped on the host, or its server not connected to the hub");
   add("storage", i.storage, `${n(i.storage, "instance")} at 90 % storage or more`, "warn", { tab: "instances", problem: "storage", sort: "storage" });
+  add("data", i.data ?? 0, `${n(i.data ?? 0, "instance")} with data storage nearly full`, "bad", { tab: "instances", problem: "data" },
+    "Its database and event media at 85 % of their own quota or more: the server stops storing events when it is full (Change data storage)");
   add("queue", i.queue, `${n(i.queue, "detection queue")} backing up`, "warn", { tab: "instances", problem: "queue", sort: "queue" },
     "YOLO verify queue above 20 events, or growing over the last 15 minutes");
   add("agent", h.agent, `${n(h.agent, "host")} on an older agent`, "warn", { tab: "hosts", status: "agent" },
@@ -178,8 +181,9 @@ export function imageTitle(c: Pick<CentralInstance, "image" | "image_id" | "host
   return `Runs ${one(c.image, c.image_id)}; its host creates ${one(c.host_image, c.host_image_id)}`;
 }
 
-/** The problems worth a badge on the row (its Storage and Cameras cells already say full and "N down" in their own words). */
-export const rowProblems = (c: Pick<CentralInstance, "problems">): InstanceProblem[] => (c.problems ?? []).filter((p) => p !== "storage" && p !== "cameras");
+/** The problems worth a badge on the row (its Storage, Data and Cameras cells already say full and "N down" in their own words). */
+export const rowProblems = (c: Pick<CentralInstance, "problems">): InstanceProblem[] =>
+  (c.problems ?? []).filter((p) => p !== "storage" && p !== "data" && p !== "cameras");
 
 // ---- bulk changes (the Instances table's checkboxes)
 

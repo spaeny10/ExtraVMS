@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { age, applicableProcedures, callsByContact, cameraNames, flatSteps, fmtDur, incidentTitle, keyLabel, logText, nextUncalled, numberTiles, parseSeconds, percent,
+import { age, applicableProcedures, eventMediaState, callsByContact, cameraNames, flatSteps, fmtDur, incidentTitle, keyLabel, logText, nextUncalled, numberTiles, parseSeconds, percent,
   rateOf, reportRange, shiftStart, toCsv } from "./format";
 
 describe("report helpers", () => {
@@ -118,5 +118,17 @@ describe("respond helpers", () => {
     expect(nextUncalled(contacts, log)?.id).toBe(7);
     expect(callsByContact(log).get(5)?.length).toBe(1);
     expect(nextUncalled(contacts, [...log, { ...log[0], id: 2, detail: { contact_id: 7, outcome: "spoke" } }])).toBe(null);
+  });
+});
+
+describe("eventMediaState", () => {
+  it("plays the recording once the event is finished; no clip column needed", () => {
+    expect(eventMediaState(null)).toEqual({ waiting: true, video: false });
+    expect(eventMediaState({ status: "pending", snapshot: null })).toEqual({ waiting: true, video: false });
+    expect(eventMediaState({ status: "open", snapshot: "events/1/snapshot.jpg" })).toEqual({ waiting: true, video: false });
+    expect(eventMediaState({ status: "verified", snapshot: "events/1/snapshot.jpg" })).toEqual({ waiting: false, video: true });
+    expect(eventMediaState({ status: "verified", snapshot: null })).toEqual({ waiting: true, video: true });
+    expect(eventMediaState({ status: "rejected", snapshot: null })).toEqual({ waiting: false, video: true });
+    expect(eventMediaState({ status: "error", snapshot: null })).toEqual({ waiting: true, video: true });
   });
 });

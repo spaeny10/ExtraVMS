@@ -1,4 +1,4 @@
-"""Event pipeline: tracker -> recording clip -> YOLO verify -> Qwen synopsis -> search index."""
+"""Event pipeline: tracker -> YOLO verify (frames from the recording; no clip is kept) -> Qwen synopsis -> search index."""
 from __future__ import annotations
 
 import asyncio
@@ -17,7 +17,6 @@ from . import aischedule, baseline, cells, detector, frames, identities, journey
 from . import synopsis as vlm
 from .config import settings
 from .db import db
-from .mediamtx import fetch_clip
 from .tracker import Tracker
 from .verifier import Verifier, event_dir, grab_frames
 
@@ -266,21 +265,23 @@ class Pipeline:
             return
         if e["end_ts"] is None:  # queued while still being tracked: the tracker re-queues it when it closes
             return
-        # MediaMTX flushes fMP4 parts every second; wait until the end of the clip is on disk.
+        # MediaMTX flushes fMP4 parts every second; wait until the end of the event's span (+ post-roll) is on disk.
         clip_end = e["end_ts"] + settings.clip_post_roll
         wait = clip_end + settings.recording_lag - time.time()
         if wait > 0:
             await asyncio.sleep(wait)
         clip_start = e["start_ts"] - settings.clip_pre_roll
-        clip = event_dir(event_id) / "clip.mp4"
-        await fetch_clip(e["camera_id"], clip_start, clip_end - clip_start, clip)
+        # No clip.mp4: the frames come straight from the recording segments, and the event's video is that stretch of
+        # the continuous recording (retention keeps it around events: keep.py). A per-event clip was a second copy;
+        # 2026-10-22 they filled an instance's 50 GB data dataset in a week and its database stopped taking writes.
         away = bool(e.get("ptz_preset"))  # PTZ camera turned away from home: zones/masks don't apply
         result = await asyncio.get_running_loop().run_in_executor(
-            self.gpu, self.verifier.verify, e, clip, clip_start, None if away else self.cameras.get(e["camera_id"], {}).get("zones"))
+            self.gpu, self.verifier.verify, e, frames.Recording(e["camera_id"]), clip_start,
+            None if away else self.cameras.get(e["camera_id"], {}).get("zones"))
         reid = result.pop("reid", None)
         if "path" in result:  # extended into the pre/post-roll: the region cells follow
             result["cells"] = cells.for_event(result["path"])
-        db.update_event(event_id, clip=str(clip.relative_to(settings.data_dir)), error=None, **result)
+        db.update_event(event_id, **{"error": None, **result})   # a result can carry its own error ("no frames")
         if reid and not e.get("people"):   # a group's crops are several people: no one fingerprint (merge.py)
             db.set_reid(event_id, reid)
         if result["status"] == "rejected":
@@ -291,8 +292,8 @@ class Pipeline:
         if result["status"] == "verified" and label == "vehicle":
             clip = await self.get_clip()
             await asyncio.get_running_loop().run_in_executor(self.gpu, identities.embed_vehicle, clip, event_id)
-        # Verified from the clip (snapshot, re-ID and fingerprint are made); a camera over the hourly event limit
-        # keeps the snapshot only, or its clips fill the disk (retention.EventRateGuard).
+        # Verified (snapshot, re-ID and fingerprint are made); a camera over the hourly event limit keeps the snapshot
+        # only, or its crops and keyframes fill the disk (retention.EventRateGuard).
         if retention.rate_guard.check(e["camera_id"]):
             retention.drop_clip_media(event_id)
         if result["status"] == "verified" and (watched := identities.check_watch(event_id)):
@@ -693,7 +694,7 @@ class Pipeline:
         return await asyncio.get_running_loop().run_in_executor(self.decode, plate.gather, e, n)
 
     async def weapon_evidence(self, e: dict) -> dict:
-        """Full-resolution crops of every person in the event for weaponcheck: the clip is decoded on a decode thread,
+        """Full-resolution crops of every person in the event for weaponcheck: its recording is decoded on a decode thread,
         YOLO (the verifier's model) runs on the GPU thread like every other YOLO call. One deadline a little inside
         COLLECT_TIMEOUT_S bounds all of it: decoding stops, no YOLO call starts after it, and a YOLO call still queued
         behind other GPU work when it passes is cancelled, so nothing runs on after check_claim stopped waiting."""

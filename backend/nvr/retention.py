@@ -7,9 +7,13 @@
 - Kept footage stays until the disk needs space; then the lowest-importance, oldest kept files go first.
   Locked footage is never deleted. Only as a last resort is continuous footage inside the window deleted,
   which raises a capacity alert.
-- Event clips past the window follow the same rules (snapshots are always kept; they're tiny).
-- Event media lives on the data_dir volume, which has its own floor: below it clips go oldest-first whatever
-  the keep rules say (see enforce_disk_floor), and a camera opening too many events keeps snapshots only.
+- Events keep no clip of their own (2026-10-22): an event's video is its stretch of this recording, which the keep
+  rules hold around it. Older events may still have a clip.mp4 (nvr.clip_cleanup removes those the recording covers).
+- Event media (keyframes, crops, PPE pictures, legacy clips; never snapshot.jpg) past the window follows the same
+  rules. It lives on the data_dir volume (on a central instance its own quota'd dataset, with nvr.db), which has its
+  own floor, measured on that filesystem: below it media goes oldest-first whatever the keep rules say (see
+  enforce_disk_floor), files first and rows after, so a database that can't write doesn't stop the space being freed.
+  A camera opening too many events keeps snapshots only.
 """
 from __future__ import annotations
 
@@ -18,6 +22,7 @@ import json
 import logging
 import os
 import shutil
+import sqlite3
 import time
 from collections import Counter
 from pathlib import Path
@@ -68,10 +73,11 @@ def data_floor() -> tuple[float, float]:
     elif same_volume():
         floor = float(keep.site_policy()["min_free_gb"])   # one disk, one floor
     else:
-        # A separate data volume is usually the OS drive, which legitimately runs with little free space; a
-        # "10 % of the disk" floor there deleted every clip on the desktop (Oct 5 2026: C: had 8 GB free of 1 TB).
-        # Event media is evidence, so this floor is only an emergency guard: 5 GB, up to 20 GB on big disks.
-        floor = float(min(20.0, max(5.0, total_gb * 0.02)))
+        # A separate data volume: the OS drive (desktop), or a central instance's own quota'd dataset (statvfs reports
+        # the quota: 50 GB on fred, where 2026-10-22 it reached 0 bytes free and SQLite failed for 30 h). The database
+        # lives here too, so keep a real margin: 10 % of the volume, at least 2 GB, at most 20 GB (a 1 TB OS drive
+        # legitimately runs with little free space; Oct 5 2026 a bigger floor there deleted every clip on the desktop).
+        floor = float(min(20.0, max(2.0, total_gb * 0.10)))
     return floor, floor + total_gb * settings.disk_floor_hysteresis_pct / 100
 
 
@@ -161,51 +167,103 @@ def _horizons(now: float) -> dict[str, float]:
     return {c["id"]: now - keep.policy_for(c)["continuous_days"] * 86400 for c in db.cameras()}
 
 
+def null_clips(ids: list[int]) -> None:
+    """Rows whose clip.mp4 was deleted: clip = NULL. The files are already gone (space first); if the database can't
+    write right now (a full disk is why we are here) the ids wait in diskguard.cleared for the next pass."""
+    if not ids:
+        return
+    try:
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            db.execute(f"UPDATE events SET clip=NULL WHERE id IN ({','.join('?' * len(chunk))})", chunk)
+    except sqlite3.Error as e:
+        log.warning("event media deleted, but marking %d events clip-less failed (%s); retrying next pass", len(ids), e)
+        diskguard.cleared.extend(ids)
+
+
 def free_event_media(target_gb: float, dry_run: bool, stats: Counter, *, horizons: dict[str, float] | None = None,
                      locked: bool = False) -> int:
-    """Delete event media (clip.mp4, wide.jpg, crop_*.jpg; never snapshot.jpg) oldest-first, ignoring keep windows,
-    until the data volume has `target_gb` free. A clip duplicates footage that is in the recordings (or in
-    kept_footage), so it is the cheapest thing to lose when the disk is full.
+    """Delete event media (keyframes, crops, PPE pictures, chat frames, a legacy clip.mp4; never snapshot.jpg)
+    oldest-first, ignoring keep windows, until the data volume has `target_gb` free. The event's video is in the
+    recordings (or kept_footage), so these pictures are the cheapest thing to lose when the disk is full.
 
-    horizons: only events older than their camera's continuous window. locked: False skips events under a footage
-    lock (or overlapped by one); True deletes only those, the very last resort. Returns the events emptied.
+    Files first, rows after (one UPDATE at the end for the legacy clips, allowed to fail: null_clips), and what was
+    freed is counted as well as measured: ZFS returns the space of a deleted file a few seconds later, and judging by
+    statvfs alone deleted far more than needed. horizons: only events older than their camera's continuous window.
+    locked: False skips events under a footage lock (or overlapped by one); True deletes only those, the very last
+    resort. Returns the events emptied.
     """
     n = freed = 0
+    start_free = data_free_gb()
+    cleared: list[int] = []
+
+    def short() -> bool:
+        return max(data_free_gb(), start_free + freed / 1e9) < target_gb
+
     last = (float("-inf"), -1)
     stop_at = max(horizons.values(), default=float("-inf")) if horizons is not None else float("inf")
-    while data_free_gb() < target_gb:
-        # Keyset paging: rows skipped (locked, or inside their camera's window) don't come back on the next page.
-        # status='error' rows: verify failed after the clip was fetched, so clip.mp4 is on disk but not in the row.
-        rows = db.all(f"SELECT id, camera_id, start_ts, end_ts, clip, {LOCKED_SQL} AS locked FROM events "
-                      "WHERE (clip IS NOT NULL OR status='error') AND status NOT IN ('open','pending') "
-                      "AND (start_ts > ? OR (start_ts = ? AND id > ?)) AND start_ts < ? ORDER BY start_ts, id LIMIT ?",
-                      [last[0], last[0], last[1], stop_at, FLOOR_PAGE])
-        if not rows:
-            break
-        for r in rows:
-            last = (r["start_ts"], r["id"])
-            if data_free_gb() >= target_gb:
+    try:
+        while short():
+            # Keyset paging: rows skipped (locked, inside their camera's window, nothing but a snapshot left) don't
+            # come back on the next page. Every finished event: since clips stopped, the clip column no longer says
+            # which folders hold media, the folder does.
+            rows = db.all(f"SELECT id, camera_id, start_ts, end_ts, clip, {LOCKED_SQL} AS locked FROM events "
+                          "WHERE status NOT IN ('open','pending') "
+                          "AND (start_ts > ? OR (start_ts = ? AND id > ?)) AND start_ts < ? ORDER BY start_ts, id LIMIT ?",
+                          [last[0], last[0], last[1], stop_at, FLOOR_PAGE])
+            if not rows:
                 break
-            if horizons is not None and r["start_ts"] >= horizons.get(r["camera_id"], float("-inf")):
-                continue
-            is_locked = bool(r["locked"]) or keep.is_locked(r["camera_id"], r["start_ts"], r["end_ts"] or r["start_ts"])
-            if is_locked != locked:
-                continue
-            if dry_run:
-                stats["dry_floor_event_clips"] += 1
-                continue
-            got = diskguard.delete_event_media(settings.data_dir / "events" / str(r["id"]))
-            if r["clip"] is not None:
-                db.update_event(r["id"], clip=None)
-            if got or r["clip"] is not None:
+            for r in rows:
+                last = (r["start_ts"], r["id"])
+                if not short():
+                    break
+                if horizons is not None and r["start_ts"] >= horizons.get(r["camera_id"], float("-inf")):
+                    continue
+                d = settings.data_dir / "events" / str(r["id"])
+                if not diskguard.has_media(d):
+                    continue
+                is_locked = bool(r["locked"]) or keep.is_locked(r["camera_id"], r["start_ts"], r["end_ts"] or r["start_ts"])
+                if is_locked != locked:
+                    continue
+                if dry_run:
+                    stats["dry_floor_event_clips"] += 1
+                    continue
+                got = diskguard.delete_event_media(d)
                 n += 1
                 freed += got
+                if r["clip"] is not None:
+                    cleared.append(r["id"])
+    finally:
+        null_clips(cleared)
     if n:
         stats["floor_event_clips_deleted"] += n
         stats["freed_bytes"] += freed
         log.warning("disk floor: freed %.1f GB of event media (%d events%s); %.1f GB free on %s",
                     freed / 1e9, n, ", locked" if locked else "", data_free_gb(), settings.data_dir)
     return n
+
+
+def data_floor_step(dtarget: float, dry_run: bool, stats: Counter, **kw) -> None:
+    """free_event_media, or, when the database can't even be read (a dead or full disk), the same deletion done on the
+    filesystem alone (diskguard: oldest event folders first, snapshots kept): space must never wait on SQLite."""
+    try:
+        free_event_media(dtarget, dry_run, stats, **kw)
+    except sqlite3.Error as e:
+        if dry_run:
+            raise
+        log.error("disk floor: the database can't be read (%s); freeing event media from the filesystem alone", e)
+        freed = diskguard.emergency_free(settings.data_dir, int(dtarget * 1e9), min_age_s=0, backup_dir=settings.backup_dir)
+        stats["freed_bytes"] += freed
+        stats["floor_fs_only_bytes"] += freed
+
+
+def enforce_data_floor(dry_run: bool, stats: Counter, now: float) -> None:
+    """Steps 1 (and 3) of enforce_disk_floor for the data disk alone: run before the curation pass, which writes rows."""
+    dfloor, dtarget = data_floor()
+    if data_free_gb() < dfloor:
+        data_floor_step(dtarget, dry_run, stats, horizons=_horizons(now))
+    if data_free_gb() < dfloor and not same_volume():
+        data_floor_step(dtarget, dry_run, stats)
 
 
 def enforce_disk_floor(dry_run: bool, stats: Counter, now: float | None = None) -> None:
@@ -217,21 +275,24 @@ def enforce_disk_floor(dry_run: bool, stats: Counter, now: float | None = None) 
     3. data disk: any unlocked event media, oldest first
     4. recordings: oldest continuous footage (breaks the continuous guarantee; alerts)
     5. data disk: locked events' media, only when nothing else is left
+
+    The data disk is measured on its own filesystem (statvfs of data_dir: on a central instance its quota'd
+    dataset), and its steps delete files before touching any row (data_floor_step).
     """
     global _continuous_breach
     now = now or time.time()
     floor = keep.site_policy()["min_free_gb"]
     dfloor, dtarget = data_floor()
     if data_free_gb() < dfloor:
-        free_event_media(dtarget, dry_run, stats, horizons=_horizons(now))
+        data_floor_step(dtarget, dry_run, stats, horizons=_horizons(now))
     if free_gb() < floor:
         _free_kept(floor, dry_run, stats)
     if data_free_gb() < dfloor:
-        free_event_media(dtarget, dry_run, stats)
+        data_floor_step(dtarget, dry_run, stats)
     if free_gb() < floor:
         _free_continuous(floor, dry_run, stats)
     if data_free_gb() < dfloor:
-        free_event_media(dtarget, dry_run, stats, locked=True)
+        data_floor_step(dtarget, dry_run, stats, locked=True)
     if stats["deleted_continuous"] or free_gb() < floor:
         _continuous_breach = {"at": time.time(), "free_gb": round(free_gb(), 1), "floor_gb": round(floor, 1),
                               "message": "Disk is too small to hold the continuous window for all cameras; "
@@ -308,7 +369,7 @@ def purge_masked(now: float, dry_run: bool, stats: Counter) -> None:
 
 
 def event_media_batch(backlog: int, data_free: float, floor: float) -> int:
-    """Clips prune_event_media may clear per camera per pass. 500 keeps a pass short; a backlog bigger than that
+    """Events prune_event_media may clear per camera per pass. 500 keeps a pass short; a backlog bigger than that
     (a camera making an event every 25 s adds ~140 an hour) or a data disk under 2x its floor needs the big batch
     to catch up instead of falling further behind every ten minutes."""
     if data_free < 2 * floor or backlog > 2 * EVENT_MEDIA_BATCH:
@@ -317,47 +378,59 @@ def event_media_batch(backlog: int, data_free: float, floor: float) -> int:
 
 
 def prune_event_media(now: float, dry_run: bool, stats: Counter) -> None:
-    """Past the continuous window, keep event clips only for events retention would keep.
+    """Past the continuous window, keep event media (keyframes, crops, a legacy clip; never the snapshot) only for
+    events retention would keep.
 
-    Kept events keep their clip, so they would fill the front of an oldest-first LIMIT for ever and the prune
+    Kept events keep their media, so they would fill the front of an oldest-first LIMIT for ever and the prune
     would stop advancing: a per-camera cursor walks past them (it wraps to the start once the camera is caught
-    up, so an event that lost its reason to be kept is looked at again)."""
+    up, so an event that lost its reason to be kept is looked at again). A folder with nothing but its snapshot is
+    passed over without asking the keep rules (new events have no clip column to say so: the folder does)."""
     floor, _ = data_floor()
     data_free = data_free_gb()
     for cam in db.cameras():
         cam_id = cam["id"]
         policy = keep.policy_for(cam)
         horizon = now - policy["continuous_days"] * 86400
-        backlog = db.one("SELECT COUNT(*) n FROM events WHERE camera_id=? AND start_ts < ? AND clip IS NOT NULL",
-                         [cam_id, horizon])["n"]
+        cursor = _prune_cursor.get(cam_id, (float("-inf"), -1))
+        backlog = db.one("SELECT COUNT(*) n FROM events WHERE camera_id=? AND start_ts < ? "
+                         "AND (start_ts > ? OR (start_ts = ? AND id > ?))",
+                         [cam_id, horizon, cursor[0], cursor[0], cursor[1]])["n"]
         if not backlog:
-            _prune_cursor.pop(cam_id, None)
+            _prune_cursor.pop(cam_id, None)   # caught up (or nothing past the window): start over next pass
             continue
         batch = event_media_batch(backlog, data_free, floor)
         if batch > EVENT_MEDIA_BATCH:
             stats["event_media_catch_up"] += 1
-        cursor = _prune_cursor.get(cam_id, (float("-inf"), -1))
         cleared = scanned = 0
-        while cleared < batch and scanned < 4 * batch:   # bounded: keep_windows costs a few queries per event
-            rows = db.all("SELECT id, start_ts, end_ts FROM events WHERE camera_id=? AND start_ts < ? AND clip IS NOT NULL "
-                          "AND (start_ts > ? OR (start_ts = ? AND id > ?)) ORDER BY start_ts, id LIMIT ?",
-                          [cam_id, horizon, cursor[0], cursor[0], cursor[1], min(batch, 1000)])
-            if not rows:
-                cursor = (float("-inf"), -1)  # caught up: start over next pass
-                break
-            for e in rows:
-                cursor = (e["start_ts"], e["id"])
-                scanned += 1
-                windows, _ = keep.keep_windows(cam, e["start_ts"], e["end_ts"] or e["start_ts"], policy)
-                if windows:
-                    continue
-                if dry_run:
-                    stats["dry_event_clips"] += 1
-                    continue
-                stats["freed_bytes"] += diskguard.delete_event_media(settings.data_dir / "events" / str(e["id"]))
-                db.update_event(e["id"], clip=None)
-                stats["event_clips_deleted"] += 1
-                cleared += 1
+        dropped: list[int] = []
+        try:
+            while cleared < batch and scanned < 4 * batch:   # bounded: keep_windows costs a few queries per event
+                rows = db.all("SELECT id, start_ts, end_ts, clip FROM events WHERE camera_id=? AND start_ts < ? "
+                              "AND status NOT IN ('open','pending') "
+                              "AND (start_ts > ? OR (start_ts = ? AND id > ?)) ORDER BY start_ts, id LIMIT ?",
+                              [cam_id, horizon, cursor[0], cursor[0], cursor[1], min(batch, 1000)])
+                if not rows:
+                    cursor = (float("-inf"), -1)  # caught up: start over next pass
+                    break
+                for e in rows:
+                    cursor = (e["start_ts"], e["id"])
+                    scanned += 1
+                    d = settings.data_dir / "events" / str(e["id"])
+                    if not diskguard.has_media(d):
+                        continue
+                    windows, _ = keep.keep_windows(cam, e["start_ts"], e["end_ts"] or e["start_ts"], policy)
+                    if windows:
+                        continue
+                    if dry_run:
+                        stats["dry_event_clips"] += 1
+                        continue
+                    stats["freed_bytes"] += diskguard.delete_event_media(d)
+                    if e["clip"] is not None:
+                        dropped.append(e["id"])
+                    stats["event_clips_deleted"] += 1
+                    cleared += 1
+        finally:
+            null_clips(dropped)
         _prune_cursor[cam_id] = cursor
 
 
@@ -411,7 +484,7 @@ rate_guard = EventRateGuard()
 
 
 def drop_clip_media(event_id: int) -> None:
-    """Keep only the snapshot of an event whose camera is over the rate limit."""
+    """Keep only the snapshot of an event whose camera is over the rate limit (keyframes and crops go)."""
     diskguard.delete_event_media(settings.data_dir / "events" / str(event_id))
     db.update_event(event_id, clip=None)
 
@@ -427,7 +500,7 @@ def _update_alert() -> None:
     dfree = data_free_gb()
     if dfree < 2 * dfloor:
         problems.append(f"Event media disk is low: {dfree:.1f} GB free (floor {dfloor:.0f} GB); "
-                        "the oldest event clips are being deleted early.")
+                        "the oldest event pictures (keyframes, crops) are being deleted early.")
     for cam_id, s in sorted(rate_guard.suppressed.items()):
         problems.append(f"{cam_id}: {s['count']:,} events in the last hour; clips suppressed "
                         f"(limit {settings.event_rate_max_per_hour:,}/h). Check the camera's analytics or zones.")
@@ -446,7 +519,9 @@ def enforce() -> dict:
     dry_run = settings.retention_dry_run
     stats: Counter = Counter()
     floor, _ = data_floor()
-    # Short of space on the data disk: clear expired clips before the (slower) curation rather than after it.
+    # Under the data floor: free event media before anything writes rows (curation does), files first.
+    enforce_data_floor(dry_run, stats, now)
+    # Short of space on the data disk: clear expired media before the (slower) curation rather than after it.
     early = data_free_gb() < 1.5 * floor
     if early:
         prune_event_media(now, dry_run, stats)
@@ -545,12 +620,12 @@ def preview(camera_id: str, hours: float = 24) -> dict:
 
 def emergency_free() -> None:
     """Filesystem-first rescue for a data disk that is nearly full while running: a full disk makes every
-    SQLite write fail, including the ones the normal pass needs, so delete files before touching the database."""
-    diskguard.emergency_free(settings.data_dir, int(settings.disk_emergency_free_gb * 1e9))
+    SQLite write fail, including the ones the normal pass needs, so delete files before touching the database
+    (and a failed UPDATE afterwards only means the ids wait for the next pass: null_clips)."""
+    diskguard.emergency_free(settings.data_dir, diskguard.emergency_target(settings.data_dir, settings.disk_emergency_free_gb),
+                             backup_dir=settings.backup_dir)
     ids, diskguard.cleared[:] = list(diskguard.cleared), []
-    for i in range(0, len(ids), 500):
-        chunk = ids[i:i + 500]
-        db.execute(f"UPDATE events SET clip=NULL WHERE id IN ({','.join('?' * len(chunk))})", chunk)
+    null_clips(ids)
 
 
 async def retention_loop(interval: float = 600, retry: float = 60) -> None:

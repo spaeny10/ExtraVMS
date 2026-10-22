@@ -243,3 +243,14 @@ export function numberTiles(data: Record<string, unknown> | null | undefined, ne
   }
   return out;
 }
+
+/**
+ * An incident event's media, from its server's event record. Events keep no clip of their own: the video is cut from
+ * the camera's recording on request (the server's /media/clip.mp4), so it can play once the event is finished
+ * (verified or rejected). `waiting`: re-read the event, its snapshot or verdict is still coming.
+ */
+export function eventMediaState(e: { status: string; snapshot: string | null } | null): { waiting: boolean; video: boolean } {
+  if (!e) return { waiting: true, video: false };
+  const unfinished = e.status === "open" || e.status === "pending";
+  return { waiting: e.status !== "rejected" && (unfinished || !e.snapshot), video: !unfinished };
+}

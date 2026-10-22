@@ -26,10 +26,12 @@ describe("KIND_LABEL", () => {
     expect(KIND_LABEL.vlm_fallback_active).toBe("AI on fallback model");
     expect(KIND_LABEL.detector_stalled).toBe("Verification stalled");
     expect(KIND_LABEL.storage_failing).toBe("Storage failing");
+    expect(KIND_LABEL.db_errors).toBe("Database write errors");
   });
   it("names the central recording alerts", () => {
     expect(KIND_LABEL.site_link_down).toBe("Site link down");
     expect(KIND_LABEL.host_offline).toBe("Central host offline");
     expect(KIND_LABEL.host_queue_growing).toBe("Central host queue growing");
+    expect(KIND_LABEL.instance_data_full).toBe("Central data storage full");
   });
 });

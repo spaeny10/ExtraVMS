@@ -318,15 +318,15 @@ def mark(img: np.ndarray, box: list[float], text: str, bad: bool) -> np.ndarray:
 def detect_event(detector: Detector, coco_model, event: dict, check: dict) -> dict:
     """GPU thread: decode the frames for one planned zone check and run the PPE detector on them.
     Returns {frames: [{ts, box, scores}], detector: {item: call}, crops: [jpeg], images: {ts: ndarray}}."""
-    from .verifier import grab_frames
-    clip = settings.data_dir / (event.get("clip") or "")
-    if not event.get("clip") or not clip.exists():
-        return {"frames": [], "detector": {i: "unclear" for i in check["required"]}, "crops": [], "images": {}, "error": "no clip"}
+    from .verifier import event_frames
     shift = (event.get("detections") or {}).get("time_shift_s") or 0.0
-    clip_start = event.get("clip_start") or event["start_ts"] - settings.clip_pre_roll
     have, extra = pick_times(event, check["window"], settings.ppe_frames)
     targets = [s["ts"] for s in have] + [t - shift for t in extra]   # frame time
-    imgs = grab_frames(clip, clip_start, targets) if targets else {}
+    # from the recording (events keep no clip of their own; an older event's clip.mp4 fills in what is gone)
+    imgs = event_frames(event, targets) if targets else {}
+    if not imgs:
+        return {"frames": [], "detector": {i: "unclear" for i in check["required"]}, "crops": [], "images": {},
+                "error": "no recording"}
     boxes_by_ts: dict[float, list[float]] = {s["ts"]: s["match"]["box"] for s in have}
     extra_ts = [t - shift for t in extra if t - shift in imgs]
     if extra_ts and coco_model is not None:

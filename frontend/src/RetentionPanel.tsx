@@ -7,6 +7,10 @@ const KEEP_LABELS: [keyof RetentionPolicy["keep"], string, string][] = [
   ["rule_events", "Camera rule events", "Intrusion, line crossing, loitering, tamper… (see topics)"],
   ["feedback", "Events you gave feedback on", "Ratings, verdicts, corrections, saved chat notes"],
   ["vehicles_in_detect_zones", "Vehicles in detect-only areas", "Only when the camera has 'detect only' zones"],
+  ["weapon_check", "Possible weapons", "A weapon the second look confirmed, or one a person needs to review"],
+  ["high_priority", "High priority", "High priority or threat, a broken site rule, a watch-list match (what raises alerts)"],
+  ["ppe_violations", "PPE violations", "Missing hard hat or hi-vis vest in a PPE zone"],
+  ["plates", "Read license plates", "Vehicles whose plate was read"],
 ];
 const ALL_TOPICS = ["FieldDetector", "LineDetector", "LoiteringDetector", "FieldInDetector", "FieldOutDetector",
   "TamperDetector", "ObjectLeftDetector", "ObjectRemoveDetector", "MotionDetector", "CellMotionDetector"];

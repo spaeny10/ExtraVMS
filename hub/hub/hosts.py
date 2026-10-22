@@ -7,14 +7,16 @@ rest like a server's device token) and keeps the socket open. Protocol (JSON tex
   host -> hub  {"t": "hello", "proto": 1, "hostname", "version", "capacity": {cpus, load, ram_gb: {total, free},
                  gpus: [{index, name, mem_total_mb, mem_used_mb, util}], disks: [{path, total_gb, free_gb}], instances: int}}
                {"t": "heartbeat", "capacity": {..., work?: {at, vllm, instances}, relay?: {port_range, connected}},
-                 "instances": [{id, location_id, name, state, quota_gb, used_gb, gpu, mode, cpus, mem_gb, gateway?, relay?}]}
+                 "instances": [{id, location_id, name, state, quota_gb, used_gb, gpu, mode, cpus, mem_gb, gateway?, relay?,
+                                instance_used_gb?, instance_quota_gb?, instance_free_gb?}]}
                {"t": "result", "id": int, "ok": bool, "detail": str, "instance"?: {...}}
                {"t": "ping"}                                   -> hub answers {"t": "pong"}
-  hub -> host  {"t": "cmd", "id": int, "op": create_instance | delete_instance | set_quota | set_camera_network |
-                 restart_instance | set_resources | set_relay | list, "args": {...}}
+  hub -> host  {"t": "cmd", "id": int, "op": create_instance | delete_instance | set_quota | set_instance_quota |
+                 set_camera_network | restart_instance | set_resources | set_relay | list, "args": {...}}
     create_instance  {id, location, name, mode, subnet, public_ip, quota_gb, gpu, enroll_token, hub_url, vlm_url}
     delete_instance  {id, purge}        purge false = the recordings and database stay on the host
     set_quota        {id, quota_gb}
+    set_instance_quota {id, quota_gb, force}  the quota of its data dataset (ZFS instances/<id>: nvr.db, events/; agent 0.3.2+)
     set_camera_network {id, subnets, public_ips, hosts}   the instance's camera allow-list (the hub sends all three)
     restart_instance {id}
     set_resources    {id, cpus, mem_gb}  CPU / memory limits; applied live (docker update), recreated only if that fails
@@ -24,6 +26,11 @@ rest like a server's device token) and keeps the socket open. Protocol (JSON tex
 capacity.work (agent 0.2.0+, tools/central/PROTOCOL.md): the shared vLLM's running / waiting requests and the instances'
 YOLO verify queues. The latest stays in hosts.capacity; a short in-memory history per host (work_history) gives the
 Hosts page its sparklines and drives the hub-level host_queue_growing alert (check_work_alerts).
+
+The data area (agent 0.3.2+): each instance's instance_used_gb / instance_quota_gb / instance_free_gb, its /data (the
+server's database and event media; ZFS: its own dataset and quota, else shared with the recordings and quota null). A
+full one stops every database write, so it drives the hub-level instance_data_full alert (check_data_alerts) and the
+Hosts page's `data` problem (hostlist.py); set_instance_quota raises it.
 
 A central instance is one isolated server container recording one customer Site's cameras, over SpeedFusion (mode
 vpn: the BR1's LAN is 10.20.<site_number>.0/24), port forwards locked to the datacenter's IP (mode forward: the
@@ -60,7 +67,8 @@ from .config import settings
 log = logging.getLogger("hub.hosts")
 
 PROTO = 1
-OPS = ("create_instance", "delete_instance", "set_quota", "set_camera_network", "restart_instance", "set_resources", "set_relay", "list")
+OPS = ("create_instance", "delete_instance", "set_quota", "set_instance_quota", "set_camera_network", "restart_instance", "set_resources",
+       "set_relay", "list")
 STATES = ("provisioning", "running", "failed", "deleting", "deleted")
 LIVE_STATES = ("provisioning", "running", "failed", "deleting")   # everything but deleted: holds its site number
 MODES = ("vpn", "forward", "bridge")
@@ -211,11 +219,16 @@ class HostRegistry:
             if not isinstance(inst, dict) or not inst.get("id"):
                 continue
             info = {k: inst.get(k) for k in ("state", "used_gb", "quota_gb", "gpu", "mode", "location_id", "name", "host_ips",
-                                             "cpus", "mem_gb", "gateway", "relay", "image", "image_id")}
+                                             "cpus", "mem_gb", "gateway", "relay", "image", "image_id",
+                                             "instance_used_gb", "instance_quota_gb", "instance_free_gb")}
             # only this host's own instances: a host can never report on (or overwrite) another host's rows
             db.run(sa.update(db.central_instances).where(db.central_instances.c.id == str(inst["id"])[:24],
                                                          db.central_instances.c.host_id == conn.host_id).values(info=info, info_at=now))
         if isinstance(frame.get("instances"), list):
+            try:   # a data area filling up (instance_data_full); never costs the heartbeat
+                check_data_alerts(conn.host, frame["instances"][:1000])
+            except Exception:
+                log.exception("host %s: data alerts", conn.host_id)
             try:   # relay ports the host lost or never got are sent again (bridges.py); never costs the heartbeat
                 from . import bridges   # (bridges imports this module)
                 bridges.on_host_heartbeat(conn.host_id, frame["instances"][:1000])
@@ -475,6 +488,51 @@ def check_work_alerts(host: dict, now: float | None = None) -> None:
         alerts.open(subject, QUEUE_KIND, "vllm", {"text": text, "host": hname, "queue": "vllm", "value": tr["vllm_waiting"]})
     elif "vllm" in open_keys and tr["vllm_waiting"] == 0:
         alerts.close(subject, QUEUE_KIND, "vllm")
+
+
+# ---------------------------------------------------------------- the instances' data areas
+
+DATA_KIND = "instance_data_full"
+DATA_OPEN = 0.90             # instance_data_full opens with the data area this full (used / its own quota)...
+DATA_CLOSE = 0.88            # ...and closes below this (between the two an open alert stays open)
+
+
+def data_frac(inst: dict) -> float | None:
+    """instance_used_gb / instance_quota_gb, None when either is unknown or there is no quota of its own (agent < 0.3.2,
+    XFS / no quota: the data shares the recordings' quota, which the storage figures cover)."""
+    used, quota = _num(inst.get("instance_used_gb")), _num(inst.get("instance_quota_gb"))
+    return used / quota if used is not None and quota and quota > 0 else None
+
+
+def check_data_alerts(host: dict, insts: list) -> None:
+    """instance_data_full (hub administrators only: alerts.HUB_KINDS), one row per (host, instance id): the instance's
+    data area (its /data: database, event media) is DATA_OPEN full or more, from the heartbeat's instance list. Closes
+    below DATA_CLOSE, when the data area no longer has a quota of its own, or when the instance is no longer reported.
+    An unknown use (an older agent, unreadable) neither opens nor closes."""
+    subject = _alert_subject(host)
+    hname = host.get("name") or host["id"]
+    open_keys = {r["key"] for r in db.rows(sa.select(db.alerts.c.key).where(
+        db.alerts.c.org_id == HUB_ORG, db.alerts.c.site_id == host["id"], db.alerts.c.kind == DATA_KIND, db.alerts.c.closed_at.is_(None)))}
+    seen = set()
+    for inst in insts:
+        if not isinstance(inst, dict) or not inst.get("id"):
+            continue
+        iid = str(inst["id"])[:24]
+        seen.add(iid)
+        if _num(inst.get("instance_used_gb")) is None:
+            continue
+        frac = data_frac(inst)
+        if frac is not None and frac >= DATA_OPEN and iid not in open_keys:
+            used, quota, free = _num(inst["instance_used_gb"]), _num(inst["instance_quota_gb"]), _num(inst.get("instance_free_gb"))
+            site, ref = _site_label(iid)
+            text = (f"{site} on {hname}: data storage {frac * 100:.0f}% full ({used:g} of {quota:g} GB): its database stops "
+                    "storing events when it is full (Hosts: Change data storage)")
+            alerts.open(subject, DATA_KIND, iid, {"text": text, "host": hname, "instance_id": iid, "site": site,
+                                                 "name": inst.get("name"), "used_gb": used, "quota_gb": quota, "free_gb": free, **ref})
+        elif iid in open_keys and (frac is None or frac < DATA_CLOSE):
+            alerts.close(subject, DATA_KIND, iid)
+    for key in open_keys - seen:   # the instance is gone
+        alerts.close(subject, DATA_KIND, key)
 
 
 # ---------------------------------------------------------------- placement
@@ -968,6 +1026,41 @@ async def set_quota(ci_id: str, quota_gb: int, by_user: dict | None) -> dict:
     return get_instance(ci_id) or ci
 
 
+DATA_QUOTA_RANGE = (1, 10_000_000)   # axiom_host.py set_instance_quota's range (GB)
+
+
+async def set_instance_quota(ci_id: str, quota_gb: int, by_user: dict | None, force: bool = False) -> dict:
+    """The quota of the instance's data dataset (its /data: database, event media): a set_instance_quota round trip,
+    then its new figures kept in its info and audited. The host refuses a quota below the data's use (unless force),
+    an instance without a data dataset of its own (XFS / no quota) and agents before 0.3.2 (unknown op). ValueError =
+    bad input, HostError = offline or refused (nothing changed then)."""
+    ci = get_instance(ci_id)
+    if not ci or ci["state"] in ("deleting", "deleted"):
+        raise LookupError("unknown central instance")
+    if not isinstance(quota_gb, int) or isinstance(quota_gb, bool) or not DATA_QUOTA_RANGE[0] <= quota_gb <= DATA_QUOTA_RANGE[1]:
+        raise ValueError(f"the data storage quota must be a whole number of GB, {DATA_QUOTA_RANGE[0]}-{DATA_QUOTA_RANGE[1]:,}")
+    args: dict = {"id": ci_id, "quota_gb": quota_gb}
+    if force:
+        args["force"] = True
+    info = ci.get("info") or {}
+    before = _num(info.get("instance_quota_gb"))
+    res = await registry.command(ci["host_id"], "set_instance_quota", args)
+    if not res.get("ok"):
+        raise HostError(str(res.get("detail") or "the host refused"))
+    got = res.get("instance") if isinstance(res.get("instance"), dict) else {}
+    after = {k: got.get(k) for k in ("instance_used_gb", "instance_quota_gb", "instance_free_gb") if k in got}
+    if _num(after.get("instance_quota_gb")) is None:
+        after["instance_quota_gb"] = float(quota_gb)
+    _set(ci_id, info={**info, **after}, info_at=time.time())
+    loc = db.one(sa.select(db.locations.c.name).where(db.locations.c.id == ci["location_id"])) or {"name": ci["location_id"]}
+    was = "?" if before is None else f"{before:g}"
+    _audit(by_user, ci["org_id"], ci["server_id"],
+           f"central data storage: {loc['name']} {was} -> {quota_gb} GB{' (forced below its use)' if force else ''}",
+           {"location_id": ci["location_id"], "instance_id": ci_id, "from": before, "to": quota_gb, "force": bool(force),
+            "detail": str(res.get("detail") or "")[:300]})
+    return get_instance(ci_id) or ci
+
+
 MAX_CAMERA_LIMIT = 500
 CPUS_RANGE = (1, 64)         # axiom_host.py set_resources also refuses more CPUs than the host has
 MEM_GB_RANGE = (2, 512)
@@ -1221,6 +1314,9 @@ def instance_out(ci: dict, names: dict, hub_admin: bool) -> dict:
                 "gpu": ci["gpu"], "gpu_name": gpu_name, "last_error": ci["last_error"], "host_state": info.get("state"),
                 # its CPU / memory limits on the host, as last reported (set_resources changes them)
                 "cpus": _num(info.get("cpus")), "mem_gb": _num(info.get("mem_gb")), "host_cpus": _num(cap.get("cpus")),
+                # its data area (/data: database, event media; agent 0.3.2+): quota None = none of its own (XFS / no quota)
+                "instance_used_gb": _num(info.get("instance_used_gb")), "instance_quota_gb": _num(info.get("instance_quota_gb")),
+                "instance_free_gb": _num(info.get("instance_free_gb")),
                 # the image it runs and the one its host creates new instances from: tags for display, Docker image IDs
                 # to compare (agent 0.3.1+; None = not reported): instances run git-rev tags while `latest` is retagged
                 "image": info.get("image") if isinstance(info.get("image"), str) else None,

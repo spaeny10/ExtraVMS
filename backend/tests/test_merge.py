@@ -179,7 +179,6 @@ def test_long_gap_frame_budget():
 def test_long_gap_runs_on_gpu_in_pipeline():
     """_verify asks the GPU executor for the footage check and merges when it passes."""
     import threading
-    from nvr import pipeline as pl
     from nvr.pipeline import Pipeline
     a, b = _still_pair(T0 + 38000, gap=27)
     db.update_event(b, status="pending")
@@ -196,18 +195,14 @@ def test_long_gap_runs_on_gpu_in_pipeline():
     def fake(camera_id, t, zone_list, model):
         threads.append(threading.current_thread().name); assert model == "M"
         return [[0.355, 0.36, 0.455, 0.64]]
-    old, old_fetch = merge.frame_person_boxes, pl.fetch_clip
+    old = merge.frame_person_boxes
     merge.frame_person_boxes = fake
-
-    async def no_fetch(*a, **k):
-        return None
-    pl.fetch_clip = no_fetch
     settings_lag = (settings.recording_lag, settings.clip_post_roll)
     settings.recording_lag, settings.clip_post_roll = -1e12, 0
     try:
         asyncio.run(p._verify(b))
     finally:
-        merge.frame_person_boxes, pl.fetch_clip = old, old_fetch
+        merge.frame_person_boxes = old
         settings.recording_lag, settings.clip_post_roll = settings_lag
     assert threads and all(n.startswith("yolo") for n in threads)
     assert db.event(b) is None and db.event(a)["status"] == "pending" and p.verify_q.get_nowait() == a

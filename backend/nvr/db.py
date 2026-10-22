@@ -8,6 +8,7 @@ import sqlite3
 import struct
 import threading
 import time
+from collections import deque
 from typing import Any, Iterable
 
 import sqlite_vec
@@ -514,26 +515,45 @@ class Database:
         self.path = path
         # Whether statements are going through (health.storage_alert turns a long failure into a server problem the hub
         # alerts on): ok, the last error, failing since when, the last statement that wrote, connections reopened.
-        self.storage: dict = {"ok": True, "error": None, "failing_since": None, "last_ok": time.time(), "reopens": 0}
+        self.storage: dict = {"ok": True, "error": None, "failing_since": None, "last_ok": time.time(), "reopens": 0,
+                              "errors_total": 0}
+        self._error_times: deque[float] = deque(maxlen=10_000)   # when statements failed on storage (recent_errors)
         self._fail_source: str | None = None    # "db" (a statement failed) or "probe" (health's write probe of data_dir)
         self._last_reopen = 0.0
         # its own lock, not db.lock: health's write probe reports from another thread and must not wait behind a
         # statement stuck on the dead disk
         self._storage_lock = threading.Lock()
         self.clock = time.time                  # tests move time forward
+        self.lock = _DbLock()
         # A full disk must not stop the service from starting (it restart-looped 41 times on a box whose event
-        # clips had filled it): make room from event media, on the filesystem alone, before SQLite needs any.
-        need = int(settings.disk_emergency_free_gb * 1e9)
-        diskguard.emergency_free(path.parent, need)
-        self._connect(path)
+        # clips had filled it; 2026-10-22 a central instance's quota'd data dataset crash-looped the same way): make
+        # room from event media, on the filesystem alone, before SQLite needs any. nvr/__main__ has already done this
+        # once before anything imported the database (diskguard.preopen); here it is cheap when there is room.
+        need = diskguard.emergency_target(path.parent, settings.disk_emergency_free_gb)
+        diskguard.emergency_free(path.parent, need, backup_dir=settings.backup_dir)
         try:
-            self.conn.execute("PRAGMA journal_mode=WAL")
-        except sqlite3.OperationalError as e:  # "disk I/O error" / "database or disk is full": free more, retry once
+            self._open_all(path)
+        except sqlite3.OperationalError as e:
+            if not _is(e, STORAGE_ERRORS):
+                raise
+            # "disk I/O error" / "database or disk is full" (journal_mode=WAL needs room for the -shm and -wal files,
+            # the schema and migrations write): free harder, wait for the space to show (ZFS frees asynchronously),
+            # retry once. A second failure raises: there is nothing left to free.
             diskguard.log.error("opening the database failed (%s); freeing event media and retrying", e)
-            self.conn.close()
-            diskguard.emergency_free(path.parent, diskguard.free_bytes(path.parent) + need, min_age_s=0)
-            self._connect(path)
-            self.conn.execute("PRAGMA journal_mode=WAL")
+            self._close_quietly()
+            free = diskguard.free_bytes(path.parent)
+            diskguard.emergency_free(path.parent, free + need, min_age_s=0, backup_dir=settings.backup_dir)
+            diskguard.wait_free(path.parent, free + need)
+            self._open_all(path)
+        try:
+            self._null_cleared_clips()
+        except sqlite3.Error as e:   # the files are gone either way; retention.emergency_free retries the rows
+            log.warning("marking emptied events clip-less failed (%s); retrying later", e)
+
+    def _open_all(self, path) -> None:
+        """Connect, WAL, foreign keys, schema and migrations: everything opening the database writes. Safe to run again."""
+        self._connect(path)
+        self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         # vehicle fingerprints changed width (CLIP only -> CLIP + color): drop the old table, the backfill refills it
         old = self.conn.execute("SELECT sql FROM sqlite_master WHERE name='vehicle_vec'").fetchone()
@@ -549,8 +569,14 @@ class Database:
             cols = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {definition}")
-        self.lock = _DbLock()
-        self._null_cleared_clips()
+
+    def _close_quietly(self) -> None:
+        conn = getattr(self, "conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
 
     def _connect(self, path) -> None:
         self.conn = self._open(path)
@@ -629,6 +655,8 @@ class Database:
         """A statement (or health's write probe of data_dir) couldn't write: the storage state says since when."""
         with self._storage_lock:
             s = self.storage
+            s["errors_total"] = s.get("errors_total", 0) + 1
+            self._error_times.append(self.clock())
             if s["ok"]:
                 log.error("database can't be written (%s)", error)
             s["ok"], s["error"] = False, error
@@ -636,6 +664,15 @@ class Database:
             # a probe failure while statements fail too stays a database failure: only a write through SQLite clears it
             if self._fail_source != "db":
                 self._fail_source = source
+
+    def recent_errors(self, window_s: float = 900) -> int:
+        """Statements (and write probes) that failed on storage in the last `window_s` seconds: the heartbeat's
+        `db_errors`, which the hub alerts on (a few failed writes lose events even when the disk recovers at once)."""
+        cutoff = self.clock() - window_s
+        with self._storage_lock:
+            while self._error_times and self._error_times[0] < cutoff:
+                self._error_times.popleft()
+            return len(self._error_times)
 
     def storage_ok(self, source: str = "db") -> None:
         """Something wrote: clear the failing state. A probe success only clears a failure the probe itself found

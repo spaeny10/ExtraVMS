@@ -76,7 +76,10 @@ async def site_summary(state, since: float | None = None, version: str = "") -> 
         # alert per kind while it is listed (hub alerts.py)
         "health_alerts": _storage_alerts() + detector.health_alerts(p) + vlmroute.router.health_alerts() + ([link] if link else []),
         "site_link_down": bool(link),
-        "storage": dict(db.storage),   # {ok, error, failing_since, last_ok, reopens} (db.py): is the database taking writes
+        "storage": dict(db.storage),   # {ok, error, failing_since, last_ok, reopens, errors_total} (db.py): is the database taking writes
+        # statements that failed on storage in the last 15 minutes (the hub's db_errors alert), and the data dir's own
+        # filesystem (on a central instance its quota'd dataset: nvr.db and event media; recordings are `disk`)
+        "db_errors": db.recent_errors(), "data_disk": _data_disk(),
         # what the cameras send this server: {mbps (5-min average), today_gb, month_gb, cameras: {id: mbps}}
         "bandwidth": state.health.bandwidth(enabled) if hasattr(state.health, "bandwidth") else None,
         "cameras": cams, "today": today, "attention": attention,
@@ -220,6 +223,15 @@ def _talkdown_voice() -> dict | None:
         return None
 
 
+def _data_disk() -> dict | None:
+    """Free / total GB of the filesystem holding data_dir (statvfs; no database needed)."""
+    try:
+        du = shutil.disk_usage(settings.data_dir)
+    except OSError:
+        return None
+    return {"free_gb": round(du.free / 1e9, 1), "total_gb": round(du.total / 1e9, 1)}
+
+
 def _storage_alerts() -> list[dict]:
     a = health.storage_alert()
     return [a] if a else []
@@ -237,7 +249,8 @@ def minimal_summary(state, version: str = "", error: str = "") -> dict:
         with contextlib.suppress(Exception):
             alerts += part()
     out = {"now": now, "version": version, "uptime_s": round(now - STARTED_AT), "degraded": True, "error": error[:200],
-           "storage": dict(db.storage), "retention_alert": retention.alert, "health_alerts": alerts}
+           "storage": dict(db.storage), "db_errors": db.recent_errors(), "data_disk": _data_disk(),
+           "retention_alert": retention.alert, "health_alerts": alerts}
     with contextlib.suppress(Exception):   # kept in memory: needs no database once loaded
         out["ai_schedule"] = aischedule.summary()
     with contextlib.suppress(OSError):

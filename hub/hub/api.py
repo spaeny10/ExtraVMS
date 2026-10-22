@@ -1714,7 +1714,7 @@ HostSort = Literal["name", "load", "free", "instances"]
 SortOrder = Literal["asc", "desc"]
 CentralState = Literal["provisioning", "running", "failed", "deleting", "deleted"]
 CentralSort = Literal["created", "site", "customer", "host", "storage", "cameras", "queue"]
-CentralProblem = Literal["any", "down", "storage", "queue", "image", "cameras"]
+CentralProblem = Literal["any", "down", "storage", "data", "queue", "image", "cameras"]
 
 
 @app.get("/api/hub/hosts")
@@ -1833,6 +1833,12 @@ class CentralResources(BaseModel):
     mem_gb: float | None = Field(None, ge=hosts.MEM_GB_RANGE[0], le=hosts.MEM_GB_RANGE[1])
 
 
+class CentralDataQuota(BaseModel):
+    """The quota of the instance's data dataset (its /data: database, event media), whole GB; force = below its use."""
+    quota_gb: int = Field(..., ge=hosts.DATA_QUOTA_RANGE[0], le=hosts.DATA_QUOTA_RANGE[1])
+    force: bool = False
+
+
 class CentralCameras(BaseModel):
     """The instance's Site networks (each list replaces the stored one; hosts.check_camera_network). The firewall is
     these plus the public addresses its cameras use (central_cameras.py)."""
@@ -1915,6 +1921,24 @@ async def location_central_resources(location_id: str, ci_id: str, body: Central
     _central_of(location_id, ci_id)
     try:
         await hosts.set_resources(ci_id, body.cpus, body.mem_gb, u)
+    except LookupError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except hosts.HostError as e:
+        raise HTTPException(502, f"{e}: nothing was changed")
+    return hosts.instances(db.central_instances.c.id == ci_id)[0]
+
+
+@app.put("/api/locations/{location_id}/central/{ci_id}/data-quota")
+async def location_central_data_quota(location_id: str, ci_id: str, body: CentralDataQuota, u: dict = Depends(user)):
+    """The quota of the instance's data dataset (a set_instance_quota round trip; ZFS hosts, agent 0.3.2+): its
+    database and event media stop being written when it is full. Hub administrators only, like the storage quota;
+    audited once the host has done it. The host refuses below the data's use unless force."""
+    auth.require_super(u)
+    _central_of(location_id, ci_id)
+    try:
+        await hosts.set_instance_quota(ci_id, body.quota_gb, u, force=body.force)
     except LookupError as e:
         raise HTTPException(404, str(e))
     except ValueError as e:

@@ -784,3 +784,70 @@ def test_set_resources(world):
         fh.close()
         if ci:
             root.delete(f"/api/locations/{loc['id']}/central/{ci['id']}?force=true")
+
+
+def test_set_instance_quota(world):
+    """Change data storage: a set_instance_quota round trip (the instance's data dataset: database, event media), hub
+    administrators only, its new figures kept and audited; the host's refusal (below its use, no data dataset of its
+    own, an older agent) changes nothing."""
+    base, root, org = world["base"], world["root"], world["org"]
+    loc = root.post(f"/api/orgs/{org['id']}/locations", json={"name": "Yard DQ"}).json()
+    host = root.post("/api/hub/hosts", json={"name": "Datahost"}).json()
+
+    def answer(cmd):
+        if cmd["op"] == "create_instance":
+            return {"ok": True, "detail": "created", "instance": {"id": cmd["args"]["id"], "state": "running"}}
+        if cmd["op"] == "set_instance_quota":
+            a = cmd["args"]
+            return {"ok": True, "detail": f"{a['id']} data quota {a['quota_gb']} GB", "instance": {
+                "id": a["id"], "state": "running", "instance_used_gb": 46.0, "instance_quota_gb": float(a["quota_gb"]),
+                "instance_free_gb": a["quota_gb"] - 46.0}}
+        return {"ok": True, "detail": "done"}
+    fh = FakeHost(base, host["token"], capacity(), answer, "datahost")
+    ci = None
+    try:
+        wait(lambda: hosts.registry.online(host["host"]["id"]))
+        ci = root.post(f"/api/locations/{loc['id']}/central", json={"mode": "vpn", "quota_gb": 100, "host_id": host["host"]["id"]}).json()
+        wait(lambda: hosts.get_instance(ci["id"])["ready_at"])
+        fh.send({"t": "heartbeat", "capacity": capacity(), "instances": [{"id": ci["id"], "state": "running", "instance_used_gb": 46.0,
+                                                                          "instance_quota_gb": 50.0, "instance_free_gb": 4.0}]})
+        wait(lambda: (hosts.get_instance(ci["id"])["info"] or {}).get("instance_quota_gb") == 50.0)
+        url = f"/api/locations/{loc['id']}/central/{ci['id']}/data-quota"
+
+        # hub administrators only
+        sa_ = _login(base, "siteadmin@central.example", PW)
+        viewer = _login(base, "viewer@central.example", PW)
+        sent_before = len(fh.cmds)
+        assert sa_.put(url, json={"quota_gb": 150}).status_code == 403
+        assert viewer.put(url, json={"quota_gb": 150}).status_code == 403
+        assert httpx.put(base + url, json={"quota_gb": 150}).status_code == 401
+        # bad input: refused before the host hears of it
+        for bad in ({}, {"quota_gb": 0}, {"quota_gb": 10_000_001}, {"quota_gb": "lots"}, {"quota_gb": 1.5}):
+            assert root.put(url, json=bad).status_code == 422, bad
+        assert root.put(f"/api/locations/{world['b']['id']}/central/{ci['id']}/data-quota", json={"quota_gb": 150}).status_code == 404
+        assert len(fh.cmds) == sent_before
+
+        r = root.put(url, json={"quota_gb": 150})
+        assert r.status_code == 200, r.text
+        out = r.json()
+        assert (out["instance_used_gb"], out["instance_quota_gb"], out["instance_free_gb"]) == (46.0, 150.0, 104.0)
+        assert fh.cmds[-1]["op"] == "set_instance_quota" and fh.cmds[-1]["args"] == {"id": ci["id"], "quota_gb": 150}
+        r = root.put(url, json={"quota_gb": 40, "force": True})
+        assert r.status_code == 200 and fh.cmds[-1]["args"] == {"id": ci["id"], "quota_gb": 40, "force": True}
+        audit = db.rows(sa.select(db.audit_log).where(db.audit_log.c.org_id == org["id"],
+                                                      db.audit_log.c.action.like("central data storage%")).order_by(db.audit_log.c.ts))
+        assert [x["action"] for x in audit] == ["central data storage: Yard DQ 50 -> 150 GB",
+                                                "central data storage: Yard DQ 150 -> 40 GB (forced below its use)"]
+        assert audit[0]["user_email"] == "root@example.com" and audit[0]["detail"]["instance_id"] == ci["id"]
+
+        # the host refuses: 502, nothing stored or audited
+        fh.answer = lambda cmd: {"ok": False, "detail": f"{ci['id']} data already uses 46.0 GB; a 20 GB quota would leave its database no room"}
+        r = root.put(url, json={"quota_gb": 20})
+        assert r.status_code == 502 and "already uses 46.0 GB" in r.text and "nothing was changed" in r.text
+        assert hosts.get_instance(ci["id"])["info"]["instance_quota_gb"] == 40.0
+        assert len(db.rows(sa.select(db.audit_log).where(db.audit_log.c.action.like("central data storage%")))) == 2
+        assert "set_instance_quota" in hosts.OPS
+    finally:
+        fh.close()
+        if ci:
+            root.delete(f"/api/locations/{loc['id']}/central/{ci['id']}?force=true")

@@ -39,9 +39,7 @@ def make(path, start=T0, status="verified"):
     eid = db.create_event(camera_id="cam1", track_id="t", camera_class="person", camera_conf=0.9, start_ts=start,
                           end_ts=path[-1][0], path=path, status=status, detections=det, yolo_class="person", yolo_conf=0.9,
                           yolo_hits=3, clip_start=start - 5)
-    (event_dir(eid) / "clip.mp4").write_bytes(b"x")
-    db.update_event(eid, clip=f"events/{eid}/clip.mp4")
-    return eid
+    return eid   # no clip.mp4: the frames come from the camera's recording (stubbed below)
 
 
 def hat(conf, worn=True):
@@ -63,11 +61,11 @@ class FakeDetector:
         return [list(self.boxes) for _ in images]
 
 
-def fake_frames(clip, clip_start, targets):
+def fake_frames(camera_id, targets, tol=0.6):
     return {t: np.zeros((90, 160, 3), np.uint8) for t in targets}
 
 
-verifier.grab_frames = fake_frames   # ppe.detect_event imports it at call time
+verifier.frames.recording_frames = fake_frames   # ppe.detect_event reads the recording (verifier.event_frames)
 VLM_CALLS = []
 
 

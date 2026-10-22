@@ -99,10 +99,11 @@ export type QueueAlert = { key: string; opened_at: number; text?: string; queue?
 export type HostProblem = "offline" | "agent" | "queue";
 /**
  * What needs attention on an instance (hub hostlist.py): down (failed, its container stopped, or its server not connected
- * while the host is up), storage (90 % of its quota or more), queue (YOLO verify queue backing up), image (its container
- * runs another Docker image ID than its host creates new instances from), cameras (some not streaming).
+ * while the host is up), storage (90 % of its quota or more), data (its data area, the database and event media, at
+ * 85 % of its own quota or more), queue (YOLO verify queue backing up), image (its container runs another Docker image
+ * ID than its host creates new instances from), cameras (some not streaming).
  */
-export type InstanceProblem = "down" | "storage" | "queue" | "image" | "cameras";
+export type InstanceProblem = "down" | "storage" | "data" | "queue" | "image" | "cameras";
 /** `offline_since`: when its open host_offline alert opened (null = none open). */
 export type Host = {
   id: string; name: string; created_at: number; online: boolean; last_seen_at: number | null; hostname: string | null; version: string | null;
@@ -152,6 +153,9 @@ export type CentralInstance = {
   host_id?: string; host_name?: string | null; host_online?: boolean; gpu?: number | null; gpu_name?: string | null; last_error?: string | null; host_state?: string | null;
   /** Its CPU and memory limits on the host, as last reported (null until a 0.2.0+ agent reports them). */
   cpus?: number | null; mem_gb?: number | null;
+  /** Its data area (/data: the database and event media; host agent 0.3.2+, null until reported). instance_quota_gb null:
+   *  no quota of its own (XFS / no quota hosts: it shares the recordings' quota), so Change data storage doesn't apply. */
+  instance_used_gb?: number | null; instance_quota_gb?: number | null; instance_free_gb?: number | null;
   /** Newer hubs, hub administrators: cameras streaming now, the host's CPU count, the image it runs and the one its host
    *  creates new instances from (tags to show, e.g. axiom/instance:2096ed5 and :latest; Docker image IDs to compare; null =
    *  not reported), its queues from the host's heartbeat, and what needs attention. */
@@ -587,6 +591,8 @@ export const api = {
   updateCentral: (loc: string, ci: string, b: { quota_gb?: number; camera_limit?: number | null }) => req<CentralInstance>(`/api/locations/${loc}/central/${ci}`, json("PATCH", b)),
   /** CPU and / or memory limits: the host recreates the instance's container (~30 s without recording); hub administrators. */
   setCentralResources: (loc: string, ci: string, b: { cpus?: number; mem_gb?: number }) => req<CentralInstance>(`/api/locations/${loc}/central/${ci}/resources`, json("PUT", b)),
+  /** The quota of the instance's data dataset (database, event media; ZFS hosts, agent 0.3.2+); force = below its use. Hub administrators. */
+  setCentralDataQuota: (loc: string, ci: string, b: { quota_gb: number; force?: boolean }) => req<CentralInstance>(`/api/locations/${loc}/central/${ci}/data-quota`, json("PUT", b)),
   /** Replaces the instance's Site networks; the host gets them plus its cameras' own addresses (hub administrators). */
   setCentralCameras: (loc: string, ci: string, b: CameraNetwork) => req<CentralInstance>(`/api/locations/${loc}/central/${ci}/cameras`, json("PUT", b)),
   /** purge also deletes the recordings on the host; force forgets the instance at the hub when its host can't. */

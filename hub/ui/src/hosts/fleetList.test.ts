@@ -9,7 +9,7 @@ const summary = (over: { hosts?: Partial<FleetSummary["hosts"]>; instances?: Par
   cameras_down: 0, newest_agent: "0.3.1", images_reported: true, healthy: false, host_index: [],
   ...over,
   hosts: { total: 4, online: 4, offline: 0, agent: 0, queue: 0, ...over.hosts },
-  instances: { total: 20, any: 0, down: 0, storage: 0, queue: 0, image: 0, cameras: 0, ...over.instances },
+  instances: { total: 20, any: 0, down: 0, storage: 0, data: 0, queue: 0, image: 0, cameras: 0, ...over.instances },
 });
 
 const ci = (over: Partial<CentralInstance> = {}): CentralInstance => ({
@@ -69,6 +69,19 @@ describe("API parameters", () => {
 });
 
 describe("attention strip", () => {
+  it("a data area nearly full: right after storage, opening the data filter", () => {
+    const items = attentionItems(summary({ instances: { storage: 1, data: 2, queue: 1 } }));
+    expect(items.map((i) => i.key)).toEqual(["storage", "data", "queue"]);
+    const data = items[1];
+    expect(data.text).toBe("2 instances with data storage nearly full");
+    expect(data.tone).toBe("bad");
+    expect(data.to).toMatchObject({ tab: "instances", problem: "data" });
+    expect(parseQuery(querySearch(data.to)).problem).toBe("data");
+    expect(activeAttention(data, { ...NO_QUERY, tab: "instances", problem: "data" })).toBe(true);
+    // a hub from before the data problem sends no count
+    expect(attentionItems(summary({ instances: { data: undefined as unknown as number, storage: 1 } })).map((i) => i.key)).toEqual(["storage"]);
+    expect(rowProblems(ci({ problems: ["storage", "data", "image"] }))).toEqual(["image"]);
+  });
   it("nothing when all is well", () => {
     expect(attentionItems(summary({ healthy: true }))).toEqual([]);
     expect(attentionItems(null)).toEqual([]);

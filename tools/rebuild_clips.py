@@ -1,4 +1,8 @@
-"""Rebuild missing event clips from the recordings still on disk.
+"""RETIRED (2026-10-22): events no longer keep a clip.mp4; an event's video is its stretch of the continuous recording
+(retention keeps it around events, keep.py), and backend `python -m nvr.clip_cleanup` removes the old clips. Running
+this would cut a clip for every event since then and fill the data disk again, so it refuses to run.
+
+Was: rebuild missing event clips from the recordings still on disk.
 
 Usage (from backend/, with the site's .env in place):  ..\\.venv\\Scripts\\python.exe ..\\tools\\rebuild_clips.py [--days 5] [--dry-run]
 
@@ -22,6 +26,7 @@ from nvr import mediamtx  # noqa: E402
 
 
 async def main() -> None:
+    sys.exit("rebuild_clips is retired: events no longer keep clips (their video is the recording). See the docstring.")
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=float, default=5.0, help="only events newer than this many days (the recordings window)")
     ap.add_argument("--dry-run", action="store_true")

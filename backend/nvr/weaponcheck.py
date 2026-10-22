@@ -9,11 +9,12 @@ So, like policy.confirm_towing, a weapon claim is checked before it is stored or
 
 1. claims(): the synopsis says firearm / gun / pistol / rifle / knife / weapon (summary, activity, threat reason,
    objects or tags), not counting tools ("nail gun", "glue gun", "heat gun", ...) or negations ("no weapons visible").
-2. gather_evidence(): every person in the event at FULL resolution: frames from the event's clip at ~2 fps, YOLO
+2. gather_evidence(): every person in the event at FULL resolution: frames from the event's stretch of the recording
+   (no clip is kept; an older event's clip.mp4 if its recording is gone) at ~2 fps, YOLO
    (the verifier's model, on the GPU thread) for person boxes, people followed across frames by position AND clothing
    colors (two people who cross are not swapped), up to 4 padded crops (hands included, the person marked with green
-   corners) per person, spread over time, largest first. Someone too small to judge, more than 4 people, or a clip
-   that could not be read in time leaves the evidence incomplete. No clip: the snapshot and the stored crops (which
+   corners) per person, spread over time, largest first. Someone too small to judge, more than 4 people, or video
+   that could not be read in time leaves the evidence incomplete. No video: the snapshot and the stored crops (which
    can confirm a weapon but never clear one, since they do not show every person throughout).
 3. One strict JSON question per person (TIMEOUT_S for all of them): everything they hold; the held object most like
    a gun or knife; is it a firearm or knife?
@@ -63,9 +64,9 @@ TASK = "unusual_review"      # the escalation task: the larger remote model when
 PRIORITY = "chat"            # ahead of queued background work: the event's alert waits for this answer
 TIMEOUT_S = 120              # all model questions together; past it the claim stays (unconfirmed, high). The 27B
                              # takes ~4 s a person when idle, ~18 s behind other work (dry run on event 9118)
-COLLECT_TIMEOUT_S = 45       # decoding the clip + YOLO
-FPS = 2.0                    # clip frames per second looked at
-MAX_FRAMES = 48              # at most this many frames per clip (spread evenly over a longer one)
+COLLECT_TIMEOUT_S = 45       # decoding the event's video (its recording) + YOLO
+FPS = 2.0                    # video frames per second looked at
+MAX_FRAMES = 48              # at most this many frames per event (spread evenly over a longer one)
 BATCH = 8                    # frames per YOLO call (full-resolution frames are large: few in memory at once)
 MAX_PERSONS = 4              # people asked about (largest first); more than this and the claim can't be cleared
 CROPS_PER_PERSON = 4
@@ -405,28 +406,81 @@ def _persons(dets: list[dict], frames: int, gap: float = MAX_GAP_S) -> tuple[lis
     return persons, max(0, len(judged) - MAX_PERSONS), len(small)
 
 
-def clip_evidence(clip: Path, predict: Callable[[list], list], deadline: float | None = None) -> dict:
-    """Frames at ~FPS across the clip (PyAV, like verifier.grab_frames), YOLO in small batches, crops kept as JPEG.
+def _from_frames(source, predict: Callable[[list], list], deadline: float | None, step: float, label: str) -> dict:
+    """YOLO over (clip time, BGR frame) pairs in small batches, the people followed across them, crops kept as JPEG.
     Past `deadline` it stops early with what it has (then incomplete: it can confirm, not clear)."""
-    import av
     dets: list[dict] = []
     batch: list[tuple[float, np.ndarray]] = []
-    n, step, cut = 0, 1 / FPS, False
+    n, cut = 0, False
     try:
-        with av.open(str(clip)) as container:
-            stream = container.streams.video[0]
-            stream.thread_type = "AUTO"
-            dur = float(stream.duration * stream.time_base) if stream.duration else (
-                container.duration / 1e6 if container.duration else MAX_FRAMES / FPS)
-            count = max(1, min(MAX_FRAMES, int(dur * FPS)))
-            targets = [dur * (i + 0.5) / count for i in range(count)]
-            step = dur / count
+        for t, img in source:
+            if deadline is not None and time.time() > deadline:
+                cut = True
+                break
+            batch.append((t, img))
+            n += 1
+            if len(batch) >= BATCH:
+                if deadline is not None and time.time() > deadline:
+                    cut = True
+                    break
+                dets += _detect(predict, batch)
+                batch = []
+        if batch and not cut and not (deadline is not None and time.time() > deadline):
+            dets += _detect(predict, batch)
+        elif batch:
+            cut = True   # decoded, but no time left to look at them
+        batch = []
+    finally:
+        close = getattr(source, "close", None)
+        if close is not None:
+            close()      # a generator still inside its container (stopped early): let it close the file now
+        gc.collect()     # PyAV frames are freed late (see verifier.grab_frames)
+    # a long event is sampled more sparsely: a person may move further between two looked-at frames
+    persons, skipped, small = _persons(dets, n, max(MAX_GAP_S, 2.5 * step))
+    return {"evidence": label, "frames": n, "persons": persons, "skipped": skipped, "too_small": small, "cut": cut,
+            "complete": n > 0 and not cut and skipped == 0 and small == 0}
+
+
+def span_targets(start: float, end: float) -> tuple[list[float], float]:
+    """~FPS frame times across [start, end] (at most MAX_FRAMES, spread evenly over a longer span) and their spacing."""
+    dur = max(0.1, end - start)
+    count = max(1, min(MAX_FRAMES, int(dur * FPS)))
+    return [start + dur * (i + 0.5) / count for i in range(count)], dur / count
+
+
+def recording_evidence(e: dict, predict: Callable[[list], list], deadline: float | None = None) -> dict:
+    """Frames at ~FPS across the event (pre-roll to post-roll) straight from the camera's recording: events keep no
+    clip of their own. frames == 0 when nothing is recorded there any more."""
+    from . import frames
+    from .config import settings
+    start = e.get("clip_start") or e["start_ts"] - settings.clip_pre_roll
+    end = (e.get("end_ts") or e["start_ts"]) + settings.clip_post_roll
+    targets, step = span_targets(start, end)
+    it = frames.iter_recording(e["camera_id"], targets, tol=min(0.6, step / 2))
+
+    def source():
+        try:
+            for t, img in it:
+                yield t - start, img   # clip time, like a clip's frames
+        finally:
+            it.close()
+    return _from_frames(source(), predict, deadline, step, "recording")
+
+
+def clip_evidence(clip: Path, predict: Callable[[list], list], deadline: float | None = None) -> dict:
+    """The same from a clip file (an older event's clip.mp4, tests): frames at ~FPS across it, decoded with PyAV."""
+    import av
+    with av.open(str(clip)) as container:
+        stream = container.streams.video[0]
+        stream.thread_type = "AUTO"
+        dur = float(stream.duration * stream.time_base) if stream.duration else (
+            container.duration / 1e6 if container.duration else MAX_FRAMES / FPS)
+        targets, step = span_targets(0.0, dur)
+
+        def source():
             k, t0 = 0, None
             for frame in container.decode(stream):
                 if k >= len(targets):
-                    break
-                if deadline is not None and time.time() > deadline:
-                    cut = True
                     break
                 if frame.time is None:
                     continue
@@ -436,25 +490,8 @@ def clip_evidence(clip: Path, predict: Callable[[list], list], deadline: float |
                     continue
                 while k < len(targets) and targets[k] <= t + 1e-3:
                     k += 1
-                batch.append((t, frame.to_ndarray(format="bgr24")))
-                n += 1
-                if len(batch) >= BATCH:
-                    if deadline is not None and time.time() > deadline:
-                        cut = True
-                        break
-                    dets += _detect(predict, batch)
-                    batch = []
-            if batch and not (deadline is not None and time.time() > deadline):
-                dets += _detect(predict, batch)
-            elif batch:
-                cut = True   # decoded, but no time left to look at them
-            batch = []
-    finally:
-        gc.collect()   # PyAV frames are freed late (see verifier.grab_frames)
-    # a long clip is sampled more sparsely: a person may move further between two looked-at frames
-    persons, skipped, small = _persons(dets, n, max(MAX_GAP_S, 2.5 * step))
-    return {"evidence": "clip", "frames": n, "persons": persons, "skipped": skipped, "too_small": small, "cut": cut,
-            "complete": n > 0 and not cut and skipped == 0 and small == 0}
+                yield t, frame.to_ndarray(format="bgr24")
+        return _from_frames(source(), predict, deadline, step, "clip")
 
 
 def image_evidence(img: np.ndarray, predict: Callable[[list], list]) -> dict:
@@ -479,18 +516,26 @@ def gather_evidence(e: dict, predict: Callable[[list], list] | None, deadline: f
     from .config import settings
     deadline = deadline if deadline is not None else time.time() + COLLECT_TIMEOUT_S - 5
     if predict is not None:
+        # the event's video: its stretch of the recording; an older event whose recording is gone may still have its clip
         clip = settings.data_dir / (e.get("clip") or "")
+        readers = []
+        if e.get("camera_id") and e.get("start_ts") is not None:
+            readers.append(("recording", lambda: recording_evidence(e, predict, deadline)))
         if e.get("clip") and clip.is_file():
+            readers.append(("clip", lambda: clip_evidence(clip, predict, deadline)))
+        for what, read in readers:
             try:
-                ev = clip_evidence(clip, predict, deadline)
+                ev = read()
                 if ev["persons"]:
                     return ev
-                log.info("event %s: weapon check found nobody in the clip; trying the snapshot and the stored crops", e["id"])
+                if ev["frames"] or ev.get("cut"):   # it was there (or time ran out): nobody in it, the clip won't differ
+                    log.info("event %s: weapon check found nobody in the %s; trying the snapshot and the stored crops", e["id"], what)
+                    break
             except TimeoutError:   # YOLO did not answer in time (GPU busy): asking it again for the snapshot won't help
                 log.warning("event %s: weapon check: YOLO did not answer in time; using the stored crops", e["id"])
                 return keyframe_evidence(e)
             except Exception as ex:  # noqa: BLE001 - fall back to what else there is
-                log.warning("event %s: weapon check could not read the clip (%s: %s)", e["id"], type(ex).__name__, ex)
+                log.warning("event %s: weapon check could not read the %s (%s: %s)", e["id"], what, type(ex).__name__, ex)
         snap = settings.data_dir / (e.get("snapshot") or "")
         if e.get("snapshot") and snap.is_file() and time.time() < deadline:   # past it: no more YOLO, only the crops
             img = cv2.imread(str(snap))
@@ -942,8 +987,8 @@ def _reason(verdict: str, kind: str, persons: list[dict], error: str | None, ev:
     if not ev.get("complete"):
         why = ("not everyone in view could be checked" if ev.get("skipped") else
                "someone in view was too small to judge" if ev.get("too_small") else
-               "the clip could not be read in time" if ev.get("cut") else
-               "there was no full-resolution clip of everyone in view" if ev.get("evidence") != "clip" else "")
+               "the video could not be read in time" if ev.get("cut") else
+               "there was no full-resolution video of everyone in view" if ev.get("evidence") not in ("clip", "recording") else "")
     else:
         why = ""
     if not why:

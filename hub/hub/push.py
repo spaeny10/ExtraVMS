@@ -15,8 +15,8 @@ from . import alerts, auth, db
 from .config import settings
 
 log = logging.getLogger("hub.push")
-DEFAULT_KINDS = ["offline", "event_policy", "event_watched", "event_high", "site_link_down", "storage_failing", "bridge_offline",
-                 "host_offline", "coverage_budget", "host_queue_growing"]   # the last three only ever reach hub administrators (alerts.HUB_KINDS)
+DEFAULT_KINDS = ["offline", "event_policy", "event_watched", "event_high", "site_link_down", "storage_failing", "db_errors", "bridge_offline",
+                 "host_offline", "coverage_budget", "host_queue_growing", "instance_data_full"]   # the last four only ever reach hub administrators (alerts.HUB_KINDS)
 _sender: Callable | None = None   # tests inject a fake
 
 
@@ -133,6 +133,10 @@ async def notify_alert(org_id: str, site: dict, kind: str, detail: dict) -> int:
         if kind == "coverage_budget":
             payload = {"title": "CoverageMap monthly budget reached", "body": detail.get("text") or "Automatic cellular coverage refreshes stopped until next month",
                        "url": "/account", "kind": kind}
+        elif kind == "instance_data_full":
+            payload = {"title": f"{detail.get('site') or detail.get('instance_id') or 'Central instance'}: data storage nearly full",
+                       "body": str(detail.get("text") or "")[:180], "url": "/hub/hosts?tab=instances&problem=data", "kind": kind,
+                       "host_id": site["id"]}
         elif kind == "host_queue_growing":
             payload = {"title": f"Host {site.get('name') or site['id']}: work queue growing", "body": str(detail.get("text") or "")[:180],
                        "url": "/hub/hosts", "kind": kind, "host_id": site["id"]}
@@ -154,6 +158,7 @@ async def notify_alert(org_id: str, site: dict, kind: str, detail: dict) -> int:
              "event_policy": f"{name}: site rule broken", "event_watched": f"{name}: watched person seen",
              "site_link_down": f"{name}: link to the site down",
              "storage_failing": f"{name}: events not being stored (disk failing)",
+             "db_errors": f"{name}: database write errors",
              "bridge_offline": f"{name}: Axiom Bridge offline"}.get(kind, f"{name}: {kind}")
     body = detail.get("text") or detail.get("synopsis") or detail.get("name") or ", ".join(detail.get("problems") or []) or ""
     url = f"/s/{site['id']}/#timeline?cam={detail.get('camera_id')}&event={detail.get('id')}" if detail.get("id") and detail.get("camera_id") else f"/s/{site['id']}/"

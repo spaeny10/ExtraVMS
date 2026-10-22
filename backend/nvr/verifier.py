@@ -1,7 +1,8 @@
 """YOLO verification of camera (edge) detections.
 
-For a closed event: fetch the clip from MediaMTX recordings, decode frames at sampled track
-timestamps, run YOLO, and check that YOLO sees the same class where the camera said it was.
+For a closed event: decode frames at sampled track timestamps straight from the camera's recording segments
+(frames.iter_recording; no clip is cut or kept), run YOLO, and check that YOLO sees the same class where the camera
+said it was.
 
 Events opened from a camera's ONVIF detection events (ruleevents.py) have no camera boxes: frames are sampled evenly
 over the event, a YOLO object of the event's label (inside the zones) counts if it is confident and big enough
@@ -24,7 +25,7 @@ import av
 import cv2
 import numpy as np
 
-from . import parked, ruleevents, zones
+from . import frames, parked, ruleevents, zones
 from .config import ROOT, settings
 
 log = logging.getLogger("nvr.verifier")
@@ -276,8 +277,11 @@ def boxless_matches(frame_boxes: list[tuple[float, list]], pre_boxes: list | Non
     return matches, reason, moved, pool, single
 
 
-def grab_frames(clip: Path, clip_start: float, targets: list[float]) -> dict[float, np.ndarray]:
-    """Decode the clip once and return the frame nearest each target epoch timestamp."""
+def grab_frames(clip: "Path | frames.Recording", clip_start: float, targets: list[float]) -> dict[float, np.ndarray]:
+    """The frame nearest each target epoch timestamp, from the camera's recording (frames.Recording: every event
+    since clips stopped being kept) or from a clip file (a legacy clip.mp4, tests, tools), decoded once."""
+    if isinstance(clip, frames.Recording):
+        return frames.recording_frames(clip.camera_id, targets)
     wanted = sorted(targets)
     best: dict[float, tuple[float, np.ndarray]] = {}
     with av.open(str(clip)) as container:
@@ -303,6 +307,28 @@ def grab_frames(clip: Path, clip_start: float, targets: list[float]) -> dict[flo
     # and the kernel killed the service every five minutes. Collect now, while the frames are still small in number.
     gc.collect()
     return {w: v[1] for w, v in best.items()}
+
+
+def legacy_clip(e: dict) -> Path | None:
+    """An older event's own clip.mp4 while it is still on disk (new events have none; clip_cleanup removes the old
+    ones once the recording covers them), else None."""
+    if not e.get("clip"):
+        return None
+    clip = settings.data_dir / e["clip"]
+    return clip if clip.is_file() else None
+
+
+def event_frames(e: dict, targets: list[float]) -> dict[float, np.ndarray]:
+    """Frames of an event at these epoch times: from the camera's recording, and for whatever the recording no longer
+    has, from the event's legacy clip.mp4 if it still has one."""
+    got = frames.recording_frames(e["camera_id"], targets)
+    missing = [t for t in targets if t not in got]
+    if missing and (clip := legacy_clip(e)) is not None:
+        try:
+            got.update(grab_frames(clip, e.get("clip_start") or e["start_ts"] - settings.clip_pre_roll, missing))
+        except (av.FFmpegError, OSError) as ex:
+            log.warning("event %s: reading its clip failed: %s", e.get("id"), ex)
+    return got
 
 
 def load_yolo():
@@ -446,9 +472,10 @@ class Verifier:
                     log.exception("saving parked spots for %s failed", cam)
         return info, detections, hits, best
 
-    def verify(self, event: dict, clip: Path, clip_start: float, zone_list: list[dict] | None = None,
+    def verify(self, event: dict, clip: "Path | frames.Recording", clip_start: float, zone_list: list[dict] | None = None,
                dry_run: bool = False) -> dict:
-        """Verify a closed event from its clip. dry_run (tools/replay_verification.py): the decision only; nothing is
+        """Verify a closed event from its video: the camera's recording (the pipeline passes frames.Recording; no clip
+        is cut or kept) or a clip file (tools, tests). clip_start: where clip time 0 is (event start - pre-roll). dry_run (tools/replay_verification.py): the decision only; nothing is
         written (no snapshot, keyframes, parked-spot memory or re-ID) and the path is not extended."""
         zone_list = zones.normalize(zone_list)
         label = event["camera_class"]

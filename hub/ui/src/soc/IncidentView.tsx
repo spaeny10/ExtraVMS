@@ -27,7 +27,7 @@ import { useSite } from "../SitePage";
 import { SiteLive } from "../SiteLive";
 import { SiteTimeline } from "../SiteTimeline";
 import { siteTimelineHref } from "../timelineLink";
-import { STATE_LABEL, age, eventNum, incidentTitle } from "./format";
+import { STATE_LABEL, age, eventMediaState, eventNum, incidentTitle } from "./format";
 import { Dispatch } from "./Dispatch";
 import { IncidentLog } from "./IncidentLog";
 import { priorityClass, priorityLabel, slaFor } from "./sla";
@@ -227,8 +227,9 @@ export function ClaimBar({ incident: i, me, actions, cmd, compact = false }: { i
 // ---------------------------------------------------------------- media + synopsis
 
 /**
- * The event's clip (or snapshot until the clip is cut) from its server. Media is written a few seconds after an event
- * opens, so while either is missing the event is re-read every 3 s (at most 3 minutes; then the operator has Live).
+ * The event from its server: its snapshot, and its video once it is finished (cut from the camera's recording on
+ * request; events keep no clip of their own). Until then the event is re-read every 3 s (at most 3 minutes; then the
+ * operator has Live).
  */
 export function useServerEvent(server: string, id: number) {
   const [e, setE] = useState<NvrEvent | null>(null);
@@ -240,7 +241,7 @@ export function useServerEvent(server: string, id: number) {
     const pull = () => siteApi(server).event(id).then((x) => {
       if (!alive) return;
       setE(x); setFailed(false);
-      const waiting = (!x.clip || !x.snapshot || x.status === "open" || x.status === "pending") && x.status !== "rejected";
+      const { waiting } = eventMediaState(x);
       if (waiting && Date.now() - start < 180000) t = setTimeout(pull, 3000);
     }).catch(() => { if (alive) { setFailed(true); if (Date.now() - start < 180000) t = setTimeout(pull, 3000); } });
     pull();
@@ -253,13 +254,15 @@ export function EventMedia({ ev, onDetails }: { ev: IncidentEvent; onDetails?: (
   const { e, failed } = useServerEvent(ev.server_id, eventNum(ev));
   useDirectVersion([ev.server_id]);  // the clip and snapshot come direct when this browser is on the server's LAN
   const s = mediaApi(ev.server_id);
+  const media = eventMediaState(e);
+  const [noVideo, setNoVideo] = useState(false);   // the recording of it is gone (or can't be cut): the snapshot
   return (
     <div className="soc-media-grid">
       <div className="soc-clip">
-        {e?.clip ? <video src={s.media(e, "clip.mp4")} poster={e.snapshot ? s.media(e, "snapshot.jpg", 960) : undefined} controls autoPlay muted loop playsInline />
+        {e && media.video && !noVideo ? <video src={s.media(e, "clip.mp4")} poster={e.snapshot ? s.media(e, "snapshot.jpg", 960) : undefined} controls autoPlay muted loop playsInline onError={() => setNoVideo(true)} />
           : e?.snapshot ? <img src={s.media(e, "snapshot.jpg", 960)} alt={`Snapshot from ${ev.camera_name}`} />
-          : <div className="soc-clip-wait muted small">{failed ? `${ev.server_name} isn't answering; retrying…` : "Waiting for the clip…"}</div>}
-        <div className="muted small">{ev.camera_name}{ev.server_name ? ` · ${ev.server_name}` : ""} · {new Date(ev.ts * 1000).toLocaleTimeString()}{e && !e.clip ? " · clip still being cut" : ""}</div>
+          : <div className="soc-clip-wait muted small">{failed ? `${ev.server_name} isn't answering; retrying…` : "Waiting for the video…"}</div>}
+        <div className="muted small">{ev.camera_name}{ev.server_name ? ` · ${ev.server_name}` : ""} · {new Date(ev.ts * 1000).toLocaleTimeString()}{e && !media.video ? " · video once the event is checked" : noVideo ? " · no recording of it" : ""}</div>
       </div>
       <IncidentSynopsis ev={ev} e={e} onDetails={onDetails} />
     </div>
