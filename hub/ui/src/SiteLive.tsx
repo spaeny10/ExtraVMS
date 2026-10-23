@@ -33,6 +33,12 @@
  * hub (audited there), whatever server the camera is on; the panel reads its status from that server.
  * Deterrence: a camera with a strobe, siren or light gets the 🚨 button and panel on its tile for the same people
  * (canDeter); the calls go to the camera's own server through the hub.
+ *
+ * Keyboard (desktop, docs/live-views-spec.md): one tile is in the Tab order; the arrow keys, Home and End move between
+ * tiles in visual order (only while a tile itself has the focus, so PTZ and digital zoom keep their own arrows), Enter
+ * expands, Escape or Backspace collapses (the browser takes Escape in fullscreen) and F toggles fullscreen. Keys are
+ * left alone while typing, in a menu or dialog, and the page-wide ones in the SOC's embed (it has its own chords).
+ * Fullscreen fills the screen with the grid alone; the activity column hides until it ends.
  */
 import { useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -49,8 +55,8 @@ import { type ClassFilter, DEFAULT_CLASS_FILTER, feedNarrow, feedNarrowKey, hubF
 import { regionFetchKey, regionPass, useRegionResults, useRegions } from "@site/region";
 import { useResync } from "@site/resync";
 import type { TalkSpeaker } from "@site/talkdown";
-import { Icon, confirmDialog, promptDialog, swipeHandlers, toast, useDismiss, useIsPhone } from "@site/ui";
-import { useStill } from "@site/useStill";
+import { Icon, confirmDialog, promptDialog, swipeHandlers, toast, typingOrDialog, useDismiss, useIsPhone } from "@site/ui";
+import { StaleStillBadge, StillAge, useStillFrame, useStillWidth } from "@site/useStillFrame";
 import { type Camera as RegistryCam, type Fleet, type Org, type Server, type Site, type SiteCameraGroup, type SiteLayout, api, lastPictureText,
   stillUrl } from "./api";
 import { type EventRef, SITE_FEED_FILTER_KEY, applyLiveEvent, cameraNameFor, checkingText, feedCards, mergePool, regionFeed, removeLiveEvent, siteRegionKeys,
@@ -61,7 +67,7 @@ import { useDirect, useDirectVersion } from "./direct";
 import { makeHubSource, mediaApi, siteApi } from "./hubSource";
 import { talkByCamera } from "./site/cameraGroups";
 import { TabToolsSlot } from "./tabTools";
-import { COLUMN_CHOICES, EMPTY_LAYOUT, type LayoutAction, type LiveFocus, type LiveLayout, type QualityMode, applyFocus, arrange, coerceLayout, isDirty,
+import { COLUMN_CHOICES, EMPTY_LAYOUT, type LayoutAction, type LiveFocus, type LiveLayout, type QualityMode, applyFocus, arrange, coerceLayout, gridMove, isDirty,
   isVisible, layoutCols, layoutReducer, loadActivityPref, loadLayout, loadLayoutId, saveActivityPref, saveLayout, saveLayoutId, tileLabel, tileQuality,
   toSavedConfig, viewSummary, wrapIndex } from "./liveLayout";
 
@@ -190,7 +196,49 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
   const talk = useMemo(() => talkByCamera(servers, groups, siteApi), [servers, groups]);
 
   // above every early return below: hooks run in the same order every render
-  const fit = useExpandFit(gridRef, !isPhone && !!expanded && shown.some((t) => t.key === expanded));
+  const layoutRef = useRef<HTMLDivElement>(null);
+  const fs = useFullscreen(layoutRef);
+  const fit = useExpandFit(gridRef, !isPhone && !!expanded && shown.some((t) => t.key === expanded), fs.on);
+  // keyboard: the tile in the Tab order, and the one to focus once the grid has re-rendered (after expand / collapse)
+  const [tabKey, setTabKey] = useState<string | null>(null);
+  const refocus = useRef<string | null>(null);
+  useEffect(() => {
+    const k = refocus.current;
+    if (!k) return;
+    refocus.current = null;
+    cellOf(gridRef.current, k)?.focus();
+  });
+  const expandedRef = useRef(expanded);
+  expandedRef.current = expanded;
+  const showTile = (key: string | null, focusKey: string) => {
+    setExpanded(key);
+    setTabKey(focusKey);
+    refocus.current = focusKey;
+  };
+  // the page-wide keys: Escape / Backspace collapse, F fullscreen (not in the SOC's embed, not on a phone)
+  const toggleFs = fs.toggle;
+  useEffect(() => {
+    if (isPhone || compact) return;
+    const on = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || typingOrDialog(e.target)) return;
+      // a control inside a tile (talk-down, deterrence, PTZ, zoom) has the key first; the tile itself doesn't
+      const el = e.target as HTMLElement | null;
+      const cell = el?.closest?.(".site-live-cell");
+      if (cell && cell !== el) return;
+      const open = expandedRef.current;
+      if ((e.key === "Escape" || e.key === "Backspace") && open) {
+        e.preventDefault();
+        setExpanded(null);
+        setTabKey(open);
+        refocus.current = open;
+      } else if (e.key === "f" || e.key === "F") {
+        e.preventDefault();
+        toggleFs();
+      }
+    };
+    addEventListener("keydown", on);
+    return () => removeEventListener("keydown", on);
+  }, [isPhone, compact, toggleFs]);
   // the Site page's tab row has room for the toolbar on its right (tabTools.ts); elsewhere it stays above the grid
   const slot = useContext(TabToolsSlot);
   if (servers.length === 0) return <p className="muted">This site has no servers yet.</p>;
@@ -228,25 +276,49 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
       )}
       <ViewMenu tiles={ordered} layout={layout} liveKeys={liveKeys} multi={multi} dispatch={dispatch} dirty={dirty} onRevert={revert}
         named={named.enabled ? named : null} current={() => toSavedConfig(allKeys, layout)} />
+      {fs.supported && (
+        <button className="ghost small icon-act" onClick={fs.toggle} aria-pressed={fs.on} aria-label={fs.on ? "Leave fullscreen" : "Fullscreen"}
+          title={fs.on ? "Leave fullscreen (F or Esc)" : "Fill the screen with the cameras (F)"}>
+          <Icon name={fs.on ? "shrink" : "expand"} size={16} />
+        </button>
+      )}
     </div>
   );
+  // arrows, Home and End between tiles, Enter to expand: only while a tile itself has the focus (the notes at the top)
+  const onGridKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const key = (e.target as HTMLElement).dataset?.liveKey;
+    if (!key || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    if (e.key === "Enter") {
+      if (!focused) { e.preventDefault(); showTile(key, key); }
+      return;
+    }
+    const keys = grid.map((t) => t.key);
+    const cols = gridRef.current ? getComputedStyle(gridRef.current).gridTemplateColumns.split(" ").filter(Boolean).length : 1;
+    const to = gridMove(keys.indexOf(key), e.key, cols, keys.length);
+    if (to === null) return;
+    e.preventDefault();
+    setTabKey(keys[to]);
+    cellOf(gridRef.current, keys[to])?.focus();
+  };
+  const tabbable = grid.some((t) => t.key === tabKey) ? tabKey : grid[0]?.key;
   return (
     <LiveBudgetProvider>
       {toolbar && slot !== undefined ? (slot ? createPortal(toolbar, slot) : null) : null}
-      <div className={`live-layout ${showFeed ? "" : "site-live-solo"} ${compact ? "site-live-compact" : ""}`}>
+      <div ref={layoutRef} className={`live-layout ${showFeed ? "" : "site-live-solo"} ${compact ? "site-live-compact" : ""}`}>
         <div className="live-main">
           {slot === undefined && toolbar}
-          <div ref={gridRef} className={`live-grid ${focused ? "expanded" : layoutCols(layout, grid.length) === 1 ? "one" : ""}`}
+          <div ref={gridRef} onKeyDown={onGridKey} className={`live-grid ${focused ? "expanded" : layoutCols(layout, grid.length) === 1 ? "one" : ""}`}
             style={{ gridTemplateColumns: `repeat(${focused ? 1 : layoutCols(layout, grid.length)}, minmax(0, 1fr))`,
               // a lone tile fits the window (styles.css .live-grid.one): the hub's header, tabs and toolbar above it
-              ...({ "--live-chrome": "260px" } as React.CSSProperties),
+              // (in fullscreen there is no chrome above it)
+              ...({ "--live-chrome": fs.on ? "24px" : "260px" } as React.CSSProperties),
               // an expanded tile on Auto goes HD (unless its HD can't play here): size the box for that
               ...(focused && fit ? { "--expand-h": `${fit}px`, "--expand-ar": q(focused.key) === "sd" ? 4 / 3 : 2592 / 1520 } as React.CSSProperties : {}) }}>
             {grid.map((t) => (
-              <SiteTile key={t.key} t={t} {...tileProps} focused={!!focused}
+              <SiteTile key={t.key} t={t} {...tileProps} focused={!!focused} tab={t.key === tabbable} onCellFocus={() => setTabKey(t.key)}
                 drag={draggable ? { onGrip: (e) => drag.start(t.key, tileLabel(t.server.name, t.name, multi), e), dragging: drag.dragKey === t.key,
                   dropTarget: drag.dropKey === t.key } : undefined}
-                extra={<button type="button" className="ghost small icon-act" onClick={() => setExpanded(focused ? null : t.key)}
+                extra={<button type="button" className="ghost small icon-act" onClick={() => showTile(focused ? null : t.key, t.key)}
                   aria-label={focused ? "Back to the grid" : "Expand"} title={focused ? "Back to the grid" : "Expand this camera"}>
                   <Icon name={focused ? "grid" : "expand"} size={16} /></button>} />
             ))}
@@ -646,21 +718,41 @@ function useSiteActivity(site: Site, servers: Server[], source: DashboardSource,
 /** Expand: the height left for the one picture below the grid's top edge, so the expanded camera (picture plus its
  *  name bar) fits the window instead of growing with the page width past the bottom of the screen. */
 const EXPAND_BAR_PX = 56;   // the tile's name bar and the gap under it
-function useExpandFit(grid: React.RefObject<HTMLDivElement | null>, on: boolean): number | null {
+function useExpandFit(grid: React.RefObject<HTMLDivElement | null>, on: boolean, fullscreen = false): number | null {
   const [h, setH] = useState<number | null>(null);
   useLayoutEffect(() => {
     if (!on) { setH(null); return; }
     const measure = () => {
       const el = grid.current;
       if (!el) return;
-      const top = el.getBoundingClientRect().top + window.scrollY;   // from the top of the page, not of the viewport
+      // from the top of the page, not of the viewport; in fullscreen the grid's own box is the screen
+      const top = el.getBoundingClientRect().top + (fullscreen ? 0 : window.scrollY);
       setH(Math.max(200, Math.floor(window.innerHeight - top - EXPAND_BAR_PX)));
     };
     measure();
     window.addEventListener("resize", measure);
     return () => window.removeEventListener("resize", measure);
-  }, [grid, on]);
+  }, [grid, on, fullscreen]);
   return h;
+}
+
+/** A tile's cell in the grid, by key. */
+const cellOf = (grid: HTMLElement | null, key: string) => grid?.querySelector<HTMLElement>(`[data-live-key="${CSS.escape(key)}"]`) ?? null;
+
+/** Fullscreen for the Live view's own box (the grid and the activity column, not the hub's header). `supported` is false
+ *  where the browser has no element fullscreen (an iPhone); the toolbar then offers no button. */
+function useFullscreen(box: React.RefObject<HTMLElement | null>) {
+  const [on, setOn] = useState(false);
+  useEffect(() => {
+    const sync = () => setOn(!!box.current && document.fullscreenElement === box.current);
+    document.addEventListener("fullscreenchange", sync);
+    return () => document.removeEventListener("fullscreenchange", sync);
+  }, [box]);
+  const toggle = useCallback(() => {
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    else box.current?.requestFullscreen?.().catch(() => {});
+  }, [box]);
+  return { on, toggle, supported: typeof document !== "undefined" && !!document.fullscreenEnabled };
 }
 
 /** The "Latest activity" column: LiveView's feed and RegionNote, with the event viewer opened in place. */
@@ -775,10 +867,13 @@ const STATE_TEXT: Record<Exclude<TileState, "live">, string> = { offline: "Serve
 /** A grid tile's part in a drag (useTileDrag): its grip, and whether it is the one dragged or the one under the pointer. */
 type TileDrag = { onGrip: (e: React.PointerEvent) => void; dragging: boolean; dropTarget: boolean };
 
-function SiteTile({ t, source, multi, q, dispatch, activeOf, talkOf, deter, extra, phone, onSwipe, drag, focused = false }: TileCommon & {
+function SiteTile({ t, source, multi, q, dispatch, activeOf, talkOf, deter, extra, phone, onSwipe, drag, focused = false, tab, onCellFocus }: TileCommon & {
   t: Tile; extra?: React.ReactNode; phone?: boolean; onSwipe?: (dir: -1 | 1) => void; drag?: TileDrag;
   /** the tile is the expanded one */
   focused?: boolean;
+  /** keyboard (the desktop grid): true = the tile in the Tab order, false = reached with the arrows; absent = not focusable */
+  tab?: boolean;
+  onCellFocus?: () => void;
 }) {
   const box = useRef<HTMLDivElement>(null);
   const budget = useBudgetSlot(t.key, box);
@@ -789,8 +884,10 @@ function SiteTile({ t, source, multi, q, dispatch, activeOf, talkOf, deter, extr
   const mode = q(t.key);
   const pick = (m: QualityMode) => dispatch({ type: "quality", key: t.key, quality: m });
   const playing = t.state === "live" && (phone || budget.playing(t.key)) && ice !== undefined;
-  // every 10 s while paused, every 60 s after a still failed to load (the server's own, through the tunnel)
-  const still = useStill(!playing && t.state === "live");
+  // every 10 s while paused, every 60 s after a still failed to load (the server's own, through the tunnel), at the
+  // tile's own width, with the frame's age
+  const stillW = useStillWidth(box);
+  const still = useStillFrame(!playing && t.state === "live", (ts) => site.frameUrl(t.id, ts, stillW));
   // the hub's latest picture: the live tile's poster until the server's still arrives, and the picture of a tile whose
   // server is offline or not answering
   const hubStill = stillUrl(t.server.id, t.id, t.stillTs);
@@ -798,7 +895,10 @@ function SiteTile({ t, source, multi, q, dispatch, activeOf, talkOf, deter, extr
   const active = activeOf(t.key);
   const grip = drag && <span className="sync-grip" title="Drag to reorder" onPointerDown={drag.onGrip}>⠿</span>;
   return (
-    <div ref={box} className={`site-live-cell ${focused ? "focused" : ""} ${drag?.dragging ? "dragging" : ""} ${drag?.dropTarget ? "drop-target" : ""}`} data-live-key={t.key}>
+    <div ref={box} className={`site-live-cell ${focused ? "focused" : ""} ${drag?.dragging ? "dragging" : ""} ${drag?.dropTarget ? "drop-target" : ""}`} data-live-key={t.key}
+      tabIndex={tab === undefined ? undefined : tab ? 0 : -1} role={tab === undefined ? undefined : "group"}
+      aria-label={tab === undefined ? undefined : `${label}${t.state === "live" ? (active ? `, ${active.camera_class} event in progress` : "") : `, ${STATE_TEXT[t.state]}`}${focused ? ", expanded" : ""}`}
+      onFocus={onCellFocus ? (e) => { if (e.target === e.currentTarget) onCellFocus(); } : undefined}>
       {playing && t.cam ? (
         // the tidy bar: the name (full in its tooltip) and a status dot; the quality badge and the actions show on
         // hover or keyboard focus on a desktop, always on a touch screen (hub.css .tile-acts)
@@ -812,13 +912,20 @@ function SiteTile({ t, source, multi, q, dispatch, activeOf, talkOf, deter, extr
           </>} />
       ) : (
         <div className={`tile ${t.state === "live" ? "" : "site-live-down"}`} {...(phone && onSwipe ? swipeHandlers(onSwipe) : {})}>
-          <div className="player dash-still">
+          {/* the whole paused picture is the Play target; the button stays for the keyboard */}
+          <div className={`player dash-still ${t.state === "live" ? "click-play" : ""}`} onClick={t.state === "live" ? () => budget.force(t.key) : undefined}>
             {t.state === "live"
-              ? <img src={site.frameUrl(t.id, still.ts, 640)} alt="" onLoad={still.onLoad} onError={still.onError} style={still.failed ? { visibility: "hidden" } : undefined} />
+              ? <>
+                {/* the hub's latest picture until the server's own still arrives */}
+                {(still.src ?? hubStill) && <img src={(still.src ?? hubStill)!} alt="" onLoad={still.onLoad} onError={still.onError}
+                  style={still.failed && still.onError ? { visibility: "hidden" } : undefined} />}
+                <StaleStillBadge frameTs={still.frameTs} />
+              </>
               : hubStill && t.stillTs
                 ? <><img src={hubStill} alt="" /><div className="player-badge stale" role="status">{STATE_TEXT[t.state]} · {lastPictureText(t.stillTs)}</div></>
                 : <div className="player-state">{STATE_TEXT[t.state]}</div>}
-            {t.state === "live" && still.failed && <div className="player-state">{NO_PICTURE_TEXT}</div>}
+            {/* a still that failed keeps the last one on screen (its age says how old) */}
+            {t.state === "live" && still.failed && (still.onError || !still.src) && <div className="player-state">{NO_PICTURE_TEXT}</div>}
             {t.state === "live" && (
               <button className="dash-play" onClick={() => budget.force(t.key)} title="Play live (another tile pauses if the page is at its limit)"><Icon name="play" size={22} /></button>
             )}
@@ -827,7 +934,7 @@ function SiteTile({ t, source, multi, q, dispatch, activeOf, talkOf, deter, extr
             {grip}
             <span className={`dot ${t.state === "live" && t.streamReady ? "ok" : "bad"}`} title={t.state === "live" ? (t.streamReady ? "Recording" : "No stream") : STATE_TEXT[t.state]} />
             <span className="tile-name" title={label}>{label}</span>
-            {t.state === "live" && <span className="muted small tile-state" title="Paused: a still frame (the page plays a limited number of cameras at once)">paused</span>}
+            {t.state === "live" && <StillAge frameTs={still.frameTs} />}
             {t.state !== "live" && t.state !== "loading" && <span className="muted small tile-state">{t.state === "offline" ? "offline" : "unreachable"}</span>}
             <span className="spacer" />
             <span className="tile-acts">
@@ -842,7 +949,9 @@ function SiteTile({ t, source, multi, q, dispatch, activeOf, talkOf, deter, extr
 }
 
 /** Phone: one camera at a time, a strip of stills across every server's cameras, swipe or tap to switch (wraps).
- *  `picker` (the named layouts, when there are any) sets which cameras the strip has and their order. */
+ *  `picker` (the named layouts, when there are any) sets which cameras the strip has and their order. Only the
+ *  thumbnails scrolled into the strip's view load and refresh (useStripInView): on a cellular Site every still
+ *  crosses its uplink, and a 50-camera strip used to ask for 50 every 10 s. */
 function PhoneLive({ tiles, activity, picker, ...common }: TileCommon & { tiles: Tile[]; activity: React.ReactNode; picker: React.ReactNode }) {
   const [idx, setIdx] = useState(0);
   const [tick, setTick] = useState(0);
@@ -859,16 +968,28 @@ function PhoneLive({ tiles, activity, picker, ...common }: TileCommon & { tiles:
   const i = Math.min(idx, tiles.length - 1);
   const t = tiles[i];
   const step = (dir: -1 | 1) => setIdx(wrapIndex(i, dir, tiles.length));
+  const strip = useRef<HTMLDivElement>(null);
+  const inView = useStripInView(strip, tiles.map((x) => x.key).join(","));
+  // a swipe to a camera off the strip's edge brings its thumbnail into view (sideways only: the page doesn't move)
+  useEffect(() => {
+    const el = strip.current?.querySelector<HTMLElement>(`[data-strip-key="${CSS.escape(t.key)}"]`);
+    const box = strip.current;
+    if (!el || !box) return;
+    if (el.offsetLeft < box.scrollLeft || el.offsetLeft + el.offsetWidth > box.scrollLeft + box.clientWidth) {
+      box.scrollTo({ left: el.offsetLeft - (box.clientWidth - el.offsetWidth) / 2, behavior: "smooth" });
+    }
+  }, [t.key]);
   return (
     <LiveBudgetProvider>
       <div className="live-phone">
         {picker}
         <SiteTile key={t.key} t={t} {...common} phone onSwipe={step} />
         {tiles.length > 1 && (
-          <div className="live-strip" role="tablist">
+          <div ref={strip} className="live-strip" role="tablist">
             {tiles.map((x, j) => (
-              <button key={x.key} role="tab" aria-selected={j === i} className={`live-strip-item ${j === i ? "active" : ""}`} onClick={() => setIdx(j)}>
-                {x.state !== "live" ? (x.stillTs
+              <button key={x.key} role="tab" aria-selected={j === i} className={`live-strip-item ${j === i ? "active" : ""}`} onClick={() => setIdx(j)}
+                data-strip-key={x.key}>
+                {!inView.has(x.key) ? <div className="site-live-strip-off" aria-hidden="true" /> : x.state !== "live" ? (x.stillTs
                   ? <img className="site-live-strip-stale" src={stillUrl(x.server.id, x.id, x.stillTs)!} alt="" title={`Offline · ${lastPictureText(x.stillTs)}`} />
                   : <div className="site-live-strip-off">offline</div>) : <>
                   {stillDue(tick, failedAt[x.key]) && (
@@ -887,4 +1008,27 @@ function PhoneLive({ tiles, activity, picker, ...common }: TileCommon & { tiles:
       </div>
     </LiveBudgetProvider>
   );
+}
+
+/** The strip's thumbnails in (or within one thumbnail of) its visible part, by tile key; re-observed when the strip's
+ *  cameras change. */
+function useStripInView(strip: React.RefObject<HTMLDivElement | null>, keySig: string): Set<string> {
+  const [keys, setKeys] = useState<Set<string>>(() => new Set());
+  useEffect(() => {
+    const root = strip.current;
+    if (!root || typeof IntersectionObserver === "undefined") return;
+    const io = new IntersectionObserver((entries) => setKeys((prev) => {
+      const next = new Set(prev);
+      for (const e of entries) {
+        const k = (e.target as HTMLElement).dataset.stripKey;
+        if (!k) continue;
+        if (e.isIntersecting) next.add(k);
+        else next.delete(k);
+      }
+      return next;
+    }), { root, rootMargin: "0px 140px" });
+    root.querySelectorAll("[data-strip-key]").forEach((el) => io.observe(el));
+    return () => io.disconnect();
+  }, [strip, keySig]);
+  return keys;
 }

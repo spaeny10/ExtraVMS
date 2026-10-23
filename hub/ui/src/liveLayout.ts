@@ -257,3 +257,24 @@ export function viewSummary(layout: LiveLayout, liveKeys: string[], shown: numbe
     title: `Stream ${streamText} · ${cols} · ${filtered ? `${filtered} cameras shown` : `all ${total} cameras`}`,
   };
 }
+
+// ---------------------------------------------------------------- keyboard
+
+/**
+ * The grid's arrow keys (docs/live-views-spec.md, Keyboard): the tile `key` moves the focus to from tile `i` of `n`
+ * laid out `cols` wide, in visual order; null = nowhere (an edge, or not a move key). Down from a row above a short
+ * last row lands on that row's last tile rather than nowhere. Home / End go to the first / last tile.
+ */
+export function gridMove(i: number, key: string, cols: number, n: number): number | null {
+  if (n <= 0 || i < 0 || i >= n) return null;
+  const c = Math.max(1, cols);
+  switch (key) {
+    case "ArrowLeft": return i > 0 ? i - 1 : null;
+    case "ArrowRight": return i < n - 1 ? i + 1 : null;
+    case "ArrowUp": return i >= c ? i - c : null;
+    case "ArrowDown": return i + c < n ? i + c : Math.floor(i / c) < Math.floor((n - 1) / c) ? n - 1 : null;
+    case "Home": return i === 0 ? null : 0;
+    case "End": return i === n - 1 ? null : n - 1;
+    default: return null;
+  }
+}

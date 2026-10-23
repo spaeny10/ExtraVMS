@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  NO_RECORDING_RETRY_MS, STILL_BACKOFF_MS, STILL_REFRESH_MS, afterFollowError, httpStatus, stillDelay, stillDue,
+  NO_RECORDING_RETRY_MS, STILL_BACKOFF_MS, STILL_REFRESH_MS, afterFollowError, httpStatus, stillAgeText, stillDelay, stillDue, stillWidth,
 } from "./liveFallback";
 
 describe("recording fallback after a chunk fails", () => {
@@ -48,5 +48,21 @@ describe("still backoff", () => {
     expect(stillDue(3, 3)).toBe(false);
     expect(stillDue(8, 3)).toBe(false);
     expect(stillDue(9, 3)).toBe(true);
+  });
+});
+
+describe("still size and age", () => {
+  it("asks for 320 px on a small tile, 640 px otherwise, counting the screen's pixel ratio", () => {
+    expect(stillWidth(300)).toBe(320);
+    expect(stillWidth(479)).toBe(320);
+    expect(stillWidth(480)).toBe(640);
+    expect(stillWidth(300, 2)).toBe(640);
+  });
+  it("says the age in seconds, minutes or hours, never negative", () => {
+    expect(stillAgeText(-4)).toBe("0 s");
+    expect(stillAgeText(8.4)).toBe("8 s");
+    expect(stillAgeText(59)).toBe("59 s");
+    expect(stillAgeText(150)).toBe("3 min");
+    expect(stillAgeText(7200)).toBe("2 h");
   });
 });

@@ -272,6 +272,12 @@ a.icon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px
 /* Site → Live embedded (SOC incident view): no activity column; compact drops the toolbar and chips */
 .live-layout.site-live-solo { grid-template-columns: minmax(0, 1fr); }
 .live-layout.site-live-compact .live-main { gap: 4px; }
+/* keyboard: the focused tile (arrows, Enter, Esc / Backspace; SiteLive's keyboard notes) */
+.site-live-cell:focus { outline: none; }
+.site-live-cell:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; border-radius: var(--radius); }
+/* fullscreen (F or the toolbar button): the grid alone fills the screen, scrolling inside it past one screenful */
+.live-layout:fullscreen { grid-template-columns: minmax(0, 1fr); background: var(--bg); padding: 12px; overflow-y: auto; align-content: start; }
+.live-layout:fullscreen > .live-feed { display: none; }
 
 /* ---------- Site → Settings sub-tabs and the SOC boxes (Monitoring, Contacts, Procedures) ---------- */
 .settings-tabs { margin-bottom: 12px; max-width: 100%; overflow-x: auto; }

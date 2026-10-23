@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { EMPTY_LAYOUT, type LiveLayout, applyFocus, arrange, coerceLayout, gridCols, isDirty, isVisible, layoutCols, layoutIdStorageKey, layoutReducer,
+import { EMPTY_LAYOUT, type LiveLayout, applyFocus, arrange, coerceLayout, gridCols, gridMove, isDirty, isVisible, layoutCols, layoutIdStorageKey, layoutReducer,
   layoutStorageKey, parseLayout, shownKeys, streamMode, tileLabel, tileQuality, toSavedConfig, viewSummary, wrapIndex } from "./liveLayout";
 
 describe("gridCols", () => {
@@ -218,5 +218,34 @@ describe("the View menu (streamMode, viewSummary)", () => {
     expect(some).toMatchObject({ stream: "sd", cols: "3 columns", cameras: "Cameras 9/14", filtered: "9/14" });
     expect(some.title).toBe("Stream All SD · 3 columns · 9/14 cameras shown");
     expect(viewSummary({ ...EMPTY_LAYOUT, cols: 1 }, keys, 1, 1).cols).toBe("1 column");
+  });
+});
+
+describe("gridMove", () => {
+  // 7 tiles, 3 wide:  0 1 2 / 3 4 5 / 6
+  it("moves left and right in reading order, stopping at the ends", () => {
+    expect(gridMove(0, "ArrowLeft", 3, 7)).toBeNull();
+    expect(gridMove(2, "ArrowRight", 3, 7)).toBe(3);
+    expect(gridMove(6, "ArrowRight", 3, 7)).toBeNull();
+  });
+  it("moves up and down a column", () => {
+    expect(gridMove(4, "ArrowUp", 3, 7)).toBe(1);
+    expect(gridMove(1, "ArrowUp", 3, 7)).toBeNull();
+    expect(gridMove(0, "ArrowDown", 3, 7)).toBe(3);
+  });
+  it("lands on a short last row's last tile, and stops below it", () => {
+    expect(gridMove(5, "ArrowDown", 3, 7)).toBe(6);
+    expect(gridMove(6, "ArrowDown", 3, 7)).toBeNull();
+  });
+  it("jumps to the first and last tile, and ignores other keys", () => {
+    expect(gridMove(4, "Home", 3, 7)).toBe(0);
+    expect(gridMove(4, "End", 3, 7)).toBe(6);
+    expect(gridMove(6, "End", 3, 7)).toBeNull();
+    expect(gridMove(4, "Enter", 3, 7)).toBeNull();
+  });
+  it("treats one column as a list and an empty grid as nowhere", () => {
+    expect(gridMove(1, "ArrowDown", 1, 3)).toBe(2);
+    expect(gridMove(0, "ArrowDown", 0, 3)).toBe(1);
+    expect(gridMove(0, "ArrowRight", 3, 0)).toBeNull();
   });
 });

@@ -4,7 +4,7 @@ import { HD_H265_TITLE, canPlayLive, pathCodec } from "../../codecs";
 import { LivePlayer, hdPathClass } from "../../LivePlayer";
 import { useLiveCodecs } from "../../LiveQuality";
 import { Icon } from "../../ui";
-import { useStill } from "../../useStill";
+import { StaleStillBadge, StillAge, useStillFrame, useStillWidth } from "../../useStillFrame";
 import { livePath } from "../../cameraStreams";
 import { pathQuality } from "../../whepTiming";
 import { useBudget } from "../budget";
@@ -55,7 +55,9 @@ export function CameraWidget({ widget: w, source, editing, big, onProps }: {
     return () => { io.disconnect(); visible(w.id, false); };
   }, [visible, w.id]);
   const playing = (big || budget.playing(w.id)) && !editing;
-  const still = useStill(!playing);
+  // sized to the tile, with the frame's age (useStillFrame); hooks before the early returns below
+  const stillW = useStillWidth(box);
+  const still = useStillFrame(!playing && !!api && !!cam?.online, (ts) => (api ? api.frameUrl(camera, ts, stillW) : ""));
 
   if (!site || !camera) return <div className="dash-empty muted small">Choose a camera in ⚙ settings.</div>;
   if (!cam) return <div className="dash-empty muted small">Camera {camera} is not on any site you can see.</div>;
@@ -74,14 +76,18 @@ export function CameraWidget({ widget: w, source, editing, big, onProps }: {
           onUnsupported={(p) => { if (pathQuality(p) === "hd") setHdOk(false); }} onSwitchFailed={(p) => setQuality(pathQuality(p) === "hd" ? "sd" : "hd")}
           muted={!sound} onAudio={setHasAudio} />
       ) : (
-        <div className="player dash-still">
+        // the whole paused picture is the Play target (not while editing: a click there starts a drag)
+        <div className={`player dash-still ${cam.online && !editing ? "click-play" : ""}`} onClick={cam.online && !editing ? () => budget.force(w.id) : undefined}>
           {cam.online
-            ? <img src={api!.frameUrl(camera, still.ts, 640)} alt="" onLoad={still.onLoad} onError={still.onError} style={still.failed ? { visibility: "hidden" } : undefined} />
+            ? <>
+              {still.src && <img src={still.src} alt="" onLoad={still.onLoad} onError={still.onError} style={still.failed && still.onError ? { visibility: "hidden" } : undefined} />}
+              <StaleStillBadge frameTs={still.frameTs} />
+            </>
             : cam.lastPicture
               // the server is offline: the hub's latest picture of the camera, with when it was taken
               ? <><img src={cam.lastPicture.url} alt="" /><div className="player-badge stale" role="status">{cam.siteName} is offline · {cam.lastPicture.label}</div></>
               : <div className="player-state">{cam.siteName} is offline</div>}
-          {cam.online && still.failed && <div className="player-state">{NO_PICTURE_TEXT}</div>}
+          {cam.online && still.failed && (still.onError || !still.src) && <div className="player-state">{NO_PICTURE_TEXT}</div>}
           {cam.online && !editing && (
             <button className="dash-play" onClick={() => budget.force(w.id)} title="Play live (another tile pauses if the page is at its limit)"><Icon name="play" size={22} /></button>
           )}
@@ -89,7 +95,7 @@ export function CameraWidget({ widget: w, source, editing, big, onProps }: {
       )}
       <div className="dash-cam-bar">
         <span className={`dot ${cam.streamReady && cam.online ? "ok" : "bad"}`} />
-        {!playing && cam.online && <span className="muted small">{editing ? "paused while editing" : "paused · still frame"}</span>}
+        {!playing && cam.online && (editing ? <span className="muted small">paused while editing</span> : <StillAge frameTs={still.frameTs} />)}
         <span className="spacer" />
         {playing && hasAudio && <button className={`ghost small ${sound ? "on" : ""}`} title={sound ? "Mute" : "Listen"} onClick={() => setSound((s) => !s)}>{sound ? "🔊" : "🔇"}</button>}
         <div className="segmented small-seg" title={hdTitle}>

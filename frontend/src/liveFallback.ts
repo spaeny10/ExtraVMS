@@ -45,3 +45,18 @@ export const stillDelay = (failed: boolean): number => (failed ? STILL_BACKOFF_M
  *  load again on `tick`? Once a minute. */
 export const stillDue = (tick: number, failedAt: number | undefined): boolean =>
   failedAt === undefined || tick - failedAt >= STILL_BACKOFF_MS / STILL_REFRESH_MS;
+
+/** A still older than this shows the stale badge on the picture itself; younger ones only say their age in the bar. */
+export const STALE_STILL_S = 30;
+
+/** The still width to ask /api/frame for, from the tile's width on screen: 320 for a small tile, else 640 (the spec's
+ *  two sizes; the server's floor is 320). */
+export const stillWidth = (cssPx: number, dpr = 1): 320 | 640 => (cssPx * dpr < 480 ? 320 : 640);
+
+/** "8 s", "3 min", "2 h": how old a still frame is (a frame "from the future" by clock skew reads 0 s). */
+export function stillAgeText(ageS: number): string {
+  const s = Math.max(0, ageS);
+  if (s < 60) return `${Math.round(s)} s`;
+  if (s < 3600) return `${Math.round(s / 60)} min`;
+  return `${Math.round(s / 3600)} h`;
+}
