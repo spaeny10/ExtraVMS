@@ -639,12 +639,17 @@ class Pipeline:
 
     def retry_failed_synopses(self, limit: int = RETRY_BATCH) -> int:
         """Requeue verified events whose synopsis failed (Qwen or the remote AI was down): newest first, at most
-        RETRY_MAX attempts each, only events from the last week that this camera still wants described."""
+        RETRY_MAX attempts each, only events from the last week that would still be described today (this camera's
+        labels, or unusual enough for it) and whose keyframes are still on disk. Without keyframes _synopsis returns
+        before asking Qwen and records nothing, so such an event would be requeued every pass forever."""
         n = 0
         for r in db.all("SELECT id FROM events WHERE status='verified' AND synopsis IS NULL AND error LIKE 'synopsis%' "
                         "AND start_ts > ? ORDER BY start_ts DESC", [time.time() - self.RETRY_WINDOW_S]):
             e = db.event(r["id"])
-            if not e or synopsis_attempts(e) >= self.RETRY_MAX or not self.wants_synopsis(e):
+            if not e or synopsis_attempts(e) >= self.RETRY_MAX or not self.keyframe_files(e):
+                continue
+            # _verify also describes any label once it is this unusual for its camera (e.g. a vehicle at night)
+            if not self.wants_synopsis(e) and (e.get("anomaly") or 0) < settings.anomaly_synopsis_min:
                 continue
             if self.queue_synopsis(e["id"]):
                 n += 1
@@ -748,13 +753,18 @@ class Pipeline:
         except Exception:
             log.exception("re-ID backfill failed")
 
+    @staticmethod
+    def keyframe_files(e: dict) -> list:
+        """The event's keyframes still on disk, as Qwen is shown them (retention may have pruned them since)."""
+        d = settings.data_dir / "events" / str(e["id"])
+        files = [d / k["file"] for k in (e.get("detections") or {}).get("keyframes", [])]
+        return [f for f in files if f.exists()][: settings.synopsis_images]
+
     async def _synopsis(self, event_id: int) -> None:
         e = db.event(event_id)
         if not e or e["synopsis"]:
             return
-        d = event_dir(event_id)
-        images = [(d / k["file"]).read_bytes() for k in (e["detections"] or {}).get("keyframes", [])
-                  if (d / k["file"]).exists()][: settings.synopsis_images]
+        images = [f.read_bytes() for f in self.keyframe_files(e)]
         if not images:
             return
         camera = self.cameras.get(e["camera_id"], {"name": e["camera_id"]})
