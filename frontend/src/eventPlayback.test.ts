@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { TimelineEvent } from "./api";
+import type { NvrEvent, TimelineEvent } from "./api";
 import {
   CLIP_PRE_ROLL_S, EDGE_S, EVENT_MARGIN_S, JUMP_LEAD_S, MID_STALL_S, NEAR_END_S, NEIGHBOUR_RANGE_S, PRE_ROLL_S, START_TIMEOUT_S,
   STRIP_FILL, STRIP_HALF_S, STUCK_S, ZOOM_HALF_S, afterPlaybackError, atFrac, chunkAt, chunkStep, clipOrigin, coverage,
@@ -7,7 +7,8 @@ import {
   needsListing, neighbour, nextChunkStart, pauseAtEnd, playStart, prefetchLead, PREV_SLACK_S, relLabel, scaleMarks, sdUsable,
   snapToRecorded, stripWindow, ticks, toFrac, viaHub, zoomLabel, zoomWindow, type ChunkLook,
   MAX_STRIP_S, MIN_STRIP_S, centreOn, clampStrip, halfLabel, listedEvents, stripLimits, stripWidth, withSelected, zoomStep,
-  stepEvent, zoomWindowWidth,
+  stepEvent, zoomWindowWidth, FAR_ERROR_TTL_MS, FAR_NONE_TTL_MS, FAR_PAGE, FarCache, STEP_STATUSES, farKey, farNeighbour,
+  stepButton, stepPlan, asTimelineEvent, type FarEntry, type FarQuery,
 } from "./eventPlayback";
 import { panWindow, wheelZoom } from "./timeZoom";
 import {
@@ -496,5 +497,147 @@ describe("previous / next from the selected event", () => {
   it("from the playhead once playback or a seek has left the selected event", () => {
     expect(stepEvent(all, a, 1300, 1, NOW)?.id).toBe(4);   // not back to #2 and #3, already played through
     expect(stepEvent(all, a, 1300, -1, NOW)?.id).toBe(3);
+  });
+});
+
+describe("previous / next beyond the listing", () => {
+  // the camera's events: one an hour, so each is beyond the previous one's listing (NEIGHBOUR_RANGE_S = 30 min)
+  const H = 3600;
+  const far = [ev(10, OLD), ev(11, OLD + H), ev(12, OLD + 2 * H, { status: "masked" }), ev(13, OLD + 3 * H), ev(14, OLD + 4 * H)];
+  const sel = far[1];
+  it("the listing's neighbour when it has one; else ask the server from the selected event", () => {
+    const listed = withSelected(listedEvents([sel, ev(20, OLD + H + 600)]), sel);
+    expect(stepPlan(listed, sel, jumpTarget(sel), 1, NOW, "cam1")).toEqual({ kind: "listed", event: listed[1] });
+    expect(stepPlan(listed, sel, jumpTarget(sel), -1, NOW, "cam1")).toEqual({ kind: "far", anchor: sel, dir: -1, key: farKey("cam1", 11, -1) });
+    // the masked one in the listing is no stop: still asked
+    const withMasked = withSelected(listedEvents([sel, ev(21, OLD + H - 600, { status: "masked" })]), sel);
+    expect(stepPlan(withMasked, sel, jumpTarget(sel), -1, NOW, "cam1").kind).toBe("far");
+    expect(farKey("cam1", 11, -1)).not.toBe(farKey("cam1", 11, 1));
+    expect(farKey("cam1", 11, 1)).not.toBe(farKey("cam2", 11, 1));
+  });
+  it("from the playhead (it left the selected event): asks beyond the listed event furthest that way", () => {
+    const listed = withSelected([sel, ev(20, OLD + H + 600)], sel);
+    const t = OLD + H + 900;   // played on past #20
+    expect(stepPlan(listed, sel, t, -1, NOW, "cam1")).toMatchObject({ kind: "listed", event: { id: 20 } });
+    expect(stepPlan(listed, sel, t, 1, NOW, "cam1")).toMatchObject({ kind: "far", anchor: { id: 20 }, key: farKey("cam1", 20, 1) });
+    const back = OLD + H - 900;   // seeked back before #11
+    expect(stepPlan(listed, sel, back, 1, NOW, "cam1")).toMatchObject({ kind: "listed", event: { id: 11 } });
+    expect(stepPlan(listed, sel, back, -1, NOW, "cam1")).toMatchObject({ kind: "far", anchor: { id: 11 }, key: farKey("cam1", 11, -1) });
+  });
+
+  it("the button: usable while the answer is unknown, greyed out only when the server says there is none", () => {
+    const plan = { kind: "far" as const, anchor: sel, dir: -1 as const, key: "k" };
+    const T = 1_000_000;
+    expect(stepButton({ kind: "listed", event: far[0] }, undefined, true, T)).toEqual({ event: far[0], disabled: false, ask: false });
+    expect(stepButton(plan, undefined, true, T)).toEqual({ event: null, disabled: false, ask: true });
+    expect(stepButton(plan, undefined, false, T)).toEqual({ event: null, disabled: false, ask: false });   // the listing first
+    const pending: FarEntry<TimelineEvent> = { state: "pending", p: new Promise(() => {}) };
+    expect(stepButton(plan, pending, true, T)).toEqual({ event: null, disabled: false, ask: false });
+    expect(stepButton(plan, { state: "done", event: far[0], at: T }, true, T + 10 * FAR_NONE_TTL_MS)).toEqual({ event: far[0], disabled: false, ask: false });
+    expect(stepButton(plan, { state: "done", event: null, at: T }, true, T)).toEqual({ event: null, disabled: true, ask: false });
+    // "none" asked again after a while, greyed out meanwhile
+    expect(stepButton(plan, { state: "done", event: null, at: T }, true, T + FAR_NONE_TTL_MS)).toEqual({ event: null, disabled: true, ask: true });
+    expect(stepButton(plan, { state: "pending", p: new Promise(() => {}), prev: null }, true, T)).toMatchObject({ disabled: true, ask: false });
+    // a failed request: usable (a press asks again), asked again by itself after FAR_ERROR_TTL_MS
+    expect(stepButton(plan, { state: "error", at: T }, true, T)).toEqual({ event: null, disabled: false, ask: false });
+    expect(stepButton(plan, { state: "error", at: T }, true, T + FAR_ERROR_TTL_MS)).toMatchObject({ ask: true });
+  });
+
+  it("the cache: one request per key, the answer kept; a failure asked again on a press", async () => {
+    const c = new FarCache<TimelineEvent>();
+    let runs = 0;
+    const run = async () => { runs++; return far[0]; };
+    const [x, y] = await Promise.all([c.ask("a", run), c.ask("a", run)]);
+    expect(x?.id).toBe(10);
+    expect(y?.id).toBe(10);
+    expect(await c.ask("a", run)).toBe(far[0]);
+    expect(runs).toBe(1);
+    expect(c.get("a")).toMatchObject({ state: "done", event: far[0] });
+    await c.ask("b", run);
+    expect(runs).toBe(2);
+    const fail = async (): Promise<TimelineEvent | null> => { runs++; throw new Error("503 site offline"); };
+    await expect(c.ask("e", fail)).rejects.toThrow("503");
+    expect(c.get("e")?.state).toBe("error");
+    await expect(c.ask("e", run)).rejects.toThrow();   // not again at once by itself...
+    expect(runs).toBe(3);
+    expect(await c.ask("e", run, Date.now(), true)).toBe(far[0]);   // ...but on a press
+    expect(runs).toBe(4);
+  });
+  it("the cache: 'none' is asked again after FAR_NONE_TTL_MS, the old answer kept meanwhile", async () => {
+    const c = new FarCache<TimelineEvent>();
+    const t0 = Date.now();
+    await c.ask("n", async () => null, t0);
+    expect(await c.ask("n", async () => far[4], t0 + 1000)).toBeNull();
+    let release!: (x: TimelineEvent | null) => void;
+    const p = c.ask("n", () => new Promise((r) => { release = r; }), t0 + FAR_NONE_TTL_MS + 1);
+    expect(c.get("n")).toMatchObject({ state: "pending", prev: null });
+    release(far[4]);
+    expect((await p)?.id).toBe(14);
+  });
+
+  /** A server's events API for one camera with STEP_STATUSES: `sort` "oldest" honoured, refused (422: a server before
+   *  it) or ignored (newest first, by id). */
+  const server = (rows: TimelineEvent[], sort: "oldest" | "refuse" | "ignore") => {
+    const calls: FarQuery[] = [];
+    const statuses = STEP_STATUSES.split(",");
+    const query = async (q: FarQuery) => {
+      calls.push(q);
+      if (q.sort && sort === "refuse") throw new Error('422 {"detail":[{"type":"literal_error","loc":["query","sort"]}]}');
+      const r = rows.filter((x) => statuses.includes(x.status) && (q.since == null || x.start_ts >= q.since)
+        && (q.until == null || x.start_ts <= q.until) && (q.before_id == null || x.id < q.before_id));
+      r.sort(q.sort && sort === "oldest" ? (a, b) => a.start_ts - b.start_ts || a.id - b.id : (a, b) => b.id - a.id);
+      return r.slice(0, q.limit);
+    };
+    return { query, calls };
+  };
+  it("earlier: the nearest before it, newest first; masked ones skipped; none at the start", async () => {
+    const s = server(far, "oldest");
+    expect((await farNeighbour(s.query, far[3], -1, NOW))?.id).toBe(11);   // #12 is masked
+    expect(s.calls).toEqual([{ until: far[3].start_ts - 0.001, limit: 5 }]);
+    expect(await farNeighbour(s.query, far[0], -1, NOW)).toBeNull();
+    // newest first is by id: one put back later (a higher id) but earlier in time isn't taken for the nearest
+    const back = server([...far, ev(30, OLD + 0.5 * H)], "oldest");
+    expect((await farNeighbour(back.query, far[1], -1, NOW))?.id).toBe(30);
+    expect((await farNeighbour(back.query, far[3], -1, NOW))?.id).toBe(11);
+  });
+  it("later: since= with sort=oldest, one request", async () => {
+    const s = server([...far, ev(31, OLD + 3.5 * H)], "oldest");
+    expect((await farNeighbour(s.query, far[1], 1, NOW))?.id).toBe(13);
+    expect(s.calls).toEqual([{ since: far[1].start_ts + 0.001, limit: 2, sort: "oldest" }]);
+    expect((await farNeighbour(s.query, far[4], 1, NOW))).toBeNull();
+    expect(s.calls).toHaveLength(2);
+  });
+  it("later, from an older server: refused or ignored sort=oldest pages newest first and takes the earliest", async () => {
+    const rows = [...far, ev(31, OLD + 3.5 * H), ev(32, OLD + 1.5 * H), ev(33, OLD + 30 * H)];   // #32: put back later
+    for (const sort of ["refuse", "ignore"] as const) {
+      const s = server(rows, sort);
+      expect((await farNeighbour(s.query, far[1], 1, NOW))?.id).toBe(32);
+      expect(s.calls.length).toBeGreaterThan(1);
+      expect(s.calls.slice(1).every((q) => q.sort === undefined)).toBe(true);
+      expect((await farNeighbour(s.query, far[3], 1, NOW))?.id).toBe(31);
+      expect((await farNeighbour(s.query, far[4], 1, NOW))?.id).toBe(33);   // beyond the first hour's window
+      expect(await farNeighbour(s.query, rows[7], 1, NOW)).toBeNull();
+    }
+    // ignored, with a single event after it: that one, nothing more asked
+    const one = server(far, "ignore");
+    expect((await farNeighbour(one.query, far[3], 1, NOW))?.id).toBe(14);
+    expect(one.calls).toHaveLength(1);
+  });
+  it("later, from an older server with more than a page in the window: paged down by id", async () => {
+    const busy = Array.from({ length: FAR_PAGE + 20 }, (_, i) => ev(100 + i, OLD + H + 5 + i));
+    const s = server([sel, ...busy], "refuse");
+    expect((await farNeighbour(s.query, sel, 1, NOW))?.id).toBe(100);
+    expect(s.calls.filter((q) => q.before_id != null)).toHaveLength(1);
+  });
+  it("other failures aren't taken for an older server", async () => {
+    const down = async (): Promise<TimelineEvent[]> => { throw new Error("503 site offline"); };
+    await expect(farNeighbour(down, sel, 1, NOW)).rejects.toThrow("503");
+    await expect(farNeighbour(down, sel, -1, NOW)).rejects.toThrow("503");
+  });
+  it("an events API answer becomes a listing event", () => {
+    const e = { id: 5, camera_id: "cam1", track_id: "t", camera_class: "person", camera_conf: 0.9, start_ts: OLD, end_ts: OLD + 5,
+      status: "verified", yolo_class: "person", yolo_conf: 0.8, yolo_hits: 3, snapshot: null, clip: null, synopsis: "s", threat: "low",
+      error: null, feedback: { verdict: "false_alarm" }, policy: { kind: "ppe", text: "", priority: "medium" } } as NvrEvent;
+    expect(asTimelineEvent(e)).toMatchObject({ id: 5, start_ts: OLD, status: "verified", verdict: "false_alarm", has_synopsis: 1, ppe: 1 });
   });
 });

@@ -256,12 +256,175 @@ export function neighbour<E extends Pick<TimelineEvent, "start_ts">>(events: E[]
  * after the playhead (neighbour), so Next never goes back to footage already played through.
  */
 export function stepEvent<E extends Pick<TimelineEvent, "id" | "start_ts" | "end_ts">>(events: E[], sel: E, t: number, dir: -1 | 1, now: number): E | null {
-  const onSel = t >= jumpTarget(sel) - 0.5 && t <= eventEnd(sel, now) + EVENT_MARGIN_S;
-  if (!onSel) return neighbour(events, t, dir);
-  const sorted = [...events].sort((a, b) => a.start_ts - b.start_ts || a.id - b.id);
+  if (!onEvent(sel, t, now)) return neighbour(events, t, dir);
+  const sorted = [...events].sort(byStart);
   const i = sorted.findIndex((x) => x.id === sel.id);
   if (i < 0) return neighbour(events, t, dir);
   return sorted[i + dir] ?? null;
+}
+/** Is the playhead `t` on event `sel` (from where a jump to it lands to EVENT_MARGIN_S past its end)? */
+const onEvent = (sel: Pick<TimelineEvent, "start_ts" | "end_ts">, t: number, now: number): boolean =>
+  t >= jumpTarget(sel) - 0.5 && t <= eventEnd(sel, now) + EVENT_MARGIN_S;
+type Ordered = Pick<TimelineEvent, "id" | "start_ts">;
+/** Time order: by start, then id (stepEvent's order, and the server's sort=oldest). */
+const byStart = (a: Ordered, b: Ordered): number => a.start_ts - b.start_ts || a.id - b.id;
+
+/*
+ * Previous / next beyond the listing. The listing (listingRange) covers the strip and NEIGHBOUR_RANGE_S either side, so
+ * a camera whose previous event is longer ago than that has none in it, and stepping back stopped there (Shawn,
+ * 2026-10-23: Prev greyed out after ~8 events). Then the server is asked for the nearest one beyond it (farNeighbour),
+ * once per (server, camera, anchor event, direction) (FarCache); the button stays usable while that answer is coming
+ * and is greyed out only when the server says there is none.
+ */
+
+/** The statuses previous / next can land on: listedEvents' (everything but masked), for asking the server. */
+export const STEP_STATUSES = "open,pending,verified,rejected,error";
+/** What previous / next goes to: an event in the listing, or (`far`) the server's nearest one before / after `anchor`.
+ *  `key` caches that answer: camera, anchor event and direction. */
+export type StepPlan<E> = { kind: "listed"; event: E } | { kind: "far"; anchor: E; dir: -1 | 1; key: string };
+export const farKey = (camera: string, anchorId: number, dir: -1 | 1): string => `${camera}|${anchorId}|${dir}`;
+
+/**
+ * stepEvent, and when the listing has nothing that way, what to ask the server: the nearest event before / after the
+ * anchor. With the playhead on `sel` that is `sel` itself; once it has left it (neighbour: by the playhead) the listed
+ * event furthest that way (`sel` among them), since the listing has nothing between the playhead and it.
+ */
+export function stepPlan<E extends Pick<TimelineEvent, "id" | "start_ts" | "end_ts">>(
+  events: E[], sel: E, t: number, dir: -1 | 1, now: number, camera: string,
+): StepPlan<E> {
+  const x = stepEvent(events, sel, t, dir, now);
+  if (x) return { kind: "listed", event: x };
+  let anchor = sel;
+  if (!onEvent(sel, t, now)) {
+    const sorted = [...events, sel].sort(byStart);
+    anchor = dir < 0 ? sorted[0] : sorted[sorted.length - 1];
+  }
+  return { kind: "far", anchor, dir, key: farKey(camera, anchor.id, dir) };
+}
+
+/** One of the server's answers in the cache: being asked (`prev` = the answer it replaces, if any), the event (null:
+ *  none) and when, or the request failed (when). */
+export type FarEntry<E> =
+  | { state: "pending"; p: Promise<E | null>; prev?: E | null }
+  | { state: "done"; event: E | null; at: number }
+  | { state: "error"; at: number };
+/** "None later" can stop being true (a new event), and "none earlier" rarely (footage put back from an SD card): asked
+ *  again after this long (ms). A failed request is asked again after FAR_ERROR_TTL_MS, or at once on a press. */
+export const FAR_NONE_TTL_MS = 60_000;
+export const FAR_ERROR_TTL_MS = 10_000;
+/** Answers kept (the oldest asked go first). */
+const FAR_CACHE_MAX = 500;
+
+/** The server's answers for previous / next beyond the listing, by farKey. One per server client (EventPlayer). */
+export class FarCache<E> {
+  private m = new Map<string, FarEntry<E>>();
+  get(key: string): FarEntry<E> | undefined { return this.m.get(key); }
+  /** Is `entry` an answer to go by at `nowMs` (else ask again)? */
+  static fresh<E>(entry: FarEntry<E> | undefined, nowMs: number): boolean {
+    if (!entry) return false;
+    if (entry.state === "pending") return true;
+    if (entry.state === "error") return nowMs - entry.at < FAR_ERROR_TTL_MS;
+    return entry.event != null || nowMs - entry.at < FAR_NONE_TTL_MS;
+  }
+  /** The answer for `key`: the cached one (`force`: not a failed one), the request under way, or `run` asked now. */
+  ask(key: string, run: () => Promise<E | null>, nowMs = Date.now(), force = false): Promise<E | null> {
+    const x = this.m.get(key);
+    if (x?.state === "pending") return x.p;
+    if (x?.state === "done" && FarCache.fresh(x, nowMs)) return Promise.resolve(x.event);
+    if (x?.state === "error" && !force && FarCache.fresh(x, nowMs)) return Promise.reject(new Error("asked a moment ago"));
+    const p = run().then(
+      (event) => { this.set(key, { state: "done", event, at: Date.now() }); return event; },
+      (err: unknown) => { this.set(key, { state: "error", at: Date.now() }); throw err; },
+    );
+    this.set(key, { state: "pending", p, prev: x?.state === "done" ? x.event : undefined });
+    return p;
+  }
+  private set(key: string, v: FarEntry<E>) {
+    this.m.delete(key);
+    this.m.set(key, v);
+    while (this.m.size > FAR_CACHE_MAX) this.m.delete(this.m.keys().next().value as string);
+  }
+}
+
+/** A previous / next button: the event it goes to (null: not known yet, or none), greyed out (`disabled`: only when
+ *  the server said there is none), and whether to ask the server now (`ask`: not asked yet, or the answer is stale).
+ *  `listed`: the listing is there (before it is, nothing is asked: it usually has the neighbour). */
+export type StepButton<E> = { event: E | null; disabled: boolean; ask: boolean };
+export function stepButton<E>(plan: StepPlan<E>, entry: FarEntry<E> | undefined, listed: boolean, nowMs: number): StepButton<E> {
+  if (plan.kind === "listed") return { event: plan.event, disabled: false, ask: false };
+  const ask = listed && !FarCache.fresh(entry, nowMs);
+  if (entry?.state === "done") return { event: entry.event, disabled: entry.event == null, ask };
+  if (entry?.state === "pending") return { event: entry.prev ?? null, disabled: entry.prev === null, ask: false };   // refreshing "none": stays greyed
+  return { event: null, disabled: false, ask };
+}
+
+/** An event from the events API (farNeighbour) as the listing's events are (a TimelineEvent: ticks, previous / next). */
+export const asTimelineEvent = (e: NvrEvent): TimelineEvent => ({
+  id: e.id, camera_class: e.camera_class, yolo_class: e.yolo_class, yolo_conf: e.yolo_conf, start_ts: e.start_ts, end_ts: e.end_ts,
+  status: e.status, threat: e.threat, priority: e.priority, anomaly: e.anomaly, journey_id: e.journey_id, cells: e.cells,
+  verdict: e.feedback?.verdict ?? null, has_synopsis: e.synopsis ? 1 : 0, ppe: e.policy?.kind === "ppe" ? 1 : 0,
+});
+
+/** The events API's parameters farNeighbour uses (api.ts SiteApi.events, with the camera and STEP_STATUSES added). */
+export type FarQuery = { since?: number; until?: number; limit: number; sort?: "oldest"; before_id?: number };
+/** Start times are floats: "before / after the anchor" is this much past its start. */
+const FAR_EPS_S = 0.001;
+/** Earlier events asked for at once (newest first is by id; the nearest by start time is taken among them). */
+const FAR_BACK_N = 5;
+/** An older server (no sort=oldest): later events are looked for in these windows after the anchor, nearest first,
+ *  each paged newest first FAR_PAGE at a time (at most FAR_PAGES pages), the earliest of them taken. */
+const FAR_WINDOWS_S = [3600, 86400, 7 * 86400];
+export const FAR_PAGE = 500;
+const FAR_PAGES = 5;
+/** The request was refused as unknown (422: a server before sort=oldest checks the value and refuses it). */
+const refused = (err: unknown): boolean => /^422\b/.test(err instanceof Error ? err.message : String(err));
+
+/**
+ * The camera's nearest event before (dir -1) or after (dir 1) `anchor` by start time, on the server (`query`: its
+ * events API for this camera, masked ones left out); null when there is none.
+ * Before: until= just before it, newest first. After: since= just after it with sort=oldest, two of them: one, or two
+ * in time order, is the answer. A server without sort=oldest refuses it (422) or, ignoring it, answers newest first
+ * (the two out of order): then its events after the anchor are paged in windows, nearest window first (oldServerNext).
+ */
+export async function farNeighbour<E extends Pick<TimelineEvent, "id" | "start_ts" | "status">>(
+  query: (q: FarQuery) => Promise<E[]>, anchor: Ordered, dir: -1 | 1, now: number,
+): Promise<E | null> {
+  const keep = (rows: E[]) => listedEvents(rows).filter((x) => x.id !== anchor.id && (dir < 0 ? x.start_ts < anchor.start_ts : x.start_ts > anchor.start_ts));
+  if (dir < 0) {
+    const rows = keep(await query({ until: anchor.start_ts - FAR_EPS_S, limit: FAR_BACK_N }));
+    return rows.sort(byStart).pop() ?? null;
+  }
+  let rows: E[];
+  try {
+    rows = await query({ since: anchor.start_ts + FAR_EPS_S, limit: 2, sort: "oldest" });
+  } catch (err) {
+    if (!refused(err)) throw err;
+    return oldServerNext(query, anchor, now, keep);
+  }
+  const got = keep(rows);
+  if (got.length <= 1) return got[0] ?? null;
+  return byStart(got[0], got[1]) <= 0 ? got[0] : oldServerNext(query, anchor, now, keep);
+}
+
+/** The earliest event after `anchor` from a server that lists newest first only: window by window (FAR_WINDOWS_S, then
+ *  up to now), each paged down by id. */
+async function oldServerNext<E extends Pick<TimelineEvent, "id" | "start_ts" | "status">>(
+  query: (q: FarQuery) => Promise<E[]>, anchor: Ordered, now: number, keep: (rows: E[]) => E[],
+): Promise<E | null> {
+  const edges = [anchor.start_ts + FAR_EPS_S, ...FAR_WINDOWS_S.map((s) => anchor.start_ts + s)].filter((x, i) => i === 0 || x < now);
+  for (let w = 0; w < edges.length; w++) {
+    const since = edges[w], until = edges[w + 1];   // the last window: up to now
+    let best: E | null = null;
+    let before: number | undefined;
+    for (let page = 0; page < FAR_PAGES; page++) {
+      const rows = await query({ since, until, limit: FAR_PAGE, before_id: before });
+      for (const x of keep(rows)) if (!best || byStart(x, best) < 0) best = x;
+      if (rows.length < FAR_PAGE) break;
+      before = Math.min(...rows.map((x) => x.id));
+    }
+    if (best) return best;
+  }
+  return null;
 }
 
 /** Playback asked for exactly at a recording's listed start can miss it (MediaMTX answers 404: the request's time is

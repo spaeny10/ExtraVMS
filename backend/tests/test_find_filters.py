@@ -114,6 +114,35 @@ def test_priority_and_sort():
         assert ex.status_code == 400
 
 
+def test_sort_oldest():
+    """sort=oldest: earliest start first (ties by id), for the event viewer's Next beyond its strip (since=, limit=);
+    the other sorts are unchanged. cam3's events are before NOW - 1, outside the other tests' since."""
+    setup()
+    t0 = NOW - 1000
+    base = dict(camera_id="cam3", camera_class="person", camera_conf=0.9, yolo_conf=0.8, status="verified", path=[])
+    db.upsert_camera({"id": "cam3", "name": "CAM3", "host": "127.0.0.1"})
+    late = db.create_event(**base, track_id="o1", start_ts=t0 + 50, end_ts=t0 + 55)
+    early = db.create_event(**base, track_id="o2", start_ts=t0 + 10, end_ts=t0 + 15)    # created later, starts earlier
+    tie = db.create_event(**base, track_id="o3", start_ts=t0 + 10, end_ts=t0 + 12)      # same start: by id
+    masked = db.create_event(**{**base, "status": "masked"}, track_id="o4", start_ts=t0 + 5, end_ts=t0 + 6)
+    q = dict(camera="cam3", since=t0)
+    assert [r["id"] for r in browse(sort="oldest", **q)] == [masked, early, tie, late]
+    assert [r["id"] for r in browse(sort="newest", **q)] == [masked, tie, early, late]          # newest = by id, as before
+    assert [r["id"] for r in browse(sort="oldest", status="open,pending,verified,rejected,error", limit=2, **q)] == [early, tie]
+    assert [r["id"] for r in browse(sort="oldest", camera="cam3", since=t0 + 10.001, limit=2)] == [late]
+    assert browse(sort="oldest", camera="cam3", since=t0 + 50.001) == []
+    # through the route: "oldest" passes the query validation; an unknown sort is still refused
+    import httpx
+
+    async def get(qs):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api.app, client=("192.0.2.9", 5000)),
+                                     base_url="http://127.0.0.1:8000") as c:
+            return await c.get(f"/api/events?{qs}")
+    r = asyncio.run(get(f"camera=cam3&since={t0 + 10.001}&limit=1&sort=oldest"))
+    assert r.status_code == 200 and [x["id"] for x in r.json()] == [late], r.text
+    assert asyncio.run(get("camera=cam3&sort=sideways")).status_code == 422
+
+
 def test_place_zone_attention_and_card_fields():
     setup()
     assert ids(browse(place="Yard")) == {IDS["journey"]}

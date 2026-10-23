@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { fmtTime, type NvrEvent, type PlaybackQuality, type SiteApi, type TimelineEvent } from "./api";
 import {
-  KEY_STEP_S, afterPlaybackError, anyRecorded, atFrac, centreOn, chunkAt, chunkStep, clampStrip, clipOrigin, clock, coverage,
-  defaultQuality, eventEnd, followWindow, footageAvailable, halfLabel, initialSource, jumpTarget, listedEvents, listingRange,
-  needsListing, nextChunkStart, pauseAtEnd, playStart, prefetchLead, relLabel, scaleMarks, sdUsable, snapToRecorded,
-  stepEvent, stripLimits, stripWindow, ticks, toFrac, viaHub, withSelected, zoomStep, zoomWindowWidth, type Source, type Win,
+  FarCache, KEY_STEP_S, STEP_STATUSES, afterPlaybackError, anyRecorded, asTimelineEvent, atFrac, centreOn, chunkAt, chunkStep,
+  clampStrip, clipOrigin, clock, coverage, defaultQuality, eventEnd, farNeighbour, followWindow, footageAvailable, halfLabel,
+  initialSource, jumpTarget, listedEvents, listingRange, needsListing, nextChunkStart, pauseAtEnd, playStart, prefetchLead,
+  relLabel, scaleMarks, sdUsable, snapToRecorded, stepButton, stepPlan, stripLimits, stripWindow, ticks, toFrac, viaHub,
+  withSelected, zoomStep, zoomWindowWidth, type Source, type StepButton, type StepPlan, type Win,
 } from "./eventPlayback";
 import { httpStatus } from "./liveFallback";
 import { PREFETCH_LEAD_S, dropPrefetch, isBuffered, mergeSpans, nowS, prefetchChunk, spanAt, useLatestFrame, type Prefetched, type Span } from "./playback";
@@ -24,6 +25,17 @@ const canSd = (site: SiteApi): Promise<boolean> => {
     sdCaps.set(site, p);
   }
   return p;
+};
+
+/** Previous / next beyond the listing (eventPlayback.ts farNeighbour): the servers' answers, per server client. */
+const farCaches = new WeakMap<SiteApi, FarCache<TimelineEvent>>();
+const farCacheFor = (site: SiteApi): FarCache<TimelineEvent> => {
+  let c = farCaches.get(site);
+  if (!c) {
+    c = new FarCache<TimelineEvent>();
+    farCaches.set(site, c);
+  }
+  return c;
 };
 
 type Listing = { spans: Span[] | null | undefined; events: TimelineEvent[]; from: number; to: number };
@@ -130,8 +142,10 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage, onSel
   const firstChunk = useRef(true);             // the snapshot is the poster of the first chunk only, not of every switch
   const advancing = useRef<number | null>(null);   // the chunk (key) already handing over to the next
   const lim = stripLimits({ start: cur.start_ts, end: eventEnd(cur, nowS()) });   // wheel / pinch zoom limits
-  const st = useRef({ spans, quality, remote, chunk, source, win, stopped, lim });
-  st.current = { spans, quality, remote, chunk, source, win, stopped, lim };
+  // a jump to an event beyond the listing (previous / next far away), waiting for the listing around it (select)
+  const [jumping, setJumping] = useState<{ id: number; at: number } | null>(null);
+  const st = useRef({ spans, quality, remote, chunk, source, win, stopped, lim, listing, jumping });
+  st.current = { spans, quality, remote, chunk, source, win, stopped, lim, listing, jumping };
 
   useEffect(() => { canSd(site).then(setCaps); }, [site]);
 
@@ -300,6 +314,7 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage, onSel
   /** Go to `to`: within the chunk when it is there already, else a new chunk; a gap goes to the next recording (`dir`
    *  -1: the end of the one before). */
   const seek = (to: number, pause = false, dir: -1 | 1 = 1) => {
+    if (st.current.jumping) setJumping(null);   // somewhere else now
     if (pause) { setWant(false); video.current?.pause(); }
     const { spans, source, chunk } = st.current;
     const v = video.current;
@@ -526,18 +541,67 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage, onSel
   const marks = ticks(listing.events, win, cur.id, label);
   const all = withSelected(listing.events, cur as TimelineEvent);
   const selected = all.find((x) => x.id === cur.id)!;
-  const prev = stepEvent(all, selected, t, -1, now), next = stepEvent(all, selected, t, 1, now);
+  // Previous / next: the listing's neighbour, else the server's nearest beyond it (eventPlayback.ts stepPlan, farNeighbour),
+  // asked as soon as it is needed so the button shows what it does; greyed out only when the server says there is none.
+  // While a jump waits for its listing, from where it lands.
+  const farCache = farCacheFor(site);
+  const [, bump] = useReducer((n: number) => n + 1, 0);
+  const tStep = jumping?.at ?? t;
+  const nowMs = Date.now();
+  const button = (dir: -1 | 1): [StepPlan<TimelineEvent>, StepButton<TimelineEvent>] => {
+    const plan = stepPlan(all, selected, tStep, dir, now, cam);
+    return [plan, stepButton(plan, plan.kind === "far" ? farCache.get(plan.key) : undefined, listing.spans !== undefined, nowMs)];
+  };
+  const [prevPlan, prev] = button(-1), [nextPlan, next] = button(1);
+  const askFar = (plan: StepPlan<TimelineEvent> & { kind: "far" }, force = false) =>
+    farCache.ask(plan.key, () => farNeighbour((q) => site.events({ camera: cam, status: STEP_STATUSES, ...q }), plan.anchor, plan.dir, nowS())
+      .then((x) => (x ? asTimelineEvent(x) : null)), Date.now(), force);
+  const alive = useRef(true);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  const prevAsk = prev.ask && prevPlan.kind === "far" ? prevPlan.key : null, nextAsk = next.ask && nextPlan.kind === "far" ? nextPlan.key : null;
+  useEffect(() => {
+    const done = () => { if (alive.current) bump(); };
+    for (const p of [prevPlan, nextPlan]) if (p.kind === "far" && (p.key === prevAsk || p.key === nextAsk)) askFar(p).then(done, done);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prevAsk, nextAsk]);
+  const curId = useRef(cur.id);
+  curId.current = cur.id;
+  const stepSeq = useRef(0);
+  /** Previous / next pressed: there now, or once the server has answered (if the viewer is still on the same event). */
+  const step = (plan: StepPlan<TimelineEvent>, b: StepButton<TimelineEvent>) => {
+    const n = ++stepSeq.current;
+    if (plan.kind === "listed") return select(plan.event);
+    if (b.event) return select(b.event);
+    const from = curId.current;
+    askFar(plan, true).then((x) => {
+      if (!alive.current) return;
+      bump();
+      if (x && n === stepSeq.current && curId.current === from) select(x);
+    }, () => { if (alive.current) bump(); });
+  };
   /** Switch the viewer to event `x` of this camera: the strip centres on it at the same zoom, the video goes on from just
-   *  before it, and the viewer (onSelectEvent) shows its details. */
+   *  before it, and the viewer (onSelectEvent) shows its details. An event beyond the listing (previous / next far
+   *  away): its recordings aren't listed yet, so the jump waits for the listing around it (`jumping`). */
   const select = (x: TimelineEvent) => {
     const at = nowS();
-    const { source: src, spans: sp } = st.current;
+    const { source: src, spans: sp, listing: l } = st.current;
     const remount = (src?.kind === "clip" || src?.kind === "still") && Array.isArray(sp) && !anyRecorded(sp, x.start_ts - 5, eventEnd(x, at));
     setPick(x);
     setWin((w) => centreOn(w, x.start_ts, eventEnd(x, at), at));
-    if (!remount) seek(jumpTarget(x));
+    if (!remount) {
+      const to = jumpTarget(x);
+      if (sp === null || (sp !== undefined && to >= l.from && to <= l.to)) seek(to);
+      else setJumping({ id: x.id, at: to });
+    }
     onSelectEvent?.(x, { remount });
   };
+  // ...and once it is there, the jump
+  useEffect(() => {
+    const j = jumping;
+    if (!j || listing.spans === undefined || (listing.spans !== null && (j.at < listing.from || j.at > listing.to))) return;
+    seek(j.at);   // (clears `jumping`)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [listing, jumping]);
   const pieces = spans ? coverage(spans, win) : null;
   const gaps = pieces?.some((p) => !p.recorded && p.end - p.start > 2);
   // round times between the end labels: about one per 80 px, none within 95 px of an end (an end label is ~60 px wide)
@@ -693,12 +757,14 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage, onSel
       </div>
       {gaps ? <div className="ep-legend small muted"><i className="ep-key rec" /> recorded <i className="ep-key gap" /> not recorded</div> : null}
       <div className="ep-controls">
-        <button type="button" className="ghost" disabled={!prev} onClick={() => prev && select(prev)}
-          aria-label="Previous event on this camera" title={prev ? `Previous event: ${label(prev)}` : "No earlier event on this camera"}>◀ Prev</button>
+        <button type="button" className="ghost" disabled={prev.disabled} onClick={() => step(prevPlan, prev)}
+          aria-label="Previous event on this camera"
+          title={prev.event ? `Previous event: ${label(prev.event)}` : prev.disabled ? "No earlier event on this camera" : "Previous event on this camera"}>◀ Prev</button>
         <button type="button" className="ghost" title="Back to the start of this event"
           onClick={() => { const to = jumpTarget(cur); seek(to); setWin(zoomWindowWidth(evRange, width, to, nowS())); }}>Event</button>
-        <button type="button" className="ghost" disabled={!next} onClick={() => next && select(next)}
-          aria-label="Next event on this camera" title={next ? `Next event: ${label(next)}` : "No later event on this camera"}>Next ▶</button>
+        <button type="button" className="ghost" disabled={next.disabled} onClick={() => step(nextPlan, next)}
+          aria-label="Next event on this camera"
+          title={next.event ? `Next event: ${label(next.event)}` : next.disabled ? "No later event on this camera" : "Next event on this camera"}>Next ▶</button>
         <span className="ep-time"><strong>{clock(shownT)}</strong> <span className="muted">{relLabel(shownT, cur.start_ts, end)}</span></span>
         <div className="ep-zoom" role="group" aria-label={`Strip zoom: ${halfLabel(width / 2)} (scroll on the strip to zoom, drag to pan)`}>
           <button type="button" className="ghost" disabled={zoomOut == null} onClick={() => zoomTo(zoomOut)}

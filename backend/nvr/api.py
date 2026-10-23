@@ -1148,11 +1148,13 @@ async def list_events(camera: str | None = None, status: str | None = None, labe
                       before_id: int | None = None, min_yolo: float = Query(0, ge=0, le=1),
                       limit: int = Query(50, le=500), priority: str | None = None, flags: str | None = None,
                       place: str | None = None, ppe_zone: str | None = None, attention: bool = False,
-                      sort: Literal["newest", "priority"] = "newest", offset: int = 0,
+                      sort: Literal["newest", "priority", "oldest"] = "newest", offset: int = 0,
                       region: Annotated[str | None, Query(max_length=200)] = None):
     """Browse events. priority: at least this level; flags: comma list (rule, ppe, unusual, watched, multicam,
     locked, corrected, false_alarm), all must hold; place: walked into this named area; attention: anything that
-    needs a look. sort=priority pages by offset (before_id only makes sense for newest-first).
+    needs a look. sort=priority pages by offset (before_id only makes sense for newest-first). sort=oldest: by start
+    time, earliest first (the event viewer's Next with since=, for the camera's next event beyond its strip; a server
+    before it answers 422).
     region: a painted 32x18 cell bitmap (cells.py encoding, the UI's region.ts): only events whose path crossed it
     while a PTZ camera was at its home view, plus open events (their path isn't complete yet), as regionPass does
     in the UI. Matched here so a burst of non-matching events can't crowd the matches out of `limit`."""
@@ -1161,7 +1163,7 @@ async def list_events(camera: str | None = None, status: str | None = None, labe
                                    ppe_zone=ppe_zone, attention=attention)
     if before_id:
         where.append("id<?"); params.append(before_id)
-    order = f"{PRIORITY_RANK_SQL} DESC, id DESC" if sort == "priority" else "id DESC"
+    order = {"priority": f"{PRIORITY_RANK_SQL} DESC, id DESC", "oldest": "start_ts ASC, id ASC"}.get(sort, "id DESC")
     if region:
         if not REGION_RE.fullmatch(region):
             raise HTTPException(400, "region: not a cell bitmap")
