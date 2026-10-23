@@ -91,6 +91,17 @@ export function useDismiss(ref: React.RefObject<HTMLElement | null>, open: boole
   }, [open, ref, returnTo]);
 }
 
+/**
+ * Should a page-wide shortcut leave this key alone? Yes while typing (a text field, select or editable text), inside a
+ * menu or dialog, or while any modal is open (the event viewer, a confirm): their own Escape and arrows come first.
+ */
+export function typingOrDialog(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  if (el?.isContentEditable) return true;
+  if (el?.closest?.("input, textarea, select, [contenteditable=true], [role=menu], [role=dialog], .modal-backdrop")) return true;
+  return typeof document !== "undefined" && !!document.querySelector(".modal-backdrop");
+}
+
 /** Up / Down / Home / End move the focus between a menu's enabled items (role menuitem, menuitemradio). */
 export function menuKeys(e: React.KeyboardEvent<HTMLElement>): void {
   const items = [...e.currentTarget.querySelectorAll<HTMLElement>("[role^=menuitem]:not(:disabled)")];

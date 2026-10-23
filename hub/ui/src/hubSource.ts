@@ -95,7 +95,7 @@ export function makeHubSource(org: Org, fleet: Fleet | null, groups: CameraGroup
     };
   }));
   const siteRows: SourceSite[] = sites.map((s) => ({
-    id: s.id, name: s.name, location: s.location, online: s.online,
+    id: s.id, name: s.name, location: s.location, online: s.online, locationId: s.location_id ?? null, locationName: s.location_name ?? null,
     cameras: s.summary?.cameras?.length ?? 0, camerasUp: (s.summary?.cameras ?? []).filter((c) => c.stream_ready).length,
     diskFreeGb: s.summary?.disk?.free_gb ?? null, openAlerts: s.open_alerts, version: s.version,
   }));

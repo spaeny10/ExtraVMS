@@ -18,6 +18,8 @@ export type SourceCamera = { site: string; siteName: string; id: string; name: s
 /** A physical Site and the servers in it, for grouping pickers (Site → Server → cameras). */
 export type SourceSiteGroup = { id: string; name: string; servers: string[] };
 export type SourceSite = { id: string; name: string; location?: string; online: boolean; camerasUp: number; cameras: number; diskFreeGb?: number | null; openAlerts: number; version?: string | null;
+  /** the physical Site the server is in (the hub); absent = no Sites (the NVR's own Home) or not placed in one yet */
+  locationId?: string | null; locationName?: string | null;
   /** Mbit/s the cameras send the server (5-min average) and GB this month: shown when known */
   bandwidth?: { mbps: number; month_gb: number } | null };
 export type SourceAlert = { id: number; site_id: string; site_name: string; kind: string; opened_at: number; acked_by: string | null; detail: Record<string, unknown> };

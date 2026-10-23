@@ -2,8 +2,8 @@
  * A dashboard: the grid of widgets for one config and one source. Handles the widget chrome (title, edit
  * controls), the live-stream budget shared by camera tiles, and the hero (one widget full width) view.
  */
-import { useState, type ReactNode } from "react";
-import { Icon } from "../ui";
+import { useEffect, useState, type ReactNode } from "react";
+import { Icon, typingOrDialog } from "../ui";
 import { BudgetCtx, useBudgetProvider } from "./budget";
 import { DashboardGrid } from "./GridView";
 import { WIDGET_DEFS } from "./palette";
@@ -44,6 +44,14 @@ export function Dashboard({ source, config, editing, onChange, onEditWidget }: D
   const title = (w: AnyWidget): string => (w.type === "camera" ? cameraTitle(w, source) : WIDGET_DEFS[w.type].label);
 
   const heroW = hero ? config.widgets.find((w) => w.id === hero) : null;
+  const heroShown = !!heroW && !editing;
+  // Esc goes back to the grid, as the Back button's tooltip says (not while typing, or a dialog or menu has it)
+  useEffect(() => {
+    if (!heroShown) return;
+    const on = (e: KeyboardEvent) => { if (e.key === "Escape" && !e.defaultPrevented && !typingOrDialog(e.target)) setHero(null); };
+    addEventListener("keydown", on);
+    return () => removeEventListener("keydown", on);
+  }, [heroShown]);
   if (heroW && !editing) {
     return (
       <BudgetCtx.Provider value={budget}>

@@ -1,3 +1,5 @@
+import { useEffect, useRef, useState } from "react";
+import { Icon, menuKeys, useDismiss } from "../ui";
 import { WIDGET_LIST } from "./palette";
 import type { DashboardWidgetType } from "./types";
 
@@ -13,7 +15,11 @@ export type ToolbarProps = {
   onPublish: (shared: boolean) => void; onSetDefault: () => void;
 };
 
-/** Dashboard picker and edit controls, modeled on the Timeline's layout bar. */
+/**
+ * Dashboard picker and edit controls, modeled on the Timeline's layout bar. The row keeps what is used every visit
+ * (picker, Edit, Add widget, and Save / Discard while changed); Save as, Rename, Delete, Publish and "Open this first"
+ * are in the ⋯ menu, so the row fits one line on a phone.
+ */
 export function DashboardToolbar(p: ToolbarProps) {
   return (
     <div className="dash-toolbar">
@@ -22,7 +28,7 @@ export function DashboardToolbar(p: ToolbarProps) {
         {p.list.map((d) => <option key={d.id} value={d.id}>{d.name}{d.shared ? " · shared" : ""}</option>)}
       </select>
       {p.dirty && <span className="dash-dirty" title="Unsaved changes">●</span>}
-      {p.currentId && <button className={`ghost small ${p.isDefault ? "on" : ""}`} title={p.isDefault ? "This opens first (click to unset)" : "Open this dashboard first"} onClick={p.onSetDefault}>{p.isDefault ? "★" : "☆"}</button>}
+      {p.isDefault && <span className="muted small" title="This dashboard opens first (change it in the ⋯ menu)">★</span>}
       <button className={`small ${p.editing ? "" : "ghost"}`} onClick={() => p.onEditing(!p.editing)}>{p.editing ? "Done" : "Edit"}</button>
       {p.editing && (
         <select value="" onChange={(e) => { if (e.target.value) p.onAdd(e.target.value as DashboardWidgetType); }} title="Add a widget">
@@ -31,16 +37,49 @@ export function DashboardToolbar(p: ToolbarProps) {
         </select>
       )}
       {p.dirty && p.currentId && p.canEdit && <button className="small" onClick={p.onSave}>Save</button>}
-      {(p.dirty || !p.currentId) && <button className="ghost small" onClick={p.onSaveAs} title="Save as a new dashboard of your own">Save as…</button>}
       {p.dirty && <button className="ghost small" onClick={p.onDiscard}>Discard</button>}
-      {p.currentId && p.canEdit && !p.dirty && <button className="ghost small" onClick={p.onRename}>Rename</button>}
-      {p.currentId && p.canEdit && !p.dirty && <button className="ghost small" onClick={p.onDelete}>Delete</button>}
-      {p.currentId && p.canPublish && !p.dirty && (
-        <button className="ghost small" onClick={() => p.onPublish(!p.currentShared)} title={p.currentShared ? "Make this your private dashboard again" : "Share with everyone in the organization (read-only for them)"}>
-          {p.currentShared ? "Unpublish" : "Publish to org"}
-        </button>
-      )}
-      {p.currentShared && !p.canEdit && <span className="muted small">shared · read-only (Save as… for your own copy)</span>}
+      <MoreMenu {...p} />
     </div>
+  );
+}
+
+/** The ⋯ menu: Save as, Rename, Delete, Publish / Unpublish and "Open this first", as far as they apply. */
+function MoreMenu(p: ToolbarProps) {
+  const [open, setOpen] = useState(false);
+  const box = useRef<HTMLSpanElement>(null);
+  const btn = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
+  useDismiss(box, open, () => setOpen(false), btn);
+  useEffect(() => { if (open) menu.current?.querySelector<HTMLElement>("[role^=menuitem]:not(:disabled)")?.focus(); }, [open]);
+  const pick = (fn: () => void) => () => { setOpen(false); fn(); };
+  const owned = !!p.currentId && p.canEdit && !p.dirty;
+  const readOnly = p.currentShared && !p.canEdit;
+  return (
+    <span ref={box} className="dash-more">
+      <button ref={btn} type="button" className="ghost small icon-act" aria-haspopup="menu" aria-expanded={open} aria-label="More dashboard actions"
+        title="More: save as, rename, delete, publish, open first" onClick={() => setOpen((o) => !o)}>
+        <Icon name="more" size={16} />
+      </button>
+      {open && (
+        <div ref={menu} className="dash-more-menu" role="menu" aria-label="Dashboard" onKeyDown={menuKeys}>
+          {readOnly && <div className="muted small dash-more-note">Shared · read-only. Save as… makes your own copy.</div>}
+          <button type="button" role="menuitem" onClick={pick(p.onSaveAs)} title="Save what is on screen as a new dashboard of your own">Save as…</button>
+          {owned && <button type="button" role="menuitem" onClick={pick(p.onRename)}>Rename…</button>}
+          {owned && <button type="button" role="menuitem" onClick={pick(p.onDelete)}>Delete…</button>}
+          {p.currentId && p.canPublish && !p.dirty && (
+            <button type="button" role="menuitem" onClick={pick(() => p.onPublish(!p.currentShared))}
+              title={p.currentShared ? "Make this your private dashboard again" : "Share with everyone in the organization (read-only for them)"}>
+              {p.currentShared ? "Unpublish" : "Publish to org"}
+            </button>
+          )}
+          {p.currentId && (
+            <button type="button" role="menuitemcheckbox" aria-checked={p.isDefault} onClick={pick(p.onSetDefault)}
+              title={p.isDefault ? "Stop opening this dashboard first" : "Open this dashboard first on every visit"}>
+              Open this first
+            </button>
+          )}
+        </div>
+      )}
+    </span>
   );
 }
