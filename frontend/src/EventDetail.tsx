@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type NamedIdentity,
-  api, fmtDuration, fmtTime, ppeItemsText, type SiteApi,
-  type ChatMessage, type Feedback, type Journey, type NvrEvent, type Synopsis, type Threat, type TimelineEvent, type Verdict, type WeaponCheck,
+  api, fmtDuration, fmtTime, fmtWhen, ppeItemsText, type SiteApi,
+  type ChatMessage, type ChatRef, type Feedback, type Journey, type NvrEvent, type Synopsis, type Threat, type TimelineEvent, type Verdict, type WeaponCheck,
 } from "./api";
+import { refChips, refSummary, refTarget, stripHandles } from "./chatRefs";
 import { EventPlayer, type EventPlayerHandle } from "./EventPlayer";
 import { clipOrigin } from "./eventPlayback";
 import { StatusBadge, eventLabel, placeholder, rejectedReason } from "./Events";
@@ -50,6 +51,16 @@ export function EventDetail({ id: initialId, cameraName, onClose, site = api, va
   }, []);
   const [tab, setTab] = useState<"clip" | "details" | "journey" | "chat">("details");
   const isPhone = useIsPhone();
+  // a sighting opened from a clip-chat answer (its chips): the event that conversation is on, to go back to it
+  const [askedFrom, setAskedFrom] = useState<number | null>(null);
+  /** Show another event in this viewer, as a Journey sighting does: the detail re-keys to it and a new player mounts
+   * (it may be on another camera). From an Ask answer the phone shows its clip, a desktop its details. */
+  const showEvent = (eid: number) => { sticky.current?.ids.delete(eid); setId(eid); };
+  const openRef = (eid: number) => {
+    setAskedFrom((from) => from ?? idRef.current);
+    showEvent(eid);
+    setTab(isPhone ? "clip" : "details");
+  };
   useEffect(() => { if (isPhone) setTab("clip"); }, [isPhone]);
   // The player (EventPlayer): its playhead for the Ask tab, and seek for chat frames and notes. A phone shows it on
   // the Clip tab only: coming back there (or tapping a chat frame elsewhere) mounts it again at `resume`.
@@ -105,6 +116,10 @@ export function EventDetail({ id: initialId, cameraName, onClose, site = api, va
           <div>
             <h2>{cameraName(e.camera_id)} · {eventLabel(e)}</h2>
             <span className="muted">{fmtTime(e.start_ts)} · {fmtDuration(e)} · event #{e.id}</span>
+            {askedFrom != null && askedFrom !== e.id && (
+              <button className="linkish small" title="Back to the event whose Ask answer listed this sighting"
+                onClick={() => { showEvent(askedFrom); setAskedFrom(null); setTab("chat"); }}>← Back to event #{askedFrom}</button>
+            )}
           </div>
           <div className="row">
             <StatusBadge e={e} />
@@ -148,10 +163,11 @@ export function EventDetail({ id: initialId, cameraName, onClose, site = api, va
               </button>
             </div>}
             {view === "journey" ? (
-              <JourneySection key={e.id} e={e} site={site} cameraName={cameraName} onShow={(eid) => { sticky.current?.ids.delete(eid); setId(eid); }}
+              <JourneySection key={e.id} e={e} site={site} cameraName={cameraName} onShow={showEvent}
                 onOpenTimeline={(members) => { openInTimeline({ ...e, members }); onClose(); }} />
             ) : view === "chat" ? (
-              <ChatPanel key={e.id} e={e} site={site} chat={chat} setChat={chatFor(e.id)} playhead={playhead} footage={footage} seek={seek} />
+              <ChatPanel key={e.id} e={e} site={site} chat={chat} setChat={chatFor(e.id)} playhead={playhead} footage={footage} seek={seek}
+                cameraName={cameraName} onOpen={openRef} />
             ) : (
               <Details key={e.id} e={e} site={site} setE={setE} notes={chat.filter((m) => m.saved)} onUnsave={(m) => site.saveNote(e.id, m.id, false).then(chatFor(e.id))} seek={seek} />
             )}
@@ -585,21 +601,23 @@ function SynopsisEditor({ initial, onSave, onCancel }: { initial: Synopsis; onSa
 
 /* ------------------------------------------------------------------ chat tab */
 
-const SUGGESTIONS = ["What is the person doing?", "Describe their clothing and anything they carry.", "Which way did they come from and leave?", "Is anything suspicious here?"];
+const SUGGESTIONS = ["What is the person doing?", "Describe their clothing and anything they carry.", "Which way did they come from and leave?", "Is anything suspicious here?",
+  "How many times did they show up that day?"];
 
 /** The player's playhead (epoch seconds; null before it plays), shared without re-rendering the whole viewer. */
 type Playhead = { t: number | null; subs: Set<(t: number) => void> };
 
-function ChatPanel({ e, site, chat, setChat, playhead, footage, seek }: {
+function ChatPanel({ e, site, chat, setChat, playhead, footage, seek, cameraName, onOpen }: {
   e: NvrEvent; site: SiteApi; chat: ChatMessage[]; setChat: (c: ChatMessage[]) => void;
   playhead: React.RefObject<Playhead>; footage: boolean | undefined; seek: (t: number) => void;
+  cameraName: (id: string) => string; onOpen: (eventId: number) => void;
 }) {
   const [q, setQ] = useState("");
   const [atMoment, setAtMoment] = useState(false);
   // clip time of the playhead (what `at` and the frames' t count in): it may be before the clip, or after it
   const t0 = clipOrigin(e);
   const [now, setNow] = useState(() => (playhead.current.t ?? t0) - t0);
-  const [pending, setPending] = useState<{ q: string; at: number | null; answer: string; frames: { file: string; t: number }[] } | null>(null);
+  const [pending, setPending] = useState<{ q: string; at: number | null; answer: string; frames: { file: string; t: number }[]; refs: ChatRef[] } | null>(null);
   const [err, setErr] = useState("");
   const end = useRef<HTMLDivElement>(null);
 
@@ -620,10 +638,11 @@ function ChatPanel({ e, site, chat, setChat, playhead, footage, seek }: {
     const at = atMoment ? Math.round(now * 10) / 10 : null;
     setErr("");
     setQ("");
-    setPending({ q: text, at, answer: "", frames: [] });
+    setPending({ q: text, at, answer: "", frames: [], refs: [] });
     try {
       await site.askClip(e.id, text, at, (c) => {
         if (c.type === "frames") setPending((p) => p && { ...p, frames: c.frames });
+        if (c.type === "refs") setPending((p) => p && { ...p, refs: c.refs });
         if (c.type === "delta") setPending((p) => p && { ...p, answer: p.answer + c.text });
         if (c.type === "error") setErr(c.error);
       });
@@ -634,15 +653,17 @@ function ChatPanel({ e, site, chat, setChat, playhead, footage, seek }: {
     setPending(null);
   };
 
-  // the server reads frames from the clip, else from the recording: refuse only when neither is there
-  if (footage === false) return <p className="muted">Chat needs the event's footage: its clip and the recording around it are no longer kept.</p>;
-
   return (
     <div className="chat">
+      {/* the server reads frames from the clip, else from the recording; neither is there: questions beyond the clip
+          (backend clipask.py) still have the event search to answer from */}
+      {footage === false && <p className="muted small">This event's clip and the recording around it are no longer kept, so questions about
+        what it shows can't be answered. Questions beyond it (how many times, where else, what happened before) still can.</p>}
       <div className="chat-log">
         {chat.length === 0 && !pending && (
           <div className="muted small">
-            <p>Ask Qwen about this clip. It looks at frames spread across the event, or with <em>focus on current moment</em> at frames around the video's playhead.</p>
+            <p>Ask Qwen about this clip. It looks at frames spread across the event, or with <em>focus on current moment</em> at frames around the video's playhead.
+              Questions beyond the clip (how many times they came today, where else they went, what happened before) search this server's other events too.</p>
             <div className="chips">
               {SUGGESTIONS.map((s) => <button key={s} className="chip" onClick={() => ask(s)}>{s}</button>)}
             </div>
@@ -650,6 +671,7 @@ function ChatPanel({ e, site, chat, setChat, playhead, footage, seek }: {
         )}
         {chat.map((m) => (
           <Bubble key={m.id} role={m.role} text={m.content} at={m.at} frames={m.frames} e={e} site={site} seek={seek}
+            refs={m.refs} cameraName={cameraName} onOpen={onOpen}
             action={m.role === "assistant" ? (
               <button className="linkish" onClick={() => site.saveNote(e.id, m.id, !m.saved).then(setChat)}>{m.saved ? "Saved as note ✓" : "Save as note"}</button>
             ) : null} />
@@ -657,7 +679,9 @@ function ChatPanel({ e, site, chat, setChat, playhead, footage, seek }: {
         {pending && (
           <>
             <Bubble role="user" text={pending.q} at={pending.at} frames={[]} e={e} site={site} seek={seek} />
-            <Bubble role="assistant" text={pending.answer || (pending.frames.length ? "Looking at the frames…" : "Pulling frames from the clip…")} at={null} frames={pending.frames} e={e} site={site} seek={seek} />
+            <Bubble role="assistant" at={null} frames={pending.frames} e={e} site={site} seek={seek}
+              refs={pending.refs} cameraName={cameraName} onOpen={onOpen}
+              text={pending.answer || (pending.refs.length ? "Reading the search results…" : pending.frames.length ? "Looking at the frames…" : "Pulling frames from the clip…")} />
           </>
         )}
         {err && <p className="error small">{err}</p>}
@@ -680,13 +704,14 @@ function ChatPanel({ e, site, chat, setChat, playhead, footage, seek }: {
   );
 }
 
-function Bubble({ role, text, at, frames, e, site, seek, action }: {
+function Bubble({ role, text, at, frames, e, site, seek, action, refs, cameraName, onOpen }: {
   role: string; text: string; at: number | null; frames: { file: string; t: number }[]; e: NvrEvent; site: SiteApi; seek: (t: number) => void; action?: React.ReactNode;
+  refs?: ChatRef[]; cameraName?: (id: string) => string; onOpen?: (eventId: number) => void;
 }) {
   return (
     <div className={`bubble ${role}`}>
       {at != null && role === "user" && <button className="linkish small" onClick={() => seek(at)}>@ {at.toFixed(1)}s</button>}
-      <p>{text}</p>
+      <p>{role === "assistant" ? stripHandles(text) : text}</p>
       {frames.length > 0 && (
         <div className="bubble-frames">
           {frames.map((f) => (
@@ -694,7 +719,35 @@ function Bubble({ role, text, at, frames, e, site, seek, action }: {
           ))}
         </div>
       )}
+      {refs?.length && cameraName && onOpen ? <RefChips refs={refs} currentId={e.id} site={site} cameraName={cameraName} onOpen={onOpen} /> : null}
       {action && <div className="small">{action}</div>}
+    </div>
+  );
+}
+
+/** The sightings an answer beyond the clip was written from (chatRefs.ts): snapshot, match, time and camera; a tap
+ * switches the viewer to that event. */
+function RefChips({ refs, currentId, site, cameraName, onOpen }: {
+  refs: ChatRef[]; currentId: number; site: SiteApi; cameraName: (id: string) => string; onOpen: (eventId: number) => void;
+}) {
+  const chips = refChips(refs, currentId, cameraName, (ts) => fmtWhen(ts));
+  const head = refSummary(refs);
+  return (
+    <div className="chat-refs">
+      {head && <span className="muted small">{head}</span>}
+      <div className="chat-refs-row">
+        {chips.map((c) => (
+          <button key={c.key} type="button" className={`chat-ref ${c.ref.match}${c.current ? " current" : ""}`} title={c.title}
+            aria-label={c.title} disabled={c.current} onClick={() => { const t = refTarget(c.ref, currentId); if (t != null) onOpen(t); }}>
+            {c.ref.snapshot
+              ? <img src={site.media({ id: c.ref.event_id }, "snapshot.jpg", 320)} alt="" loading="lazy" />
+              : <span className="thumb-empty">{c.ref.label ?? "event"}</span>}
+            <span className="chat-ref-tag">{c.label}</span>
+            <span>{c.time}</span>
+            <span className="chat-ref-cam">{c.camera}</span>
+          </button>
+        ))}
+      </div>
     </div>
   );
 }

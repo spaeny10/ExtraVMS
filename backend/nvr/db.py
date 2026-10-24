@@ -384,6 +384,9 @@ MIGRATIONS = [
     ("events", "plate_raw", "TEXT"),
     ("events", "plate_region", "TEXT"),
     ("events", "plate_conf", "TEXT"),
+    # clip chat that searched beyond the clip (clipask.py): the sightings the answer was written from, JSON
+    # [{event_id, camera_id, start_ts, match: this | same | possible | found, score, via, label, snapshot}]
+    ("chat_messages", "refs", "TEXT"),
 ]
 JSON_FIELDS = ("path", "rules", "detections", "synopsis_json", "synopsis_original", "feedback", "anomaly_json", "areas", "policy",
                "migrated_from", "tracks")
@@ -895,11 +898,14 @@ class Database:
         rows = self.all("SELECT * FROM chat_messages WHERE event_id=? ORDER BY id", [event_id])
         for r in rows:
             r["frames"] = json.loads(r["frames"])
+            r["refs"] = json.loads(r["refs"]) if r.get("refs") else []
         return rows
 
-    def add_chat(self, event_id: int, role: str, content: str, frames: list | None = None, at: float | None = None) -> int:
-        return self.execute("INSERT INTO chat_messages (event_id, role, content, frames, at, ts) VALUES (?,?,?,?,?,?)",
-                            [event_id, role, content, json.dumps(frames or []), at, time.time()]).lastrowid
+    def add_chat(self, event_id: int, role: str, content: str, frames: list | None = None, at: float | None = None,
+                 refs: list | None = None) -> int:
+        return self.execute("INSERT INTO chat_messages (event_id, role, content, frames, at, ts, refs) VALUES (?,?,?,?,?,?,?)",
+                            [event_id, role, content, json.dumps(frames or []), at, time.time(),
+                             json.dumps(refs) if refs else None]).lastrowid
 
     def enrich(self, rows: list[dict]) -> list[dict]:
         """Add what browse cards show but SELECT * lacks: locked (footage lock) and journey_cameras."""

@@ -444,21 +444,46 @@ CHAT_SYSTEM = (
 )
 
 
+# Added when the clip chat searched beyond the clip (clipask.py): how to read and count the search results.
+CHAT_SEARCH = (
+    " The question also reaches beyond this clip, so the server searched its other camera events, anchored to this clip; "
+    "the results are under 'Search results'. Answer from them for anything outside the clip, and from the frames for what "
+    "the clip shows. Lines start with THIS (this clip), SAME (the same person or vehicle by appearance, a confirmed "
+    "cross-camera journey, or the same license plate) or POSSIBLE (looks alike, may or may not be them). Count only THIS "
+    "and SAME as certain appearances, and give the 'Certain appearances' figure when asked how many times; mention "
+    "POSSIBLE ones separately as possible, never as certain. Other lines are the camera's events found by the search. "
+    "Never invent appearances, times, cameras or counts that are not in the results; if they don't answer the question, "
+    "say so and say what was searched (period and cameras). Appearance matching sees clothing and build, not faces, so "
+    "say 'matched by appearance', never that you recognized the person. Use the local times shown; name sightings by "
+    "camera and time (never by event number)."
+)
+
+
 async def chat_stream(event: dict, camera: dict, frames: list[tuple[float, bytes]], history: list[dict],
-                      question: str):
-    """Yield answer text chunks. history: prior [{role, content}] turns (text only)."""
+                      question: str, evidence: str | None = None):
+    """Yield answer text chunks. history: prior [{role, content}] turns (text only). `evidence`: the search results
+    when the question reaches beyond the clip (clipask.evidence); frames may then be few or none."""
     stamps = ", ".join(f"t={t:.1f}s" for t, _ in frames)
     synopsis_text = event.get("synopsis") or "(none yet)"
     context = (
         event_facts(event, camera)
         + f"Current synopsis: {synopsis_text}\n"
-        + f"Attached frames in order: {stamps}. The amber box, where drawn, is the camera detection."
+        + (f"Attached frames in order: {stamps}. The amber box, where drawn, is the camera detection." if frames
+           else "No frames are attached for this question: answer from the event details and the search results.")
     )
+    if evidence:
+        context += f"\n\nSearch results:\n{evidence}"
+    first: dict = {"role": "user", "content": context}
+    if frames:
+        first["images"] = [b for _, b in frames]   # raw bytes: each backend encodes
+    have = "the frames and event details" if frames else "the event details"
     messages = [
-        {"role": "system", "content": CHAT_SYSTEM},
-        {"role": "user", "content": context, "images": [b for _, b in frames]},   # raw bytes: each backend encodes
-        {"role": "assistant", "content": "Understood. I have the frames and event details. What would you like to know?"},
-        *history[-8:],
+        {"role": "system", "content": CHAT_SYSTEM + (CHAT_SEARCH if evidence else "")},
+        first,
+        {"role": "assistant", "content": f"Understood. I have {have}{' and the search results' if evidence else ''}. "
+                                         "What would you like to know?"},
+        # with search results the prompt is long: fewer, shorter earlier turns keep it inside the context window
+        *([{"role": m["role"], "content": m["content"][:600]} for m in history[-4:]] if evidence else history[-8:]),
         {"role": "user", "content": question},
     ]
     # routed like every other task (vlmroute): the local Qwen, or the remote when "chat" is a remote task or

@@ -440,6 +440,21 @@ export type ChatMessage = {
   at: number | null;
   saved: number;
   ts: number;
+  /** the sightings a question beyond the clip was answered from (backend clipask.py); [] for one about the clip */
+  refs?: ChatRef[];
+};
+
+/** A sighting the clip chat's search found: this clip, the same person / vehicle (certain), a possible look-alike, or
+ * an event the camera's lookups listed. score = appearance similarity (null when matched by plate or not compared). */
+export type ChatRef = {
+  event_id: number;
+  camera_id: string;
+  start_ts: number;
+  match: "this" | "same" | "possible" | "found";
+  score: number | null;
+  via?: "appearance" | "plate" | "journey" | null;
+  label?: string | null;
+  snapshot?: boolean;
 };
 
 export type FeedbackStats = {
@@ -940,8 +955,9 @@ export const ask: SiteApi["ask"] = (...args) => api.ask(...args);
 export type ChatChunk =
   | { type: "user"; id: number }
   | { type: "frames"; frames: { file: string; t: number }[] }
+  | { type: "refs"; refs: ChatRef[] }
   | { type: "delta"; text: string }
-  | { type: "done"; id: number }
+  | { type: "done"; id: number; refs?: ChatRef[] }
   | { type: "error"; error: string };
 
 export const askClip: SiteApi["askClip"] = (...args) => api.askClip(...args);

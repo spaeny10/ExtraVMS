@@ -110,6 +110,26 @@ class Settings(BaseSettings):
     fallback_ollama_parallel: int = 1                # its OLLAMA_NUM_PARALLEL (it shares a GPU with YOLO)
     fallback_when_queue_over: int = 4                # primary in-flight + waiting above this: synopses use the fallback
     chat_frames: int = 4                   # frames per chat question (~1,050 tokens each)
+    # "Ask about this clip" reaching beyond the clip ("how many times did he show up today?", "where else did they go?"):
+    # identities.same_subject compares every sighting in the window with the clip's appearance fingerprint (cosine).
+    # At or above *_same_min a sighting counts as the same person / vehicle; from *_possible_min up to that it is only
+    # listed as possible (the answer never counts it as certain); below, it is left out.
+    # People (OSNet re-ID; measured on this site: same person 0.8-0.9, different people median ~0.65):
+    #   same 0.85 = identities.NAME_SIM["person"], what it takes to put a NAME on a sighting. Not journeys' 0.80
+    #   (REID_AUTO_SIM): that confirms a link across two cameras inside a walking window; here most sightings are on the
+    #   SAME camera, whose shared view and light lift different people too (indoors they reach ~0.82).
+    #   possible 0.75 = merge_reid_min, what merging two tracks of one visit asks; journeys' 0.70 (REID_MIN_SIM) is only a
+    #   candidate Qwen still checks, too loose to show an operator.
+    # Vehicles (0.7 CLIP + 0.3 color: same truck twice 0.885, two white trucks of one fleet 0.89, white vs black pickup
+    # 0.81, white pickup vs white van 0.77): same 0.87 = identities.NAME_SIM["vehicle"]; possible 0.82, just above a
+    # differently colored vehicle of the same shape. Look-alike fleet vehicles still reach "same" by appearance: a
+    # matching plate (events.plate) is the certain match, and two different plates are never the same vehicle.
+    # A confirmed cross-camera journey with the clip's person (journeys.py) counts as the same person whatever the score.
+    same_person_min: float = 0.85
+    possible_person_min: float = 0.75
+    same_vehicle_min: float = 0.87
+    possible_vehicle_min: float = 0.82
+    same_subject_max: int = 50             # matches returned (the most similar first); the answer says when it was capped
     embed_model: str = "nomic-embed-text"
     synopsis_images: int = 4
     # License plates (plate.py): a vehicle's description also asks Qwen for its plate, from a full-resolution crop of

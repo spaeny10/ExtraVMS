@@ -29,7 +29,7 @@ from . import assistant, backup, baseline, cells, footage, frames, health, ident
 from . import synopsis as vlm
 from . import advisor, ai_serve, detector, direct, hub_agent, lan_cert, lan_guard, sdbackfill, site_actions, siteconfig
 from . import camweb, deterrence, deterrence_api, device_api, speakers_api, talkdown
-from . import aischedule, plate, snapshots, vlmroute
+from . import aischedule, clipask, plate, snapshots, vlmroute
 from . import summary as summary_mod
 from .config import ROOT, settings
 from .db import JOURNEY_CAMS_SQL, LOCKED_SQL, PRIORITY_RANK_SQL, db, event_filters
@@ -1501,15 +1501,24 @@ async def clear_chat(event_id: int):
 
 @app.post("/api/events/{event_id}/chat")
 async def post_chat(event_id: int, body: ChatIn):
-    """Ask Qwen about the clip. Streams NDJSON: {type:user|frames|delta|done|error}."""
+    """Ask Qwen about the clip. Streams NDJSON: {type: user | frames | refs | delta | done | error}.
+
+    A question that reaches beyond the clip ("how many times did he show up today?", "where else did they go?", "what
+    happened before this?") also searches this server's events, anchored to the clip's camera, time and subject
+    (clipask.route / clipask.evidence: the same person or vehicle by appearance and plate, the camera's events around
+    it); one about the clip itself is answered from its frames as before. `refs` (sent before the answer and again with
+    `done`, and kept with the answer) are the sightings found: [{event_id, camera_id, start_ts, match: this | same |
+    possible | found, score, via, label, snapshot}]. Interactive, so it runs outside the Site's AI hours (aischedule:
+    task "chat", metered as "ask")."""
     e = _require_event(event_id)
     if not state.pipeline.vlm_ready:
         raise HTTPException(503, "Qwen is not ready yet")
     p = state.pipeline
     camera = p.cameras.get(e["camera_id"], {"name": e["camera_id"]})
     history = [{"role": m["role"], "content": m["content"]} for m in db.chat(event_id)]
+    intent = clipask.route(body.message, [(c["id"], c["name"]) for c in db.cameras()], e["camera_id"])
     user_id = db.add_chat(event_id, "user", body.message, at=body.at)
-    if INSTRUCTION_RE.search(body.message.lower()):
+    if is_instruction(body.message, intent):
         # The chat can't act. Say so from code (the model tends to agree to anything) and point at the real feature.
         canned = ("I can't watch for anyone or send alerts from this chat; I only see this clip. To be told about this "
                   + ("person" if e["camera_class"] == "person" else "vehicle")
@@ -1527,23 +1536,42 @@ async def post_chat(event_id: int, body: ChatIn):
         yield json.dumps({"type": "user", "id": user_id}) + "\n"
         answer = ""
         frames_meta: list[dict] = []
+        refs: list[dict] = []
         try:
-            frames = await p.chat_frames(e, body.at)
-            if not frames:
-                raise RuntimeError("no recording available for this event")
-            frames_meta = [{"file": name, "t": t} for t, _, name in frames]
-            yield json.dumps({"type": "frames", "frames": frames_meta}) + "\n"
+            frames: list = []
+            if intent["mode"] != "search":
+                try:
+                    frames = await p.chat_frames(e, body.at)
+                except Exception:  # noqa: BLE001 - a clip-only question has nothing else to go on: raised again
+                    if intent["mode"] == "clip":
+                        raise
+                    log.warning("chat on event %s: no frames, answering from the search only", event_id, exc_info=True)
+                if not frames and intent["mode"] == "clip":
+                    raise RuntimeError("no recording available for this event")
+                if intent["mode"] == "both" and len(frames) > clipask.BOTH_FRAMES:
+                    # the first and the last of the overview (or around `at`): the evidence needs the room
+                    frames = [frames[round(i * (len(frames) - 1) / (clipask.BOTH_FRAMES - 1))] for i in range(clipask.BOTH_FRAMES)] \
+                        if clipask.BOTH_FRAMES > 1 else frames[:1]
+                frames_meta = [{"file": name, "t": t} for t, _, name in frames]
+                if frames_meta:
+                    yield json.dumps({"type": "frames", "frames": frames_meta}) + "\n"
+            evidence = None
+            if intent["mode"] != "clip":
+                found = await clipask.evidence(e, body.message, intent)
+                evidence, refs = found["text"], found["refs"]
+                yield json.dumps({"type": "refs", "refs": refs}) + "\n"
             # chat_stream takes the Qwen gate itself (vlmroute, "chat" priority). Taking it here as well made one
             # Ask wait on its own lock forever and froze every synopsis behind it.
-            async for chunk in vlm.chat_stream(e, camera, [(t, b) for t, b, _ in frames], history, body.message):
+            async for chunk in vlm.chat_stream(e, camera, [(t, b) for t, b, _ in frames], history, body.message,
+                                               evidence=evidence):
                 answer += chunk
                 yield json.dumps({"type": "delta", "text": chunk}) + "\n"
-            msg_id = db.add_chat(event_id, "assistant", answer.strip(), frames=frames_meta, at=body.at)
-            yield json.dumps({"type": "done", "id": msg_id}) + "\n"
+            msg_id = db.add_chat(event_id, "assistant", answer.strip(), frames=frames_meta, at=body.at, refs=refs)
+            yield json.dumps({"type": "done", "id": msg_id, "refs": refs}) + "\n"
         except Exception as ex:  # surface errors to the UI instead of a broken stream
             log.exception("chat on event %s failed", event_id)
             if answer:
-                db.add_chat(event_id, "assistant", answer.strip() + " [interrupted]", frames=frames_meta, at=body.at)
+                db.add_chat(event_id, "assistant", answer.strip() + " [interrupted]", frames=frames_meta, at=body.at, refs=refs)
             yield json.dumps({"type": "error", "error": str(ex)}) + "\n"
 
     return StreamingResponse(stream(), media_type="application/x-ndjson")
@@ -1559,6 +1587,24 @@ async def save_chat_note(event_id: int, msg_id: int, saved: bool = True):
 
 INSTRUCTION_RE = re.compile(r"\b(keep an eye|watch (out )?for|look out for|alert me|notify me|let me know if|tell me (if|when)|"
                             r"flag (him|her|them|this|that)|track (him|her|them)|remind me|add (him|her|them) to)\b")
+# the INSTRUCTION_RE phrases that also start a question about the past ("tell me when he first showed up")
+QUESTION_INSTRUCTION_RE = re.compile(r"let me know if|tell me (if|when)")
+PAST_RE = re.compile(r"\b(did|was|were|had|has|have|came|showed|returned|arrived|left|went|visited|first|last|today|yesterday|"
+                     r"earlier|before|ever|already|so far|this (morning|afternoon|week))\b")
+
+
+def is_instruction(message: str, intent: dict) -> bool:
+    """A clip-chat message asking the chat to act (watch, alert, remind): answered from code, the chat can't act.
+    "Tell me when he first showed up" / "let me know if they came back today" ask about the past and are answered by
+    the search beyond the clip (clipask) instead; "let me know if he comes back" is still a request to watch."""
+    q = message.lower()
+    found = [m.group(0) for m in INSTRUCTION_RE.finditer(q)]
+    if not found:
+        return False
+    asks_past = intent.get("mode") != "clip" and bool(PAST_RE.search(q))
+    return not (asks_past and all(QUESTION_INSTRUCTION_RE.fullmatch(x) for x in found))
+
+
 query_label = assistant.query_label
 
 

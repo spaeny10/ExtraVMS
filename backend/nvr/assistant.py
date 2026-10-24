@@ -25,7 +25,7 @@ import time
 from typing import AsyncIterator
 from zoneinfo import ZoneInfo
 
-from . import baseline, retention, vlmroute
+from . import baseline, identities, retention, vlmroute
 from . import synopsis as vlm
 from .config import settings
 from .db import db
@@ -36,6 +36,8 @@ MAX_CALLS = 3
 MAX_RESULT_CHARS = 9000        # ~2,300 tokens of lookup results in the answer prompt
 HISTORY_TURNS = 6
 TOOLS = ("search_events", "count_events", "list_unusual", "list_journeys", "search_footage", "recording_gaps", "get_briefing")
+# Tools that need an anchor event (args.event_id), so the planner never picks them: the clip chat (clipask.py) calls them.
+ANCHORED_TOOLS = ("same_subject",)
 FOOTAGE_VERIFY = 3             # footage matches Qwen checks before the answer may use them
 PRIORITY_RANK = {"any": -1, "none": 0, "low": 1, "medium": 2, "high": 3}
 FALSE_ALARM = "(feedback IS NULL OR json_extract(feedback, '$.verdict') IS NOT 'false_alarm')"
@@ -621,6 +623,8 @@ def augment(calls: list[dict], question: str, now: float | None = None) -> list[
 def describe_call(c: dict) -> str:
     a = c["args"]
     bits = [f'"{a["text"]}"'] if a.get("text") else []
+    if a.get("event_id"):
+        bits.append(f"like #{a['event_id']}")
     if a.get("camera"):
         bits.append(_cam_name(a["camera"]))
     if a.get("label"):
@@ -839,6 +843,79 @@ async def t_list_journeys(a: dict, refs: Refs) -> tuple[list[str], int]:
     return lines or ["No cross-camera journeys."], len(js)
 
 
+SAME_FULL_LINES = 15     # same_subject: matches listed with their description; the rest by time, camera and score only
+SAME_REASONS = {
+    "group": "This clip shows a group of {people} people. A group has no appearance fingerprint (one fingerprint over "
+             "several people would match the wrong person), so their other sightings can't be found by appearance; "
+             "each person's own event can be searched.",
+    "no_fingerprint": "This {kind} has no appearance fingerprint (no saved crops, or it is not verified yet), so its other "
+                      "sightings can't be found by appearance.",
+    "not_subject": "Other sightings can be matched by appearance for people and vehicles only.",
+    "missing": "The event is gone.",
+}
+EXCLUDED_WORDS = {"groups": "groups of people (no fingerprint)", "masked": "masked", "rejected": "rejected (not a real sighting)",
+                  "false_alarms": "marked false alarm", "other_plate": "a different license plate",
+                  "no_fingerprint": "no fingerprint to compare"}
+
+
+def same_subject_lines(r: dict, scope: str = "") -> list[str]:
+    """identities.same_subject as lookup lines: a head with the counts, then one line per match tagged THIS / SAME /
+    POSSIBLE (the first SAME_FULL_LINES with their description)."""
+    kind = r.get("kind") or "subject"
+    if r.get("reason"):
+        return [SAME_REASONS[r["reason"]].format(people=r.get("people") or "several", kind=kind)]
+    found = r["same"] + r["possible"]
+    plate = " (or the same license plate)" if kind == "vehicle" else ""
+    head = (f"Same-{kind} search{f' ({scope})' if scope else ''}: compared {r['compared']} {kind} sightings with this clip by "
+            f"appearance{' (clothing and build, not faces)' if kind == 'person' else ''}{plate}. "
+            f"SAME: {r['same']} (counted as certain). POSSIBLE: {r['possible']} (look-alikes: may or may not be them). "
+            f"Certain appearances including this clip: {r['same'] + 1}.")
+    lines = [head]
+    if r.get("excluded"):
+        lines.append("Not compared: " + ", ".join(f"{n} {EXCLUDED_WORDS.get(k, k)}" for k, n in r["excluded"].items()) + ".")
+    if r.get("capped"):
+        lines.append(f"Capped: {found} matches found; only the {len(r['matches']) - 1} most similar are listed (the counts "
+                     f"above include all of them).")
+    ids = [m["event_id"] for m in r["matches"]]
+    rows = {x["id"]: x for x in db.all(f"SELECT {EVENT_COLS} FROM events WHERE id IN ({','.join('?' * len(ids))})", ids)} if ids else {}
+    full = {m["event_id"] for m in sorted(r["matches"], key=lambda m: (identities.MATCH_ORDER[m["match"]], -(m["score"] or 1.0)))[:SAME_FULL_LINES]}
+    for m in r["matches"]:
+        e = rows.get(m["event_id"])
+        if not e:
+            continue
+        tag = m["match"].upper()
+        why = ("" if m["match"] == "this" else ", same license plate" if m["via"] == "plate"
+               else ", same cross-camera journey" if m["via"] == "journey" else "")
+        if m["match"] == "this":
+            score = " (this clip)"
+        elif m["score"] is not None:
+            score = f" (similarity {m['score']:.2f}{why})"
+        else:
+            score = f" ({why[2:]})" if why else ""
+        if m["event_id"] in full:
+            lines.append(f"{tag}{score} " + _event_line(e))
+        else:
+            lines.append(f"{tag}{score} [#{e['id']}] {_cam_name(e['camera_id'])}, {_when(e['start_ts'])}")
+    if not found:
+        lines.append(f"No other sighting looked like this {kind}.")
+    return lines
+
+
+async def t_same_subject(a: dict, refs: Refs) -> tuple[list[str], int]:
+    """Sightings of the same person / vehicle as event a["event_id"] (identities.same_subject) in since..until, on
+    a["camera"] or a["cameras"] (neither: all cameras). The structured result is left in a["_result"]."""
+    cams = [a["camera"]] if a.get("camera") else a.get("cameras")
+    since = a.get("since") if a.get("since") is not None else time.time() - 86400
+    r = await asyncio.to_thread(identities.same_subject, a["event_id"], since, a.get("until"), cams, a.get("limit"))
+    a["_result"] = r
+    lines = await asyncio.to_thread(same_subject_lines, r, a.get("scope") or "")
+    if r["matches"]:
+        ids = [m["event_id"] for m in r["matches"]]
+        for e in db.all(f"SELECT {EVENT_COLS} FROM events WHERE id IN ({','.join('?' * len(ids))})", ids):
+            refs.event(e)
+    return lines, r["same"] + r["possible"]
+
+
 async def t_search_footage(a: dict, refs: Refs) -> tuple[list[str], int]:
     if ctx.footage is None:
         return ["Footage search is not available."], 0
@@ -931,7 +1008,7 @@ async def t_get_briefing(a: dict, refs: Refs) -> tuple[list[str], int]:
 
 TOOL_FUNCS = {"search_events": t_search_events, "count_events": t_count_events, "list_unusual": t_list_unusual,
               "list_journeys": t_list_journeys, "search_footage": t_search_footage, "recording_gaps": t_recording_gaps,
-              "get_briefing": t_get_briefing}
+              "get_briefing": t_get_briefing, "same_subject": t_same_subject}
 
 
 def fallback_call(calls: list[dict], question: str) -> dict | None:

@@ -333,6 +333,19 @@ button.on { background: color-mix(in srgb, var(--accent) 22%, transparent); bord
 .bubble.assistant { align-self: flex-start; background: var(--panel-2); }
 .bubble-frames { display: flex; gap: 4px; margin-top: 6px; overflow-x: auto; }
 .bubble-frames img { height: 48px; border-radius: 4px; cursor: pointer; }
+/* clip chat: the sightings a question beyond the clip was answered from (chatRefs.ts); a tap opens one */
+.chat-refs { margin-top: 6px; display: flex; flex-direction: column; gap: 4px; }
+.chat-refs-row { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; }
+.chat-ref { flex: 0 0 auto; width: 104px; display: flex; flex-direction: column; align-items: stretch; gap: 1px; padding: 3px; text-align: left;
+  background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 6px; font-size: 11px; line-height: 1.25; cursor: pointer; }
+.chat-ref img, .chat-ref .thumb-empty { width: 100%; height: 56px; min-height: 0; object-fit: cover; border-radius: 4px; }
+.chat-ref .chat-ref-tag { font-weight: 600; }
+.chat-ref .chat-ref-cam { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chat-ref.same { border-color: var(--ok); }
+.chat-ref.same .chat-ref-tag { color: var(--ok); }
+.chat-ref.possible { border-style: dashed; }
+.chat-ref.this, .chat-ref.current { border-color: var(--accent); }
+.chat-ref.current { cursor: default; opacity: 0.85; }
 .chat-input { display: flex; flex-direction: column; gap: 6px; border-top: 1px solid var(--border); padding-top: 10px; }
 .stat a { color: var(--accent); }
 

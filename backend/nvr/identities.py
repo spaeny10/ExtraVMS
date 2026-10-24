@@ -409,3 +409,118 @@ def identity_facts(kind: str, event_id: int) -> str | None:
     n = m[0]
     return (f"Known {kind}: '{n['name']}'" + (f" ({n['notes']})" if n["notes"] else "") + " (matched by appearance)."
             + (f" This {kind} is on the operator's watch list" + (f": {n['watch_note']}" if n["watch_note"] else "") + "." if n["watch"] else ""))
+
+
+# ---------------------------------------------------------------- same person / vehicle as one event
+
+MATCH_ORDER = {"this": 0, "same": 1, "possible": 2}
+_FALSE_ALARM = "(feedback IS NULL OR json_extract(feedback, '$.verdict') IS NOT 'false_alarm')"
+
+
+def same_thresholds(kind: str) -> tuple[float, float]:
+    """(same, possible) cosine thresholds for a kind, from the settings (config.py explains the values)."""
+    if kind == "vehicle":
+        return settings.same_vehicle_min, settings.possible_vehicle_min
+    return settings.same_person_min, settings.possible_person_min
+
+
+def _vectors_by_id(table: str, ids: list[int]) -> dict[int, np.ndarray]:
+    out: dict[int, np.ndarray] = {}
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        for r in db.all(f"SELECT rowid, embedding FROM {table} WHERE rowid IN ({','.join('?' * len(chunk))})", chunk):
+            out[r["rowid"]] = np.frombuffer(r["embedding"], dtype=np.float32)
+    return out
+
+
+def same_subject(event_id: int, since: float, until: float | None = None, cameras: list[str] | None = None,
+                 limit: int | None = None) -> dict:
+    """Other sightings of the person or vehicle in event `event_id` between since and until, on `cameras` (None = all
+    of this server's cameras): a nearest-neighbor search of the clip's appearance fingerprint (reid_vec for people,
+    vehicle_vec for vehicles) over every fingerprinted sighting in the window, exact (cosine over the window's vectors;
+    reid_vec / vehicle_vec have no time or camera columns, so a k-limited MATCH over all history could miss the window).
+
+    Each match: {event_id, camera_id, start_ts, end_ts, match: this | same | possible, score, via}. "same" = score at or
+    above the kind's same threshold, a confirmed journey with the clip's person, or (vehicles) the same license plate;
+    "possible" = between the possible and the same threshold. The clip itself comes back as "this". Left out: groups of
+    people (no fingerprint), masked and rejected events, false alarms, and a vehicle whose plate differs from the
+    clip's. At most `limit` (settings.same_subject_max) matches, the most certain first; `capped` says when more were
+    found. Returns {kind, anchor, since, until, cameras, matches (by time), same, possible, compared, capped, excluded,
+    reason}; reason (group | no_fingerprint | not_subject | missing) when no search could run."""
+    limit = settings.same_subject_max if limit is None else max(1, int(limit))
+    until = until if until is not None else time.time()
+    out: dict = {"kind": None, "anchor": event_id, "since": since, "until": until, "cameras": cameras, "matches": [],
+                 "same": 0, "possible": 0, "compared": 0, "capped": False, "excluded": {}, "reason": None}
+    e = db.event(event_id)
+    if not e:
+        out["reason"] = "missing"
+        return out
+    kind = e["camera_class"] if e["camera_class"] in VEC_TABLE else None
+    out["kind"] = kind
+    this = {"event_id": e["id"], "camera_id": e["camera_id"], "start_ts": e["start_ts"], "end_ts": e.get("end_ts"),
+            "match": "this", "score": 1.0, "via": None}
+    if kind is None:
+        out["reason"] = "not_subject"
+        return out
+    if kind == "person" and (e.get("people") or 1) >= 2:
+        out["reason"] = "group"   # merge.py: a group of people keeps no re-ID vector (it would match the wrong person)
+        out["people"] = e["people"]
+        return out
+    table = VEC_TABLE[kind]
+    anchor = db.get_vec(table, event_id)
+    plate = (e.get("plate") or None) if kind == "vehicle" else None
+    if anchor is None and not plate:
+        out["reason"] = "no_fingerprint"
+        return out
+    out["matches"] = [this]
+    cams = cameras if cameras is not None else [c["id"] for c in db.cameras()]
+    if not cams:
+        return out
+    marks = ",".join("?" * len(cams))
+    scope = f"camera_class=? AND camera_id IN ({marks}) AND start_ts BETWEEN ? AND ? AND id != ?"
+    params = [kind, *cams, since, until, event_id]
+    ex = db.one(f"SELECT COALESCE(SUM(status='masked'), 0) AS masked, COALESCE(SUM(status='rejected'), 0) AS rejected, "
+                f"COALESCE(SUM(status NOT IN ('masked', 'rejected') AND COALESCE(people, 1) >= 2), 0) AS groups, "
+                f"COALESCE(SUM(status NOT IN ('masked', 'rejected') AND NOT {_FALSE_ALARM}), 0) AS false_alarms "
+                f"FROM events WHERE {scope}", params) or {}
+    rows = db.all(f"SELECT id, camera_id, start_ts, end_ts, journey_id, plate FROM events WHERE {scope} "
+                  f"AND status NOT IN ('masked', 'rejected') AND COALESCE(people, 1) < 2 AND {_FALSE_ALARM}", params)
+    vecs = _vectors_by_id(table, [r["id"] for r in rows]) if anchor is not None else {}
+    a = None
+    if anchor is not None:
+        a = anchor.astype(np.float64)
+        a /= np.linalg.norm(a) + 1e-9
+    same_min, possible_min = same_thresholds(kind)
+    found, other_plate, unprinted = [], 0, 0
+    for r in rows:
+        v = vecs.get(r["id"])
+        score = None
+        if v is not None and a is not None:
+            v = v.astype(np.float64)
+            score = float(v @ a / (np.linalg.norm(v) + 1e-9))
+        if plate and r.get("plate") and r["plate"] != plate:
+            other_plate += 1   # read clearly on both and different: another vehicle, however alike they look
+            continue
+        if plate and r.get("plate") == plate:
+            match, via = "same", "plate"
+        elif kind == "person" and e.get("journey_id") and r.get("journey_id") == e["journey_id"]:
+            match, via = "same", "journey"   # Qwen confirmed the same person across cameras (journeys.py)
+        elif score is None:
+            unprinted += 1
+            continue
+        elif score >= same_min:
+            match, via = "same", "appearance"
+        elif score >= possible_min:
+            match, via = "possible", "appearance"
+        else:
+            continue
+        found.append({"event_id": r["id"], "camera_id": r["camera_id"], "start_ts": r["start_ts"], "end_ts": r.get("end_ts"),
+                      "match": match, "score": round(score, 3) if score is not None else None, "via": via})
+    out["compared"] = len(rows) - unprinted - other_plate
+    out["same"] = sum(1 for m in found if m["match"] == "same")
+    out["possible"] = len(found) - out["same"]
+    found.sort(key=lambda m: (MATCH_ORDER[m["match"]], -(m["score"] if m["score"] is not None else 1.0), m["start_ts"]))
+    out["capped"] = len(found) > limit
+    out["matches"] = sorted([this, *found[:limit]], key=lambda m: m["start_ts"])
+    out["excluded"] = {k: int(v) for k, v in {**ex, "other_plate": other_plate, "no_fingerprint": unprinted}.items() if v}
+    return out
