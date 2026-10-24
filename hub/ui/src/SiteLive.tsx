@@ -54,6 +54,7 @@ import { NO_PICTURE_TEXT, stillDue } from "@site/liveFallback";
 import { type ClassFilter, DEFAULT_CLASS_FILTER, feedNarrow, feedNarrowKey, hubFeedQuery, nvrFeedQuery } from "@site/classFilter";
 import { regionFetchKey, regionPass, useRegionResults, useRegions } from "@site/region";
 import { useResync } from "@site/resync";
+import { enterFullscreen, exitFullscreen, fullscreenElement, fullscreenSupported, onFullscreenChange } from "@site/fullscreen";
 import type { TalkSpeaker } from "@site/talkdown";
 import { Icon, confirmDialog, promptDialog, swipeHandlers, toast, typingOrDialog, useDismiss, useIsPhone } from "@site/ui";
 import { StaleStillBadge, StillAge, useStillFrame, useStillWidth } from "@site/useStillFrame";
@@ -197,7 +198,8 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
 
   // above every early return below: hooks run in the same order every render
   const layoutRef = useRef<HTMLDivElement>(null);
-  const fs = useFullscreen(layoutRef);
+  // an expanded camera is the picture full screen shows: a tablet held upright turns to landscape for it
+  const fs = useFullscreen(layoutRef, () => (gridRef.current?.classList.contains("expanded") ? gridRef.current.querySelector("video") : null));
   const fit = useExpandFit(gridRef, !isPhone && !!expanded && shown.some((t) => t.key === expanded), fs.on);
   // keyboard: the tile in the Tab order, and the one to focus once the grid has re-rendered (after expand / collapse)
   const [tabKey, setTabKey] = useState<string | null>(null);
@@ -739,20 +741,20 @@ function useExpandFit(grid: React.RefObject<HTMLDivElement | null>, on: boolean,
 /** A tile's cell in the grid, by key. */
 const cellOf = (grid: HTMLElement | null, key: string) => grid?.querySelector<HTMLElement>(`[data-live-key="${CSS.escape(key)}"]`) ?? null;
 
-/** Fullscreen for the Live view's own box (the grid and the activity column, not the hub's header). `supported` is false
- *  where the browser has no element fullscreen (an iPhone); the toolbar then offers no button. */
-function useFullscreen(box: React.RefObject<HTMLElement | null>) {
+/** Fullscreen for the Live view's own box (the grid and the activity column, not the hub's header), through the shared
+ *  helper (@site/fullscreen): `picture` is the video it shows alone, if any (an expanded camera), so a touch device held
+ *  upright turns to landscape for it. `supported` is false where the browser has no element fullscreen (an iPhone);
+ *  the toolbar then offers no button. */
+function useFullscreen(box: React.RefObject<HTMLElement | null>, picture?: () => HTMLVideoElement | null) {
   const [on, setOn] = useState(false);
-  useEffect(() => {
-    const sync = () => setOn(!!box.current && document.fullscreenElement === box.current);
-    document.addEventListener("fullscreenchange", sync);
-    return () => document.removeEventListener("fullscreenchange", sync);
-  }, [box]);
+  const pictureRef = useRef(picture);
+  pictureRef.current = picture;
+  useEffect(() => onFullscreenChange((el) => setOn(!!box.current && el === box.current)), [box]);
   const toggle = useCallback(() => {
-    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
-    else box.current?.requestFullscreen?.().catch(() => {});
+    if (fullscreenElement()) exitFullscreen();
+    else void enterFullscreen(box.current, pictureRef.current?.() ?? null);
   }, [box]);
-  return { on, toggle, supported: typeof document !== "undefined" && !!document.fullscreenEnabled };
+  return { on, toggle, supported: fullscreenSupported() };
 }
 
 /** The "Latest activity" column: LiveView's feed and RegionNote, with the event viewer opened in place. */

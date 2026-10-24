@@ -12,6 +12,10 @@
  *                     gets the same transform. Without a scope it renders its children unchanged.
  *
  * A ZoomFrame without a scope keeps its own state, so any player can use it alone.
+ *
+ * `onTap` (the event player's play / pause): a tap or click on the picture that is not part of a gesture. At 1× it
+ * comes at once; while zoomed it waits out the double-tap time, so the double-tap (or double-click) that resets the zoom
+ * doesn't also play / pause. The end of a pan or a pinch is never a tap.
  */
 import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
@@ -154,14 +158,27 @@ type Gesture = {
   down: { at: number; p: Point; touch: boolean } | null;
   lastTap: { at: number; p: Point } | null;
   touchOurs: boolean;   // this touch sequence pinches or pans: the tile's swipe-to-switch must not see it
+  tapTimer: number | null;   // a tap while zoomed, waiting to see whether a second one makes it a double-tap
 };
+
+/** What a tap (click) on the picture does with `onTap`: "now" (at 1×, or no double-tap reset), "later" (zoomed: after
+ *  the double-tap time, unless a second tap comes) or "none" (`pending`: a first tap is still waiting, so this is the
+ *  second tap of a double, which resets the zoom instead: neither tap plays / pauses). */
+export function tapAction(o: { pending: boolean; zoomed: boolean; dblReset: boolean }): "now" | "later" | "none" {
+  if (o.pending) return "none";
+  return o.zoomed && o.dblReset ? "later" : "now";
+}
 
 /**
  * The zoomable box around a <video>. Fills its positioned parent (the player box); the video inside is laid out as
  * before. Props apply when there is no ZoomScope around it.
  */
-export function ZoomFrame({ children, doubleClickReset: dblProp = true, keyboard: keysProp = true }: {
+export function ZoomFrame({ children, doubleClickReset: dblProp = true, keyboard: keysProp = true, onTap, label }: {
   children: ReactNode; doubleClickReset?: boolean; keyboard?: boolean;
+  /** a tap or click on the picture (not a pan, pinch or zoom-resetting double-tap) */
+  onTap?: () => void;
+  /** the frame's accessible name (default: the zoom keys) */
+  label?: string;
 }) {
   const scope = useContext(ZoomContext);
   const [own] = useState(() => new ZoomController());
@@ -174,7 +191,14 @@ export function ZoomFrame({ children, doubleClickReset: dblProp = true, keyboard
   const frame = useRef<HTMLDivElement>(null);
   const inner = useRef<HTMLDivElement>(null);
   const [view, setView] = useState({ zoomed: false, label: "1×" });
-  const g = useRef<Gesture>({ pointers: new Map(), pan: null, pinch: null, moved: false, acted: false, down: null, lastTap: null, touchOurs: false });
+  const g = useRef<Gesture>({ pointers: new Map(), pan: null, pinch: null, moved: false, acted: false, down: null, lastTap: null, touchOurs: false, tapTimer: null });
+  const tapFn = useRef(onTap);
+  tapFn.current = onTap;
+  const cancelTap = () => {
+    const s = g.current;
+    if (s.tapTimer != null) { window.clearTimeout(s.tapTimer); s.tapTimer = null; }
+  };
+  useEffect(() => cancelTap, []);
 
   useLayoutEffect(() => {
     const el = frame.current, layer = inner.current;
@@ -239,6 +263,7 @@ export function ZoomFrame({ children, doubleClickReset: dblProp = true, keyboard
     g.current.pan = null;
     g.current.moved = true;
     g.current.acted = true;
+    cancelTap();
   };
   const endGesture = () => {
     const s = g.current;
@@ -280,7 +305,7 @@ export function ZoomFrame({ children, doubleClickReset: dblProp = true, keyboard
       const [a, b] = [...s.pointers.values()];
       ctl.set(pinchXform(s.pinch, distance(a, b), midpoint(a, b), geo.frame, geo.content));
     } else if (s.pan) {
-      if (s.moved) s.acted = true;
+      if (s.moved && !s.acted) { s.acted = true; cancelTap(); }
       ctl.set(clampPan({ s: s.pan.xf.s, x: s.pan.xf.x + p.x - s.pan.from.x, y: s.pan.xf.y + p.y - s.pan.from.y }, geo.frame, geo.content));
     }
   };
@@ -336,13 +361,25 @@ export function ZoomFrame({ children, doubleClickReset: dblProp = true, keyboard
   const hint = `wheel or pinch to zoom, drag to move${dblReset ? ", double-click to reset" : ""}`;
   return (
     <div ref={frame} className="vzoom" role="group" tabIndex={keyboard && !disabled ? 0 : undefined}
-      aria-label={keyboard && !disabled ? "Video: + and − zoom (or wheel, pinch), arrow keys move, 0 resets" : undefined}
+      aria-label={label ?? (keyboard && !disabled ? "Video: + and − zoom (or wheel, pinch), arrow keys move, 0 resets" : undefined)}
       onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp}
       onPointerLeave={(e) => { if (!frame.current?.hasPointerCapture(e.pointerId)) onPointerUp(e); }}
       onTouchStart={onTouch} onTouchMove={onTouch} onTouchEnd={onTouch} onTouchCancel={onTouch}
       // the end of a pan or pinch is not a click; the pill's Reset is never a gesture's end (after a pinch `acted`
       // stays set until the next press on the picture, and the press on the pill doesn't clear it)
       onClickCapture={(e) => { if (g.current.acted && !(e.target as Element).closest(".vzoom-pill")) e.stopPropagation(); }}
+      onClick={(e) => {
+        const s = g.current;
+        if (!tapFn.current || (e.target as Element).closest(".vzoom-pill")) return;
+        if (opts.current.disabled) return tapFn.current();
+        if (s.acted) return;
+        // a mouse click that moved (a drag at 1×, e.g. selecting) is no tap either
+        if (s.moved) return;
+        const act = tapAction({ pending: s.tapTimer != null, zoomed: isZoomed(ctl.xf) && !opts.current.disabled, dblReset: opts.current.dblReset });
+        if (act === "none") cancelTap();
+        else if (act === "now") tapFn.current();
+        else s.tapTimer = window.setTimeout(() => { s.tapTimer = null; tapFn.current?.(); }, TAP_MS);
+      }}
       onDoubleClick={(e) => { if (dblReset && !disabled && isZoomed(ctl.xf)) { e.stopPropagation(); ctl.reset(); } }}
       onKeyDown={onKeyDown}>
       <div ref={inner} className="vzoom-inner">{children}</div>

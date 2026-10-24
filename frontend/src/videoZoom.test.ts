@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { wheelAction } from "./VideoZoom";
+import { tapAction, wheelAction } from "./VideoZoom";
 
 const wheel = (deltaY: number, o: { ctrlKey?: boolean; deltaX?: number } = {}) => ({ ctrlKey: false, deltaX: 0, deltaY, ...o });
 
@@ -21,5 +21,20 @@ describe("wheelAction (a wheel over a video tile)", () => {
     expect(wheelAction(true, wheel(-100))).toBe("zoom");
     expect(wheelAction(true, wheel(100))).toBe("zoom");
     expect(wheelAction(true, wheel(5, { deltaX: 40 }))).toBe("pan");
+  });
+});
+
+describe("tapAction (a tap on the event player's picture: play / pause)", () => {
+  it("at 1× a tap plays or pauses at once", () => {
+    expect(tapAction({ pending: false, zoomed: false, dblReset: true })).toBe("now");
+  });
+  it("zoomed, a tap waits out the double-tap time, so a double-tap resets the zoom without playing / pausing", () => {
+    expect(tapAction({ pending: false, zoomed: true, dblReset: true })).toBe("later");
+    // the second tap: the first is still waiting; it is dropped (the double-tap reset the zoom)
+    expect(tapAction({ pending: true, zoomed: false, dblReset: true })).toBe("none");
+    expect(tapAction({ pending: true, zoomed: true, dblReset: true })).toBe("none");
+  });
+  it("without a double-tap reset (the Timeline's tiles) there is nothing to wait for", () => {
+    expect(tapAction({ pending: false, zoomed: true, dblReset: false })).toBe("now");
   });
 });
