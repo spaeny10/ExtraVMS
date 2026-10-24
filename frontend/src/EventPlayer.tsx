@@ -12,7 +12,7 @@ import { PREFETCH_LEAD_S, dropPrefetch, isBuffered, mergeSpans, nowS, prefetchCh
 import { fracIn, hoverFrameTime, isDrag, panWindow, pinchStart, pinchWindow, thumbLeft, wheelWindow, type PinchStart } from "./timeZoom";
 import { Icon, useIsPhone } from "./ui";
 import { ZoomFrame, ZoomLayer, ZoomScope } from "./VideoZoom";
-import { enterFullscreen, exitFullscreen, fullscreenElement, onFullscreenChange } from "./fullscreen";
+import { useFullscreen } from "./useFullscreen";
 
 /** What the event viewer can do with the player: seek it (Ask answers' frames, notes) to epoch `t`, paused if asked. */
 export type EventPlayerHandle = { seek: (t: number, pause?: boolean) => void };
@@ -80,7 +80,8 @@ const release = (v: HTMLVideoElement) => {
  * Digital zoom (VideoZoom.tsx) on the picture: wheel or pinch zooms, one finger or a drag pans while zoomed, a
  * double-tap or double-click resets; a single tap still plays / pauses (while zoomed, once the double-tap time has
  * passed). The zoom stays across chunks, seeks and the camera's other events, in and out of full screen. Full screen
- * (fullscreen.ts) turns a phone held upright to landscape for the picture.
+ * (fullscreen.ts) fills the window at once (whatever the browser allows), and on a phone held upright shows the picture
+ * in landscape: the screen locked, or else the stage turned with CSS (the zoom's gestures follow the turn).
  * A chunk hands over to the next when it ends, and also when it is stuck at its end (a streamed transcode can come out
  * shorter than its duration says, and then 'ended' never fires); a next chunk that doesn't come is asked for again
  * once, then the viewer can tap to retry (eventPlayback.ts chunkStep).
@@ -137,7 +138,7 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage, onSel
   const [want, setWantState] = useState(wantPlay.current);
   const setWant = (b: boolean) => { wantPlay.current = b; setWantState(b); };
   const [muted, setMuted] = useState(true);   // muted autoplay is allowed everywhere; sound is the viewer's choice
-  const [full, setFull] = useState(false);
+  const stage = useRef<HTMLDivElement | null>(null);
   const played = useRef(false);                // some recording chunk played: a later failure stops there, no fallback
   const prefetch = useRef<Prefetched | null>(null);
   const blobInUse = useRef<string | null>(null);
@@ -356,12 +357,14 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage, onSel
     setMuted(m);
     if (video.current) video.current.muted = m;
   };
-  // the box full screen (a phone held upright turns to landscape); an iPhone: the video alone, in the system player
-  const toggleFull = () => {
-    if (fullscreenElement()) return exitFullscreen();
-    void enterFullscreen(box.current, video.current);
-  };
-  useEffect(() => onFullscreenChange((el) => setFull(!!box.current && el === box.current)), []);
+  // the box full screen (a phone held upright: landscape, locked or turned); an iPhone in Safari: the video alone, in
+  // the system player
+  const fs = useFullscreen(box, {
+    picture: () => video.current ?? box.current?.querySelector<HTMLImageElement>("img.clip") ?? null,
+    stage: () => stage.current,
+  });
+  const full = fs.on;
+  const toggleFull = fs.toggle;
   const onPlayerKey = (ev: React.KeyboardEvent) => {
     if (ev.key !== " " || ev.altKey || ev.ctrlKey || ev.metaKey) return;
     const el = ev.target as HTMLElement;
@@ -622,83 +625,92 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage, onSel
     <div className="ep" onKeyDown={onPlayerKey}>
       <ZoomScope resetKey={cam}>
         <div className={`ep-video${full ? " full" : ""}`} ref={box}>
-          {(hasVideo || e.snapshot) ? (
-            <ZoomFrame onTap={hasVideo ? toggle : undefined}
-              label={hasVideo ? "Event video: Space plays or pauses; + and − zoom (or wheel, pinch), arrow keys move, 0 resets" : undefined}>
-              {source?.kind === "recording" && chunk ? (
-                <video key={chunk.key} ref={attachVideo} className="clip" src={chunk.src} poster={firstChunk.current ? poster : undefined}
-                  muted={muted} playsInline autoPlay={wantPlay.current} preload="auto"
-                  onLoadedMetadata={(ev) => { if (wantPlay.current) playNow(ev.currentTarget); }}
-                  onCanPlay={(ev) => { if (wantPlay.current && ev.currentTarget.paused && !ev.currentTarget.ended) playNow(ev.currentTarget); }}
-                  onPlaying={() => {
-                    played.current = true;
-                    firstChunk.current = false;
-                    caughtUp();
-                    if (st.current.stopped === "failed") setStopped(null);   // it came after all
-                  }}
-                  onSeeked={caughtUp}
-                  onPlay={(ev) => { if (ev.currentTarget === video.current) setWant(true); }}
-                  onPause={(ev) => {
-                    const v = ev.currentTarget;
-                    if (v !== video.current || pauseAtEnd({ ct: v.currentTime, len: chunk.len, duration: v.duration, ended: v.ended })) return;
-                    setWant(false);
-                  }}
-                  onTimeUpdate={(ev) => {
-                    const at = chunk.start + ev.currentTarget.currentTime;
-                    if (scrubT == null) moveTo(at, false);
-                    if (chunk.start + chunk.len - at < prefetchLead(chunk.len, PREFETCH_LEAD_S)) prefetchNext(chunk);
-                  }}
-                  onError={() => onError(chunk)}
-                  onEnded={(ev) => advance(chunk, ev.currentTarget)} />
-              ) : source?.kind === "clip" ? (
-                <video ref={attachVideo} className="clip" src={site.media(e, "clip.mp4")} poster={poster} autoPlay={wantPlay.current} muted={muted} playsInline
-                  onTimeUpdate={(ev) => { if (scrubT == null) moveTo(t0 + ev.currentTarget.currentTime, false); }}
-                  onPlay={(ev) => { if (ev.currentTarget === video.current) setWant(true); }}
-                  onPause={(ev) => { if (ev.currentTarget === video.current && !ev.currentTarget.ended) setWant(false); }}
-                  onEnded={() => setWant(false)}
-                  onSeeked={caughtUp} onPlaying={caughtUp}
-                  onError={() => setSource({ kind: "still" })} />
-              ) : (
-                <img className="clip" src={site.media(e, "snapshot.jpg", 960)} alt="" draggable={false} />
-              )}
-            </ZoomFrame>
-          ) : (
-            <div className="clip thumb-empty">{source?.kind === "still" && !live ? "The footage is no longer recorded" : source ? "No media yet" : "Loading…"}</div>
-          )}
-          {frames.shot && (
-            <ZoomLayer>
-              <div className="ep-preview">
-                {frames.shot.url ? <img src={frames.shot.url} alt="" /> : <div className="ep-msg">No recording here</div>}
-              </div>
-            </ZoomLayer>
-          )}
-          {/* one play control at a time: the big one while paused, the bar's Pause while playing */}
-          {hasVideo && !want && !stopped && !frames.shot && (
-            <button type="button" className="ep-big" onClick={toggle} aria-label="Play" title="Play (Space)"><Icon name="play" size={30} /></button>
-          )}
-          {stopped === "failed" && chunk ? (
-            <button type="button" className="ep-retry" onClick={() => { setWant(true); again(chunk, true); }}>
-              {played.current || chunk.cont ? "Couldn't load the next part" : "Couldn't load the recording"} — tap to retry
-            </button>
-          ) : stopped && !frames.shot ? (
-            <div className="ep-msg ep-msg-bar">{stopped === "live" ? "Caught up with live" : "End of the recording"}</div>
-          ) : null}
-          {hasVideo && (
-            <div className="ep-bar">
-              {(want || stopped) && (
-                <button type="button" onClick={toggle} aria-label={want ? "Pause" : "Play"} title={want ? "Pause (Space)" : "Play (Space)"}>
-                  <Icon name={want ? "pause" : "play"} size={20} />
+          <div className="ep-stage" ref={stage}>
+            {(hasVideo || e.snapshot) ? (
+              <ZoomFrame onTap={hasVideo ? toggle : undefined}
+                label={hasVideo ? "Event video: Space plays or pauses; + and − zoom (or wheel, pinch), arrow keys move, 0 resets" : undefined}>
+                {source?.kind === "recording" && chunk ? (
+                  <video key={chunk.key} ref={attachVideo} className="clip" src={chunk.src} poster={firstChunk.current ? poster : undefined}
+                    muted={muted} playsInline autoPlay={wantPlay.current} preload="auto"
+                    onLoadedMetadata={(ev) => { if (wantPlay.current) playNow(ev.currentTarget); }}
+                    onCanPlay={(ev) => { if (wantPlay.current && ev.currentTarget.paused && !ev.currentTarget.ended) playNow(ev.currentTarget); }}
+                    onPlaying={() => {
+                      played.current = true;
+                      firstChunk.current = false;
+                      caughtUp();
+                      if (st.current.stopped === "failed") setStopped(null);   // it came after all
+                    }}
+                    onSeeked={caughtUp}
+                    onPlay={(ev) => { if (ev.currentTarget === video.current) setWant(true); }}
+                    onPause={(ev) => {
+                      const v = ev.currentTarget;
+                      if (v !== video.current || pauseAtEnd({ ct: v.currentTime, len: chunk.len, duration: v.duration, ended: v.ended })) return;
+                      setWant(false);
+                    }}
+                    onTimeUpdate={(ev) => {
+                      const at = chunk.start + ev.currentTarget.currentTime;
+                      if (scrubT == null) moveTo(at, false);
+                      if (chunk.start + chunk.len - at < prefetchLead(chunk.len, PREFETCH_LEAD_S)) prefetchNext(chunk);
+                    }}
+                    onError={() => onError(chunk)}
+                    onEnded={(ev) => advance(chunk, ev.currentTarget)} />
+                ) : source?.kind === "clip" ? (
+                  <video ref={attachVideo} className="clip" src={site.media(e, "clip.mp4")} poster={poster} autoPlay={wantPlay.current} muted={muted} playsInline
+                    onTimeUpdate={(ev) => { if (scrubT == null) moveTo(t0 + ev.currentTarget.currentTime, false); }}
+                    onPlay={(ev) => { if (ev.currentTarget === video.current) setWant(true); }}
+                    onPause={(ev) => { if (ev.currentTarget === video.current && !ev.currentTarget.ended) setWant(false); }}
+                    onEnded={() => setWant(false)}
+                    onSeeked={caughtUp} onPlaying={caughtUp}
+                    onError={() => setSource({ kind: "still" })} />
+                ) : (
+                  <img className="clip" src={site.media(e, "snapshot.jpg", 960)} alt="" draggable={false} />
+                )}
+              </ZoomFrame>
+            ) : (
+              <div className="clip thumb-empty">{source?.kind === "still" && !live ? "The footage is no longer recorded" : source ? "No media yet" : "Loading…"}</div>
+            )}
+            {frames.shot && (
+              <ZoomLayer>
+                <div className="ep-preview">
+                  {frames.shot.url ? <img src={frames.shot.url} alt="" /> : <div className="ep-msg">No recording here</div>}
+                </div>
+              </ZoomLayer>
+            )}
+            {/* one play control at a time: the big one while paused, the bar's Pause while playing */}
+            {hasVideo && !want && !stopped && !frames.shot && (
+              <button type="button" className="ep-big" onClick={toggle} aria-label="Play" title="Play (Space)"><Icon name="play" size={30} /></button>
+            )}
+            {stopped === "failed" && chunk ? (
+              <button type="button" className="ep-retry" onClick={() => { setWant(true); again(chunk, true); }}>
+                {played.current || chunk.cont ? "Couldn't load the next part" : "Couldn't load the recording"} — tap to retry
+              </button>
+            ) : stopped && !frames.shot ? (
+              <div className="ep-msg ep-msg-bar">{stopped === "live" ? "Caught up with live" : "End of the recording"}</div>
+            ) : null}
+            {hasVideo && (
+              <div className="ep-bar">
+                {(want || stopped) && (
+                  <button type="button" onClick={toggle} aria-label={want ? "Pause" : "Play"} title={want ? "Pause (Space)" : "Play (Space)"}>
+                    <Icon name={want ? "pause" : "play"} size={20} />
+                  </button>
+                )}
+                <span className="grow" />
+                <button type="button" onClick={toggleMute} aria-label={muted ? "Turn sound on" : "Mute"} aria-pressed={!muted} title={muted ? "Sound on" : "Mute"}>
+                  <Icon name={muted ? "volumeOff" : "volume"} size={20} />
                 </button>
-              )}
-              <span className="grow" />
-              <button type="button" onClick={toggleMute} aria-label={muted ? "Turn sound on" : "Mute"} aria-pressed={!muted} title={muted ? "Sound on" : "Mute"}>
-                <Icon name={muted ? "volumeOff" : "volume"} size={20} />
+                <button type="button" onClick={toggleFull} aria-label={full ? "Exit full screen" : "Full screen"} title={full ? "Exit full screen" : "Full screen"}>
+                  <Icon name={full ? "shrink" : "expand"} size={20} />
+                </button>
+              </div>
+            )}
+            {/* no video (a still), so no bar: full screen still needs a way out */}
+            {full && !hasVideo && (
+              <button type="button" className="ep-exit" onClick={toggleFull} aria-label="Exit full screen" title="Exit full screen">
+                <Icon name="shrink" size={20} />
               </button>
-              <button type="button" onClick={toggleFull} aria-label={full ? "Exit full screen" : "Full screen"} title={full ? "Exit full screen" : "Full screen"}>
-                <Icon name={full ? "shrink" : "expand"} size={20} />
-              </button>
-            </div>
-          )}
+            )}
+            {fs.debugView}
+          </div>
         </div>
       </ZoomScope>
       {source?.kind === "clip" && <p className="muted small">The event's own clip: the recording around it is no longer kept.</p>}

@@ -1,0 +1,40 @@
+/* Full screen that doesn't depend on the browser (fullscreen.ts). Attributes, not classes: React rewrites className. */
+
+/* the box fills the window, above everything (the hub's dialogs sit at z-index 20–60) */
+[data-fs-pseudo] {
+  position: fixed !important; top: 0 !important; left: 0 !important; right: auto !important; bottom: auto !important;
+  width: 100vw !important; height: 100vh !important; width: 100dvw !important; height: 100dvh !important;
+  min-width: 0 !important; min-height: 0 !important; max-width: none !important; max-height: none !important;
+  margin: 0 !important; aspect-ratio: auto !important; border-radius: 0 !important; box-sizing: border-box !important;
+  z-index: 2147483000 !important; background: #000;
+  container-type: size;   /* the turned stage sizes itself from this box (100cqh × 100cqw) */
+}
+/* every ancestor: nothing that would make it the fixed box's containing block, and its stacking context on top */
+[data-fs-host] {
+  z-index: 2147483000 !important; transform: none !important; filter: none !important; backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important; perspective: none !important; contain: none !important; will-change: auto !important;
+}
+/* the page behind doesn't scroll (nor pull to refresh) */
+html.fs-pseudo-on, html.fs-pseudo-on body { overflow: hidden !important; overscroll-behavior: none !important; }
+/* the one picture takes every touch: one finger pans, two pinch, nothing scrolls (a full-screen grid of tiles still
+   scrolls under the finger, unless it is turned: then its vertical is the screen's horizontal) */
+[data-fs-rotated] .vzoom, .ep-video[data-fs-pseudo] .vzoom { touch-action: none; }
+
+/* a phone held upright, a landscape picture and no orientation lock: the stage turned 90° clockwise to fill the long
+   side. The stage is laid out H wide × W tall (the box's height × width) at the box's top left; translateY(-100%)
+   lifts it by its own height (W) above the box, and the turn about the top left corner swings it down into the box:
+   a stage point (x, y) lands at (W − y, x), so its top edge runs down the right side of the screen (the picture is
+   upright with the phone turned counter-clockwise, its usual landscape). */
+[data-fs-rotated] {
+  position: absolute !important; top: 0 !important; left: 0 !important; right: auto !important; bottom: auto !important;
+  width: 100vh !important; height: 100vw !important; width: 100cqh !important; height: 100cqw !important;
+  max-width: none !important; max-height: none !important; margin: 0 !important; box-sizing: border-box;
+  transform-origin: 0 0 !important; transform: rotate(90deg) translateY(-100%) !important;
+}
+
+/* the diagnostics overlay (useFullscreen.tsx FullscreenDebug) */
+.fs-debug { position: absolute; left: 8px; top: 8px; z-index: 20; max-width: calc(100% - 16px); padding: 6px 8px; border-radius: 6px;
+  background: rgb(0 0 0 / .78); color: #e6edf3; font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  pointer-events: auto; cursor: pointer; white-space: normal; overflow-wrap: anywhere; }
+.fs-debug b { color: #9ecbff; font-weight: 600; }
+.fs-debug-hint { color: #8b949e; margin-top: 2px; }

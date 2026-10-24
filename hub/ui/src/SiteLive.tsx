@@ -36,9 +36,11 @@
  *
  * Keyboard (desktop, docs/live-views-spec.md): one tile is in the Tab order; the arrow keys, Home and End move between
  * tiles in visual order (only while a tile itself has the focus, so PTZ and digital zoom keep their own arrows), Enter
- * expands, Escape or Backspace collapses (the browser takes Escape in fullscreen) and F toggles fullscreen. Keys are
+ * expands, Escape or Backspace collapses (Escape leaves fullscreen first) and F toggles fullscreen. Keys are
  * left alone while typing, in a menu or dialog, and the page-wide ones in the SOC's embed (it has its own chords).
- * Fullscreen fills the screen with the grid alone; the activity column hides until it ends.
+ * Fullscreen fills the screen with the grid alone; the activity column hides until it ends. It is the shared helper's
+ * (@site/useFullscreen): the window filled at once whatever the browser allows, the real full screen as a bonus, and an
+ * expanded camera on a touch device held upright shown in landscape (screen locked, or the grid turned with CSS).
  */
 import { useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -54,7 +56,7 @@ import { NO_PICTURE_TEXT, stillDue } from "@site/liveFallback";
 import { type ClassFilter, DEFAULT_CLASS_FILTER, feedNarrow, feedNarrowKey, hubFeedQuery, nvrFeedQuery } from "@site/classFilter";
 import { regionFetchKey, regionPass, useRegionResults, useRegions } from "@site/region";
 import { useResync } from "@site/resync";
-import { enterFullscreen, exitFullscreen, fullscreenElement, fullscreenSupported, onFullscreenChange } from "@site/fullscreen";
+import { useFullscreen } from "@site/useFullscreen";
 import type { TalkSpeaker } from "@site/talkdown";
 import { Icon, confirmDialog, promptDialog, swipeHandlers, toast, typingOrDialog, useDismiss, useIsPhone } from "@site/ui";
 import { StaleStillBadge, StillAge, useStillFrame, useStillWidth } from "@site/useStillFrame";
@@ -198,9 +200,14 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
 
   // above every early return below: hooks run in the same order every render
   const layoutRef = useRef<HTMLDivElement>(null);
-  // an expanded camera is the picture full screen shows: a tablet held upright turns to landscape for it
-  const fs = useFullscreen(layoutRef, () => (gridRef.current?.classList.contains("expanded") ? gridRef.current.querySelector("video") : null));
-  const fit = useExpandFit(gridRef, !isPhone && !!expanded && shown.some((t) => t.key === expanded), fs.on);
+  // an expanded camera is the picture full screen shows: a tablet held upright turns to landscape for it (the lock, or
+  // the grid's column turned with CSS); a grid of cameras is never turned
+  const expandedNow = () => !!gridRef.current?.classList.contains("expanded");
+  const fs = useFullscreen(layoutRef, {
+    picture: () => (expandedNow() ? gridRef.current!.querySelector("video") : null),
+    stage: () => (expandedNow() ? layoutRef.current?.querySelector<HTMLElement>(".live-main") : null),
+  });
+  const fit = useExpandFit(gridRef, !isPhone && !!expanded && shown.some((t) => t.key === expanded), fs.on, fs.rotated);
   // keyboard: the tile in the Tab order, and the one to focus once the grid has re-rendered (after expand / collapse)
   const [tabKey, setTabKey] = useState<string | null>(null);
   const refocus = useRef<string | null>(null);
@@ -278,12 +285,10 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
       )}
       <ViewMenu tiles={ordered} layout={layout} liveKeys={liveKeys} multi={multi} dispatch={dispatch} dirty={dirty} onRevert={revert}
         named={named.enabled ? named : null} current={() => toSavedConfig(allKeys, layout)} />
-      {fs.supported && (
-        <button className="ghost small icon-act" onClick={fs.toggle} aria-pressed={fs.on} aria-label={fs.on ? "Leave fullscreen" : "Fullscreen"}
-          title={fs.on ? "Leave fullscreen (F or Esc)" : "Fill the screen with the cameras (F)"}>
-          <Icon name={fs.on ? "shrink" : "expand"} size={16} />
-        </button>
-      )}
+      <button className="ghost small icon-act" onClick={fs.toggle} aria-pressed={fs.on} aria-label={fs.on ? "Leave fullscreen" : "Fullscreen"}
+        title={fs.on ? "Leave fullscreen (F or Esc)" : "Fill the screen with the cameras (F)"}>
+        <Icon name={fs.on ? "shrink" : "expand"} size={16} />
+      </button>
     </div>
   );
   // arrows, Home and End between tiles, Enter to expand: only while a tile itself has the focus (the notes at the top)
@@ -309,6 +314,13 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
       <div ref={layoutRef} className={`live-layout ${showFeed ? "" : "site-live-solo"} ${compact ? "site-live-compact" : ""}`}>
         <div className="live-main">
           {slot === undefined && toolbar}
+          {/* the toolbar may be up in the Site page's tab row, outside the full-screen box: a way out inside it */}
+          {fs.on && slot !== undefined && (
+            <button type="button" className="ghost small icon-act live-fs-exit" onClick={fs.exit} aria-label="Leave fullscreen" title="Leave fullscreen (F or Esc)">
+              <Icon name="shrink" size={16} />
+            </button>
+          )}
+          {fs.debugView}
           <div ref={gridRef} onKeyDown={onGridKey} className={`live-grid ${focused ? "expanded" : layoutCols(layout, grid.length) === 1 ? "one" : ""}`}
             style={{ gridTemplateColumns: `repeat(${focused ? 1 : layoutCols(layout, grid.length)}, minmax(0, 1fr))`,
               // a lone tile fits the window (styles.css .live-grid.one): the hub's header, tabs and toolbar above it
@@ -720,42 +732,27 @@ function useSiteActivity(site: Site, servers: Server[], source: DashboardSource,
 /** Expand: the height left for the one picture below the grid's top edge, so the expanded camera (picture plus its
  *  name bar) fits the window instead of growing with the page width past the bottom of the screen. */
 const EXPAND_BAR_PX = 56;   // the tile's name bar and the gap under it
-function useExpandFit(grid: React.RefObject<HTMLDivElement | null>, on: boolean, fullscreen = false): number | null {
+function useExpandFit(grid: React.RefObject<HTMLDivElement | null>, on: boolean, fullscreen = false, rotated = false): number | null {
   const [h, setH] = useState<number | null>(null);
   useLayoutEffect(() => {
     if (!on) { setH(null); return; }
     const measure = () => {
       const el = grid.current;
       if (!el) return;
-      // from the top of the page, not of the viewport; in fullscreen the grid's own box is the screen
-      const top = el.getBoundingClientRect().top + (fullscreen ? 0 : window.scrollY);
-      setH(Math.max(200, Math.floor(window.innerHeight - top - EXPAND_BAR_PX)));
+      // from the top of the page, not of the viewport; in fullscreen the grid's own box is the screen; turned with the
+      // column (fullscreen on a phone held upright) the column's height is the window's width, its top the grid's offset
+      const top = rotated ? el.offsetTop : el.getBoundingClientRect().top + (fullscreen ? 0 : window.scrollY);
+      setH(Math.max(200, Math.floor((rotated ? window.innerWidth : window.innerHeight) - top - EXPAND_BAR_PX)));
     };
     measure();
     window.addEventListener("resize", measure);
     return () => window.removeEventListener("resize", measure);
-  }, [grid, on, fullscreen]);
+  }, [grid, on, fullscreen, rotated]);
   return h;
 }
 
 /** A tile's cell in the grid, by key. */
 const cellOf = (grid: HTMLElement | null, key: string) => grid?.querySelector<HTMLElement>(`[data-live-key="${CSS.escape(key)}"]`) ?? null;
-
-/** Fullscreen for the Live view's own box (the grid and the activity column, not the hub's header), through the shared
- *  helper (@site/fullscreen): `picture` is the video it shows alone, if any (an expanded camera), so a touch device held
- *  upright turns to landscape for it. `supported` is false where the browser has no element fullscreen (an iPhone);
- *  the toolbar then offers no button. */
-function useFullscreen(box: React.RefObject<HTMLElement | null>, picture?: () => HTMLVideoElement | null) {
-  const [on, setOn] = useState(false);
-  const pictureRef = useRef(picture);
-  pictureRef.current = picture;
-  useEffect(() => onFullscreenChange((el) => setOn(!!box.current && el === box.current)), [box]);
-  const toggle = useCallback(() => {
-    if (fullscreenElement()) exitFullscreen();
-    else void enterFullscreen(box.current, pictureRef.current?.() ?? null);
-  }, [box]);
-  return { on, toggle, supported: fullscreenSupported() };
-}
 
 /** The "Latest activity" column: LiveView's feed and RegionNote, with the event viewer opened in place. */
 function SiteActivity({ site, servers, tiles, multi, activity: a, onShowAll, filter: classFilter, onFilter: setClassFilter }: {

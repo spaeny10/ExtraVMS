@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  IDENTITY, MAX_SCALE, clampPan, clampScale, contentBox, distance, isZoomed, midpoint, panBy, pinchXform, scaleLabel, toCss, wheelScale, zoomAt,
+  IDENTITY, MAX_SCALE, clampPan, clampScale, clientToLocal, contentBox, cssTurn, distance, isZoomed, midpoint, panBy, pinchXform, scaleLabel, toCss, wheelScale, zoomAt,
   type Point, type Rect, type Size, type Xform,
 } from "./zoom";
 
@@ -159,5 +159,88 @@ describe("scaleLabel", () => {
     expect(scaleLabel(2)).toBe("2×");
     expect(scaleLabel(2.54)).toBe("2.5×");
     expect(scaleLabel(7.96)).toBe("8×");
+  });
+});
+
+describe("clientToLocal: pointer positions under full screen's CSS turn", () => {
+  // a phone held upright, 375 × 812; the stage (and the zoom frame filling it) laid out 812 × 375 and turned with
+  // fullscreen.css: rotate(90deg) translateY(-100%), origin top left
+  const W = 375, H = 812;
+  const size: Size = { width: H, height: W };
+  const rect: Rect = { left: 0, top: 0, width: W, height: H };   // getBoundingClientRect of the turned frame
+  /** where the CSS puts a frame point on screen: translateY(-W), then rotate 90° clockwise ((x, y) → (−y, x)) */
+  const screenOf = (p: Point): Point => ({ x: -(p.y - W), y: p.x });
+  const close = (a: Point, b: Point) => { expect(a.x).toBeCloseTo(b.x, 6); expect(a.y).toBeCloseTo(b.y, 6); };
+
+  it("unturned: the offset from the frame's corner, as before", () => {
+    expect(clientToLocal({ x: 130, y: 90 }, { left: 30, top: 40, width: 400, height: 300 }, frame)).toEqual({ x: 100, y: 50 });
+    expect(clientToLocal({ x: 130, y: 90 }, { left: 30, top: 40, width: 400, height: 300 }, frame, 360)).toEqual({ x: 100, y: 50 });
+  });
+  it("the CSS puts the frame exactly over the screen, its top edge down the right side", () => {
+    close(screenOf({ x: 0, y: 0 }), { x: W, y: 0 });
+    close(screenOf({ x: H, y: 0 }), { x: W, y: H });
+    close(screenOf({ x: 0, y: W }), { x: 0, y: 0 });
+    close(screenOf({ x: H, y: W }), { x: 0, y: H });
+  });
+  it("turned 90°: the corners and the centre map back", () => {
+    expect(clientToLocal({ x: W, y: 0 }, rect, size, 90)).toEqual({ x: 0, y: 0 });
+    expect(clientToLocal({ x: W, y: H }, rect, size, 90)).toEqual({ x: H, y: 0 });
+    expect(clientToLocal({ x: 0, y: 0 }, rect, size, 90)).toEqual({ x: 0, y: W });
+    expect(clientToLocal({ x: 0, y: H }, rect, size, 90)).toEqual({ x: H, y: W });
+    expect(clientToLocal({ x: W / 2, y: H / 2 }, rect, size, 90)).toEqual({ x: H / 2, y: W / 2 });
+  });
+  it("is the inverse of the CSS turn for any point", () => {
+    for (const p of [{ x: 10, y: 20 }, { x: 600, y: 300 }, { x: 406, y: 1 }, { x: 811, y: 374 }]) close(clientToLocal(screenOf(p), rect, size, 90), p);
+  });
+  it("any angle: the inverse of a turn about the frame's centre (offset rect, as in a dialog)", () => {
+    const f: Size = { width: 300, height: 200 };
+    for (const deg of [30, 90, 180, 270, -90]) {
+      const r = (deg * Math.PI) / 180, c = Math.cos(r), sn = Math.sin(r);
+      // the box around the turned frame, centred at (500, 400)
+      const bw = Math.abs(f.width * c) + Math.abs(f.height * sn), bh = Math.abs(f.width * sn) + Math.abs(f.height * c);
+      const box: Rect = { left: 500 - bw / 2, top: 400 - bh / 2, width: bw, height: bh };
+      const toScreen = (p: Point): Point => {
+        const dx = p.x - f.width / 2, dy = p.y - f.height / 2;
+        return { x: 500 + dx * c - dy * sn, y: 400 + dx * sn + dy * c };
+      };
+      for (const p of [{ x: 0, y: 0 }, { x: 300, y: 0 }, { x: 120, y: 170 }]) close(clientToLocal(toScreen(p), box, f, deg), p);
+    }
+  });
+  it("a pan moves the picture with the finger on the glass", () => {
+    const content = contentBox(size, 2592 / 1520);
+    const xf = zoomAt(IDENTITY, 3, { x: H / 2, y: W / 2 }, size, content);
+    // the finger slides 40 px down the screen (to the viewer holding the phone sideways: to the right)
+    const a = { x: 200, y: 300 }, b = { x: 200, y: 340 };
+    const la = clientToLocal(a, rect, size, 90), lb = clientToLocal(b, rect, size, 90);
+    expect(lb.x - la.x).toBeCloseTo(40, 6);
+    expect(lb.y - la.y).toBeCloseTo(0, 6);
+    const moved = panBy(xf, lb.x - la.x, lb.y - la.y, size, content);
+    // the picture point that was under the finger is under it again
+    const q = { x: (la.x - xf.x) / xf.s, y: (la.y - xf.y) / xf.s };
+    close(screenOf(apply(moved, q)), b);
+  });
+  it("a pinch keeps the picture point between the fingers there", () => {
+    const content = contentBox(size, 2592 / 1520);
+    const a0 = { x: 150, y: 350 }, b0 = { x: 250, y: 450 };
+    const l = (p: Point) => clientToLocal(p, rect, size, 90);
+    const start = { xf: IDENTITY, dist: distance(l(a0), l(b0)), mid: midpoint(l(a0), l(b0)) };
+    const a1 = { x: 120, y: 320 }, b1 = { x: 280, y: 480 };   // spread apart about the same middle
+    const xf = pinchXform(start, distance(l(a1), l(b1)), midpoint(l(a1), l(b1)), size, content);
+    expect(xf.s).toBeCloseTo(1.6, 6);
+    close(screenOf(apply(xf, start.mid)), { x: 200, y: 400 });
+  });
+});
+
+describe("cssTurn: the turn in a computed transform", () => {
+  it("reads the matrix", () => {
+    expect(cssTurn("none")).toBe(0);
+    expect(cssTurn(undefined)).toBe(0);
+    expect(cssTurn("matrix(1, 0, 0, 1, 0, 0)")).toBe(0);
+    expect(cssTurn("matrix(0, 1, -1, 0, 375, 0)")).toBe(90);
+    expect(cssTurn("matrix(6.12323e-17, 1, -1, 6.12323e-17, 375, 0)")).toBe(90);
+    expect(cssTurn("matrix(-1, 0, 0, -1, 0, 0)")).toBe(180);
+    expect(cssTurn("matrix(0, -1, 1, 0, 0, 0)")).toBe(270);
+    expect(cssTurn("matrix3d(0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1, 0, 375, 0, 0, 1)")).toBe(90);
+    expect(cssTurn("matrix(2, 0, 0, 2, 0, 0)")).toBe(0);   // a scale is no turn
   });
 });

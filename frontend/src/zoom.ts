@@ -98,3 +98,31 @@ export const toCss = (xf: Xform) => (isZoomed(xf) ? `translate(${xf.x}px, ${xf.y
 
 /** "2.5×" for the indicator: one decimal, none when whole ("2×"). */
 export const scaleLabel = (s: number) => `${Math.round(s * 10) / 10}×`;
+
+/**
+ * A pointer's client (screen) position in the frame's own, unturned coordinates. `rect` is the frame's
+ * getBoundingClientRect (under a CSS turn: the box around the turned frame), `size` its own offsetWidth / offsetHeight,
+ * `deg` how far it is turned on screen, clockwise (full screen turns a phone's picture 90°: fullscreen.ts). The offset
+ * from the box's centre (which a turn about any point keeps the frame's centre at) is turned back by −deg.
+ */
+export function clientToLocal(p: Point, rect: Rect, size: Size, deg = 0): Point {
+  const a = ((deg % 360) + 360) % 360;
+  if (a === 0) return { x: p.x - rect.left, y: p.y - rect.top };
+  // quarter turns exactly (no 6e-17 from cos 90°)
+  const q = a % 90 === 0 ? a / 90 : -1;
+  const c = q >= 0 ? [1, 0, -1, 0][q] : Math.cos((a * Math.PI) / 180);
+  const s = q >= 0 ? [0, 1, 0, -1][q] : Math.sin((a * Math.PI) / 180);
+  const dx = p.x - (rect.left + rect.width / 2), dy = p.y - (rect.top + rect.height / 2);
+  return { x: size.width / 2 + dx * c + dy * s + 0, y: size.height / 2 - dx * s + dy * c + 0 };
+}
+
+/** The turn (degrees clockwise, 0–360) in a computed CSS transform ("none", "matrix(a, b, c, d, e, f)", "matrix3d(…)"). */
+export function cssTurn(transform: string | null | undefined): number {
+  const m = /^matrix(?:3d)?\(([^)]*)\)$/.exec((transform ?? "").trim());
+  if (!m) return 0;
+  const v = m[1].split(",").map(Number);
+  const [a, b] = v;   // m11, m12 in both forms
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return 0;
+  const deg = Math.round((Math.atan2(b, a) * 180) / Math.PI * 1000) / 1000;
+  return ((deg % 360) + 360) % 360;
+}

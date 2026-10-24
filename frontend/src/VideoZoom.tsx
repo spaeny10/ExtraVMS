@@ -19,9 +19,10 @@
  */
 import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
-  IDENTITY, STEP, clampPan, contentBox, distance, isZoomed, midpoint, pinchXform, scaleLabel, toCss, wheelScale, zoomAt,
+  IDENTITY, STEP, clampPan, clientToLocal, contentBox, cssTurn, distance, isZoomed, midpoint, pinchXform, scaleLabel, toCss, wheelScale, zoomAt,
   type PinchStart, type Point, type Rect, type Size, type Xform,
 } from "./zoom";
+import { FS_DEBUG_EVENT } from "./fullscreen";
 import "./videoZoom.css";
 
 type Listener = (xf: Xform, animate: boolean) => void;
@@ -145,6 +146,18 @@ export function ZoomLayer({ children }: { children: ReactNode }) {
   return <div className="vzoom-layer"><div ref={inner} className="vzoom-layer-inner">{children}</div></div>;
 }
 
+/**
+ * A pointer's position in the frame's own coordinates. Full screen on a phone held upright may turn the picture 90°
+ * with CSS (fullscreen.ts, `data-fs-rotated` on an ancestor): then the client position is turned back around the frame
+ * (zoom.ts clientToLocal), so a pinch or a pan moves the picture the way the fingers move on the glass.
+ */
+export function framePoint(el: HTMLElement, e: { clientX: number; clientY: number }): Point {
+  const r = el.getBoundingClientRect();
+  const turned = el.closest<HTMLElement>("[data-fs-rotated]");
+  const deg = turned ? cssTurn(getComputedStyle(turned).transform) : 0;
+  return clientToLocal({ x: e.clientX, y: e.clientY }, r, { width: el.offsetWidth, height: el.offsetHeight }, deg);
+}
+
 const TAP_MS = 300;     // a double-tap's two taps within this long...
 const TAP_PX = 30;      // ...and this close together
 const MOVE_PX = 6;      // a press that moves more than this is a drag, not a tap or click
@@ -228,9 +241,8 @@ export function ZoomFrame({ children, doubleClickReset: dblProp = true, keyboard
         ctl.panBy(-ev.deltaX * (ev.deltaMode === 1 ? 40 : 1), 0);
         return;
       }
-      const r = el.getBoundingClientRect();
       const notch = ev.deltaMode !== 0 || Math.abs(ev.deltaY) >= 50;   // a mouse wheel click, not a trackpad stream
-      ctl.zoomTo(wheelScale(ctl.xf.s, ev.deltaY * (ev.ctrlKey ? 4 : 1), ev.deltaMode), { x: ev.clientX - r.left, y: ev.clientY - r.top }, notch);
+      ctl.zoomTo(wheelScale(ctl.xf.s, ev.deltaY * (ev.ctrlKey ? 4 : 1), ev.deltaMode), framePoint(el, ev), notch);
     };
     el.addEventListener("wheel", wheel, { passive: false });
     // touch: our pinch and pan must not scroll or zoom the page (Safari also needs its gesture events stopped)
@@ -252,10 +264,7 @@ export function ZoomFrame({ children, doubleClickReset: dblProp = true, keyboard
     };
   }, [ctl]);
 
-  const local = (e: { clientX: number; clientY: number }): Point => {
-    const r = frame.current!.getBoundingClientRect();
-    return { x: e.clientX - r.left, y: e.clientY - r.top };
-  };
+  const local = (e: { clientX: number; clientY: number }): Point => framePoint(frame.current!, e);
   const capture = (id: number) => { try { frame.current?.setPointerCapture(id); } catch { /* pointer already gone */ } };
   const startPinch = () => {
     const [a, b] = [...g.current.pointers.values()];
@@ -357,6 +366,23 @@ export function ZoomFrame({ children, doubleClickReset: dblProp = true, keyboard
   };
 
   const stop = (e: React.SyntheticEvent) => e.stopPropagation();
+  // a long-press on the pill: full screen's diagnostics overlay (fullscreen.ts), for a screenshot when it misbehaves
+  // (a phone's own long-press, contextmenu, may come first and cancel the pointer: it counts too, once per press)
+  const press = useRef<{ timer: number | null; fired: boolean }>({ timer: null, fired: false });
+  const unpress = () => { const p = press.current; if (p.timer != null) { window.clearTimeout(p.timer); p.timer = null; } };
+  useEffect(() => unpress, []);
+  const longPress = (el: Element) => {
+    unpress();
+    if (press.current.fired) return;
+    press.current.fired = true;
+    el.dispatchEvent(new CustomEvent(FS_DEBUG_EVENT, { bubbles: true }));
+  };
+  const pillDown = (e: React.PointerEvent) => {
+    e.stopPropagation();
+    unpress();
+    const el = e.currentTarget;
+    press.current = { fired: false, timer: window.setTimeout(() => longPress(el), 600) };
+  };
   // the pill shows only while zoomed, when the wheel alone zooms; from 1× it takes ctrl + wheel or a pinch
   const hint = `wheel or pinch to zoom, drag to move${dblReset ? ", double-click to reset" : ""}`;
   return (
@@ -384,7 +410,8 @@ export function ZoomFrame({ children, doubleClickReset: dblProp = true, keyboard
       onKeyDown={onKeyDown}>
       <div ref={inner} className="vzoom-inner">{children}</div>
       {view.zoomed && !disabled && (
-        <div className="vzoom-pill" title={`Digital zoom: ${hint}`} onPointerDown={stop} onClick={stop} onDoubleClick={stop}>
+        <div className="vzoom-pill" title={`Digital zoom: ${hint}`} onPointerDown={pillDown} onPointerUp={unpress} onPointerCancel={unpress}
+          onPointerLeave={unpress} onContextMenu={(e) => { e.preventDefault(); if (e.currentTarget.contains(e.target as Node)) longPress(e.currentTarget); }} onClick={stop} onDoubleClick={stop}>
           <span aria-live="polite">{view.label}</span>
           <button type="button" onClick={() => ctl.reset()} title="Back to 1×" aria-label="Reset zoom">Reset</button>
         </div>
