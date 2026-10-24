@@ -2,23 +2,16 @@
  * The widget grid: CSS grid placement plus, in edit mode, pointer drag (header) and resize (corner) with
  * snapping and push-down (grid.ts). Phones get a single column and no editing.
  */
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { clampBox, resolve, stackForPhone } from "./grid";
 import type { AnyWidget, DashboardConfig } from "./types";
+import { useIsPhone } from "../ui";
 
 const GAP = 10;
 const DRAG_PX = 6;
 
-export function usePhone(): boolean {
-  const [phone, setPhone] = useState(() => typeof matchMedia !== "undefined" && matchMedia("(max-width: 700px)").matches);
-  useEffect(() => {
-    const mq = matchMedia("(max-width: 700px)");
-    const on = () => setPhone(mq.matches);
-    mq.addEventListener("change", on);
-    return () => mq.removeEventListener("change", on);
-  }, []);
-  return phone;
-}
+/** The same breakpoint as ui.tsx useIsPhone, which also holds the layout still while a player is in full screen. */
+export const usePhone = useIsPhone;
 
 export function DashboardGrid({ config, editing, onChange, render, minSize }: {
   config: DashboardConfig; editing: boolean; onChange: (c: DashboardConfig) => void;

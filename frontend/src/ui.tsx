@@ -1,5 +1,6 @@
 /* Small UI toolkit: SVG icons, toasts, in-app confirm/prompt dialogs, skeletons, connection status. */
 import { probeHealth } from "./api";
+import { subscribeFullscreen } from "./fullscreen";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 // ---------------------------------------------------------------- icons (24px stroke paths, Lucide-style)
@@ -238,14 +239,19 @@ export function SkeletonGrid({ n = 6 }: { n?: number }) {
 // ---------------------------------------------------------------- viewport
 
 const PHONE = "(max-width: 700px)";
-/** True on phone-width screens (matches the CSS breakpoint), live-updating on rotate/resize. */
+/** True on phone-width screens (matches the CSS breakpoint), live-updating on rotate/resize, but not while a player is
+ *  in full screen: a phone turned to landscape for it is wider than the breakpoint, and switching layouts then (the
+ *  hub's event drawer becoming a modal) unmounted the player mid full screen and closed the event viewer. The change
+ *  is taken once full screen ends. */
 export function useIsPhone(): boolean {
   const [phone, setPhone] = useState(() => typeof matchMedia !== "undefined" && matchMedia(PHONE).matches);
   useEffect(() => {
     const mq = matchMedia(PHONE);
-    const on = () => setPhone(mq.matches);
+    let full = false;
+    const on = () => { if (!full) setPhone(mq.matches); };
     mq.addEventListener("change", on);
-    return () => mq.removeEventListener("change", on);
+    const unsub = subscribeFullscreen((info) => { full = !!info; if (!full) setPhone(mq.matches); });
+    return () => { mq.removeEventListener("change", on); unsub(); };
   }, []);
   return phone;
 }
