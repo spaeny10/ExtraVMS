@@ -371,6 +371,8 @@ describe("leaving", () => {
     cleared(p);
     expect(p.doc.exitFullscreen).toHaveBeenCalledOnce();
     expect(p.orientation.unlock).toHaveBeenCalledOnce();
+    expect(p.hist.back).not.toHaveBeenCalled();   // not at once: the back gesture's own pop may still be coming
+    vi.advanceTimersByTime(fs.BACK_SETTLE_MS);
     expect(p.hist.back).toHaveBeenCalledOnce();
     vi.advanceTimersByTime(1);
     expect(p.stack).toEqual([null]);
@@ -415,7 +417,23 @@ describe("leaving", () => {
     cleared(p);
     expect(fs.lastEnd).toBe("real-exit");
     expect(p.orientation.unlock).toHaveBeenCalledOnce();
+    vi.advanceTimersByTime(fs.BACK_SETTLE_MS);
     expect(p.hist.back).toHaveBeenCalledOnce();
+  });
+  it("Android's back gesture: the real full screen ends first, then the gesture pops our entry: one step back, not two", async () => {
+    const p = page({ touch: true });
+    const page_ = vi.fn();
+    p.w.addEventListener("popstate", page_);   // the page's own handler (Find re-reads its URL and closes the viewer)
+    start(p);
+    await flush();
+    p.leave();                                 // fullscreenchange: the session ends ("real-exit")
+    cleared(p);
+    const e = p.back();                        // then the gesture's own pop of our entry
+    expect(e.stopImmediatePropagation).toHaveBeenCalled();
+    expect(page_).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(fs.BACK_SETTLE_MS);
+    expect(p.hist.back).not.toHaveBeenCalled();   // the entry is already gone: no second step back
+    expect(p.stack).toEqual([null]);
   });
   it("a real full screen granted after the viewer already left: left again", async () => {
     const p = page({ request: "never" });

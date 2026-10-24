@@ -175,6 +175,10 @@ const errText = (e: unknown) => (e instanceof Error || (e && typeof e === "objec
 // ---- history: one entry per session, so back leaves full screen; our own history.back() is swallowed
 let swallowPop = false;
 let swallowTimer: ReturnType<typeof setTimeout> | null = null;
+/** How long after a session ends its history entry is left alone, for the back gesture's own pop to arrive. */
+export const BACK_SETTLE_MS = 350;
+let lastEndedId: number | null = null;
+let lastEndedAt = 0;
 let popInstalled = false;
 function installPop() {
   const w = win();
@@ -184,6 +188,7 @@ function installPop() {
   w.addEventListener("popstate", (e: PopStateEvent) => {
     if (swallowPop) {
       swallowPop = false;
+      lastEndedId = null;   // our own back(): the gesture didn't pop the entry, so nothing more to swallow
       if (swallowTimer) clearTimeout(swallowTimer);
       e.stopImmediatePropagation();
       return;
@@ -192,6 +197,13 @@ function installPop() {
     if (s && s.pushed && (hist()?.state as { axiomFs?: number } | null)?.axiomFs !== s.id) {
       e.stopImmediatePropagation();   // same URL as before: nothing for the page to do
       s.end("back");
+      return;
+    }
+    // the back gesture's pop of an entry whose session already ended (the real full screen ended first): the URL is
+    // the one the page shows, so the page (Find re-reading its search) must not react to it
+    if (lastEndedId != null && Date.now() - lastEndedAt < BACK_SETTLE_MS * 4) {
+      lastEndedId = null;
+      e.stopImmediatePropagation();
     }
   }, true);
 }
@@ -392,13 +404,22 @@ class Session {
     unlockOrientation();
     if (fullscreenElement() === this.box) exitDocFullscreen();
     if (this.s.real === "video" && reason !== "real-exit") { try { this.video?.webkitExitFullscreen?.(); } catch { /* closed */ } }
-    // our history entry: still on top unless back already took it (or the page pushed its own on top)
+    // Our history entry: taken back only if it is still on top a moment later. On Android the back gesture both ends
+    // the real full screen (fullscreenchange, "real-exit") and pops our entry, in either order: going back at once here
+    // stepped back twice, past the page the viewer was opened on (the event list). The gesture's own pop, arriving
+    // after this, still ends nothing (the session is gone) and is swallowed by the popstate handler below.
     const h = hist();
-    if (this.pushed && reason !== "back" && (h?.state as { axiomFs?: number } | null)?.axiomFs === this.id) {
-      swallowPop = true;
-      if (swallowTimer) clearTimeout(swallowTimer);
-      swallowTimer = setTimeout(() => { swallowPop = false; }, 1000);
-      try { h!.back(); } catch { swallowPop = false; }
+    if (this.pushed && reason !== "back") {
+      const id = this.id;
+      lastEndedId = id;
+      lastEndedAt = Date.now();
+      setTimeout(() => {
+        if ((h?.state as { axiomFs?: number } | null)?.axiomFs !== id) return;   // already gone (the gesture took it)
+        swallowPop = true;
+        if (swallowTimer) clearTimeout(swallowTimer);
+        swallowTimer = setTimeout(() => { swallowPop = false; }, 1000);
+        try { h!.back(); } catch { swallowPop = false; }
+      }, BACK_SETTLE_MS);
     }
     lastEnd = reason;
     emit(null);
