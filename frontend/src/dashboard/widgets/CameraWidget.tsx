@@ -57,7 +57,7 @@ export function CameraWidget({ widget: w, source, editing, big, onProps }: {
   const playing = (big || budget.playing(w.id)) && !editing;
   // sized to the tile, with the frame's age (useStillFrame); hooks before the early returns below
   const stillW = useStillWidth(box);
-  const still = useStillFrame(!playing && !!api && !!cam?.online, (ts) => (api ? api.frameUrl(camera, ts, stillW) : ""));
+  const still = useStillFrame(!playing && !!api && !!cam?.online && stillW !== null, (ts) => (api ? api.frameUrl(camera, ts, stillW ?? 640) : ""));
 
   if (!site || !camera) return <div className="dash-empty muted small">Choose a camera in ⚙ settings.</div>;
   if (!cam) return <div className="dash-empty muted small">Camera {camera} is not on any site you can see.</div>;

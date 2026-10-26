@@ -5,7 +5,7 @@
  * read the answer falls back to a plain <img> with no age. A still that fails keeps the last one on screen; its age keeps
  * growing, which says more than a blank tile.
  */
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { STALE_STILL_S, stillAgeText, stillWidth } from "./liveFallback";
 import { useStill } from "./useStill";
 
@@ -59,13 +59,20 @@ export function useStillFrame(active: boolean, urlFor: (ts: number) => string): 
   return { src: frame?.src ?? null, frameTs: frame?.frameTs ?? null, failed: still.failed };
 }
 
-/** The width to ask stills for, from the tile's width on screen (stillWidth: 320 or 640). */
-export function useStillWidth(box: React.RefObject<HTMLElement | null>): 320 | 640 {
-  const [w, setW] = useState<320 | 640>(640);
-  useEffect(() => {
+/**
+ * The width to ask stills for, from the tile's width on screen (stillWidth: 320 or 640); null until measured, so the
+ * first still isn't fetched at the wrong size. Measured once on mount (a ResizeObserver never reports in a hidden tab),
+ * then on every resize; a box not rendered at mount gets 640.
+ */
+export function useStillWidth(box: React.RefObject<HTMLElement | null>): 320 | 640 | null {
+  const [w, setW] = useState<320 | 640 | null>(null);
+  useLayoutEffect(() => {
     const el = box.current;
-    if (!el || typeof ResizeObserver === "undefined") return;
-    const ro = new ResizeObserver(([e]) => setW(stillWidth(e.contentRect.width, window.devicePixelRatio || 1)));
+    if (!el) { setW(640); return; }
+    const measure = (px: number) => setW(stillWidth(px, window.devicePixelRatio || 1));
+    measure(el.getBoundingClientRect().width);
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(([e]) => measure(e.contentRect.width));
     ro.observe(el);
     return () => ro.disconnect();
   }, [box]);
@@ -88,7 +95,8 @@ const clock = (() => {
 })();
 const useNowS = () => useSyncExternalStore(clock.subscribe, clock.get);
 
-/** "still · 8 s" for the tile's bar; "paused" when the frame's time isn't known. */
+/** "8 s" for the tile's bar (short: a small tile's bar has little room beside the name; the Play button on the picture
+ *  already says it is paused); "paused" when the frame's time isn't known. */
 export function StillAge({ frameTs }: { frameTs: number | null }) {
   if (frameTs == null) return <span className="muted small tile-state" title="Paused: a still frame (the page plays a limited number of cameras at once)">paused</span>;
   return <Age frameTs={frameTs} />;
@@ -96,7 +104,7 @@ export function StillAge({ frameTs }: { frameTs: number | null }) {
 function Age({ frameTs }: { frameTs: number }) {
   const now = useNowS();
   return <span className="muted small tile-state" title="Paused: a still frame, this old (the page plays a limited number of cameras at once)">
-    still · {stillAgeText(now - frameTs)}</span>;
+    {stillAgeText(now - frameTs)}</span>;
 }
 
 /** On the picture, once the still is older than STALE_STILL_S: the frame shown is no longer a fair picture of now. */

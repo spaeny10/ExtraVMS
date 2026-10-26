@@ -886,7 +886,7 @@ function SiteTile({ t, source, multi, q, dispatch, activeOf, talkOf, deter, extr
   // every 10 s while paused, every 60 s after a still failed to load (the server's own, through the tunnel), at the
   // tile's own width, with the frame's age
   const stillW = useStillWidth(box);
-  const still = useStillFrame(!playing && t.state === "live", (ts) => site.frameUrl(t.id, ts, stillW));
+  const still = useStillFrame(!playing && t.state === "live" && stillW !== null, (ts) => site.frameUrl(t.id, ts, stillW ?? 640));
   // the hub's latest picture: the live tile's poster until the server's still arrives, and the picture of a tile whose
   // server is offline or not answering
   const hubStill = stillUrl(t.server.id, t.id, t.stillTs);
@@ -974,8 +974,10 @@ function PhoneLive({ tiles, activity, picker, ...common }: TileCommon & { tiles:
     const el = strip.current?.querySelector<HTMLElement>(`[data-strip-key="${CSS.escape(t.key)}"]`);
     const box = strip.current;
     if (!el || !box) return;
-    if (el.offsetLeft < box.scrollLeft || el.offsetLeft + el.offsetWidth > box.scrollLeft + box.clientWidth) {
-      box.scrollTo({ left: el.offsetLeft - (box.clientWidth - el.offsetWidth) / 2, behavior: "smooth" });
+    // measured against the strip itself (offsetLeft counts from a positioned ancestor, not the strip)
+    const e = el.getBoundingClientRect(), b = box.getBoundingClientRect();
+    if (e.left < b.left || e.right > b.right) {
+      box.scrollTo({ left: box.scrollLeft + (e.left - b.left) - (b.width - e.width) / 2, behavior: "smooth" });
     }
   }, [t.key]);
   return (
@@ -1011,11 +1013,19 @@ function PhoneLive({ tiles, activity, picker, ...common }: TileCommon & { tiles:
 
 /** The strip's thumbnails in (or within one thumbnail of) its visible part, by tile key; re-observed when the strip's
  *  cameras change. */
+const STRIP_MARGIN_PX = 140;   // about one thumbnail either side of the strip's visible part
 function useStripInView(strip: React.RefObject<HTMLDivElement | null>, keySig: string): Set<string> {
   const [keys, setKeys] = useState<Set<string>>(() => new Set());
   useEffect(() => {
     const root = strip.current;
-    if (!root || typeof IntersectionObserver === "undefined") return;
+    if (!root) return;
+    // the first answer from the geometry: an IntersectionObserver reports nothing in a hidden or background page
+    const b = root.getBoundingClientRect();
+    setKeys(new Set([...root.querySelectorAll<HTMLElement>("[data-strip-key]")].filter((el) => {
+      const r = el.getBoundingClientRect();
+      return r.right > b.left - STRIP_MARGIN_PX && r.left < b.right + STRIP_MARGIN_PX;
+    }).map((el) => el.dataset.stripKey!)));
+    if (typeof IntersectionObserver === "undefined") return;
     const io = new IntersectionObserver((entries) => setKeys((prev) => {
       const next = new Set(prev);
       for (const e of entries) {
@@ -1025,7 +1035,7 @@ function useStripInView(strip: React.RefObject<HTMLDivElement | null>, keySig: s
         else next.delete(k);
       }
       return next;
-    }), { root, rootMargin: "0px 140px" });
+    }), { root, rootMargin: `0px ${STRIP_MARGIN_PX}px` });
     root.querySelectorAll("[data-strip-key]").forEach((el) => io.observe(el));
     return () => io.disconnect();
   }, [strip, keySig]);

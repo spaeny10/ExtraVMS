@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Icon, menuKeys, useDismiss } from "../ui";
+import { menuKeys, useDismiss } from "../ui";
 import { WIDGET_LIST } from "./palette";
 import type { DashboardWidgetType } from "./types";
 
@@ -56,10 +56,9 @@ function MoreMenu(p: ToolbarProps) {
   const readOnly = p.currentShared && !p.canEdit;
   return (
     <span ref={box} className="dash-more">
-      <button ref={btn} type="button" className="ghost small icon-act" aria-haspopup="menu" aria-expanded={open} aria-label="More dashboard actions"
-        title="More: save as, rename, delete, publish, open first" onClick={() => setOpen((o) => !o)}>
-        <Icon name="more" size={16} />
-      </button>
+      {/* the text ⋯, as the hub's other row menus (InstancesTable, servers.tsx): the icon's dots were too faint here */}
+      <button ref={btn} type="button" className="ghost small" aria-haspopup="menu" aria-expanded={open} aria-label="More dashboard actions"
+        title="More: save as, rename, delete, publish, open first" onClick={() => setOpen((o) => !o)}>⋯</button>
       {open && (
         <div ref={menu} className="dash-more-menu" role="menu" aria-label="Dashboard" onKeyDown={menuKeys}>
           {readOnly && <div className="muted small dash-more-note">Shared · read-only. Save as… makes your own copy.</div>}
