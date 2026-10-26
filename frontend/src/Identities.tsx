@@ -110,7 +110,7 @@ export function IdentitiesView({ cameras, initialCamera = "", initialHours = 0 }
                   <form className="row small identity-name" onSubmit={(e) => { e.preventDefault(); saveName(c); }}>
                     <input autoFocus list="known-names" placeholder={kind === "person" ? "e.g. Shawn (pick an existing name to add this look to them)" : "e.g. UPS truck"} value={naming.name} onChange={(e) => setNaming({ ...naming, name: e.target.value })} />
                     <datalist id="known-names">{r?.named.map((n) => <option key={n.id} value={n.name} />)}</datalist>
-                    <input placeholder="notes, e.g. owner / weekly delivery (used in Qwen's prompts)" value={naming.notes} onChange={(e) => setNaming({ ...naming, notes: e.target.value })} />
+                    <input placeholder="notes, e.g. owner / weekly delivery (used in Otso's prompts)" value={naming.notes} onChange={(e) => setNaming({ ...naming, notes: e.target.value })} />
                     <button type="submit" className="small">Save</button>
                   </form>
                 )}

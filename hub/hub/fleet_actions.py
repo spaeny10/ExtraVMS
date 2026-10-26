@@ -1,5 +1,5 @@
 """Fleet actions: an operator types "Migrate Ironsight to Hailo T1", "Move the front door camera from Ironsight to
-Qwenbot", "Add 192.168.105.19 to Hailo T1 as Front Door", "Lock Side Yard footage 3-4 pm today" or "Quiet alerts
+Dock Server", "Add 192.168.105.19 to Hailo T1 as Front Door", "Lock Side Yard footage 3-4 pm today" or "Quiet alerts
 tonight" into the instruction box on Customer › Actions (the only place instructions are planned and run; Find's Ask
 box answers questions only), and the hub carries it out across sites (which cannot talk to each other).
 
@@ -95,7 +95,7 @@ VERBS: dict[str, dict] = {
     "move_cameras": {
         "title": "Move cameras to another server", "role": "admin", "confirm_name": False,
         "prompt": "move the named cameras from server source_site to server target_site.",
-        "examples": ["Move the front door camera from Ironsight to Qwenbot", "Move gate and dock cameras to Qwenbot",
+        "examples": ["Move the front door camera from Ironsight to Dock Server", "Move gate and dock cameras to Dock Server",
                      "Transfer Back Lot from Ironsight to Hailo T1 with history"],
         "moves": _MOVE_MOVES, "stays": _MOVE_STAYS,
         "options": [{**_COPY_HISTORY, "default": False}, _SKIP_STREAM],
@@ -104,7 +104,7 @@ VERBS: dict[str, dict] = {
     "migrate_site": {
         "title": "Migrate a whole server", "role": "admin", "confirm_name": True,
         "prompt": "move every camera of server source_site to server target_site, then retire source_site.",
-        "examples": ["Migrate Ironsight to Hailo T1", "Migrate the server Qwenbot onto Hailo T1", "Migrate Ironsight to Hailo T1 without history"],
+        "examples": ["Migrate Ironsight to Hailo T1", "Migrate the server Dock Server onto Hailo T1", "Migrate Ironsight to Hailo T1 without history"],
         "moves": ["Every enabled camera, as for Move cameras", *_MOVE_MOVES[1:]],
         "stays": [*_MOVE_STAYS, "Disabled cameras are not moved",
                   "The source is then retired: hidden from Fleet, Home, Find, Ask and alerts; its tunnel stays connected and its page still opens"],
@@ -123,7 +123,7 @@ VERBS: dict[str, dict] = {
     "set_retention": {
         "title": "Set continuous recording retention", "role": "admin", "confirm_name": False,
         "prompt": "keep `days` days of continuous recording at server source_site.",
-        "examples": ["Set Qwenbot to 7 days of recording", "Keep 10 days at Hailo T1", "Set the retention on Ironsight to 21 days"],
+        "examples": ["Set Dock Server to 7 days of recording", "Keep 10 days at Hailo T1", "Set the retention on Ironsight to 21 days"],
         "moves": ["The server's continuous_days (1-365)"],
         "stays": ["Event clips, locked footage and per-camera overrides follow their own rules", "The free-space floor still wins"],
         "options": [], "undo": "Sets the previous number of days again",
@@ -138,7 +138,7 @@ VERBS: dict[str, dict] = {
     "add_camera": {
         "title": "Add a camera to a server", "role": "admin", "confirm_name": False,
         "prompt": "add a new camera at address `host` to server target_site, named new_name.",
-        "examples": ["Add 192.168.105.19 to Hailo T1 as Front Door", "Add camera 10.2.0.9 to Qwenbot called Loading Dock"],
+        "examples": ["Add 192.168.105.19 to Hailo T1 as Front Door", "Add camera 10.2.0.9 to Dock Server called Loading Dock"],
         "moves": ["A new camera on the server (RTSP main/sub paths, ONVIF port); the server starts recording it"],
         "stays": ["The password you type goes to the server in the Confirm call only: the hub never stores, logs or audits it",
                   "Other cameras and settings"],
@@ -151,11 +151,11 @@ VERBS: dict[str, dict] = {
                    {"key": "rtsp_port", "label": "RTSP port", "type": "number", "placeholder": "554", "optional": True}],
     },
     "set_synopsis_labels": {
-        "title": "Choose what Qwen describes on a camera", "role": "admin", "confirm_name": False,
-        "prompt": "change which object kinds Qwen describes on cameras[0] at source_site: labels (person / vehicle) with "
+        "title": "Choose what Otso describes on a camera", "role": "admin", "confirm_name": False,
+        "prompt": "change which object kinds Otso describes on cameras[0] at source_site: labels (person / vehicle) with "
                   "label_mode remove (stop describing), add (also describe) or only.",
         "examples": ["Stop describing vehicles on cam2", "Describe only people on Gate at Hailo T1", "Start describing vehicles on Back Lot"],
-        "moves": ["The camera's synopsis labels (YOLO still verifies every label; only Qwen's descriptions change)"],
+        "moves": ["The camera's synopsis labels (YOLO still verifies every label; only Otso's descriptions change)"],
         "stays": ["Past synopses", "Other cameras"],
         "options": [], "undo": "Restores the previous labels (or the site default)",
     },
@@ -1166,8 +1166,8 @@ async def preview(p: dict, u: dict) -> dict:
             say = lambda xs: " and ".join("people" if x == "person" else "vehicles" for x in xs) or "nothing"   # noqa: E731
             p["previous_labels"] = c.get("synopsis_labels")
             if after == cur and new is not None and c.get("synopsis_labels") is not None:
-                blockers.append(f"Qwen already describes {say(cur)} on \"{c['name']}\".")
-            moves.append(f"Qwen describes {say(after)} on \"{c['name']}\" (now {say(cur)}){' (the site default)' if new is None else ''}")
+                blockers.append(f"Otso already describes {say(cur)} on \"{c['name']}\".")
+            moves.append(f"Otso describes {say(after)} on \"{c['name']}\" (now {say(cur)}){' (the site default)' if new is None else ''}")
             if not after:
                 warnings.append("Nothing would be described on this camera: events are still verified by YOLO but get no synopsis.")
         stays.append("YOLO still verifies every person and vehicle; past synopses are kept")
@@ -1750,7 +1750,7 @@ async def _run(p: dict, u: dict, lines: list[str], detail: dict, extras: dict) -
         new = new_labels(p, _effective_labels(cur, info))
         await _put_camera(p, u, cur, synopsis_labels=new)
         say = " and ".join("people" if x == "person" else "vehicles" for x in (new if new is not None else info.get("synopsis_labels_default") or ["person"])) or "nothing"
-        lines.append(f"Qwen now describes {say} on \"{cur['name']}\" at {p['site']['name']}")
+        lines.append(f"Otso now describes {say} on \"{cur['name']}\" at {p['site']['name']}")
         prev = cur.get("synopsis_labels")
         detail.update(camera=cur["id"], labels=new, previous_labels=prev)
         detail["reverse"] = [{"action": "set_synopsis_labels", "source_site": p["site"]["id"], "cameras": [cur["id"]], "label_mode": "exact",

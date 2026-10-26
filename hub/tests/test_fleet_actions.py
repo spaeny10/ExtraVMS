@@ -638,7 +638,7 @@ def test_lock_footage_and_labels(fleet):
     assert time.gmtime(lock["start_ts"]).tm_hour == 15
     assert fleet.owner.post(f"/api/orgs/{fleet.org['id']}/actions/undo/{r.json()['audit_id']}").json()["ok"] and not e["locks"]
     p = plan(fleet, "Stop describing vehicles on Lobby at Echo")
-    assert p["action"] == "set_synopsis_labels" and p["card"]["can_execute"] and "Qwen describes people on \"Lobby\" (now people and vehicles)" in p["card"]["moves"][0]
+    assert p["action"] == "set_synopsis_labels" and p["card"]["can_execute"] and "Otso describes people on \"Lobby\" (now people and vehicles)" in p["card"]["moves"][0]
     r = execute(fleet, p["id"])
     assert r.json()["ok"] and e["cameras"]["d1"]["synopsis_labels"] == ["person"] and e["puts"][-1]["had_password"] is False
     assert fleet.owner.post(f"/api/orgs/{fleet.org['id']}/actions/undo/{r.json()['audit_id']}").json()["ok"]

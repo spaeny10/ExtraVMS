@@ -450,7 +450,7 @@ export function FindView({ cameras = NO_CAMERAS, live = null, source: given, ask
         {submitted && <button type="button" className="ghost" onClick={clearSearch} title="Back to the latest events">✕</button>}
         <button type="submit" disabled={busy || !q.trim()}>{busy && submitted ? "Searching…" : "Search"}</button>
         {features.assistant
-          ? <button type="button" className="ask-btn" disabled={!!pending || !q.trim()} onClick={() => askNvr()} title="Have Qwen look it up and answer in words (Shift+Enter, or end with ?)">✦ Ask</button>
+          ? <button type="button" className="ask-btn" disabled={!!pending || !q.trim()} onClick={() => askNvr()} title="Have Otso look it up and answer in words (Shift+Enter, or end with ?)">✦ Ask</button>
           : external && <button type="button" className="ask-btn" disabled={external.busy || !q.trim()} onClick={() => askNvr()} title={external.title}>✦ {external.label}</button>}
       </form>
       {queryHint?.(q)}
@@ -487,7 +487,7 @@ export function FindView({ cameras = NO_CAMERAS, live = null, source: given, ask
               {day && <button className="linkish small" onClick={() => setF({ day: "" })}>✕</button>}
             </label>
             <select value={filters.priority} onChange={(e) => setF({ priority: e.target.value as FindFilters["priority"] })}
-              title="Minimum priority: the higher of Qwen's threat level and how unusual the event is for its camera">
+              title="Minimum priority: the higher of Otso's threat level and how unusual the event is for its camera">
               {PRIORITIES.map(([v, l]) => <option key={l} value={v}>{l}</option>)}
             </select>
             {places.length > 0 && (
@@ -569,7 +569,7 @@ export function FindView({ cameras = NO_CAMERAS, live = null, source: given, ask
       {!features.assistant && external?.panel}
 
       {browsing && !hasConversation && (features.assistant || external) && (
-        <div className={`ask-suggestions find-more ${moreOpen ? "open" : ""}`} title="Search finds events by meaning and footage by looks; Ask has Qwen look things up and answer with links to the evidence">
+        <div className={`ask-suggestions find-more ${moreOpen ? "open" : ""}`} title="Search finds events by meaning and footage by looks; Ask has Otso look things up and answer with links to the evidence">
           {suggestions.map((s) => <button key={s} className="ghost small" disabled={!features.assistant && asking} onClick={() => { if (!features.assistant) setQ(s); askNvr(s); }}>✦ {s}</button>)}
         </div>
       )}
@@ -607,7 +607,7 @@ export function FindView({ cameras = NO_CAMERAS, live = null, source: given, ask
           </section>
           {features.footage && parsed?.footage_text !== null && (
             <section>
-              <h3>Footage <span className="muted small">frames that look like "{parsed?.footage_text ?? submitted}"{parsed?.time_label ? ` · ${parsed.time_label}` : ""} · Qwen checks the best 8 · the outline is the part that matched</span></h3>
+              <h3>Footage <span className="muted small">frames that look like "{parsed?.footage_text ?? submitted}"{parsed?.time_label ? ` · ${parsed.time_label}` : ""} · Otso checks the best 8 · the outline is the part that matched</span></h3>
               <FootageResults q={parsed?.footage_text ?? submitted} nonce={nonce} cameras={cams} camera={camera} sinceHours={day ? 0 : hours}
                 window={parsed?.time_label ? { since: parsed.since, until: parsed.until } : day ? { since: filterWindow(filters)[0] ?? null, until: filterWindow(filters)[1] ?? null } : null} />
             </section>

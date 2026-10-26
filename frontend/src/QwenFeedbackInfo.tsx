@@ -33,22 +33,22 @@ export function QwenFeedbackInfo() {
 
   return (
     <div className="info-anchor" ref={root}>
-      <button className="info-btn" onClick={() => setOpen(!open)} aria-expanded={open} title="How feedback improves Qwen">
-        ⓘ How feedback improves Qwen
+      <button className="info-btn" onClick={() => setOpen(!open)} aria-expanded={open} title="How feedback improves Otso">
+        ⓘ How feedback improves Otso
       </button>
       {open && (
-        <div className="popout" role="dialog" aria-label="How feedback improves Qwen">
+        <div className="popout" role="dialog" aria-label="How feedback improves Otso">
           <div className="popout-head">
-            <strong>How your feedback improves Qwen</strong>
+            <strong>How your feedback improves Otso</strong>
             <button className="ghost small" onClick={() => setOpen(false)} aria-label="Close">✕</button>
           </div>
           <p className="muted small">
-            Qwen's weights are not retrained here. Your feedback steers it through the prompt, right away, and builds a
+            Otso's weights are not retrained here. Your feedback steers it through the prompt, right away, and builds a
             dataset you can use for real training later.
           </p>
 
           <section>
-            <h4>1 · Used by Qwen right away</h4>
+            <h4>1 · Used by Otso right away</h4>
             <div className="info-row">
               <span className="info-icon">📝</span>
               <div>
@@ -66,7 +66,7 @@ export function QwenFeedbackInfo() {
               <span className="info-icon">✏️</span>
               <div>
                 <strong>Corrected synopses</strong> (event → Edit): the 3 most recent corrections on a camera are shown to
-                Qwen as examples ("the model wrote X, the operator corrected it to Y"), so it copies your style, detail
+                Otso as examples ("the model wrote X, the operator corrected it to Y"), so it copies your style, detail
                 and threat judgment.
                 <div className="info-status">{stats ? `${stats.corrected} correction${stats.corrected === 1 ? "" : "s"} so far` : "…"}</div>
               </div>
@@ -80,7 +80,7 @@ export function QwenFeedbackInfo() {
               <span className="info-icon">📦</span>
               <div>
                 👍/👎 with reasons, detection verdicts (correct / false alarm / wrong class), notes and corrections are saved
-                as a labeled dataset. <strong>Qwen doesn't read these yet.</strong> They can later be used to fine-tune Qwen
+                as a labeled dataset. <strong>Otso doesn't read these yet.</strong> They can later be used to fine-tune Otso
                 (a LoRA adapter) or YOLO offline. That's a separate, manual step, not automatic.
                 <div className="info-status">
                   {stats ? `👍 ${stats.up} · 👎 ${stats.down}` : "…"}
@@ -93,14 +93,14 @@ export function QwenFeedbackInfo() {
           <section>
             <h4>3 · What helps most</h4>
             <ul className="plain small">
-              <li><strong>Fix</strong> a wrong synopsis with Edit instead of only 👎. Corrections are what Qwen learns from today.</li>
-              <li>Put anything Qwen gets wrong repeatedly into <strong>scene notes</strong>.</li>
+              <li><strong>Fix</strong> a wrong synopsis with Edit instead of only 👎. Corrections are what Otso learns from today.</li>
+              <li>Put anything Otso gets wrong repeatedly into <strong>scene notes</strong>.</li>
               <li>Mark <strong>false alarms</strong>. They build the dataset for tuning detection.</li>
             </ul>
             <p className="muted small">Also: events you gave feedback on are kept past the continuous-recording window by retention.</p>
             <p className="muted small">
-              <strong>Cross-camera journeys:</strong> a re-ID model matches a person's appearance on neighboring cameras, then Qwen
-              confirms the match. <em>Not the same person</em> on an event's journey splits it, and Qwen is never asked about that pair again.
+              <strong>Cross-camera journeys:</strong> a re-ID model matches a person's appearance on neighboring cameras, then Otso
+              confirms the match. <em>Not the same person</em> on an event's journey splits it, and Otso is never asked about that pair again.
             </p>
           </section>
         </div>

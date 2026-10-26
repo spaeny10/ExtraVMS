@@ -332,7 +332,7 @@ def check_bitrate(ctx: dict) -> list[Finding]:
             out.append(Finding(
                 key=f"bitrate:{c['id']}", area="cameras", impact="medium" if mbps >= target * 1.8 else "low", camera_id=c["id"], camera=c["name"],
                 title=f"{c['name']} records at {mbps:.1f} Mbps; about {target:.1f} would do",
-                why=f"{desc}. That picture stays clean for YOLO and Qwen at about {target:.1f} Mbps; the camera sends {mbps:.1f}" + (f", about {gbd:.0f} GB a day" if gbd else "") + ".",
+                why=f"{desc}. That picture stays clean for YOLO and Otso at about {target:.1f} Mbps; the camera sends {mbps:.1f}" + (f", about {gbd:.0f} GB a day" if gbd else "") + ".",
                 effect=f"Roughly {(1 - target / mbps) * 100:.0f}% less disk per day and the same saving in remote playback bandwidth, with no change to detection: the camera's analytics work on the sensor image, and YOLO verifies from a picture this rate keeps sharp.",
                 steps=[f"Open the camera's web page ({c['host']}) → Video → main stream.", f"Set the bitrate mode to VBR with a target of {lo}–{hi} Mbps (keep the resolution, frame rate and codec).",
                        "Save; MediaMTX picks up the new stream within a few seconds. Check the live picture for blockiness on a busy moment."],
@@ -341,7 +341,7 @@ def check_bitrate(ctx: dict) -> list[Finding]:
             out.append(Finding(
                 key=f"bitrate-low:{c['id']}", area="cameras", impact="medium", camera_id=c["id"], camera=c["name"],
                 title=f"{c['name']} is starved at {mbps:.1f} Mbps",
-                why=f"{desc}. A busy scene this size wants about {target:.1f} Mbps; at {mbps:.1f} fast movement smears, which costs YOLO confirmations and Qwen detail.",
+                why=f"{desc}. A busy scene this size wants about {target:.1f} Mbps; at {mbps:.1f} fast movement smears, which costs YOLO confirmations and Otso detail.",
                 effect="Sharper clips and fewer missed verifications on busy moments.",
                 steps=[f"Camera web page ({c['host']}) → Video → main stream: raise the VBR target toward {target:.1f} Mbps."],
                 fingerprint=f"{mbps:.0f}:{target:.0f}"))
@@ -362,7 +362,7 @@ def check_framerate(ctx: dict) -> list[Finding]:
         out.append(Finding(
             key=f"fps:{c['id']}", area="cameras", impact="medium" if fps >= 20 else "low", camera_id=c["id"], camera=c["name"],
             title=f"{c['name']} records at {fps:.0f} fps; {FPS_MAX:.0f} is enough",
-            why=f"The main stream runs at {fps:.0f} frames a second" + (f" and {mbps:.1f} Mbps" if mbps else "") + f". The camera's own analytics, YOLO verification and Qwen all work from a few frames per event; {FPS_MAX:.0f} fps keeps every walking step and every passing vehicle.",
+            why=f"The main stream runs at {fps:.0f} frames a second" + (f" and {mbps:.1f} Mbps" if mbps else "") + f". The camera's own analytics, YOLO verification and Otso all work from a few frames per event; {FPS_MAX:.0f} fps keeps every walking step and every passing vehicle.",
             effect=f"About {saving * 100:.0f}% less bitrate at the same quality setting, or a sharper picture at the same bitrate, plus lighter live decoding in browsers.",
             steps=[f"Open the camera's web page ({c['host']}) → Video → main stream.", f"Set the frame rate to {FPS_MAX:.0f} fps and set the I-frame (GOP) interval to about 2 s ({FPS_MAX * 2:.0f} frames).",
                    "Save; the stream reconnects on its own. The bitrate card, if any, is recalculated for the new frame rate."],
@@ -453,16 +453,16 @@ def check_vlm(ctx: dict) -> list[Finding]:
     if v.get("state") == "unresponsive":
         since = v.get("down_since")
         mins = (ctx["now"] - since) / 60 if since else 0
-        out.append(Finding(key="ai:down", area="ai", impact="high", title="Qwen has stopped answering",
+        out.append(Finding(key="ai:down", area="ai", impact="high", title="Otso has stopped answering",
                            why=f"Synopses have been timing out for {mins:.0f} min; the NVR is restarting Ollama every 5 minutes without success.",
                            effect="Synopses, Ask, briefings and journeys come back.",
-                           steps=["Run nvidia-smi: if it says a GPU is lost, reboot the machine.", "Otherwise check that nothing else is using Qwen's GPU memory."],
+                           steps=["Run nvidia-smi: if it says a GPU is lost, reboot the machine.", "Otherwise check that nothing else is using Otso's GPU memory."],
                            fingerprint=f"{int(mins // 15)}"))
     if v.get("size_gb") and v.get("vram_gb") is not None and v["vram_gb"] < v["size_gb"] * 0.98:
-        out.append(Finding(key="ai:vram", area="ai", impact="high", title="Qwen is partly running on the CPU",
+        out.append(Finding(key="ai:vram", area="ai", impact="high", title="Otso is partly running on the CPU",
                            why=f"Ollama holds {v['vram_gb']} of {v['size_gb']} GB of the model in VRAM; the rest runs on the CPU, which makes every synopsis several times slower.",
                            effect="Synopses in seconds instead of minutes; the queue keeps up.",
-                           steps=["Free VRAM on Qwen's GPU: close GPU-heavy desktop apps, or move the monitor to the other card.", "Lower vlm_num_ctx in the site .env if it stays short."],
+                           steps=["Free VRAM on Otso's GPU: close GPU-heavy desktop apps, or move the monitor to the other card.", "Lower vlm_num_ctx in the site .env if it stays short."],
                            fingerprint=f"{v['vram_gb']}"))
     lat = v.get("latency_s") or []
     if len(lat) >= 5:
@@ -471,24 +471,24 @@ def check_vlm(ctx: dict) -> list[Finding]:
             out.append(Finding(key="ai:slow", area="ai", impact="high", title=f"Synopses take {med:.0f} s each",
                                why=f"The median of the last {len(lat)} synopses is {med:.0f} s; a resident 7-9B model does them in 10–30 s.",
                                effect="The event feed catches up and Ask answers promptly.",
-                               steps=["Check the VRAM finding above; if the model is resident, look at what else uses Qwen (below)."],
+                               steps=["Check the VRAM finding above; if the model is resident, look at what else uses Otso (below)."],
                                fingerprint=f"{int(med // 30)}"))
     calls = v.get("calls") or {}
     total = sum(calls.values())
     if total >= 50:
         top = Counter(calls).most_common(1)[0]
         if top[0] != "synopsis" and top[1] / total > 0.4:
-            out.append(Finding(key=f"ai:mix:{top[0]}", area="ai", impact="medium", title=f"{top[1] / total:.0%} of Qwen's work is '{top[0]}'",
-                               why=f"Of {total} Qwen calls since start-up, {top[1]} were {top[0]} and only {calls.get('synopsis', 0)} synopses.",
-                               effect="More of Qwen's time goes to describing events.",
+            out.append(Finding(key=f"ai:mix:{top[0]}", area="ai", impact="medium", title=f"{top[1] / total:.0%} of Otso's work is '{top[0]}'",
+                               why=f"Of {total} Otso calls since start-up, {top[1]} were {top[0]} and only {calls.get('synopsis', 0)} synopses.",
+                               effect="More of Otso's time goes to describing events.",
                                steps=["Journey checks: raise REID_AUTO_SIM so more links are confirmed by re-ID alone." if top[0] in ("same_person", "journey") else "Review what triggers this task."],
                                fingerprint=top[0]))
     q = v.get("queue") or 0
     if q > 40:
-        out.append(Finding(key="ai:queue", area="ai", impact="medium", title=f"{q} events are waiting for Qwen",
+        out.append(Finding(key="ai:queue", area="ai", impact="medium", title=f"{q} events are waiting for Otso",
                            why="The synopsis queue is deep; new events wait behind old ones.",
                            effect="Fresh events get described within a minute.",
-                           steps=["Usually a burst from a PTZ camera turned toward a road, or Qwen running slow (see above)."], fingerprint=f"{q // 40}"))
+                           steps=["Usually a burst from a PTZ camera turned toward a road, or Otso running slow (see above)."], fingerprint=f"{q // 40}"))
     return out
 
 
@@ -559,8 +559,8 @@ def check_events(ctx: dict) -> list[Finding]:
         if f["vehicles"] >= 40 and not any(z.get("type") == "include" for z in (next((c for c in ctx["cameras"] if c["id"] == cid), {}).get("zones") or [])):
             out.append(Finding(key=f"zones:{cid}", area="rules", impact="medium", camera_id=cid, camera=name,
                                title=f"{name} has no include zone and saw {f['vehicles']} vehicles in 24 h",
-                               why="Without an include zone every passing vehicle on a public road behind the property becomes an event and a Qwen call.",
-                               effect="Only vehicles on the property are recorded as events; Qwen's load drops.",
+                               why="Without an include zone every passing vehicle on a public road behind the property becomes an event and a Otso call.",
+                               effect="Only vehicles on the property are recorded as events; Otso's load drops.",
                                steps=["Settings → Cameras → Edit → Zones: draw an include zone around the property, leaving the road out."],
                                fingerprint=f"{f['vehicles'] // 40}"))
     return out
@@ -687,7 +687,7 @@ def plain_summary(findings: list[Finding], n_cameras: int) -> str:
         parts.append(f"{len(high)} thing{'s' if len(high) > 1 else ''} need attention: " + "; ".join(f.title.rstrip(".") for f in high) + ".")
     rest = [f for f in findings if f.impact != "high"]
     if rest:
-        parts.append(f"{len(rest)} smaller improvement{'s' if len(rest) > 1 else ''} would save disk, bandwidth or Qwen time.")
+        parts.append(f"{len(rest)} smaller improvement{'s' if len(rest) > 1 else ''} would save disk, bandwidth or Otso time.")
     return " ".join(parts)
 
 

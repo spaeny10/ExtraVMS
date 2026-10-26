@@ -13,6 +13,7 @@ import { socReportsApi } from "../socApi";
 import type { ShiftReport as Report } from "../types";
 import { Breakdowns, copyText, reportError, useReport } from "./common";
 import { DigestText } from "../../DigestView";
+import { aiModelLabel } from "../../aiName";
 
 const span = (r: Pick<Report, "period_start" | "period_end">) => {
   const a = new Date(r.period_start * 1000), b = new Date(r.period_end * 1000);
@@ -87,7 +88,7 @@ export function ShiftReport({ me }: { me: Me }) {
               <div className="row soc-section-head">
                 <h3>{span(full)}</h3>
                 <button className="ghost small" disabled={!full.text} onClick={() => copyText(full.text ?? "")}>Copy</button>
-                {full.model && <span className="muted small" title="Written by">{full.model}</span>}
+                {full.model && <span className="muted small" title="Written by">{aiModelLabel(full.model)}</span>}
               </div>
               {tiles.length > 0 && <div className="soc-tiles small">{tiles.map((t) => <div key={t.key} className="soc-tile"><span className="soc-tile-value">{t.value}</span><span className="soc-tile-name">{t.label}</span></div>)}</div>}
               {lines.length > 0 && <Breakdowns lines={lines} />}

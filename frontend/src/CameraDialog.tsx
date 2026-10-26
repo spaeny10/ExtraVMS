@@ -137,7 +137,7 @@ export function CameraDialog({ draft, cameras, sitePolicy, reload, onClose, onEd
             <Field label="ID" hint={isNew ? undefined : "Set when the camera is added; it can't be changed."}>
               <input value={edit.id} disabled={!isNew} onChange={(e) => setEdit({ ...edit, id: e.target.value })} />
             </Field>
-            <Field label="Scene notes for Qwen" hint="Added to every synopsis and chat prompt for this camera.">
+            <Field label="Scene notes for Otso" hint="Added to every synopsis and chat prompt for this camera.">
               <textarea rows={5} value={edit.scene_notes ?? ""} onChange={(e) => setEdit({ ...edit, scene_notes: e.target.value })}
                 placeholder={"What's normal in this view, e.g.\nThe white trailers in the foreground are our solar light towers.\nThe road and Ford dealership in the background are public; traffic there is routine.\nStaff wear hi-vis vests."} />
             </Field>
@@ -280,7 +280,7 @@ export function CameraDialog({ draft, cameras, sitePolicy, reload, onClose, onEd
               );
             })()}
             <div className="field" role="group" aria-labelledby={`${uid}-qwen`} aria-describedby={`${uid}-qwen-hint`}>
-              <span id={`${uid}-qwen`}>Qwen describes</span>
+              <span id={`${uid}-qwen`}>Otso describes</span>
               <div className="row">
                 {(["person", "vehicle"] as const).map((l) => {
                   const cur = edit.synopsis_labels ?? ["person"];
@@ -355,7 +355,7 @@ export function CameraDialog({ draft, cameras, sitePolicy, reload, onClose, onEd
                 <button className="ghost small" onClick={() => setEdit({ ...edit, policies: [...(edit.policies ?? []), { kind: "entry", area: "", allowed: [], priority: "high" }] })}>+ Entry rule</button>
               </div>
               <Hint id={`${uid}-rules-hint`} text="Flag a vehicle towing the asset, or a person entering through a named place, that isn't named in People & vehicles."
-                more="Towing: checked after Qwen describes each vehicle here — a vehicle towing the asset that isn't a named vehicle is flagged. Entry: checked right after verification — a person whose track starts at that named place (an exterior door) who isn't a named person is flagged. Both raise the event to that priority and show it under Needs attention. Name your own people and trucks in People & vehicles first; an unnamed one trips the rule once." />
+                more="Towing: checked after Otso describes each vehicle here — a vehicle towing the asset that isn't a named vehicle is flagged. Entry: checked right after verification — a person whose track starts at that named place (an exterior door) who isn't a named person is flagged. Both raise the event to that priority and show it under Needs attention. Name your own people and trucks in People & vehicles first; an unnamed one trips the rule once." />
             </div>
             {speakers && <>
               <h3 className="spaced">Talk-down speakers</h3>

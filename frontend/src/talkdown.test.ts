@@ -178,9 +178,9 @@ describe("Describe & warn", () => {
     expect(s.stage === "ready" && s.text).toBe("This is private property and you are being recorded. Leave now.");
     expect(warnChoices(a)).toEqual([]);
     expect(warnReducer(s, { type: "template", id: "police" })).toMatchObject({ text: "The police have been called. Leave the property immediately." });
-    // Qwen unavailable: the error, and the general message too
-    const down = answer({ people: null, options: [], phrase: null, frame_ts: null, model: null, error: "Qwen is unavailable right now." });
-    expect(describeNote(down)).toBe("Qwen is unavailable right now.");
+    // Otso unavailable: the error, and the general message too
+    const down = answer({ people: null, options: [], phrase: null, frame_ts: null, model: null, error: "Otso is unavailable right now." });
+    expect(describeNote(down)).toBe("Otso is unavailable right now.");
     expect(ready(down)).toMatchObject({ stage: "ready", text: "This is private property and you are being recorded. Leave now." });
   });
 
@@ -191,7 +191,7 @@ describe("Describe & warn", () => {
       { description: "", position: "by the fence", phrase: "You by the fence" },
     ];
     const a = answer({ people: 3, options: opts, phrase: "You by the gate", group_phrase: "You by the gate", confidence: "low", text: fillTemplate(templates[0].text, "You by the gate") });
-    expect(describeNote(a)).toBe("3 people (Qwen isn't sure)");
+    expect(describeNote(a)).toBe("3 people (Otso isn't sure)");
     const chips = warnChoices(a);
     expect(chips.map((c) => c.label)).toEqual(["Everyone", "in the red shirt by the white truck", "with the backpack at the gate", "by the fence"]);
     let s = ready(a);

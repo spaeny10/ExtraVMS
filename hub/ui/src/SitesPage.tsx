@@ -14,6 +14,7 @@ import { SiteMap } from "./map/LazyMap";
 import { PIN_COLOUR, type PinStatus, cityState, hasPoint, pinColour, pinStatus } from "./place";
 import { ServerCard } from "./servers";
 import { useFleetRefresh } from "./fleetRefresh";
+import { aiModelLabel } from "./aiName";
 
 export function SitesPage({ org, me }: { org: Org; me: Me }) {
   const [fleet, setFleet] = useState<Fleet | null>(null);
@@ -144,7 +145,7 @@ export function DigestCard({ org, site }: { org: Org; site?: Site }) {
   const whole = d && <DigestText text={d.text} refs={d.data?.refs} onOpen={setOpen} />;
   return (
     <div className="card" style={{ marginTop: 12 }}>
-      <div className="row"><h3 style={{ margin: 0 }}>Digest</h3><span className="muted small">{d ? `${d.day}${d.model ? ` · ${d.model}` : ""}${d.scoped ? " · your Sites only" : ""}` : "none yet"}</span><span className="spacer" />
+      <div className="row"><h3 style={{ margin: 0 }}>Digest</h3><span className="muted small">{d ? `${d.day}${d.model ? ` · ${aiModelLabel(d.model)}` : ""}${d.scoped ? " · your Sites only" : ""}` : "none yet"}</span><span className="spacer" />
         {(org.role === "admin" || org.role === "owner") && !d?.scoped && <button className="ghost small" disabled={busy} onClick={async () => { setBusy(true); try { await api.digestNow(org.id); await load(); } catch (e) { toast.error(e); } finally { setBusy(false); } }}>Generate now</button>}</div>
       {d && site && section && (
         <>

@@ -945,7 +945,7 @@ async def t_search_footage(a: dict, refs: Refs) -> tuple[list[str], int]:
                                    + f" - CHECKED: yes, {r.get('seen') or 'matches'}"))
     if a.get("newest"):  # "last seen": the latest confirmed moment first
         lines.sort(key=lambda x: -x[0])
-    head = (f"Footage search: Qwen checked the best {checked} visual matches; {len(lines)} actually show it."
+    head = (f"Footage search: Otso checked the best {checked} visual matches; {len(lines)} actually show it."
             + (" Newest first." if a.get("newest") and lines else "")
             if checked else "Footage search: the matches could not be checked.")
     return [head, *(l for _, l in lines)], len(lines)
@@ -1064,7 +1064,9 @@ MAKE_MODEL = (
 )
 
 ANSWER_SYSTEM = (
-    "You are the assistant of an AI security camera system (NVR) for one site. Answer the operator's question using "
+    "You are the assistant of an AI security camera system (NVR) for one site. "
+    "Your name is Otso, the AI of Axiom Vision; if asked who or what you are, say that and nothing about the model underneath. "
+    "Answer the operator's question using "
     "ONLY the lookup results provided. Each result line starts with a handle in square brackets; when you mention "
     "that sighting, copy its handle exactly (only handles from the list you are given). Use the local times shown. "
     "Be brief and concrete: a direct answer first, then the supporting sightings. If the results don't answer the "

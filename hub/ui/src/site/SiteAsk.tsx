@@ -31,6 +31,7 @@ import {
 } from "./siteAskData";
 import { formatPlate, otherLabel } from "@site/plate";
 import { PlateBadge, ReadPlate } from "@site/PlateRead";
+import { aiModelLabel } from "../aiName";
 
 type Pending = {
   question: string; answer: string; status?: string; sources?: SiteAskSources; model?: string | null; fallback?: string; error?: string;
@@ -382,7 +383,7 @@ function AskAnswer({ siteId, tz, text, status, sources, model, fallback, onOpen,
                 {show ? "▾" : "▸"} Sources ({sightings}) · {serversLine(sources.servers)}
               </button>
           )}
-          {model && <span className="model-tag" title="The shared AI model that wrote this answer">{model}</span>}
+          {model && <span className="model-tag" title="The shared AI model that wrote this answer">{aiModelLabel(model)}</span>}
           {plain && <span title={String(plain)}>plain summary (the AI was unavailable)</span>}
         </div>
       )}

@@ -4,6 +4,7 @@ import { useNav } from "./nav";
 import { otherLabel, splitCited } from "./plate";
 import { PlateBadge, ReadPlate } from "./PlateRead";
 import { Skeleton, toast } from "./ui";
+import { aiModelLabel } from "./aiName";
 
 export function Answer({ text, meta, model, fallback, onEvent, streaming }: {
   text: string; meta: AskMeta | null; model: string | null; fallback?: string; onEvent: (id: number) => void; streaming?: boolean;
@@ -19,8 +20,8 @@ export function Answer({ text, meta, model, fallback, onEvent, streaming }: {
             {showCalls ? "▾" : "▸"} Looked up: {meta.calls.map((c) => `${c.tool.replace("_", " ")} → ${c.count}`).join(", ")}
           </button>
         ) : null}
-        {model && <span className="model-tag" title="Which Qwen model wrote this answer">{model}</span>}
-        {(fallback || meta?.fallback) && <span title="The larger remote model wasn't ready, so the local model answered">local model ({fallback || meta?.fallback})</span>}
+        {model && <span className="model-tag" title="Which model wrote this answer">{aiModelLabel(model)}</span>}
+        {(fallback || meta?.fallback) && <span title="The larger remote model wasn't ready, so the local model answered">local model ({aiModelLabel(fallback || meta?.fallback)})</span>}
       </div>
       {showCalls && meta && (
         <ul className="ask-calls small">
@@ -165,7 +166,7 @@ export function BriefingCard({ onEvent, compact, site = api, readOnly }: {
               <li key={i}><Cited text={line.replace(/^-\s*/, "")} refs={b.stats.refs} onEvent={onEvent} site={site} /></li>
             ))}
           </ul>
-          {b.model && <div className="muted small"><span className="model-tag">{b.model}</span></div>}
+          {b.model && <div className="muted small"><span className="model-tag">{aiModelLabel(b.model)}</span></div>}
         </>
       )}
     </div>

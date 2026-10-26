@@ -205,9 +205,9 @@ def test_describe_sensitive_answer_falls_back():
 
 def test_describe_qwen_down_slow_or_no_picture_gives_the_generic_message():
     generic = "This is private property and you are being recorded. Leave now."
-    with Patched(RuntimeError("no model for talkdown: local Qwen is disabled and the remote is not configured")):
+    with Patched(RuntimeError("no model for talkdown: local Otso is disabled and the remote is not configured")):
         r = asyncio.run(td.describe("cam1"))
-    assert r["people"] is None and r["error"] == "Qwen is unavailable right now." and r["text"] == generic and r["frame_ts"]
+    assert r["people"] is None and r["error"] == "Otso is unavailable right now." and r["text"] == generic and r["frame_ts"]
     orig = td.TOTAL_S
     td.TOTAL_S = 1.0
     try:

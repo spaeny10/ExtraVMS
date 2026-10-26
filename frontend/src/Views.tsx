@@ -30,6 +30,7 @@ import { SpeakersSection } from "./Speakers";
 import { CameraDialog, StreamsLine, blankCamera, zoneSummary } from "./CameraDialog";
 import { FixClocksDialog } from "./DeviceSettings";
 import type { CameraDraft } from "./cameraEdit";
+import { aiModelLabel } from "./aiName";
 
 /* ------------------------------------------------------------------ Live */
 
@@ -597,7 +598,7 @@ function HubPanel() {
   return (
     <Row label="Cloud hub" hint="One webpage for all your sites. The site dials out to the hub; no port forwarding. Enter the claim code at the hub under Add site."
       value={<><Status ok={h.connected} /> {state}</>}
-      sub={h.last_error && !h.connected ? `Can't reach the hub yet · ${h.last_error}` : h.last_heartbeat ? `last heartbeat ${fmtTime(h.last_heartbeat)}${h.vlm_managed ? " · Qwen managed by the hub" : ""}` : undefined}
+      sub={h.last_error && !h.connected ? `Can't reach the hub yet · ${h.last_error}` : h.last_heartbeat ? `last heartbeat ${fmtTime(h.last_heartbeat)}${h.vlm_managed ? " · Otso managed by the hub" : ""}` : undefined}
       action={h.enrolled ? <button className="ghost small" onClick={async () => { if (await confirmDialog("Unenroll this site from the hub?", { confirmLabel: "Unenroll", danger: true })) { await api.setHub({ unenrol: true }); load(); } }}>Unenroll</button> : undefined}>
       {!h.enrolled && h.enroll_token && (
         <div className="muted small">Enrolling automatically with the hub's enrollment token (NVR_HUB_ENROLL_TOKEN): no claim code needed.</div>
@@ -651,7 +652,7 @@ export function SystemView() {
           sub={[s.yolo_fallback ? yoloFallbackText(s.yolo_fallback) : "",
             ...(s.health_alerts ?? []).filter((a) => a.kind === "detector_stalled").map((a) => a.text),
             s.queues.verify ? `${s.queues.verify} waiting` : "queue empty", s.yolo_frame_ms != null ? `${s.yolo_frame_ms} ms a frame` : ""].filter(Boolean).join(" · ")} />
-        <Row label="Qwen" value={<><Status ok={s.vlm_ready} /> {vlmValue(s)}</>}
+        <Row label="Otso" value={<><Status ok={s.vlm_ready} /> {vlmValue(s)}</>}
           sub={vlmSub(s)}
           action={<QwenFeedbackInfo />} />
         <SynopsisGateRow />
@@ -723,16 +724,16 @@ function SynopsisGateRow() {
   const valid = pct != null && pct.trim() !== "" && Number.isFinite(n) && n >= 0 && n <= 100 && n !== cur;
   const save = async () => {
     setBusy(true);
-    try { setG(await api.saveAiSettings({ synopsis_min_conf: n / 100 })); setPct(null); toast.success(n ? `Qwen describes events from YOLO ${n}%` : "Qwen describes every event"); }
+    try { setG(await api.saveAiSettings({ synopsis_min_conf: n / 100 })); setPct(null); toast.success(n ? `Otso describes events from YOLO ${n}%` : "Otso describes every event"); }
     catch (e) { toast.error(e); }
     setBusy(false);
   };
   return (
-    <Row label="Synopsis threshold" hint={"Qwen writes no synopsis for an event whose YOLO confidence is below this: the event stays verified and its card says why. "
+    <Row label="Synopsis threshold" hint={"Otso writes no synopsis for an event whose YOLO confidence is below this: the event stays verified and its card says why. "
       + "Events that break a site rule (or are on a camera with a towing rule), PPE checks and unusual events are still described; "
-      + "Generate with Qwen, Describe & warn and Ask are not affected. 0 = off. Applies to new events."}
+      + "Generate with Otso, Describe & warn and Ask are not affected. 0 = off. Applies to new events."}
       value={<>{cur ? <>YOLO ≥ <strong>{cur}%</strong></> : "Off: every event"}</>}
-      sub={`default ${Math.round(g.synopsis_min_conf_default * 100)}% · fewer Qwen runs on distant or doubtful detections`}
+      sub={`default ${Math.round(g.synopsis_min_conf_default * 100)}% · fewer Otso runs on distant or doubtful detections`}
       action={<div className="row small">
         <input type="number" min={0} max={100} step={5} value={pct ?? String(cur)} onChange={(e) => setPct(e.target.value)} style={{ width: 64 }} title="Minimum YOLO confidence, %" />
         <button className="ghost small" disabled={!valid || busy} onClick={save}>{busy ? "Saving…" : "Save"}</button>
@@ -768,10 +769,10 @@ function RemoteRow() {
     setBusy(false);
   };
   const stateLabel = { off: "Not configured", cold: "Cold (scaled to zero)", warm: "Warm", down: "Down, using local" }[r.state];
-  const hint = "A larger Qwen on a rented cloud GPU for reasoning-heavy tasks. Everything falls back to the local model automatically. Configure NVR_REMOTE_VLM_URL, NVR_REMOTE_VLM_KEY and NVR_REMOTE_VLM_MODEL in .env.";
+  const hint = "A larger Otso on a rented cloud GPU for reasoning-heavy tasks. Everything falls back to the local model automatically. Configure NVR_REMOTE_VLM_URL, NVR_REMOTE_VLM_KEY and NVR_REMOTE_VLM_MODEL in .env.";
   if (!r.configured) return <Row label="Remote AI" hint={hint} value={stateLabel} sub={`Everything runs on ${r.local_model}`} />;
   return (
-    <Row label="Remote AI" hint={hint} value={<><Status ok={r.state === "warm"} /> {stateLabel} · {r.model}</>}
+    <Row label="Remote AI" hint={hint} value={<><Status ok={r.state === "warm"} /> {stateLabel} · {aiModelLabel(r.model)}</>}
       sub={<>
         {r.today.requests} requests today · ~{Math.round(r.today.billed_s / 60)} GPU-min
         {r.rate_usd_per_s > 0 ? ` · ~$${r.today.usd.toFixed(2)} of $${r.budget_usd.toFixed(2)}` : ""}

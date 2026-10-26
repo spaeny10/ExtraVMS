@@ -58,14 +58,14 @@ export function AiScheduleCard({ site }: { site: Site }) {
       )}
       {data.mode === "soc" && (
         <p className="muted small">
-          Full Qwen while the SOC monitors this Site (<a href={settingsHref(site.id, "monitoring")} onClick={go(settingsHref(site.id, "monitoring"))}>Settings › Monitoring</a>).
-          Outside those hours: PPE checks and everything people ask for (Ask, clip chat, Describe &amp; warn, Generate with Qwen).
-          {!data.monitored && <strong> The Site isn't monitored, so Qwen is limited around the clock.</strong>}
+          Full Otso while the SOC monitors this Site (<a href={settingsHref(site.id, "monitoring")} onClick={go(settingsHref(site.id, "monitoring"))}>Settings › Monitoring</a>).
+          Outside those hours: PPE checks and everything people ask for (Ask, clip chat, Describe &amp; warn, Generate with Otso).
+          {!data.monitored && <strong> The Site isn't monitored, so Otso is limited around the clock.</strong>}
         </p>)}
       {(behind.length > 0 || old.length > 0) && (
         <p className="small muted">
           {behind.length > 0 && <>{behind.map((s) => s.server_name).join(", ")}: not following it yet ({behind.some((s) => !s.online) ? "offline: takes it when it reconnects" : "being sent"}). </>}
-          {old.length > 0 && <>{old.map((s) => s.server_name).join(", ")}: too old for AI schedules (runs Qwen full time).</>}
+          {old.length > 0 && <>{old.map((s) => s.server_name).join(", ")}: too old for AI schedules (runs Otso full time).</>}
         </p>)}
       {data.servers.length > 1 && data.servers.some((s) => s.qwen) && (
         <p className="small muted">{data.servers.filter((s) => s.qwen).map((s) => `${s.server_name}: ${s.qwen}${s.until ? ` until ${untilText(s.until, data.timezone)}` : ""}`).join(" · ")}</p>)}
@@ -83,9 +83,9 @@ function Usage({ title, m }: { title: string; m: AiUsageMonth }) {
   return (
     <div className="ai-usage-month">
       <div className="small"><strong>{title}</strong> <span className="muted">({m.month}, UTC)</span></div>
-      <div className="small">{fmtSeconds(m.total.seconds)} of Qwen · {m.total.requests.toLocaleString()} request{m.total.requests === 1 ? "" : "s"}
+      <div className="small">{fmtSeconds(m.total.seconds)} of Otso · {m.total.requests.toLocaleString()} request{m.total.requests === 1 ? "" : "s"}
         {m.out.seconds > 0 && <span className="muted"> · {fmtSeconds(m.out.seconds)} outside the AI schedule</span>}</div>
-      {kinds.length === 0 ? <p className="muted small" style={{ margin: 0 }}>No Qwen use reported.</p> : (
+      {kinds.length === 0 ? <p className="muted small" style={{ margin: 0 }}>No Otso use reported.</p> : (
         <table className="hub-table small ai-usage-table">
           <thead><tr><th>Kind</th><th>Time</th><th>Requests</th><th>Share</th></tr></thead>
           <tbody>{kinds.map((k) => (

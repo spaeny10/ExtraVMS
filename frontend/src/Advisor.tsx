@@ -6,6 +6,7 @@
 import { useState } from "react";
 import { api, type AdvisorFinding, type AdvisorReport } from "./api";
 import { Icon, toast } from "./ui";
+import { aiModelLabel } from "./aiName";
 
 const AREA_LABEL: Record<string, string> = { cameras: "Cameras", storage: "Storage", ai: "AI", events: "Detections", rules: "Zones & rules", ptz: "PTZ", time: "Clocks" };
 const IMPACT_LABEL: Record<string, string> = { high: "Fix soon", medium: "Worth doing", low: "Nice to have" };
@@ -62,12 +63,12 @@ export function Advisor({ onAsk }: { onAsk?: (q: string) => void }) {
           <div className={`adv-summary ${report.findings.length === 0 ? "ok" : ""}`}>
             <p>{report.summary.text}</p>
             <div className="muted small adv-meta">
-              {report.summary.model ? <span className="model-tag">{report.summary.model}</span> : summarizing ? <span>✦ Qwen is writing its read…</span> : <span>plain summary</span>}
+              {report.summary.model ? <span className="model-tag">{aiModelLabel(report.summary.model)}</span> : summarizing ? <span>✦ Otso is writing its read…</span> : <span>plain summary</span>}
               <span> · {report.cameras} cameras</span>
               {report.facts.gb_per_day != null && <span> · {report.facts.gb_per_day} GB/day</span>}
               {report.facts.median_synopsis_s != null && <span> · synopses {report.facts.median_synopsis_s} s</span>}
-              {report.facts.vlm.vram_gb != null && <span> · Qwen {report.facts.vlm.vram_gb}/{report.facts.vlm.size_gb} GB in VRAM</span>}
-              {onAsk && <button className="linkish small" onClick={() => onAsk("What should I change to make my camera system run better?")}>Ask Qwen to explain →</button>}
+              {report.facts.vlm.vram_gb != null && <span> · Otso {report.facts.vlm.vram_gb}/{report.facts.vlm.size_gb} GB in VRAM</span>}
+              {onAsk && <button className="linkish small" onClick={() => onAsk("What should I change to make my camera system run better?")}>Ask Otso to explain →</button>}
             </div>
           </div>
 

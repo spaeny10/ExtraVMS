@@ -173,7 +173,7 @@ export function describeNote(a: DescribeAnswer): string {
   if (a.people === null) return a.error ?? "The camera could not be described";
   if (a.people === 0) return "Nobody visible right now";
   const n = a.people === 1 ? "1 person" : `${a.people} people`;
-  return a.confidence === "low" ? `${n} (Qwen isn't sure)` : n;
+  return a.confidence === "low" ? `${n} (Otso isn't sure)` : n;
 }
 
 /** The people to address when several are in view: everyone (the group phrase) and each one Qwen described (at most 3). */

@@ -74,11 +74,11 @@ export function FootageResults({ q, nonce, cameras, camera, sinceHours, window: 
                 <div style={{ width: `${hi > lo ? 15 + 85 * (m.score - lo) / (hi - lo) : 100}%` }} />
               </div>
               <div className="event-foot">
-                {m.check === "pending" && <span className="muted small">Qwen is checking…</span>}
-                {m.check === "error" && <span className="muted small">Qwen check unavailable</span>}
+                {m.check === "pending" && <span className="muted small">Otso is checking…</span>}
+                {m.check === "error" && <span className="muted small">Otso check unavailable</span>}
                 {c && (c.matches
-                  ? <span className="badge status-verified" title={`Qwen (${c.confidence} confidence)`}>✓ {c.seen || "Qwen confirmed"}</span>
-                  : <span className="muted small" title={`Qwen (${c.confidence} confidence)`}>✗ Qwen: {c.seen || "not a match"}</span>)}
+                  ? <span className="badge status-verified" title={`Otso (${c.confidence} confidence)`}>✓ {c.seen || "Otso confirmed"}</span>
+                  : <span className="muted small" title={`Otso (${c.confidence} confidence)`}>✗ Otso: {c.seen || "not a match"}</span>)}
               </div>
             </div>
           </button>

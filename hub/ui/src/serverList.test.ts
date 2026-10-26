@@ -54,9 +54,9 @@ describe("recording, AI and network text", () => {
   it("shows a central instance's storage quota instead", () => {
     expect(recordingText(srv({ central }, { disk: { free_gb: 50, total_gb: 100 } }))).toBe("186 GB of 2.0 TB (9%)");
   });
-  it("says whether YOLO and Qwen are ready, and what waits for a synopsis", () => {
-    expect(aiText(srv({}, { yolo_ready: true, vlm_ready: false }))).toBe("YOLO ✓ · Qwen ✗");
-    expect(aiText(srv({}, { yolo_ready: true, vlm_ready: true, queues: { verify: 0, synopsis: 3 } }))).toBe("YOLO ✓ · Qwen ✓ (3 waiting)");
+  it("says whether YOLO and Otso are ready, and what waits for a synopsis", () => {
+    expect(aiText(srv({}, { yolo_ready: true, vlm_ready: false }))).toBe("YOLO ✓ · Otso ✗");
+    expect(aiText(srv({}, { yolo_ready: true, vlm_ready: true, queues: { verify: 0, synopsis: 3 } }))).toBe("YOLO ✓ · Otso ✓ (3 waiting)");
   });
   it("shows what the cameras send, or nothing", () => {
     expect(networkText(srv({}, { bandwidth: { mbps: 16.8, month_gb: 4.7 } }))).toBe("16.8 Mbit/s in · 4.7 GB this month");

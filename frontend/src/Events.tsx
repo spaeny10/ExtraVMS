@@ -20,7 +20,7 @@ export function StatusBadge({ e }: { e: Pick<NvrEvent, "status" | "threat"> }) {
 export function CardStatus({ e }: { e: Pick<NvrEvent, "status" | "priority"> }) {
   if (e.status !== "verified") return <span className={`badge status-${e.status}`}>{STATUS_LABEL[e.status]}</span>;
   if (!e.priority || e.priority === "none") return null;
-  return <span className={`badge threat-${e.priority}`} title="Priority: the higher of Qwen's threat level and how unusual this is for the camera">{e.priority}</span>;
+  return <span className={`badge threat-${e.priority}`} title="Priority: the higher of Otso's threat level and how unusual this is for the camera">{e.priority}</span>;
 }
 
 const clip = (t: string, n = 40) => (t.length > n ? `${t.slice(0, n - 1).trimEnd()}…` : t);
@@ -37,8 +37,8 @@ export function rejectedReason(e: Pick<NvrEvent, "status" | "detections">): stri
  * or "No description (outside AI hours)"), or the YOLO result for labels Qwen skips. */
 export function placeholder(e: NvrEvent): string {
   if (e.status === "verified") {
-    if (e.synopsis_pending) return "Qwen is writing a synopsis…";
-    if (e.synopsis_deferred) return "Outside AI hours: described when Qwen is free";
+    if (e.synopsis_pending) return "Otso is writing a synopsis…";
+    if (e.synopsis_deferred) return "Outside AI hours: described when Otso is free";
     if (e.detections?.synopsis_skipped) return e.detections.synopsis_skipped;
     if (e.camera_class !== "person") return e.error ?? `${e.yolo_class ?? e.camera_class} confirmed by YOLO in ${e.yolo_hits ?? 0} frames.`;
     return e.error ?? "Writing synopsis…";

@@ -21,7 +21,7 @@ describe("plates", () => {
   it("turns errors into a sentence", () => {
     expect(plateError(new Error('429 {"detail":"this plate was just read; try again in 25 s"}'))).toBe("this plate was just read; try again in 25 s");
     expect(plateError(new Error('403 {"detail":"needs operator"}'))).toBe("Reading a plate needs the operator role");
-    expect(plateError(new Error("503 Qwen is not ready yet"))).toBe("Qwen is not ready yet");
+    expect(plateError(new Error("503 Otso is not ready yet"))).toBe("Otso is not ready yet");
   });
 });
 

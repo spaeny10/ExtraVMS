@@ -32,7 +32,7 @@ export function NeighborsEditor({ cameraId, cameras }: { cameraId: string; camer
     <div className="neighbors">
       <p className="muted small">
         Cameras someone can walk to from here, and how long it usually takes. When a person leaves one camera and a similar-looking
-        person appears on a neighbor inside that window, re-ID and Qwen check whether it's the same individual and link the two
+        person appears on a neighbor inside that window, re-ID and Otso check whether it's the same individual and link the two
         events into a journey. Use a negative minimum if the views overlap.
       </p>
       {mine.length === 0 && <p className="muted small">No neighbors yet.</p>}

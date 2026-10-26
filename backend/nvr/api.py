@@ -1409,7 +1409,7 @@ async def read_plate(event_id: int, request: Request):
     if not plate.is_vehicle(e):
         raise HTTPException(400, "plates are read on vehicle events only")
     if not state.pipeline.vlm_ready:
-        raise HTTPException(503, "Qwen is not ready yet")
+        raise HTTPException(503, "Otso is not ready yet")
     wait = plate.limiter.wait_s(event_id)
     if wait > 0:
         raise HTTPException(429, f"this plate was just read; try again in {wait:.0f} s", headers={"Retry-After": str(int(wait) + 1)})
@@ -1417,7 +1417,7 @@ async def read_plate(event_id: int, request: Request):
     try:
         result = await plate.run(event_id, state.pipeline.plate_crops, "user", plate.ON_DEMAND_CROPS, "chat")
     except (asyncio.TimeoutError, httpx.TimeoutException):
-        raise HTTPException(504, "Qwen took too long to read the plate; try again in a moment")
+        raise HTTPException(504, "Otso took too long to read the plate; try again in a moment")
     except Exception as ex:  # noqa: BLE001 - the model is down or misconfigured
         log.warning("event %s: plate read failed: %s", event_id, ex)
         raise HTTPException(502, f"the plate could not be read: {str(ex)[:200]}")
@@ -1512,7 +1512,7 @@ async def post_chat(event_id: int, body: ChatIn):
     task "chat", metered as "ask")."""
     e = _require_event(event_id)
     if not state.pipeline.vlm_ready:
-        raise HTTPException(503, "Qwen is not ready yet")
+        raise HTTPException(503, "Otso is not ready yet")
     p = state.pipeline
     camera = p.cameras.get(e["camera_id"], {"name": e["camera_id"]})
     history = [{"role": m["role"], "content": m["content"]} for m in db.chat(event_id)]
@@ -2075,7 +2075,7 @@ async def delete_assistant_thread(thread_id: int):
 async def assistant_ask(body: AskIn):
     """Streams NDJSON: thread, user, calls (what was looked up + citation refs), model, delta..., done | error."""
     if not state.pipeline.vlm_ready and not vlmroute.router.configured:
-        raise HTTPException(503, "Qwen is not ready yet")
+        raise HTTPException(503, "Otso is not ready yet")
     if body.thread_id and not db.one("SELECT 1 FROM assistant_threads WHERE id=?", [body.thread_id]):
         raise HTTPException(404, "no such conversation")
 
@@ -2115,7 +2115,7 @@ async def list_briefings(limit: int = Query(10, le=60)):
 @app.post("/api/briefings/generate")
 async def generate_briefing():
     if not state.pipeline.vlm_ready and not vlmroute.router.configured:
-        raise HTTPException(503, "Qwen is not ready yet")
+        raise HTTPException(503, "Otso is not ready yet")
     return await assistant.generate_briefing()
 
 
@@ -2216,7 +2216,7 @@ async def footage_verify(body: FootageVerifyIn):
     if not img:
         raise HTTPException(404, "no recording at that time")
     if not state.pipeline.vlm_ready:
-        raise HTTPException(503, "Qwen is still starting")
+        raise HTTPException(503, "Otso is still starting")
     r = await vlm.footage_match(img, body.q)
     return {"matches": bool(r.get("matches")), "confidence": r.get("confidence", "low"), "seen": r.get("seen", ""),
             "model": r.get("_model")}

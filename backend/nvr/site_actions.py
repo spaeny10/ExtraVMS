@@ -33,7 +33,7 @@ LABELS = ("person", "vehicle")
 VERBS: dict[str, dict] = {
     "rename_camera": {"title": "Rename a camera", "role": "admin", "examples": ["Rename cam3 to Loading Dock", "Rename the gate camera to North Gate"]},
     "set_retention": {"title": "Set continuous recording retention", "role": "admin", "examples": ["Set retention to 7 days", "Keep 14 days of recording"]},
-    "set_synopsis_labels": {"title": "Choose what Qwen describes", "role": "admin",
+    "set_synopsis_labels": {"title": "Choose what Otso describes", "role": "admin",
                             "examples": ["Stop describing vehicles on cam2", "Describe only people on Gate", "Start describing vehicles on Back Lot"]},
     "lock_footage": {"title": "Lock footage", "role": "operator", "examples": ["Lock Side Yard footage 3-4 pm today", "Lock Gate footage from 9am to 10:30am yesterday"]},
 }
@@ -228,10 +228,10 @@ def build(parsed: dict, text: str) -> dict:
             cur = list(cam["synopsis_labels"]) if cam.get("synopsis_labels") is not None else list(settings.synopsis_labels)
             new = _labels_after(cur, parsed.get("mode") or "add", labels)
             p["labels"] = new
-            title = f'Qwen describes {_say(new)} on "{cam["name"]}"'
+            title = f'Otso describes {_say(new)} on "{cam["name"]}"'
             if new == cur and labels:
-                needs.append(f'Qwen already describes {_say(cur)} on "{cam["name"]}".')
-            moves.append(f'Qwen describes {_say(new)} on "{cam["name"]}" (now {_say(cur)})')
+                needs.append(f'Otso already describes {_say(cur)} on "{cam["name"]}".')
+            moves.append(f'Otso describes {_say(new)} on "{cam["name"]}" (now {_say(cur)})')
             if not new:
                 warnings.append("Nothing would be described on this camera: events are still verified by YOLO but get no synopsis.")
         stays.append("YOLO still verifies every person and vehicle; past synopses are kept")
@@ -298,7 +298,7 @@ def execute(plan_id: str, role: str | None, user: str = "") -> dict:
         lines.append(f"This site now keeps {p['days']} days of continuous recording")
     elif a == "set_synopsis_labels":
         db.execute("UPDATE cameras SET synopsis_labels=? WHERE id=?", [json.dumps(p["labels"]), cam["id"]])
-        lines.append(f'Qwen now describes {_say(p["labels"])} on "{cam["name"]}"')
+        lines.append(f'Otso now describes {_say(p["labels"])} on "{cam["name"]}"')
     elif a == "lock_footage":
         note = f"locked from Ask{f' by {user}' if user else ''}"[:200]
         lock_id = db.execute_insert("INSERT INTO locks (camera_id, start_ts, end_ts, note, created_at) VALUES (?,?,?,?,?)",

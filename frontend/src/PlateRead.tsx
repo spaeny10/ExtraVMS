@@ -47,7 +47,7 @@ export function ReadPlate({ id, plate, region, site = api, onRead, compact }: {
       {known && !said && <span className="plate-text" title="License plate, read from the footage">Plate {formatPlate(known.plate, known.region)}</span>}
       {said && <span className={known ? "plate-text" : "muted small"}>{said}</span>}
       <button type="button" className="ghost small" disabled={busy} onClick={run}
-        title="Qwen looks at the sharpest full-resolution frames of this vehicle and reads the plate only if it is clearly legible">
+        title="Otso looks at the sharpest full-resolution frames of this vehicle and reads the plate only if it is clearly legible">
         {busy ? "Reading…" : known ? "Read again" : "Read plate"}
       </button>
       {err && <span className="error small">{err}</span>}

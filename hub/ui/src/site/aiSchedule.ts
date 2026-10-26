@@ -8,7 +8,7 @@ import type { AiEffective, AiMode, AiOutside, AiUsageKind, QwenDays } from "../a
 export const MODE_LABEL: Record<AiMode, string> = { full: "Full-time", soc: "SOC hours" };
 export const OUTSIDE_LABEL: Record<AiOutside, string> = { catchup: "Catch up when idle", skip: "Skip" };
 export const OUTSIDE_HELP: Record<AiOutside, string> = {
-  catchup: "Events outside the SOC hours are described later, one at a time, whenever Qwen has nothing else to do.",
+  catchup: "Events outside the SOC hours are described later, one at a time, whenever Otso has nothing else to do.",
   skip: "Events outside the SOC hours are not described: their cards say \"No description (outside AI hours)\".",
 };
 
@@ -29,12 +29,12 @@ export function untilText(ts: number, tz: string | null | undefined, now = Date.
   catch { return new Intl.DateTimeFormat("en-US", { ...opts, timeZone: undefined }).format(new Date(ts * 1000)); }
 }
 
-/** "Qwen: on until 06:00" / "Qwen: limited until 18:00" / "Qwen: on (full time)" / "Qwen: limited (the Site isn't monitored)". */
+/** "Otso: on until 06:00" / "Otso: limited until 18:00" / "Otso: on (full time)" / "Otso: limited (the Site isn't monitored)". */
 export function effectiveLine(e: AiEffective, tz: string | null | undefined, now = Date.now() / 1000): string {
-  if (e.mode === "full") return "Qwen: on (full time)";
-  if (e.until != null) return `Qwen: ${e.qwen} until ${untilText(e.until, tz, now)}`;
-  if (e.reason === "unmonitored") return "Qwen: limited (the Site isn't monitored by the SOC, so it has no SOC hours)";
-  return `Qwen: ${e.qwen}${e.qwen === "on" ? " (SOC hours around the clock)" : ""}`;
+  if (e.mode === "full") return "Otso: on (full time)";
+  if (e.until != null) return `Otso: ${e.qwen} until ${untilText(e.until, tz, now)}`;
+  if (e.reason === "unmonitored") return "Otso: limited (the Site isn't monitored by the SOC, so it has no SOC hours)";
+  return `Otso: ${e.qwen}${e.qwen === "on" ? " (SOC hours around the clock)" : ""}`;
 }
 
 /** The read-only line customer admins see: "AI: SOC hours · Full-time AI available" (full time: "AI: Full-time"). */

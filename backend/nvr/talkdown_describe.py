@@ -184,7 +184,7 @@ def judge(answer: dict) -> dict:
     try:
         people = max(0, min(50, int(answer.get("people"))))
     except (TypeError, ValueError):
-        raise ValueError("Qwen's answer had no count of people")
+        raise ValueError("Otso's answer had no count of people")
     confidence = answer.get("confidence") if answer.get("confidence") in ("low", "medium", "high") else "low"
     raw = [p for p in (answer.get("persons") or []) if isinstance(p, dict)][:MAX_OPTIONS]
     if not raw or people <= 1:
@@ -298,10 +298,10 @@ async def describe(camera_id: str, template: str = "leave") -> dict:
         r = await asyncio.wait_for(router.chat_json(TASK, SYSTEM, PROMPT, [jpeg], SCHEMA, num_predict=220, temperature=0.1,
                                                     priority=PRIORITY), left)
     except asyncio.TimeoutError:
-        return answer(template, frame_ts, None, f"Qwen did not answer within {TOTAL_S:.0f} s.")
+        return answer(template, frame_ts, None, f"Otso did not answer within {TOTAL_S:.0f} s.")
     except Exception as e:  # noqa: BLE001 - model down or not configured: the generic message
         log.warning("describe %s: Qwen unavailable (%s: %s)", camera_id, type(e).__name__, str(e)[:160])
-        return answer(template, frame_ts, None, "Qwen is unavailable right now.")
+        return answer(template, frame_ts, None, "Otso is unavailable right now.")
     try:
         judged = judge(r)
     except ValueError as e:

@@ -53,10 +53,10 @@ export function recordingText(s: Pick<Server, "summary" | "central">): string {
   const d = daysLeft(s);
   return `${fmtGB(disk.free_gb)} free${d != null ? ` · room for ~${d} day${d === 1 ? "" : "s"}` : ""}`;
 }
-/** "YOLO ✓ · Qwen ✗ (3 waiting)". The heartbeat summary doesn't say which device YOLO runs on, so it isn't shown. */
+/** "YOLO ✓ · Otso ✗ (3 waiting)". The heartbeat summary doesn't say which device YOLO runs on, so it isn't shown. */
 export function aiText(s: Cams): string {
   const sm = s.summary ?? {};
-  return `YOLO ${sm.yolo_ready ? "✓" : "✗"} · Qwen ${sm.vlm_ready ? "✓" : "✗"}${sm.queues?.synopsis ? ` (${sm.queues.synopsis} waiting)` : ""}`;
+  return `YOLO ${sm.yolo_ready ? "✓" : "✗"} · Otso ${sm.vlm_ready ? "✓" : "✗"}${sm.queues?.synopsis ? ` (${sm.queues.synopsis} waiting)` : ""}`;
 }
 /** "16.8 Mbit/s in · 4.7 GB this month": what the cameras send the server; null when it reports none. */
 export function networkText(s: Cams): string | null {

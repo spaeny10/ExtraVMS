@@ -62,7 +62,7 @@ class LocalHTTPError(RuntimeError):
     """A local Ollama answered with an HTTP error (status kept so 5xx can fall back and 4xx doesn't)."""
 
     def __init__(self, status: int, text: str) -> None:
-        super().__init__(f"Qwen request failed ({status}): {text[:300]}")
+        super().__init__(f"Otso request failed ({status}): {text[:300]}")
         self.status = status
 
 
@@ -404,7 +404,7 @@ class Router:
                 and not self.over_budget())
 
     def _no_local(self, task: str, e: Exception | None = None) -> RuntimeError:
-        return RuntimeError(f"no model for {task}: local Qwen is disabled and the remote "
+        return RuntimeError(f"no model for {task}: local Otso is disabled and the remote "
                             + (f"failed ({type(e).__name__}: {str(e)[:120]})" if e else "is not configured"))
 
     def state(self) -> str:
@@ -506,7 +506,7 @@ class Router:
             return []
         name = size_label(p.model)
         return [{"kind": "vlm_fallback_active",
-                 "text": f"{'Qwen ' if 'qwen' in p.model.lower() and name != p.model else ''}{name} is down; "
+                 "text": f"{'Otso ' if 'qwen' in p.model.lower() and name != p.model else ''}{name} is down; "
                          f"descriptions are using the {size_label(f.model)}",
                  "since": p.down_since, "error": p.last_error or None, "model": p.model, "fallback_model": f.model}]
 

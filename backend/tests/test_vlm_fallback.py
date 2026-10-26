@@ -242,7 +242,7 @@ def test_fallback_alert_after_two_minutes():
     assert r.health_alerts() == []                                   # just went down
     p.down_since = time.time() - 121
     (a,) = r.health_alerts()
-    assert a["kind"] == "vlm_fallback_active" and a["text"] == "Qwen 27B is down; descriptions are using the 9B", a
+    assert a["kind"] == "vlm_fallback_active" and a["text"] == "Otso 27B is down; descriptions are using the 9B", a
     assert a["since"] == p.down_since
     r.models["fallback"].set_state("unresponsive")
     assert r.health_alerts() == []                                   # the fallback isn't serving either

@@ -1236,7 +1236,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
           <option value="rejected">Rejected</option>
           <option value="all">All statuses</option>
         </select>
-        <select value={filter.minThreat} onChange={(e) => setFilter({ minThreat: e.target.value as Filter["minThreat"] })} title="Minimum priority: the higher of Qwen's threat level and how unusual the event is for its camera (time, place, how long it stayed). Your synopsis corrections and false-alarm verdicts override it.">
+        <select value={filter.minThreat} onChange={(e) => setFilter({ minThreat: e.target.value as Filter["minThreat"] })} title="Minimum priority: the higher of Otso's threat level and how unusual the event is for its camera (time, place, how long it stayed). Your synopsis corrections and false-alarm verdicts override it.">
           <option value="any">Any priority</option>
           <option value="low">Low and above</option>
           <option value="medium">Medium and above</option>

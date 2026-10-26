@@ -1,6 +1,7 @@
-/** Settings → System's Qwen row in words: the primary local model and, when configured, the fallback model
+/** Settings → System's AI row in words: the primary local model and, when configured, the fallback model
  * (backend nvr/vlmroute.py Router.vlm_status). */
 import { fmtTime, type SystemInfo, type VlmInstance } from "./api";
+import { aiModelLabel } from "./aiName";
 
 export function vlmStateWord(state: VlmInstance["state"] | undefined): string {
   if (state === "ready") return "Ready";
@@ -10,11 +11,11 @@ export function vlmStateWord(state: VlmInstance["state"] | undefined): string {
 
 const gpu = (m: VlmInstance) => (m.gpu ? ` on GPU ${m.gpu}` : "");
 
-/** The row's value: "Ready · qwen3.8:27b" with one model, both models and states with a fallback. */
+/** The row's value: "Ready · Otso 27B" with one model, both models and states with a fallback. */
 export function vlmValue(s: Pick<SystemInfo, "vlm" | "vlm_ready" | "vlm_state" | "vlm_model">): string {
   const v = s.vlm;
-  if (!v || !v.fallback) return `${s.vlm_ready ? "Ready" : vlmStateWord(s.vlm_state)} · ${s.vlm_model}`;
-  return `${v.primary.model}${gpu(v.primary)}: ${vlmStateWord(v.primary.state)} · fallback ${v.fallback.model}${gpu(v.fallback)}: ${vlmStateWord(v.fallback.state)}`;
+  if (!v || !v.fallback) return `${s.vlm_ready ? "Ready" : vlmStateWord(s.vlm_state)} · ${aiModelLabel(s.vlm_model)}`;
+  return `${aiModelLabel(v.primary.model)}${gpu(v.primary)}: ${vlmStateWord(v.primary.state)} · fallback ${aiModelLabel(v.fallback.model)}${gpu(v.fallback)}: ${vlmStateWord(v.fallback.state)}`;
 }
 
 /** The row's second line: why it is down, who is answering, queues. */
@@ -25,7 +26,7 @@ export function vlmSub(s: Pick<SystemInfo, "vlm" | "vlm_state" | "vlm_down_since
     parts.push(`down since ${s.vlm_down_since ? fmt(s.vlm_down_since) : "?"} · if nvidia-smi says the GPU is lost, reboot`);
   }
   if (v?.fallback) {
-    if (v.primary.state !== "ready" && v.fallback.state === "ready") parts.push(`the fallback ${v.fallback.model} is answering meanwhile`);
+    if (v.primary.state !== "ready" && v.fallback.state === "ready") parts.push(`the fallback ${aiModelLabel(v.fallback.model)} is answering meanwhile`);
     if (v.fallback.state === "unresponsive") parts.push(`the fallback has not been answering since ${v.fallback.down_since ? fmt(v.fallback.down_since) : "?"}`);
     if (v.routed_to_fallback_last_hour) parts.push(`${v.routed_to_fallback_last_hour} answered by the fallback in the last hour`);
     if (v.primary.queue || v.fallback.queue) parts.push(`working on ${v.primary.queue} + ${v.fallback.queue}`);

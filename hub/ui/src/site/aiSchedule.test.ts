@@ -9,8 +9,8 @@ const eff = (over: Partial<AiEffective>): AiEffective => ({ mode: "soc", outside
 
 describe("the effective state, in the Site's time zone", () => {
   test("on / limited until the next change", () => {
-    expect(effectiveLine(eff({ qwen: "limited", reason: "disarmed_schedule", until: NOON + 6 * 3600 }), CHI, NOON)).toBe("Qwen: limited until 18:00");
-    expect(effectiveLine(eff({ until: NOON + 18 * 3600 }), CHI, NOON)).toBe("Qwen: on until 06:00");
+    expect(effectiveLine(eff({ qwen: "limited", reason: "disarmed_schedule", until: NOON + 6 * 3600 }), CHI, NOON)).toBe("Otso: limited until 18:00");
+    expect(effectiveLine(eff({ until: NOON + 18 * 3600 }), CHI, NOON)).toBe("Otso: on until 06:00");
   });
   test("further away: the weekday, then the date", () => {
     expect(untilText(NOON + 30 * 3600, CHI, NOON)).toBe("Tue 18:00");
@@ -18,9 +18,9 @@ describe("the effective state, in the Site's time zone", () => {
     expect(untilText(NOON + 3600, "Not/AZone", NOON)).toMatch(/^\d\d:\d\d$/);   // an unknown zone falls back to the browser's
   });
   test("full time, never armed, armed around the clock", () => {
-    expect(effectiveLine(eff({ mode: "full", reason: "full_time" }), CHI, NOON)).toBe("Qwen: on (full time)");
-    expect(effectiveLine(eff({ qwen: "limited", reason: "unmonitored" }), CHI, NOON)).toMatch(/^Qwen: limited \(the Site isn't monitored/);
-    expect(effectiveLine(eff({ reason: "always" }), CHI, NOON)).toBe("Qwen: on (SOC hours around the clock)");
+    expect(effectiveLine(eff({ mode: "full", reason: "full_time" }), CHI, NOON)).toBe("Otso: on (full time)");
+    expect(effectiveLine(eff({ qwen: "limited", reason: "unmonitored" }), CHI, NOON)).toMatch(/^Otso: limited \(the Site isn't monitored/);
+    expect(effectiveLine(eff({ reason: "always" }), CHI, NOON)).toBe("Otso: on (SOC hours around the clock)");
   });
 });
 

@@ -141,7 +141,7 @@ export function FleetActionsPage({ org }: { org: Org }) {
         <label className="muted small" htmlFor="fleet-instruction">Instruction</label>
         <div className="actions-input">
           <textarea id="fleet-instruction" ref={box} rows={2} value={text} maxLength={500}
-            placeholder={'e.g. "Quiet alerts at Main Street for 2 hours" or "Move the gate camera from Ironsight to Qwenbot"'}
+            placeholder={'e.g. "Quiet alerts at Main Street for 2 hours" or "Move the gate camera from Ironsight to Dock Server"'}
             onChange={(e) => { setText(e.target.value); setNotInstruction(false); }}
             onKeyDown={(e) => { if (instructionKey({ key: e.key, shiftKey: e.shiftKey, isComposing: e.nativeEvent.isComposing }) === "plan") { e.preventDefault(); void doPlan(); } }} />
           <button onClick={() => void doPlan()} disabled={planning || !text.trim()}>{planning ? "Planning…" : "Plan"}</button>

@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "@site/ui";
 import { type Org, type Usage, api } from "../api";
+import { aiModelLabel } from "../aiName";
 
 export function SharedAiBox({ org, canEdit }: { org: Org; canEdit: boolean }) {
   const [u, setU] = useState<Usage | null>(null);
@@ -13,7 +14,7 @@ export function SharedAiBox({ org, canEdit }: { org: Org; canEdit: boolean }) {
       <h3>Shared AI &amp; relay</h3>
       <p className="muted small">
         Live video relay (TURN): {u.turn ? "configured" : "not configured on this hub — remote live view needs it"}.
-        Shared model: {u.configured ? u.model : "not configured on this hub"}
+        Shared model: {u.configured ? aiModelLabel(u.model) : "not configured on this hub"}
         {u.configured && u.provider.kind === "site" && <> — served by the GPU at <b>{u.provider.site_name || u.provider.site_id}</b> through its tunnel ({u.provider.online ? "online" : "offline: servers fall back to their local model"})</>}
         {u.configured && u.provider.kind === "url" && <> — served by the hub's own model server</>}.
       </p>

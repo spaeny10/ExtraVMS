@@ -273,7 +273,7 @@ export function TalkdownPanel({ speakers, site = api, cameraId, deter = true, on
         <input ref={fileRef} type="file" hidden accept={types.join(",")} onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; sendFile(f); }} />
         {tts && cameraId && (
           <button type="button" className="talk-act" disabled={busy || cooling || warn.stage === "looking" || !tg.length} onClick={describe}
-            title="Qwen looks at this camera now and suggests how to address the person; you check the text before anything plays">
+            title="Otso looks at this camera now and suggests how to address the person; you check the text before anything plays">
             <Icon name="eye" size={18} /> <span>AI Describe &amp; warn</span>
           </button>
         )}

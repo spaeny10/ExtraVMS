@@ -3,7 +3,7 @@ import { api, type RetentionPolicy, type RetentionPreview, type RetentionStats }
 
 const KEEP_LABELS: [keyof RetentionPolicy["keep"], string, string][] = [
   ["person", "People", "Verified person events"],
-  ["qwen_analyzed", "Qwen-analyzed events", "Anything with a synopsis (threat level raises its priority)"],
+  ["qwen_analyzed", "Otso-analyzed events", "Anything with a synopsis (threat level raises its priority)"],
   ["rule_events", "Camera rule events", "Intrusion, line crossing, loitering, tamper… (see topics)"],
   ["feedback", "Events you gave feedback on", "Ratings, verdicts, corrections, saved chat notes"],
   ["vehicles_in_detect_zones", "Vehicles in detect-only areas", "Only when the camera has 'detect only' zones"],

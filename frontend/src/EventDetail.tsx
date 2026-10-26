@@ -11,6 +11,7 @@ import { StatusBadge, eventLabel, placeholder, rejectedReason } from "./Events";
 import { useNav } from "./nav";
 import { ReadPlate } from "./PlateRead";
 import { Icon, confirmDialog, toast, useIsPhone } from "./ui";
+import { aiModelLabel } from "./aiName";
 
 const REASONS = ["Wrong object", "Missed detail", "Made something up", "Threat too high", "Threat too low", "Too vague"];
 const VERDICTS: [Verdict, string][] = [["correct", "Correct detection"], ["false_alarm", "False alarm"], ["wrong_class", "Wrong class"]];
@@ -199,7 +200,7 @@ function JourneySection({ e, site, cameraName, onShow, onOpenTimeline }: {
         <button className="ghost small" onClick={() => onOpenTimeline(j.events.map((m) => ({ id: m.id, cam: m.camera_id, start: m.start_ts, end: m.end_ts ?? m.start_ts })))}
           title="Play the whole journey on the Timeline with these cameras side by side">⏱ Open journey on Timeline</button>
       </div>
-      <p>{j.synopsis ?? <span className="muted">{j.dirty ? "Qwen will describe the whole journey shortly…" : "No journey description."}</span>}</p>
+      <p>{j.synopsis ?? <span className="muted">{j.dirty ? "Otso will describe the whole journey shortly…" : "No journey description."}</span>}</p>
       <ol className="journey-list">
         {j.events.map((m) => {
           const link = linkInto(m.id);
@@ -319,7 +320,7 @@ function WeaponCheckLine({ check, original }: { check: WeaponCheck; original?: S
   const { label, cls } = weaponCheckText(check);
   return (
     <div className={`d-line weapon-line ${cls}`} title="The description mentioned a weapon, so every person in the clip was looked at again at full camera resolution before the event was rated">
-      <strong>Weapon check:</strong> {label}. <span className="muted small">{check.reason}{check.model ? ` · ${check.model}` : ""}</span>
+      <strong>Weapon check:</strong> {label}. <span className="muted small">{check.reason}{check.model ? ` · ${aiModelLabel(check.model)}` : ""}</span>
       {original?.summary ? (
         <div className="muted small">Before the check, the description said: {original.summary} <em>(threat: {original.threat_level})</em></div>
       ) : null}
@@ -380,9 +381,9 @@ function Details({ e, site, setE, notes, onUnsave, seek }: {
             {!s && !editing && <button className="ghost small" onClick={() => setEditing(true)}>Write one</button>}
             {canGenerate && !editing && (
               <button className="ghost small" disabled={e.synopsis_pending} onClick={async () => {
-                if (e.corrected_at && !await confirmDialog("Replace your corrected synopsis?", { message: "Qwen will write a new one; your correction is lost.", confirmLabel: "Regenerate", danger: true })) return;
-                await site.generateSynopsis(e.id); toast.info("Qwen is writing a new synopsis…"); site.event(e.id).then(setE);
-              }}>{e.synopsis_pending ? "Qwen is writing…" : s ? "Regenerate" : "Generate with Qwen"}</button>
+                if (e.corrected_at && !await confirmDialog("Replace your corrected synopsis?", { message: "Otso will write a new one; your correction is lost.", confirmLabel: "Regenerate", danger: true })) return;
+                await site.generateSynopsis(e.id); toast.info("Otso is writing a new synopsis…"); site.event(e.id).then(setE);
+              }}>{e.synopsis_pending ? "Otso is writing…" : s ? "Regenerate" : "Generate with Otso"}</button>
             )}
           </div>
         </div>
@@ -398,7 +399,7 @@ function Details({ e, site, setE, notes, onUnsave, seek }: {
               <div className="d-line" title="Named places the person walked into, in order">📍 {e.areas.map((a) => `${a.name} (+${Math.max(0, Math.round(a.from - e.start_ts))} s)`).join(" → ")}</div>
             ) : null}
             {e.camera_class === "vehicle" && e.status === "verified" ? (
-              <div className="d-line plate-line" title="Read by Qwen from the sharpest full-resolution frames of this vehicle, only when the plate is clearly legible">
+              <div className="d-line plate-line" title="Read by Otso from the sharpest full-resolution frames of this vehicle, only when the plate is clearly legible">
                 🔢 <ReadPlate key={`${e.id}/${e.plate ?? ""}`} id={e.id} plate={e.plate} region={e.plate_region} site={site}
                   onRead={(_r, next) => { if (next) setE(next); }} />
               </div>
@@ -410,7 +411,7 @@ function Details({ e, site, setE, notes, onUnsave, seek }: {
               <div className="d-line rule-broken" title="A site rule from Settings → Cameras → Site rules">🚫 <strong>Site rule:</strong> {e.policy.text}</div>
             ) : null}
             {ppe && ["violation", "compliant", "unclear"].includes(ppe.verdict) ? (
-              <div className={`d-line ${ppe.verdict === "violation" ? "rule-broken" : ""}`} title="PPE zone from Settings → Cameras → Zones. The PPE detector checks the recorded frames; Qwen looks when it is unsure.">
+              <div className={`d-line ${ppe.verdict === "violation" ? "rule-broken" : ""}`} title="PPE zone from Settings → Cameras → Zones. The PPE detector checks the recorded frames; Otso looks when it is unsure.">
                 🦺 <strong>PPE in '{ppe.zone}':</strong> {ppe.verdict === "violation" ? (e.policy?.kind === "ppe" ? e.policy.text : "violation") : ppe.verdict === "compliant" ? "required items worn" : "could not tell"}
                 <span className="muted small"> · {ppeItemsText(ppe.items, ppe.required)}{ppe.marked ? <> · <a href={site.media(e, ppe.marked)} target="_blank" rel="noreferrer">marked frame</a></> : null}</span>
               </div>
@@ -425,17 +426,17 @@ function Details({ e, site, setE, notes, onUnsave, seek }: {
             {tags.length > 0 && <div className="tags">{tags.slice(0, 8).map((t) => <span key={t} className="tag">{t}</span>)}{tags.length > 8 && <span className="tag muted">+{tags.length - 8}</span>}</div>}
             {(activity || s?.objects?.length || s?.model || originals.correction) && (
               <details className="d-more">
-                <summary className="muted small">More from Qwen</summary>
+                <summary className="muted small">More from Otso</summary>
                 {activity && <p className="muted">{activity}</p>}
                 {s?.objects?.length ? (
                   <ul className="plain small">
                     {s.objects.map((o, i) => <li key={i}><strong>{o.type}</strong> — {o.description}</li>)}
                   </ul>
                 ) : null}
-                {s?.model && <p className="muted small model-tag">written by {s.model}</p>}
+                {s?.model && <p className="muted small model-tag">written by {aiModelLabel(s.model)}</p>}
                 {originals.correction && (
                   <div className="original small">
-                    <p className="muted">Qwen's original: {originals.correction.summary} <em>(threat: {originals.correction.threat_level})</em></p>
+                    <p className="muted">Otso's original: {originals.correction.summary} <em>(threat: {originals.correction.threat_level})</em></p>
                     <button className="ghost small" onClick={async () => setE(await site.revertSynopsis(e.id))}>Revert to original</button>
                   </div>
                 )}
@@ -483,8 +484,8 @@ function Details({ e, site, setE, notes, onUnsave, seek }: {
               {ppe && <tr><td>PPE check</td><td>
                 {ppe.error ? `${ppe.verdict}: ${ppe.error}` : <>
                   detector: {ppeItemsText(ppe.detector, ppe.required)}
-                  {ppe.vlm ? <> · Qwen: {ppeItemsText(ppe.vlm, ppe.required)}{ppe.vlm.head ? ` (head: ${ppe.vlm.head})` : ""}</> : " · Qwen not needed"}
-                  {ppe.overruled?.length ? " · Qwen changed the detector's answer" : ""} · {ppe.dwell_s.toFixed(0)} s in zone
+                  {ppe.vlm ? <> · Otso: {ppeItemsText(ppe.vlm, ppe.required)}{ppe.vlm.head ? ` (head: ${ppe.vlm.head})` : ""}</> : " · Otso not needed"}
+                  {ppe.overruled?.length ? " · Otso changed the detector's answer" : ""} · {ppe.dwell_s.toFixed(0)} s in zone
                 </>}
               </td></tr>}
             </tbody>
@@ -590,7 +591,7 @@ function SynopsisEditor({ initial, onSave, onCancel }: { initial: Synopsis; onSa
         <label className="field grow"><span>Threat reason</span><input value={s.threat_reason ?? ""} onChange={(ev) => setS({ ...s, threat_reason: ev.target.value })} /></label>
       </div>
       <label className="field"><span>Tags (comma separated)</span><input value={tags} onChange={(ev) => setTags(ev.target.value)} /></label>
-      <p className="muted small">Your correction replaces the synopsis in the UI and search. Recent corrections from this camera are shown to Qwen as examples for future events.</p>
+      <p className="muted small">Your correction replaces the synopsis in the UI and search. Recent corrections from this camera are shown to Otso as examples for future events.</p>
       <div className="row">
         <button onClick={save} disabled={busy || !s.summary.trim()}>{busy ? "Saving…" : "Save correction"}</button>
         <button className="ghost" onClick={onCancel}>Cancel</button>
@@ -662,7 +663,7 @@ function ChatPanel({ e, site, chat, setChat, playhead, footage, seek, cameraName
       <div className="chat-log">
         {chat.length === 0 && !pending && (
           <div className="muted small">
-            <p>Ask Qwen about this clip. It looks at frames spread across the event, or with <em>focus on current moment</em> at frames around the video's playhead.
+            <p>Ask Otso about this clip. It looks at frames spread across the event, or with <em>focus on current moment</em> at frames around the video's playhead.
               Questions beyond the clip (how many times they came today, where else they went, what happened before) search this server's other events too.</p>
             <div className="chips">
               {SUGGESTIONS.map((s) => <button key={s} className="chip" onClick={() => ask(s)}>{s}</button>)}

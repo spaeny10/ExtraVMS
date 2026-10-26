@@ -189,7 +189,7 @@ def test_remote_only_site_never_touches_local():
             try:
                 run(r.chat_json("synopsis", "sys", "describe", [], SCHEMA))
             except RuntimeError as e:
-                failed = "local Qwen is disabled" in str(e)
+                failed = "local Otso is disabled" in str(e)
             assert failed and not calls
         finally:
             restore()

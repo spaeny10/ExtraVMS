@@ -140,7 +140,7 @@ export function HomeView({ cameras, port, onGo }: { cameras: Camera[]; port: num
   if (h.retention_alert) problems.push("Retention can't hold the continuous window (disk full)");
   for (const a of h.health_alerts ?? []) problems.push(a.text);   // Hailo missing (YOLO on the CPU), verification stalled
   if (!h.yolo_ready && !(h.health_alerts ?? []).some((a) => a.kind === "detector_fallback")) problems.push("YOLO is still loading");
-  if (!h.vlm_ready) problems.push("Qwen is still loading");
+  if (!h.vlm_ready) problems.push("Otso is still loading");
   const healthy = problems.length === 0;
   const usedPct = Math.round((1 - h.disk.free_gb / h.disk.total_gb) * 100);
 
@@ -150,7 +150,7 @@ export function HomeView({ cameras, port, onGo }: { cameras: Camera[]; port: num
         <span className={`dot ${healthy ? "ok" : "bad"}`} />
         {healthy
           ? <span>All {h.cameras.length} cameras recording · {h.disk.free_gb.toLocaleString()} GB free ({usedPct}% used)
-            {h.queues.verify + h.queues.synopsis > 0 && <span className="muted"> · {h.queues.verify} verifying, {h.queues.synopsis} awaiting Qwen</span>}</span>
+            {h.queues.verify + h.queues.synopsis > 0 && <span className="muted"> · {h.queues.verify} verifying, {h.queues.synopsis} awaiting Otso</span>}</span>
           : <span>{problems.join(" · ")}</span>}
         {h.bandwidth && h.cameras.length > 0 && <span className="muted small" title="Video received from the cameras, averaged over 5 minutes">{bandwidthText(h.bandwidth)}</span>}
         <span className="spacer" />
