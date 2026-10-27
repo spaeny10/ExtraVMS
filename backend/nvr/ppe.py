@@ -26,7 +26,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from . import aischedule, snapshots, zones
+from . import aischedule, inference, snapshots, zones
 from .config import ROOT, settings
 
 log = logging.getLogger("nvr.ppe")
@@ -102,6 +102,8 @@ class Detector:
         return self._model is not None or self.weights.exists()
 
     def _load(self):
+        if self._model is None and inference.active():   # the recording host's shared service
+            self._model = inference.RemoteYOLO("ppe")
         if self._model is None:
             from ultralytics import YOLO
             self._model = YOLO(str(self.weights))

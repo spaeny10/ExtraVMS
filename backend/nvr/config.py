@@ -57,6 +57,12 @@ class Settings(BaseSettings):
     yolo_device: str = "cuda:0"             # "cuda:0", "cpu", or "hailo" (Hailo-8 PCIe; yolo_model is then a .hef, see hailo.py)
     hailo_retry_s: float = 600              # on the CPU fallback (Hailo not found / failing): try the Hailo again this often
     gpu_mem_mb: int = 0                     # this server's share of a shared GPU, MB (central instances; gpumem.py); 0 = no cap
+    # The recording host's shared inference service (inferd.py, inference.py): its socket(s), comma-separated
+    # ("/run/axiom-infer/gpu1.sock" or "127.0.0.1:8770"); empty = this server runs its own models (every on-site server)
+    infer_socket: str = ""
+    infer_token: str = ""                   # this instance's token (the host agent writes it; the service's --tokens)
+    infer_timeout_s: float = 60.0           # one call, queueing on the service included
+    infer_retry_s: float = 20.0             # reconnecting before a call gives up (InferUnavailable: the event waits)
     yolo_imgsz: int = 1280
     yolo_conf: float = 0.25
     verify_frames: int = 6                  # frames sampled per event

@@ -2,6 +2,8 @@
 
 Images and text map into the same 512-d space, so "red pickup truck" can be matched against frames that
 never raised an event. Runs in fp16 on the YOLO GPU; call it from Pipeline.gpu so it takes turns with YOLO.
+torch is imported by Clip() only, so DIM and precision_for cost nothing (an instance of the shared inference
+service never loads it: inference.RemoteClip).
 """
 from __future__ import annotations
 
@@ -9,13 +11,12 @@ import threading
 
 import cv2
 import numpy as np
-import torch
 
 from .config import ROOT, settings
 
 MODEL, PRETRAINED = "ViT-B-16", "datacomp_xl_s13b_b90k"
 CACHE_DIR = ROOT / "models" / "open_clip"
-DIM = 512
+DIM = 512   # inferwire.CLIP_DIM
 SIZE = 224
 # CLIP retrieves better with a caption than a bare phrase; the query embedding is the mean of these.
 TEMPLATES = ("a photo of {}.", "a security camera photo of {}.", "{}")
@@ -32,6 +33,8 @@ class Clip:
         if any(CACHE_DIR.glob("models--*/snapshots/*/*")):  # weights already downloaded: don't phone home
             os.environ.setdefault("HF_HUB_OFFLINE", "1")
         import open_clip
+        import torch
+        self.torch = torch
         self.device = device or settings.torch_device
         self.precision = precision_for(self.device)
         self.model, _, _ = open_clip.create_model_and_transforms(
@@ -48,22 +51,24 @@ class Clip:
         rgb = cv2.cvtColor(cv2.resize(bgr, (SIZE, SIZE), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2RGB)
         return ((rgb.astype(np.float32) / 255 - self.mean) / self.std).transpose(2, 0, 1)
 
-    @torch.inference_mode()
     def embed_images(self, images: list[np.ndarray]) -> np.ndarray:
         """BGR images -> (n, 512) float32, L2-normalized."""
         if not images:
             return np.zeros((0, DIM), np.float32)
-        x = torch.from_numpy(np.stack([self._prep(i) for i in images])).to(self.device)
-        if self.precision == "fp16":
-            x = x.half()
-        with self.lock:
-            f = self.model.encode_image(x).float()
-        return torch.nn.functional.normalize(f, dim=-1).cpu().numpy()
+        torch = self.torch
+        with torch.inference_mode():
+            x = torch.from_numpy(np.stack([self._prep(i) for i in images])).to(self.device)
+            if self.precision == "fp16":
+                x = x.half()
+            with self.lock:
+                f = self.model.encode_image(x).float()
+            return torch.nn.functional.normalize(f, dim=-1).cpu().numpy()
 
-    @torch.inference_mode()
     def embed_text(self, text: str) -> np.ndarray:
-        tokens = self.tokenizer([t.format(text.strip()) for t in TEMPLATES]).to(self.device)
-        with self.lock:
-            f = self.model.encode_text(tokens).float()
-        f = torch.nn.functional.normalize(f, dim=-1).mean(0)
-        return torch.nn.functional.normalize(f, dim=0).cpu().numpy()
+        torch = self.torch
+        with torch.inference_mode():
+            tokens = self.tokenizer([t.format(text.strip()) for t in TEMPLATES]).to(self.device)
+            with self.lock:
+                f = self.model.encode_text(tokens).float()
+            f = torch.nn.functional.normalize(f, dim=-1).mean(0)
+            return torch.nn.functional.normalize(f, dim=0).cpu().numpy()

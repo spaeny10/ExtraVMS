@@ -308,7 +308,7 @@ async def narrative_loop(pipeline) -> None:
 
 def _tight_crops(event_id: int, detections: dict) -> list[np.ndarray]:
     """Recover tight person crops from saved keyframe crops (their padding is known from save_keyframes)."""
-    from .reid import person_crop
+    from .reidprep import person_crop
     samples = {s["ts"]: s for s in detections.get("samples", [])}
     out = []
     for k in detections.get("keyframes", []):

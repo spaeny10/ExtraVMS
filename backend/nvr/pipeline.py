@@ -13,7 +13,7 @@ import cv2
 import httpx
 import numpy as np
 
-from . import aischedule, baseline, cells, detector, frames, gpumem, identities, journeys, plate, policy, ppe, retention, vlmroute, weaponcheck, zones, merge
+from . import aischedule, baseline, cells, detector, frames, gpumem, identities, inference, journeys, plate, policy, ppe, retention, vlmroute, weaponcheck, zones, merge
 from . import reverify as reverify_mod
 from . import synopsis as vlm
 from .config import settings
@@ -112,8 +112,7 @@ class Pipeline:
 
     async def get_clip(self):
         if self.clip is None:
-            from .clip import Clip
-            self.clip = await asyncio.get_running_loop().run_in_executor(self.gpu, Clip)
+            self.clip = await asyncio.get_running_loop().run_in_executor(self.gpu, inference.clip_model)
             log.info("CLIP model loaded (footage search, vehicle fingerprints)")
         return self.clip
 
@@ -228,18 +227,26 @@ class Pipeline:
         asyncio.create_task(self.retry_loop(), name="synopsis-retry")
         asyncio.create_task(self.catchup_loop(), name="synopsis-catchup")
         while True:
-            event_id = await self.verify_q.get()
-            try:
-                await self._verify_retrying_oom(event_id)
-            except Exception as e:  # keep the worker alive
-                if gpumem.is_oom(e):
-                    gpumem.note_oom(e)
-                log.exception("verify %s failed", event_id)
-                db.update_event(event_id, status="error", error=f"verify: {e}")
-            row = db.one("SELECT status FROM events WHERE id=?", [event_id])
-            if row and row["status"] in ("verified", "rejected", "error"):
-                self.verify_done += 1
-            self.publish(event_id)
+            await self._verify_one(await self.verify_q.get())
+
+    async def _verify_one(self, event_id: int) -> None:
+        """The verify worker's turn for one event: verified / rejected, an error, or, while the recording host's AI
+        service is down (inference.py), back in the queue a little later: the event waits for it, it didn't fail."""
+        try:
+            await self._verify_retrying_oom(event_id)
+        except inference.InferUnavailable as e:
+            log.warning("verify %s: %s; back in the queue in %.0f s", event_id, e, inference.REQUEUE_S)
+            asyncio.get_running_loop().call_later(inference.REQUEUE_S, self.verify_q.put_nowait, event_id)
+            return
+        except Exception as e:  # keep the worker alive
+            if gpumem.is_oom(e):
+                gpumem.note_oom(e)
+            log.exception("verify %s failed", event_id)
+            db.update_event(event_id, status="error", error=f"verify: {e}")
+        row = db.one("SELECT status FROM events WHERE id=?", [event_id])
+        if row and row["status"] in ("verified", "rejected", "error"):
+            self.verify_done += 1
+        self.publish(event_id)
 
     async def _verify_retrying_oom(self, event_id: int) -> None:
         """_verify, once more after a GPU out-of-memory error: this server reached its share of the GPU (gpumem.py),
@@ -688,9 +695,8 @@ class Pipeline:
     async def _reid_backfill(self) -> None:
         """One-time: re-ID vectors for person events verified before re-ID existed (from their saved crops)."""
         def work():
-            from .reid import ReID
             if self.verifier._reid is None:
-                self.verifier._reid = ReID()
+                self.verifier._reid = inference.reid_model()
             return journeys.backfill(self.verifier._reid)
         try:
             n = await asyncio.get_running_loop().run_in_executor(self.gpu, work)

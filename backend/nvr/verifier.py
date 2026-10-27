@@ -340,6 +340,9 @@ def load_yolo():
         if weights.suffix != ".hef":
             raise ValueError(f"NVR_YOLO_DEVICE=hailo needs a Hailo .hef in NVR_YOLO_MODEL, not {settings.yolo_model}")
         return load_hailo(weights), None
+    from . import inference
+    if inference.active():   # the recording host's shared service (inference.py): no torch here at all
+        return inference.RemoteYOLO("yolo"), "remote"
     from ultralytics import YOLO  # heavy import; keep module import cheap
 
     weights.parent.mkdir(exist_ok=True)
@@ -398,10 +401,11 @@ class Verifier:
 
     def _reid_embedding(self, frames: dict, detections: list) -> list[float] | None:
         """Appearance fingerprint of the verified person (tight crops of YOLO's matched boxes)."""
-        from .reid import ReID, person_crop
+        from .inference import reid_model
+        from .reidprep import person_crop
         try:
             if self._reid is None:
-                self._reid = ReID()
+                self._reid = reid_model()
             crops = [person_crop(frames[d["ts"]], d["match"]["box"]) for d in _largest_matches(detections) if d["ts"] in frames]
             vec = self._reid.embed(crops)
             return vec.tolist() if vec is not None else None

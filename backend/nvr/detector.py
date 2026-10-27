@@ -14,8 +14,9 @@ merge.py and ppe.py call: .names, .predict, .to) and:
 
 health_alerts() is the list /api/system, /api/home and the hub heartbeat carry: `detector_fallback` while the Hailo
 is unavailable and `detector_stalled` when the verify queue has had work for STALL_AFTER_S with no event finished
-(stall_check, a pure function), whatever the cause, and `gpu_memory_full` after a central instance ran out of its
-share of the shared GPU (gpumem.py).
+(stall_check, a pure function), whatever the cause, `gpu_memory_full` after a central instance ran out of its
+share of the shared GPU (gpumem.py) and `inference_unavailable` while its host's shared AI service doesn't answer
+(inference.py).
 """
 from __future__ import annotations
 
@@ -26,7 +27,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from . import gpumem
+from . import gpumem, inference
 
 log = logging.getLogger("nvr.detector")
 
@@ -274,4 +275,7 @@ def health_alerts(pipeline) -> list[dict]:
     oom = gpumem.health_alert()   # a central instance that hit its share of the shared GPU
     if oom:
         out.append(oom)
+    down = inference.health_alert()   # a central instance whose host's shared AI service isn't answering
+    if down:
+        out.append(down)
     return out
