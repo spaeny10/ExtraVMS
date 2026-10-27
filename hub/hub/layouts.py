@@ -5,7 +5,9 @@ Private to the user who saved them, per Site: one list shared by the Site's Live
 saved on either page is picked on both. A layout is {id, name, config, created_at, updated_at}, the shape of a
 server's /api/layouts, so the UI's layout pickers read both alike. `config` is the union of what the two pages keep:
 the Timeline's LayoutConfig ({visible, solo, order}, camera keys "<server>/<camera>" on both pages) plus Live's
-per-camera stream quality, grid columns (null = Auto) and whether the activity column shows. Each page sends only the
+per-camera stream quality, grid columns (null = Auto), whether the activity column shows, and the layout mode with its
+Freeform tile sizes and Focus camera (docs/live-views-spec.md: mode auto|focus|free, spans {key: [w, h]} on a
+12-column grid, focus key). Each page sends only the
 fields it owns; an update merges them into the stored config, so a save on Live keeps the Timeline's solo and a save
 on the Timeline keeps Live's quality, columns and activity column.
 Rows are stored with view "live" (the list began as Live's); the `view` a client names is accepted and ignored.
@@ -14,7 +16,7 @@ Not audited: like a private dashboard, a personal arrangement of cameras changes
 from __future__ import annotations
 
 import time
-from typing import Literal
+from typing import Annotated, Literal
 
 import sqlalchemy as sa
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -26,6 +28,7 @@ STORED_VIEW = "live"      # every row's view: one list per user and Site (an old
 MAX_LAYOUTS = 50          # per user and Site
 MAX_KEYS = 500            # cameras named in one list (a Site's cameras across all its servers)
 KEY_LEN = 120             # "<server id>/<camera id>"
+GRID_COLS = 12            # Freeform: a span is 1-12 columns wide and 1-12 rows tall
 
 
 class LayoutConfig(BaseModel):
@@ -36,6 +39,9 @@ class LayoutConfig(BaseModel):
     quality: dict[str, Literal["sd", "hd"]] | None = None
     cols: int | None = Field(default=None, ge=1, le=4)
     activity: bool | None = None
+    mode: Literal["auto", "focus", "free"] | None = None
+    spans: dict[str, tuple[Annotated[int, Field(ge=1, le=GRID_COLS)], Annotated[int, Field(ge=1, le=GRID_COLS)]]] | None = None
+    focus: str | None = Field(default=None, min_length=1, max_length=KEY_LEN)
 
 
 def clean_config(cfg: dict) -> dict:
@@ -53,12 +59,15 @@ def clean_config(cfg: dict) -> dict:
             if any(not x or len(x) > KEY_LEN for x in keys):
                 raise ValueError(f"{k}: camera keys are 1-{KEY_LEN} characters")
             out[k] = list(dict.fromkeys(keys))   # duplicates would only confuse the order
-    q = out.get("quality")
-    if q is not None:
-        if len(q) > MAX_KEYS:
-            raise ValueError(f"quality: at most {MAX_KEYS} cameras")
-        if any(not k or len(k) > KEY_LEN for k in q):
-            raise ValueError(f"quality: camera keys are 1-{KEY_LEN} characters")
+    for k in ("quality", "spans"):
+        m = out.get(k)
+        if m is not None:
+            if len(m) > MAX_KEYS:
+                raise ValueError(f"{k}: at most {MAX_KEYS} cameras")
+            if any(not x or len(x) > KEY_LEN for x in m):
+                raise ValueError(f"{k}: camera keys are 1-{KEY_LEN} characters")
+    if out.get("spans") is not None:
+        out["spans"] = {x: list(v) for x, v in out["spans"].items()}   # stored and sent as [w, h]
     return out
 
 

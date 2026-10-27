@@ -126,6 +126,8 @@ def test_union_config_cleaned():
     {"cols": 5}, {"cols": 0}, {"quality": {"a/cam1": "4k"}}, {"visible": "a/cam1"}, {"visible": [""]},
     {"order": ["x" * 121]}, {"visible": [f"a/c{i}" for i in range(501)]}, {"quality": {f"a/c{i}": "sd" for i in range(501)}},
     {"activity": "maybe"}, {"solo": ["a/cam1"]}, {"solo": "x" * 121},
+    {"mode": "grid"}, {"spans": {"a/cam1": [13, 4]}}, {"spans": {"a/cam1": [0, 4]}}, {"spans": {"a/cam1": [4]}}, {"spans": {"a/cam1": [4, 4, 4]}},
+    {"spans": {"": [4, 4]}}, {"spans": {f"a/c{i}": [4, 4] for i in range(501)}}, {"spans": ["a/cam1"]}, {"focus": ""}, {"focus": "x" * 121},
 ])
 def test_config_validated(world, config):
     r = world["viewer"].post(f"/api/locations/{world['yard']['id']}/layouts", json={"name": "Bad", "config": config})
@@ -142,6 +144,22 @@ def test_names_and_limits(world, monkeypatch):
     assert r["config"] == {"order": ["a/1", "a/2"]}
     monkeypatch.setattr(layouts, "MAX_LAYOUTS", len(v.get(url).json()))
     assert v.post(url, json={"name": "One too many", "config": {}}).status_code == 422
+
+
+def test_modes_spans_and_focus(world):
+    """Live's layout mode, Freeform sizes and Focus camera are stored as sent ([w, h] lists), and a Timeline save keeps them."""
+    v = world["viewer"]
+    url = f"/api/locations/{world['yard']['id']}/layouts"
+    free = {**LIVE, "mode": "free", "spans": {"a/cam1": [8, 6], "b/cam2": [4, 3]}, "focus": "b/cam2"}
+    r = v.post(url, json={"name": "Freeform", "config": free})
+    assert r.status_code == 200, r.text
+    assert r.json()["config"] == free
+    tl = {"visible": ["a/cam1"], "solo": None, "order": ["a/cam1"]}
+    r = v.put(f"{url}/{r.json()['id']}", json={"name": "Freeform", "config": tl})
+    assert r.json()["config"] == {**free, **tl}
+    assert layouts.clean_config({"mode": None, "spans": None, "focus": None}) == {"mode": None, "spans": None, "focus": None}
+    assert layouts.clean_config({"spans": {"a/1": (12, 1)}}) == {"spans": {"a/1": [12, 1]}}
+    v.delete(f"{url}/{r.json()['id']}")
 
 
 def test_deleted_site_takes_its_layouts(world):

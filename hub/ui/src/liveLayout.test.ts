@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { EMPTY_LAYOUT, type LiveLayout, applyFocus, arrange, coerceLayout, gridCols, gridMove, isDirty, isVisible, layoutCols, layoutIdStorageKey, layoutReducer,
-  layoutStorageKey, parseLayout, shownKeys, streamMode, tileLabel, tileQuality, toSavedConfig, viewSummary, wrapIndex } from "./liveLayout";
+import { EMPTY_LAYOUT, type LiveLayout, applyFocus, arrange, clampSpan, coerceLayout, defaultSpan, focusKey, freeCols, freeRowPx, gridCols, gridMove, isDirty,
+  isVisible, layoutCols, layoutIdStorageKey, layoutReducer, layoutStorageKey, parseLayout, shownKeys, shownSpan, spanAt, streamMode, tileLabel, tileQuality,
+  tileSpan, toSavedConfig, viewSummary, wrapIndex } from "./liveLayout";
 
 describe("gridCols", () => {
   it("is square-ish and at most 4 wide, like the server's LiveView", () => {
@@ -68,12 +69,12 @@ describe("arrange", () => {
 
 describe("parseLayout", () => {
   it("round-trips and tolerates junk", () => {
-    const l: LiveLayout = { visible: ["a/1"], order: ["b/1", "a/1"], quality: { "a/1": "hd" }, cols: 2, activity: false };
+    const l: LiveLayout = { ...EMPTY_LAYOUT, visible: ["a/1"], order: ["b/1", "a/1"], quality: { "a/1": "hd" }, cols: 2, activity: false };
     expect(parseLayout(JSON.stringify(l))).toEqual(l);
     expect(parseLayout(null)).toEqual(EMPTY_LAYOUT);
     expect(parseLayout("{nope")).toEqual(EMPTY_LAYOUT);
     expect(parseLayout(JSON.stringify({ visible: [1], order: "x", quality: { a: "4k", b: "sd" }, cols: 7, activity: "no" })))
-      .toEqual({ visible: null, order: null, quality: { b: "sd" }, cols: null, activity: true });
+      .toEqual({ ...EMPTY_LAYOUT, quality: { b: "sd" } });
   });
   it("an arrangement stored before layouts had columns and the activity column reads as Auto, shown", () => {
     expect(parseLayout(JSON.stringify({ visible: null, order: ["b/1"], quality: {} }))).toEqual({ ...EMPTY_LAYOUT, order: ["b/1"] });
@@ -109,7 +110,7 @@ describe("applyFocus", () => {
 
 describe("named layouts", () => {
   // a saved layout: b/2 then a/1 shown, a/2 hidden, b/2 in HD, 2 columns, no activity column
-  const saved: LiveLayout = { visible: ["b/2", "a/1"], order: ["b/2", "a/1", "a/2", "b/1"], quality: { "b/2": "hd" }, cols: 2, activity: false };
+  const saved: LiveLayout = { ...EMPTY_LAYOUT, visible: ["b/2", "a/1"], order: ["b/2", "a/1", "a/2", "b/1"], quality: { "b/2": "hd" }, cols: 2, activity: false };
 
   it("applied to the Site's cameras: its cameras in its order, new cameras left out, gone ones dropped", () => {
     expect(shownKeys(all, saved)).toEqual(["b/2", "a/1"]);
@@ -122,7 +123,7 @@ describe("named layouts", () => {
   it("saved spelled out: explicit cameras and order of the Site's current cameras, quality only for those", () => {
     const working: LiveLayout = { ...EMPTY_LAYOUT, visible: null, order: ["gone/1", "b/1"], quality: { "a/1": "hd", "gone/1": "hd" }, cols: 3 };
     expect(toSavedConfig(all, working)).toEqual({ visible: ["b/1", "a/1", "a/2", "b/2"], order: ["b/1", "a/1", "a/2", "b/2"], quality: { "a/1": "hd" },
-      cols: 3, activity: true });
+      cols: 3, activity: true, mode: "auto", spans: {}, focus: null });
     // ...so a camera added later doesn't join it
     expect(shownKeys([...all, "c/1"], toSavedConfig(all, working))).not.toContain("c/1");
   });
@@ -157,13 +158,14 @@ describe("named layouts", () => {
   it("shared with the Timeline: its fields are read as Live's defaults and never count as a change", () => {
     // saved on the Timeline: {visible, solo, order} only; Live reads it with SD streams, Auto columns, activity shown
     const fromTimeline = coerceLayout({ visible: ["a/1", "b/1"], solo: "b/1", order: ["b/1", "a/1"] });
-    expect(fromTimeline).toEqual({ visible: ["a/1", "b/1"], order: ["b/1", "a/1"], quality: {}, cols: null, activity: true });
+    expect(fromTimeline).toEqual({ ...EMPTY_LAYOUT, visible: ["a/1", "b/1"], order: ["b/1", "a/1"] });
     expect(shownKeys(all, fromTimeline)).toEqual(["b/1", "a/1"]);
     expect(isDirty(all, layoutReducer(EMPTY_LAYOUT, { type: "load", layout: fromTimeline }), fromTimeline)).toBe(false);
     // a Live layout the Timeline has since soloed a camera in: the solo isn't Live's, so the grid is unchanged
     expect(isDirty(all, saved, coerceLayout({ ...saved, solo: "a/1" }))).toBe(false);
     // and Live saves only its own fields (the hub keeps the solo beside them)
-    expect(Object.keys(toSavedConfig(all, coerceLayout({ ...saved, solo: "a/1" }))).sort()).toEqual(["activity", "cols", "order", "quality", "visible"]);
+    expect(Object.keys(toSavedConfig(all, coerceLayout({ ...saved, solo: "a/1" }))).sort())
+      .toEqual(["activity", "cols", "focus", "mode", "order", "quality", "spans", "visible"]);
   });
 
   it("load replaces the arrangement; cols and activity", () => {
@@ -247,5 +249,82 @@ describe("gridMove", () => {
     expect(gridMove(1, "ArrowDown", 1, 3)).toBe(2);
     expect(gridMove(0, "ArrowDown", 0, 3)).toBe(1);
     expect(gridMove(0, "ArrowRight", 3, 0)).toBeNull();
+  });
+});
+
+describe("modes: Freeform sizes and Focus", () => {
+  const free: LiveLayout = { ...EMPTY_LAYOUT, mode: "free", spans: { "a/1": [8, 6], "gone/1": [2, 2] } };
+
+  it("mode, span, resetSpans and focus actions; a no-op returns the same layout", () => {
+    expect(layoutReducer(EMPTY_LAYOUT, { type: "mode", mode: "auto" })).toBe(EMPTY_LAYOUT);
+    expect(layoutReducer(EMPTY_LAYOUT, { type: "mode", mode: "focus" }).mode).toBe("focus");
+    expect(layoutReducer(free, { type: "span", key: "a/2", span: [6, 4] }).spans["a/2"]).toEqual([6, 4]);
+    // clamped to the grid, whole cells
+    expect(layoutReducer(free, { type: "span", key: "a/2", span: [20, 0.4] }).spans["a/2"]).toEqual([12, 1]);
+    expect(layoutReducer(free, { type: "span", key: "a/1", span: [8, 6] })).toBe(free);
+    expect(layoutReducer(free, { type: "span", key: "a/1", span: null }).spans).toEqual({ "gone/1": [2, 2] });
+    expect(layoutReducer(free, { type: "span", key: "b/1", span: null })).toBe(free);
+    expect(layoutReducer(free, { type: "resetSpans" }).spans).toEqual({});
+    expect(layoutReducer(EMPTY_LAYOUT, { type: "resetSpans" })).toBe(EMPTY_LAYOUT);
+    expect(layoutReducer(EMPTY_LAYOUT, { type: "focus", key: "b/1" }).focus).toBe("b/1");
+  });
+
+  it("default size: what the tile has in Grid mode", () => {
+    expect(defaultSpan(EMPTY_LAYOUT, 9)).toEqual([4, 4]);
+    expect(defaultSpan(EMPTY_LAYOUT, 1)).toEqual([12, 12]);
+    expect(defaultSpan({ ...EMPTY_LAYOUT, cols: 2 }, 9)).toEqual([6, 6]);
+    expect(tileSpan(free, "a/1", 9)).toEqual([8, 6]);
+    expect(tileSpan(free, "a/2", 9)).toEqual([4, 4]);
+    expect(clampSpan([0, 99])).toEqual([1, 12]);
+  });
+
+  it("narrow grids step down to 6 columns; spans halve, at least 2 wide, keeping their shape", () => {
+    expect([0, 600, 899, 900, 1400].map(freeCols)).toEqual([12, 6, 6, 12, 12]);
+    expect(shownSpan([8, 6], 12)).toEqual([8, 6]);
+    expect(shownSpan([8, 6], 6)).toEqual([4, 3]);
+    expect(shownSpan([12, 12], 6)).toEqual([6, 6]);
+    expect(shownSpan([2, 2], 6)).toEqual([2, 2]);
+    expect(shownSpan([1, 3], 6)).toEqual([2, 6]);
+  });
+
+  it("row height: a column's width at 16:9; a corner dragged snaps to whole cells", () => {
+    // 1200 px, 12 columns, 8 px gaps: columns of 92.67 px, rows of 52.125 px
+    expect(freeRowPx(1200, 12, 8)).toBeCloseTo(52.125);
+    const col = (1200 - 88) / 12, row = col * 9 / 16;
+    // a 4x4 tile is 4 columns + 3 gaps wide: dragged there it stays 4x4
+    expect(spanAt(4 * col + 24, 4 * row + 24, col, row, 8)).toEqual([4, 4]);
+    expect(spanAt(4.6 * col + 24, 2.2 * row, col, row, 8)).toEqual([5, 2]);
+    expect(spanAt(-50, -50, col, row, 8)).toEqual([1, 1]);
+    expect(spanAt(99999, 99999, col, row, 8, 6)).toEqual([6, 12]);
+  });
+
+  it("Focus mode's camera: the pick while shown, else the first", () => {
+    expect(focusKey(all, EMPTY_LAYOUT)).toBe("a/1");
+    expect(focusKey(all, { ...EMPTY_LAYOUT, focus: "b/1" })).toBe("b/1");
+    expect(focusKey(["a/1"], { ...EMPTY_LAYOUT, focus: "b/1" })).toBe("a/1");
+    expect(focusKey([], EMPTY_LAYOUT)).toBe(null);
+  });
+
+  it("dirty: mode, the shown tiles' sizes, and the large camera in Focus mode only", () => {
+    expect(isDirty(all, free, free)).toBe(false);
+    expect(isDirty(all, { ...free, mode: "focus" }, free)).toBe(true);
+    expect(isDirty(all, layoutReducer(free, { type: "span", key: "b/2", span: [3, 3] }), free)).toBe(true);
+    // a size kept for a camera the Site no longer has, or a hidden one, doesn't show
+    expect(isDirty(all, { ...free, spans: { "a/1": [8, 6] } }, free)).toBe(false);
+    expect(isDirty(all, { ...free, focus: "b/1" }, free)).toBe(false);
+    const focus: LiveLayout = { ...EMPTY_LAYOUT, mode: "focus" };
+    expect(isDirty(all, { ...focus, focus: "b/1" }, focus)).toBe(true);
+    // naming the camera that is large anyway is no change
+    expect(isDirty(all, { ...focus, focus: "a/1" }, focus)).toBe(false);
+  });
+
+  it("read tolerantly, saved for the Site's cameras only", () => {
+    expect(coerceLayout({ mode: "free", spans: { "a/1": [8, 6], "a/2": [13, 1], "b/1": [4], "b/2": ["4", 4] }, focus: "a/2" }))
+      .toEqual({ ...EMPTY_LAYOUT, mode: "free", spans: { "a/1": [8, 6] }, focus: "a/2" });
+    expect(coerceLayout({ mode: "grid", spans: [1, 2], focus: 3 })).toEqual(EMPTY_LAYOUT);
+    const s = toSavedConfig(all, { ...free, focus: "gone/1" });
+    expect(s.spans).toEqual({ "a/1": [8, 6] });
+    expect(s.focus).toBe(null);
+    expect(parseLayout(JSON.stringify(free))).toEqual({ ...free, spans: { "a/1": [8, 6], "gone/1": [2, 2] } });
   });
 });

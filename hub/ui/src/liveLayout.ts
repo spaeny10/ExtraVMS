@@ -11,6 +11,10 @@
  * The Site's Timeline lists the same layouts: a layout carries its {visible, solo, order} too, and each page reads and
  * saves only its own fields (Live never sends solo; the hub keeps it), so the Timeline's fields never count as a change.
  * Picking a named layout loads it into the working arrangement; the picker marks it changed (isDirty) until saved.
+ *
+ * Three ways to lay the tiles out (docs/live-views-spec.md, "Layout modes"; the spec's field names, so Views can take
+ * them over): Grid ("auto": equal tiles, `cols` wide), Focus (one large camera beside or above a strip of the rest) and
+ * Freeform (each tile sized in columns and rows of a 12-column grid, flowing in the layout's order).
  */
 
 export type Quality = "sd" | "hd";
@@ -24,8 +28,19 @@ export type QualityMode = Quality | "auto";
  * The names follow the Timeline's LayoutConfig {visible, solo, order}; a saved Live layout stores this shape.
  * The working arrangement is stored in localStorage under `siteLive.<siteId>`.
  */
-export type LiveLayout = { visible: string[] | null; order: string[] | null; quality: Record<string, Quality>; cols: number | null; activity: boolean };
-export const EMPTY_LAYOUT: LiveLayout = { visible: null, order: null, quality: {}, cols: null, activity: true };
+export type LiveMode = "auto" | "focus" | "free";
+export const LIVE_MODES: readonly LiveMode[] = ["auto", "focus", "free"];
+/** a Freeform tile's size: [columns of the 12-column grid, rows]; a row is a column's width at 16:9, so [4, 4] is a 16:9 box */
+export type Span = [number, number];
+/**
+ * `mode`: how the tiles are laid out (above). `spans`: Freeform sizes the viewer set; a tile without one gets
+ * defaultSpan. `focus`: Focus mode's large camera (null, or a camera not shown: the first shown).
+ */
+export type LiveLayout = {
+  visible: string[] | null; order: string[] | null; quality: Record<string, Quality>; cols: number | null; activity: boolean;
+  mode: LiveMode; spans: Record<string, Span>; focus: string | null;
+};
+export const EMPTY_LAYOUT: LiveLayout = { visible: null, order: null, quality: {}, cols: null, activity: true, mode: "auto", spans: {}, focus: null };
 export const layoutStorageKey = (siteId: string) => `siteLive.${siteId}`;
 /** the named layout picked for a Site (0 = "All cameras") */
 export const layoutIdStorageKey = (siteId: string) => `siteLive.${siteId}.layoutId`;
@@ -64,6 +79,57 @@ export function shownKeys(all: string[], layout: LiveLayout): string[] {
 /** Columns for n tiles: the layout's fixed count, or Auto. */
 export const layoutCols = (layout: LiveLayout, n: number) => layout.cols ?? gridCols(n);
 
+// ---------------------------------------------------------------- Freeform and Focus
+
+/** Freeform's grid: 12 columns, a row a column's width at 16:9 */
+export const GRID_COLS = 12;
+export const ROW_ASPECT = 9 / 16;
+/** a Freeform grid narrower than this (a laptop with the activity column, a tablet) steps down to 6 columns */
+export const FREE_NARROW_PX = 900;
+/** on the 6-column grid a tile is at least this many columns wide (a third of the width): one column was a postage stamp */
+const NARROW_MIN_W = 2;
+
+export const clampSpan = ([w, h]: Span): Span => [Math.min(GRID_COLS, Math.max(1, Math.round(w))), Math.min(GRID_COLS, Math.max(1, Math.round(h)))];
+
+/** A Freeform tile without a size of its own: the size it has in Grid mode (`cols` wide), so switching starts from what was on screen. */
+export function defaultSpan(layout: LiveLayout, n: number): Span {
+  const w = GRID_COLS / layoutCols(layout, n);
+  return [w, w];
+}
+
+/** A tile's Freeform size as stored or defaulted, on the full 12-column grid. */
+export const tileSpan = (layout: LiveLayout, key: string, n: number): Span => layout.spans[key] ?? defaultSpan(layout, n);
+
+/** Columns the Freeform grid uses at this width (FREE_NARROW_PX). */
+export const freeCols = (gridPx: number) => (gridPx > 0 && gridPx < FREE_NARROW_PX ? GRID_COLS / 2 : GRID_COLS);
+
+/**
+ * A 12-column span as drawn on a grid of `cols` columns: halved on the 6-column grid (the same share of the width),
+ * at least NARROW_MIN_W wide there, and as many rows as keep the tile's shape. On 12 columns, as stored.
+ */
+export function shownSpan([w, h]: Span, cols: number): Span {
+  if (cols >= GRID_COLS) return [w, h];
+  const nw = Math.min(cols, Math.max(NARROW_MIN_W, Math.ceil(w / 2)));
+  return [nw, Math.max(1, Math.round((h * nw) / w))];
+}
+
+/** Freeform's row height in px for a grid `gridPx` wide with `cols` columns and `gap` px between them. */
+export const freeRowPx = (gridPx: number, cols: number, gap: number) => Math.max(1, ((gridPx - gap * (cols - 1)) / cols) * ROW_ASPECT);
+
+/**
+ * The span a tile's corner dragged to (x, y) px from the tile's top-left gives: whole columns and rows, the nearest
+ * cell edge, clamped to the grid.
+ */
+export function spanAt(x: number, y: number, colPx: number, rowPx: number, gap: number, cols = GRID_COLS): Span {
+  const w = Math.round((x + gap) / (colPx + gap));
+  const h = Math.round((y + gap) / (rowPx + gap));
+  return [Math.min(cols, Math.max(1, w)), Math.min(GRID_COLS, Math.max(1, h))];
+}
+
+/** Focus mode's large camera among the shown ones: the layout's pick while it shows, else the first. */
+export const focusKey = (shown: string[], layout: LiveLayout): string | null =>
+  layout.focus && shown.includes(layout.focus) ? layout.focus : shown[0] ?? null;
+
 export type LayoutAction =
   | { type: "toggle"; key: string; all: string[] }
   /** "auto" forgets the tile's pick */
@@ -75,6 +141,13 @@ export type LayoutAction =
   | { type: "drop"; key: string; onto: string; all: string[] }
   | { type: "cols"; cols: number | null }
   | { type: "activity"; on: boolean }
+  | { type: "mode"; mode: LiveMode }
+  /** a Freeform tile's size (clamped to the grid); null = back to the default */
+  | { type: "span"; key: string; span: Span | null }
+  /** every Freeform tile back to the default size */
+  | { type: "resetSpans" }
+  /** Focus mode's large camera */
+  | { type: "focus"; key: string }
   /** replace the arrangement (a named layout picked, or reverted to) */
   | { type: "load"; layout: LiveLayout }
   | { type: "reset" };
@@ -122,6 +195,21 @@ export function layoutReducer(layout: LiveLayout, a: LayoutAction): LiveLayout {
       return layout.cols === a.cols ? layout : { ...layout, cols: a.cols };
     case "activity":
       return layout.activity === a.on ? layout : { ...layout, activity: a.on };
+    case "mode":
+      return layout.mode === a.mode ? layout : { ...layout, mode: a.mode };
+    case "span": {
+      const was = layout.spans[a.key];
+      const next = a.span && clampSpan(a.span);
+      if (was?.[0] === next?.[0] && was?.[1] === next?.[1]) return layout;
+      const spans = { ...layout.spans };
+      if (next) spans[a.key] = next;
+      else delete spans[a.key];
+      return { ...layout, spans };
+    }
+    case "resetSpans":
+      return Object.keys(layout.spans).length ? { ...layout, spans: {} } : layout;
+    case "focus":
+      return layout.focus === a.key ? layout : { ...layout, focus: a.key };
     case "load":
       return a.layout;
     case "reset":
@@ -137,17 +225,21 @@ export function layoutReducer(layout: LiveLayout, a: LayoutAction): LiveLayout {
 export function toSavedConfig(all: string[], layout: LiveLayout): LiveLayout {
   const known = new Set(all);
   const quality = Object.fromEntries(Object.entries(layout.quality).filter(([k]) => known.has(k)));
-  return { visible: shownKeys(all, layout), order: arrange(all, layout), quality, cols: layout.cols, activity: layout.activity };
+  const spans = Object.fromEntries(Object.entries(layout.spans).filter(([k]) => known.has(k)));
+  return { visible: shownKeys(all, layout), order: arrange(all, layout), quality, cols: layout.cols, activity: layout.activity,
+    mode: layout.mode, spans, focus: layout.focus && known.has(layout.focus) ? layout.focus : null };
 }
 
 /**
  * What the viewer sees under a layout, as a comparable string: the shown cameras in order, their streams, the
- * columns and (unless `withActivity` is false) the activity column. The order of hidden cameras doesn't show, so it
- * doesn't count; neither do cameras the Site no longer has.
+ * columns, the mode, the shown cameras' Freeform sizes, Focus mode's large camera and (unless `withActivity` is false)
+ * the activity column. The order of hidden cameras doesn't show, so it doesn't count; neither do cameras the Site no
+ * longer has, nor which camera is large outside Focus mode.
  */
 function signature(all: string[], layout: LiveLayout, withActivity: boolean) {
   const shown = shownKeys(all, layout);
-  return JSON.stringify({ shown, quality: shown.map((k) => tileQuality(layout, k)), cols: layout.cols, activity: withActivity ? layout.activity : null });
+  return JSON.stringify({ shown, quality: shown.map((k) => tileQuality(layout, k)), cols: layout.cols, activity: withActivity ? layout.activity : null,
+    mode: layout.mode, spans: shown.map((k) => layout.spans[k] ?? null), focus: layout.mode === "focus" ? focusKey(shown, layout) : null });
 }
 
 /**
@@ -167,8 +259,15 @@ export function coerceLayout(raw: unknown): LiveLayout {
   const quality: Record<string, Quality> = {};
   if (v.quality && typeof v.quality === "object") for (const [k, q] of Object.entries(v.quality)) if (q === "sd" || q === "hd") quality[k] = q;
   const cols = typeof v.cols === "number" && (COLUMN_CHOICES as readonly number[]).includes(v.cols) ? v.cols : null;
-  return { visible: strings(v.visible), order: strings(v.order), quality, cols, activity: v.activity !== false };
+  const mode = LIVE_MODES.includes(v.mode as LiveMode) ? (v.mode as LiveMode) : "auto";
+  const spans: Record<string, Span> = {};
+  if (v.spans && typeof v.spans === "object" && !Array.isArray(v.spans)) {
+    for (const [k, x] of Object.entries(v.spans)) if (Array.isArray(x) && x.length === 2 && x.every(spanPart)) spans[k] = [x[0], x[1]];
+  }
+  return { visible: strings(v.visible), order: strings(v.order), quality, cols, activity: v.activity !== false, mode, spans,
+    focus: typeof v.focus === "string" && v.focus ? v.focus : null };
 }
+const spanPart = (n: unknown): n is number => typeof n === "number" && Number.isInteger(n) && n >= 1 && n <= GRID_COLS;
 
 export function parseLayout(raw: string | null): LiveLayout {
   if (!raw) return EMPTY_LAYOUT;
@@ -181,7 +280,8 @@ export function loadLayout(siteId: string): LiveLayout {
 
 export function saveLayout(siteId: string, layout: LiveLayout) {
   try {
-    const empty = layout.visible === null && layout.order === null && Object.keys(layout.quality).length === 0 && layout.cols === null && layout.activity;
+    const empty = layout.visible === null && layout.order === null && Object.keys(layout.quality).length === 0 && layout.cols === null && layout.activity
+      && layout.mode === "auto" && Object.keys(layout.spans).length === 0 && layout.focus === null;
     if (empty) localStorage.removeItem(layoutStorageKey(siteId));
     else localStorage.setItem(layoutStorageKey(siteId), JSON.stringify(layout));
   } catch { /* private mode: the layout just isn't remembered */ }
