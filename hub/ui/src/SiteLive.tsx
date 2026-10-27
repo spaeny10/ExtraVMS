@@ -19,8 +19,13 @@
  * Layouts, as on the Timeline: "All cameras" or a named layout saved on the hub (per user and Site, spanning its
  * servers: hub/hub/layouts.py), with Save (shown while the grid differs from it) and, in the View menu, Save as new /
  * Rename / Delete / Revert. A
- * layout holds which cameras show and in what order, their streams, the grid's columns and the activity column. Tiles
- * reorder by dragging the ⠿ grip in their bar (desktop); the phone picks a layout only. The logic is liveLayout.ts.
+ * layout holds which cameras show and in what order, their streams, the grid's columns, the activity column and how
+ * the tiles are laid out (View › Layout): Grid (equal tiles), Focus (one large camera, the rest in a strip beside it on
+ * a wide window or under it on a narrow one; a click on a strip tile makes it the large one) or Freeform (each tile
+ * its own size on a 12-column grid, 6 columns on a narrow one). Every mode is one CSS grid over the same tiles, so a
+ * change of mode or of the large camera moves tiles without reconnecting them. Tiles reorder by dragging the ⠿ grip
+ * in their bar (desktop); the phone picks a layout only, one camera at a time whatever its mode. The logic is
+ * liveLayout.ts.
  *
  * Streams: a tile is on Auto unless the viewer picked SD or HD for it (on the tile, All SD / All HD, or a saved layout
  * holding a pick): Auto goes HD on a large or expanded tile with a clean link, two at a time (LiveQuality.tsx), and
@@ -70,9 +75,9 @@ import { useDirect, useDirectVersion } from "./direct";
 import { makeHubSource, mediaApi, siteApi } from "./hubSource";
 import { talkByCamera } from "./site/cameraGroups";
 import { TabToolsSlot } from "./tabTools";
-import { COLUMN_CHOICES, EMPTY_LAYOUT, type LayoutAction, type LiveFocus, type LiveLayout, type QualityMode, applyFocus, arrange, coerceLayout, gridMove, isDirty,
-  isVisible, layoutCols, layoutReducer, loadActivityPref, loadLayout, loadLayoutId, saveActivityPref, saveLayout, saveLayoutId, tileLabel, tileQuality,
-  toSavedConfig, viewSummary, wrapIndex } from "./liveLayout";
+import { COLUMN_CHOICES, EMPTY_LAYOUT, type LayoutAction, type LiveFocus, type LiveLayout, type LiveMode, type QualityMode, applyFocus, arrange, coerceLayout,
+  focusKey, freeCols, freeRowPx, gridMove, isDirty, isVisible, layoutCols, layoutReducer, loadActivityPref, loadLayout, loadLayoutId, saveActivityPref, saveLayout,
+  saveLayoutId, shownSpan, tileLabel, tileQuality, tileSpan, toSavedConfig, viewSummary, wrapIndex } from "./liveLayout";
 
 /** live: full camera record from the server · loading: server online, cameras not fetched yet · unreachable: the
  *  server is online at the hub but its camera list failed (busy tunnel, restarting) · offline: the server is offline */
@@ -207,7 +212,9 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
     picture: () => (expandedNow() ? gridRef.current!.querySelector("video") : null),
     stage: () => (expandedNow() ? layoutRef.current?.querySelector<HTMLElement>(".live-main") : null),
   });
-  const fit = useExpandFit(gridRef, !isPhone && !!expanded && shown.some((t) => t.key === expanded), fs.on, fs.rotated);
+  const expandedShown = !!expanded && shown.some((t) => t.key === expanded);
+  const fit = useExpandFit(gridRef, !isPhone && (expandedShown || layout.mode === "focus"), fs.on, fs.rotated);
+  const gridBox = useGridBox(gridRef, !isPhone && tiles.length > 0);
   // keyboard: the tile in the Tab order, and the one to focus once the grid has re-rendered (after expand / collapse)
   const [tabKey, setTabKey] = useState<string | null>(null);
   const refocus = useRef<string | null>(null);
@@ -271,6 +278,10 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
 
   const focused = expanded ? shown.find((t) => t.key === expanded) : undefined;
   const grid = focused ? [focused] : shown;
+  // how the tiles are laid out: an expanded camera alone, else the layout's mode (one tile: as Grid)
+  const mode: LiveMode | null = focused ? null : grid.length > 1 ? layout.mode : "auto";
+  const placed = placeTiles(mode, grid.map((t) => t.key), layout, gridBox);
+  const bigKey = placed.big;
   const draggable = !compact && grid.length > 1;
   const liveKeys = shown.filter((t) => t.state === "live").map((t) => t.key);
   // the tab row's right side (or, without a Site page around, its own row): Layout, Save while changed, Activity, View
@@ -296,7 +307,10 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
     const key = (e.target as HTMLElement).dataset?.liveKey;
     if (!key || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
     if (e.key === "Enter") {
-      if (!focused) { e.preventDefault(); showTile(key, key); }
+      e.preventDefault();
+      // Focus mode: a strip tile becomes the large one; the large one (or any other mode's tile) expands
+      if (bigKey && key !== bigKey) dispatch({ type: "focus", key });
+      else if (!focused) showTile(key, key);
       return;
     }
     const keys = grid.map((t) => t.key);
@@ -321,21 +335,34 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
             </button>
           )}
           {fs.debugView}
-          <div ref={gridRef} onKeyDown={onGridKey} className={`live-grid ${focused ? "expanded" : layoutCols(layout, grid.length) === 1 ? "one" : ""}`}
+          <div ref={gridRef} onKeyDown={onGridKey}
+            className={`live-grid ${focused ? "expanded" : mode === "auto" && layoutCols(layout, grid.length) === 1 ? "one" : ""} ${placed.className}`}
             style={{ gridTemplateColumns: `repeat(${focused ? 1 : layoutCols(layout, grid.length)}, minmax(0, 1fr))`,
+              ...placed.style,
               // a lone tile fits the window (styles.css .live-grid.one): the hub's header, tabs and toolbar above it
               // (in fullscreen there is no chrome above it)
               ...({ "--live-chrome": fs.on ? "24px" : "260px" } as React.CSSProperties),
-              // an expanded tile on Auto goes HD (unless its HD can't play here): size the box for that
-              ...(focused && fit ? { "--expand-h": `${fit}px`, "--expand-ar": q(focused.key) === "sd" ? 4 / 3 : 2592 / 1520 } as React.CSSProperties : {}) }}>
-            {grid.map((t) => (
-              <SiteTile key={t.key} t={t} {...tileProps} focused={!!focused} tab={t.key === tabbable} onCellFocus={() => setTabKey(t.key)}
-                drag={draggable ? { onGrip: (e) => drag.start(t.key, tileLabel(t.server.name, t.name, multi), e), dragging: drag.dragKey === t.key,
-                  dropTarget: drag.dropKey === t.key } : undefined}
-                extra={<button type="button" className="ghost small icon-act" onClick={() => showTile(focused ? null : t.key, t.key)}
-                  aria-label={focused ? "Back to the grid" : "Expand"} title={focused ? "Back to the grid" : "Expand this camera"}>
-                  <Icon name={focused ? "grid" : "expand"} size={16} /></button>} />
-            ))}
+              // an expanded tile (or Focus mode's large one) on Auto goes HD (unless its HD can't play here): size the box
+              // for that; Focus's strip under the large camera keeps a row of the strip on screen
+              ...((focused ?? bigKey) && fit ? {
+                "--expand-h": `${placed.stripBelow ? Math.max(200, fit - STRIP_PEEK_PX) : fit}px`,
+                "--expand-ar": q(focused?.key ?? bigKey!) === "sd" ? 4 / 3 : 2592 / 1520 } as React.CSSProperties : {}) }}>
+            {grid.map((t) => {
+              const big = t.key === bigKey;
+              const strip = !!bigKey && !big;
+              return (
+                <SiteTile key={t.key} t={t} {...tileProps} focused={!!focused} big={big} style={placed.cell(t.key)} tab={t.key === tabbable}
+                  onCellFocus={() => setTabKey(t.key)} onPick={strip ? () => dispatch({ type: "focus", key: t.key }) : undefined}
+                  drag={draggable ? { onGrip: (e) => drag.start(t.key, tileLabel(t.server.name, t.name, multi), e), dragging: drag.dragKey === t.key,
+                    dropTarget: drag.dropKey === t.key } : undefined}
+                  extra={strip
+                    ? <button type="button" className="ghost small icon-act" onClick={() => dispatch({ type: "focus", key: t.key })}
+                      aria-label="Make this the large camera" title="Make this the large camera (or click its picture)"><Icon name="expand" size={16} /></button>
+                    : <button type="button" className="ghost small icon-act" onClick={() => showTile(focused ? null : t.key, t.key)}
+                      aria-label={focused ? "Back to the grid" : "Expand"} title={focused ? "Back to the grid" : "Expand this camera"}>
+                      <Icon name={focused ? "grid" : "expand"} size={16} /></button>} />
+              );
+            })}
             {grid.length === 0 && <div className="empty">Every camera is hidden. Show some under View › Cameras, or Reset there.</div>}
           </div>
           {drag.ghost && <div className="drag-ghost" style={{ left: drag.ghost.x, top: drag.ghost.y }}>{drag.ghost.name}</div>}
@@ -509,13 +536,24 @@ function ViewMenu({ tiles, layout, liveKeys, multi, dispatch, dirty, onRevert, n
                 title="Full-resolution main stream (a camera whose HD this browser can't play stays on SD)">All HD</button>
             </div>
           </div>
-          <label className="pop-sec">
-            <span className="pop-h">Columns</span>
-            <select className="site-live-cols" value={layout.cols ?? 0} onChange={(e) => dispatch({ type: "cols", cols: Number(e.target.value) || null })}>
-              <option value={0}>Auto columns</option>
-              {COLUMN_CHOICES.map((n) => <option key={n} value={n}>{n} column{n > 1 ? "s" : ""}</option>)}
-            </select>
-          </label>
+          <div className="pop-sec">
+            <span className="pop-h">Layout</span>
+            <div className="segmented" role="group" aria-label="How the cameras are laid out">
+              {MODE_CHOICES.map(([m, text, title]) => (
+                <button key={m} className={layout.mode === m ? "active" : ""} aria-pressed={layout.mode === m} onClick={() => dispatch({ type: "mode", mode: m })}
+                  title={title}>{text}</button>
+              ))}
+            </div>
+          </div>
+          {layout.mode === "auto" && (
+            <label className="pop-sec">
+              <span className="pop-h">Columns</span>
+              <select className="site-live-cols" value={layout.cols ?? 0} onChange={(e) => dispatch({ type: "cols", cols: Number(e.target.value) || null })}>
+                <option value={0}>Auto columns</option>
+                {COLUMN_CHOICES.map((n) => <option key={n} value={n}>{n} column{n > 1 ? "s" : ""}</option>)}
+              </select>
+            </label>
+          )}
           <div className="pop-sec pop-col">
             <button className={`pop-disclose ${v.filtered ? "filtered" : ""}`} aria-expanded={camsOpen} onClick={() => setCamsOpen(!camsOpen)}
               title="Choose which cameras show and in what order">
@@ -529,6 +567,12 @@ function ViewMenu({ tiles, layout, liveKeys, multi, dispatch, dirty, onRevert, n
     </div>
   );
 }
+
+const MODE_CHOICES: [LiveMode, string, string][] = [
+  ["auto", "Grid", "Equal tiles in columns"],
+  ["focus", "Focus", "One large camera, the rest in a strip beside or under it: click a strip camera to make it the large one"],
+  ["free", "Freeform", "Each camera its own size: Edit tiles in the toolbar to resize and reorder"],
+];
 
 /** The View menu's Layout part: Save as new, Rename, Delete (a picked layout), and Revert while the grid differs. */
 function LayoutActions({ named, dirty, onRevert, current, then }: {
@@ -729,6 +773,81 @@ function useSiteActivity(site: Site, servers: Server[], source: DashboardSource,
   return { recent, pool, regionKeys, regionMap, offline, focusKey };
 }
 
+/** the grid's gap (styles.css .live-grid): Freeform's row height counts it */
+const LIVE_GAP_PX = 8;
+/** Focus mode with the strip under the large camera: room kept on screen for a row of the strip */
+const STRIP_PEEK_PX = 170;
+/** Focus mode: the strip goes beside the large camera in a landscape window (at least this much wider than tall)
+ *  whose grid is at least this wide; under it otherwise */
+const STRIP_SIDE_MIN_PX = 760;
+const STRIP_SIDE_ASPECT = 1.3;
+
+type GridBox = { w: number; viewW: number; viewH: number };
+type Placement = {
+  className: string;
+  style: React.CSSProperties;
+  /** each tile's cell (undefined: auto-placed) */
+  cell: (key: string) => React.CSSProperties | undefined;
+  /** Focus mode's large camera */
+  big: string | null;
+  stripBelow: boolean;
+};
+
+/**
+ * Where each tile goes in the grid's one CSS grid (the tiles stay in layout order in the DOM, so nothing remounts):
+ * Grid lets the columns place them; Focus pins the large camera to the first column (spanning the strip's rows plus a
+ * last row that takes up its extra height, so the strip doesn't spread out) or the first row; Freeform gives each tile
+ * its span on the 12- (or 6-) column grid, rows a column's width at 16:9, gaps filled in order (dense).
+ */
+function placeTiles(mode: LiveMode | null, keys: string[], layout: LiveLayout, box: GridBox): Placement {
+  const none: Placement = { className: "", style: {}, cell: () => undefined, big: null, stripBelow: false };
+  if (mode === "focus") {
+    const big = focusKey(keys, layout);
+    const n = keys.length;
+    if (box.w >= STRIP_SIDE_MIN_PX && box.viewW >= box.viewH * STRIP_SIDE_ASPECT) {
+      return { className: "focus-mode strip-side", big, stripBelow: false,
+        style: { gridTemplateColumns: "minmax(0, 1fr) clamp(180px, 22%, 320px)", gridTemplateRows: `repeat(${n - 1}, auto) minmax(0, 1fr)` },
+        cell: (k) => (k === big ? { gridColumn: "1", gridRow: `1 / span ${n}` } : { gridColumn: "2" }) };
+    }
+    return { className: "focus-mode strip-below", big, stripBelow: true,
+      style: { gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))" },
+      cell: (k) => (k === big ? { gridColumn: "1 / -1", gridRow: "1" } : undefined) };
+  }
+  if (mode === "free") {
+    const cols = freeCols(box.w);
+    const n = keys.length;
+    return { ...none, className: `free ${cols < 12 ? "free-narrow" : ""}`,
+      style: { gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`, gridAutoFlow: "row dense",
+        // not measured yet (the first render): rows size to the tiles for that one frame
+        ...(box.w ? { gridAutoRows: `${freeRowPx(box.w, cols, LIVE_GAP_PX)}px` } : {}) },
+      cell: (k) => {
+        const [w, h] = shownSpan(tileSpan(layout, k, n), cols);
+        return { gridColumn: `span ${w}`, gridRow: `span ${h}` };
+      } };
+  }
+  return none;
+}
+
+/** The grid's width and the window's size: measured at once (a ResizeObserver reports nothing in a hidden tab),
+ *  then on every resize of either. */
+function useGridBox(grid: React.RefObject<HTMLDivElement | null>, on: boolean): GridBox {
+  const [box, setBox] = useState<GridBox>({ w: 0, viewW: 0, viewH: 0 });
+  useLayoutEffect(() => {
+    const el = grid.current;
+    if (!on || !el) return;
+    const measure = () => {
+      const next = { w: el.clientWidth, viewW: window.innerWidth, viewH: window.innerHeight };
+      setBox((b) => (b.w === next.w && b.viewW === next.viewW && b.viewH === next.viewH ? b : next));
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    const ro = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    ro?.observe(el);
+    return () => { window.removeEventListener("resize", measure); ro?.disconnect(); };
+  }, [grid, on]);
+  return box;
+}
+
 /** Expand: the height left for the one picture below the grid's top edge, so the expanded camera (picture plus its
  *  name bar) fits the window instead of growing with the page width past the bottom of the screen. */
 const EXPAND_BAR_PX = 56;   // the tile's name bar and the gap under it
@@ -866,10 +985,17 @@ const STATE_TEXT: Record<Exclude<TileState, "live">, string> = { offline: "Serve
 /** A grid tile's part in a drag (useTileDrag): its grip, and whether it is the one dragged or the one under the pointer. */
 type TileDrag = { onGrip: (e: React.PointerEvent) => void; dragging: boolean; dropTarget: boolean };
 
-function SiteTile({ t, source, multi, q, dispatch, activeOf, talkOf, deter, extra, phone, onSwipe, drag, focused = false, tab, onCellFocus }: TileCommon & {
+function SiteTile({ t, source, multi, q, dispatch, activeOf, talkOf, deter, extra, phone, onSwipe, drag, focused = false, big = false, style, onPick, tab,
+  onCellFocus }: TileCommon & {
   t: Tile; extra?: React.ReactNode; phone?: boolean; onSwipe?: (dir: -1 | 1) => void; drag?: TileDrag;
   /** the tile is the expanded one */
   focused?: boolean;
+  /** Focus mode's large camera: Auto may pick HD whatever its width, as for an expanded tile */
+  big?: boolean;
+  /** the cell's place in the grid (Focus mode, Freeform: placeTiles) */
+  style?: React.CSSProperties;
+  /** Focus mode's strip: a click on the picture makes this the large camera */
+  onPick?: () => void;
   /** keyboard (the desktop grid): true = the tile in the Tab order, false = reached with the arrows; absent = not focusable */
   tab?: boolean;
   onCellFocus?: () => void;
@@ -894,14 +1020,20 @@ function SiteTile({ t, source, multi, q, dispatch, activeOf, talkOf, deter, extr
   const active = activeOf(t.key);
   const grip = drag && <span className="sync-grip" title="Drag to reorder" onPointerDown={drag.onGrip}>⠿</span>;
   return (
-    <div ref={box} className={`site-live-cell ${focused ? "focused" : ""} ${drag?.dragging ? "dragging" : ""} ${drag?.dropTarget ? "drop-target" : ""}`} data-live-key={t.key}
+    <div ref={box} className={`site-live-cell ${focused ? "focused" : ""} ${big ? "big" : ""} ${onPick ? "pickable" : ""} ${drag?.dragging ? "dragging" : ""} ${drag?.dropTarget ? "drop-target" : ""}`}
+      data-live-key={t.key} style={style}
       tabIndex={tab === undefined ? undefined : tab ? 0 : -1} role={tab === undefined ? undefined : "group"}
-      aria-label={tab === undefined ? undefined : `${label}${t.state === "live" ? (active ? `, ${active.camera_class} event in progress` : "") : `, ${STATE_TEXT[t.state]}`}${focused ? ", expanded" : ""}`}
-      onFocus={onCellFocus ? (e) => { if (e.target === e.currentTarget) onCellFocus(); } : undefined}>
+      aria-label={tab === undefined ? undefined : `${label}${t.state === "live" ? (active ? `, ${active.camera_class} event in progress` : "") : `, ${STATE_TEXT[t.state]}`}${focused ? ", expanded" : big ? ", large" : ""}`}
+      onFocus={onCellFocus ? (e) => { if (e.target === e.currentTarget) onCellFocus(); } : undefined}
+      // the picture only, and not while it paints a region or steers PTZ (their clicks are the tool's)
+      onClick={onPick ? (e) => {
+        const el = e.target as HTMLElement;
+        if (el.closest(".player") && !el.closest("button, a, input, select, textarea, .tile.painting, .tile.ptz")) onPick();
+      } : undefined}>
       {playing && t.cam ? (
         // the tidy bar: the name (full in its tooltip) and a status dot; the quality badge and the actions show on
         // hover or keyboard focus on a desktop, always on a touch screen (hub.css .tile-acts)
-        <LiveTile c={t.cam} quality={mode} onQuality={pick} focused={focused} port={source.port} iceServers={ice} site={site} regionKey={t.key} phone={phone} poster={hubStill}
+        <LiveTile c={t.cam} quality={mode} onQuality={pick} focused={focused || big} port={source.port} iceServers={ice} site={site} regionKey={t.key} phone={phone} poster={hubStill}
           onSwipe={onSwipe} active={active} speakers={talkOf(t)} deter={deter} tidy actions={extra} bar={() => <>
             {grip}
             <span className={`dot ${t.streamReady ? "ok" : "bad"}`} title={t.streamReady ? "Recording" : "No stream"} />
