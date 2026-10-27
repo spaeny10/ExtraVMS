@@ -1923,5 +1923,97 @@ class Tls(unittest.TestCase):
         self.assertTrue(ctx.check_hostname)
 
 
+class GpuShare(unittest.TestCase):
+    """An instance's share of its GPU (gpu_mem_mb -> NVR_GPU_MEM_MB, nvr/gpumem.py): set at create, changed with a
+    recreate, reported in capacity and the work numbers."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.exe = FakeExec()
+        self.host = make_host(self.tmp, self.exe)
+        self.host.host_cpus = lambda: 80
+
+    def rec(self, iid="acme-gate"):
+        return self.host.load()["instances"][iid]
+
+    def run_env(self):
+        """The NVR_GPU_MEM_MB of the last docker run (None when it had none)."""
+        run = self.exe.cmds("docker run")[-1]
+        envs = [run[i + 1] for i, a in enumerate(run) if a == "-e"]
+        vals = [e.split("=", 1)[1] for e in envs if e.startswith("NVR_GPU_MEM_MB=")]
+        return int(vals[0]) if vals else None
+
+    def test_create_takes_the_default_or_the_hubs_share(self):
+        self.host.create_instance(dict(VPN_ARGS))
+        self.assertEqual(self.rec()["gpu_mem_mb"], 4096)                 # host.json gpu_mem_mb
+        self.assertEqual(self.run_env(), 4096)
+        run = self.exe.cmds("docker run")[-1]
+        self.assertLess(run.index("--env-file"), run.index("-e"))         # -e after the env file: it wins
+        self.host.create_instance(dict(FWD_ARGS))                         # CPU instance: no share
+        self.assertIsNone(self.rec("beta-yard")["gpu_mem_mb"])
+        self.assertIsNone(self.run_env())
+        self.host.create_instance({**VPN_ARGS, "id": "c-big", "location": "loc_c", "subnet": "10.20.9.0/24", "gpu_mem_mb": 6144})
+        self.assertEqual((self.rec("c-big")["gpu_mem_mb"], self.run_env()), (6144, 6144))
+        self.host.create_instance({**VPN_ARGS, "id": "c-free", "location": "loc_d", "subnet": "10.20.10.0/24", "gpu_mem_mb": 0})
+        self.assertIsNone(self.rec("c-free")["gpu_mem_mb"])               # 0 = no cap
+        self.assertIsNone(self.run_env())
+        for bad in (512, 60000, "lots"):
+            with self.assertRaises(ah.OpError) as e:
+                self.host.create_instance({**VPN_ARGS, "id": "c-bad", "location": "loc_e", "subnet": "10.20.11.0/24", "gpu_mem_mb": bad})
+            self.assertIn("gpu_mem_mb", str(e.exception))
+
+    def test_set_resources_recreates_with_the_new_share(self):
+        self.host.create_instance(dict(VPN_ARGS))
+        n = len(self.exe.calls)
+        out = self.host.set_resources({"id": "acme-gate", "gpu_mem_mb": 6144})
+        self.assertIn("GPU share 4096 -> 6144 MB", out["detail"])
+        self.assertIn("recreated", out["detail"])
+        self.assertEqual(self.exe.cmds("docker update"), [])             # an env var: live update can't change it
+        self.assertEqual(len([c for c in self.exe.calls[n:] if c[:2] == ["docker", "rm"]]), 1)
+        self.assertEqual((self.rec()["gpu_mem_mb"], self.run_env()), (6144, 6144))
+        self.assertIn("unchanged", self.host.set_resources({"id": "acme-gate", "gpu_mem_mb": 6144})["detail"])
+        out = self.host.set_resources({"id": "acme-gate", "gpu_mem_mb": 0})
+        self.assertIn("6144 -> none MB", out["detail"])
+        self.assertIsNone(self.rec()["gpu_mem_mb"])
+        self.assertIsNone(self.run_env())
+        n = len(self.exe.calls)                                           # CPU only: still live
+        self.assertIn("applied live", self.host.set_resources({"id": "acme-gate", "cpus": 6})["detail"])
+        self.assertEqual([c[:2] for c in self.exe.calls[n:]], [["docker", "update"]])
+        self.host.create_instance(dict(FWD_ARGS))
+        with self.assertRaises(ah.OpError) as e:
+            self.host.set_resources({"id": "beta-yard", "gpu_mem_mb": 4096})
+        self.assertIn("has no GPU", str(e.exception))
+
+    def test_image_upgrade_sets_the_share_in_one_recreate(self):
+        self.host.create_instance(dict(VPN_ARGS))
+        reg = self.host.load()
+        reg["instances"]["acme-gate"].pop("gpu_mem_mb")                  # an instance created before shares
+        self.host.save(reg)
+        n = len(self.exe.calls)
+        self.host.restart_instance({"id": "acme-gate", "image": "axiom/instance:abc1234", "gpu_mem_mb": 5120})
+        self.assertEqual(len([c for c in self.exe.calls[n:] if c[:2] == ["docker", "run"]]), 1)
+        self.assertEqual((self.rec()["image"], self.rec()["gpu_mem_mb"], self.run_env()), ("axiom/instance:abc1234", 5120, 5120))
+        n = len(self.exe.calls)
+        self.host.restart_instance({"id": "acme-gate", "gpu_mem_mb": 4096})   # a share alone recreates too
+        self.assertEqual(len([c for c in self.exe.calls[n:] if c[:2] == ["docker", "run"]]), 1)
+        self.assertEqual(self.run_env(), 4096)
+
+    def test_capacity_and_work_report_shares(self):
+        self.host.create_instance(dict(VPN_ARGS))
+        self.host.create_instance({**VPN_ARGS, "id": "c-old", "location": "loc_c", "subnet": "10.20.9.0/24"})
+        reg = self.host.load()
+        reg["instances"]["c-old"]["gpu_mem_mb"] = None                     # running without a share
+        self.host.save(reg)
+        g1 = [g for g in self.host.capacity()["gpus"] if g["index"] == 1][0]
+        self.assertEqual((g1["instances"], g1["shares_mb"], g1["unshared"]), (2, 4096, 1))
+        self.assertEqual(self.host.view(self.rec())["gpu_mem_mb"], 4096)
+        line = json.dumps({"verify_q": 0, "gpu_mem": {"share_mb": 4096, "cap_mb": 3584, "reserved_mb": 1800, "peak_mb": 2900,
+                                                      "oom": 0, "oom_last": None}})
+        self.assertEqual(ah.parse_instance_work(line)["gpu_mem"],
+                         {"share_mb": 4096, "cap_mb": 3584, "reserved_mb": 1800, "peak_mb": 2900, "oom": 0})
+        self.assertIsNone(ah.parse_instance_work(system_line())["gpu_mem"])   # an older image: not reported
+        self.assertIn("'gpu_mem':s.get('gpu_mem')", ah.INSTANCE_WORK)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

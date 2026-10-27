@@ -69,7 +69,13 @@ export type CentralUsage = { id: string; mode: CentralMode; quota_gb: number; us
 /** vpn: SpeedFusion; forward: port forwards on the Site's router; bridge: through an Axiom Bridge at the Site (hub bridges.py). */
 export type CentralMode = "vpn" | "forward" | "bridge";
 /** `instances`: central instances assigned to the GPU for YOLO; `verify_q`: their verify queues summed (agent 0.2.0+). */
-export type HostGpu = { index: number; name: string; mem_total_mb?: number; mem_used_mb?: number; util?: number; instances?: number; verify_q?: number | null };
+export type HostGpu = { index: number; name: string; mem_total_mb?: number; mem_used_mb?: number; util?: number; instances?: number; verify_q?: number | null;
+  /** agent 0.3.3+: the instances' GPU shares on this card (MB) and how many run without one */
+  shares_mb?: number; unshared?: number };
+/** A card instances are placed on (hub hosts.gpu_room): its Sites' shares and the room for another, MB; slots = default shares that fit. */
+export type GpuRoom = { index: number; name: string; total_mb: number; used_mb: number; reserved_mb: number; room_mb: number; slots: number };
+/** An instance's own GPU memory (its /api/system gpu_mem, nvr/gpumem.py), MB: its share, torch's cap, now and peak; out-of-memory errors. */
+export type GpuMemWork = { share_mb?: number | null; cap_mb?: number | null; reserved_mb?: number | null; peak_mb?: number | null; oom?: number | null };
 /**
  * capacity.work (tools/central/PROTOCOL.md): the shared vLLM's /metrics and each instance's /api/system, read beside every
  * heartbeat. `ok` false: this read failed; the numbers are the last good ones, read at `at`. Rates are null until two reads.
@@ -82,7 +88,7 @@ export type VllmWork = {
 export type InstanceWork = {
   ok: boolean; error?: string | null; at?: number | null; gpu?: number | null;
   verify_q?: number | null; synopsis_q?: number | null; yolo_ready?: boolean | null; vlm_ready?: boolean | null; vlm_state?: string | null;
-  yolo_frame_ms?: number | null; verify_rate_per_min?: number | null;
+  yolo_frame_ms?: number | null; verify_rate_per_min?: number | null; gpu_mem?: GpuMemWork | null;
 };
 export type HostWork = { at: number; vllm?: VllmWork; instances?: Record<string, InstanceWork> };
 export type HostCapacity = { cpus?: number; load?: number | number[]; ram_gb?: { total: number; free: number }; gpus?: HostGpu[]; disks?: { path: string; total_gb?: number; free_gb?: number }[]; instances?: number; work?: HostWork };
@@ -110,6 +116,8 @@ export type Host = {
   capacity: HostCapacity | null; notes: string | null; fusionhub: string | null; agent_ip: string | null; instances: number; quota_gb: number; offline_since: number | null;
   /** GB a new instance's quota may take: the largest disk's free space minus what its instances may still grow into. */
   room_gb?: number;
+  /** newer hubs: the cards instances go on, with their Sites' GPU shares and the room for more; gpu_slots = default shares that still fit */
+  gpu_room?: GpuRoom[]; gpu_slots?: number;
   work_history?: WorkSample[]; work_trend?: WorkTrend; queue_alerts?: QueueAlert[];
   /** newer hubs */
   problems?: HostProblem[];
@@ -153,6 +161,8 @@ export type CentralInstance = {
   host_id?: string; host_name?: string | null; host_online?: boolean; gpu?: number | null; gpu_name?: string | null; last_error?: string | null; host_state?: string | null;
   /** Its CPU and memory limits on the host, as last reported (null until a 0.2.0+ agent reports them). */
   cpus?: number | null; mem_gb?: number | null;
+  /** Its GPU share as set (MB; null = no cap or an older agent) and what placement counts for it (its share, else the default or its peak). */
+  gpu_mem_mb?: number | null; gpu_share_mb?: number | null;
   /** Its data area (/data: the database and event media; host agent 0.3.2+, null until reported). instance_quota_gb null:
    *  no quota of its own (XFS / no quota hosts: it shares the recordings' quota), so Change data storage doesn't apply. */
   instance_used_gb?: number | null; instance_quota_gb?: number | null; instance_free_gb?: number | null;
@@ -590,7 +600,7 @@ export const api = {
   /** Storage quota and / or camera limit (null = no limit); hub administrators. */
   updateCentral: (loc: string, ci: string, b: { quota_gb?: number; camera_limit?: number | null }) => req<CentralInstance>(`/api/locations/${loc}/central/${ci}`, json("PATCH", b)),
   /** CPU and / or memory limits: the host recreates the instance's container (~30 s without recording); hub administrators. */
-  setCentralResources: (loc: string, ci: string, b: { cpus?: number; mem_gb?: number }) => req<CentralInstance>(`/api/locations/${loc}/central/${ci}/resources`, json("PUT", b)),
+  setCentralResources: (loc: string, ci: string, b: { cpus?: number; mem_gb?: number; gpu_mem_mb?: number }) => req<CentralInstance>(`/api/locations/${loc}/central/${ci}/resources`, json("PUT", b)),
   /** The quota of the instance's data dataset (database, event media; ZFS hosts, agent 0.3.2+); force = below its use. Hub administrators. */
   setCentralDataQuota: (loc: string, ci: string, b: { quota_gb: number; force?: boolean }) => req<CentralInstance>(`/api/locations/${loc}/central/${ci}/data-quota`, json("PUT", b)),
   /** Replaces the instance's Site networks; the host gets them plus its cameras' own addresses (hub administrators). */

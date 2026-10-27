@@ -22,7 +22,7 @@ import { confirmDialog, promptDialog, toast } from "@site/ui";
 import { type CentralInstance, type CentralMode, type FleetSummary, type Host, type HubSitesOrg, type QwenDays, ago, api, fmtTime, qs } from "../api";
 import { dayShare, monthOf, qwenText, qwenTitle } from "../site/aiSchedule";
 import {
-  allocateFormError, capacityBars, defaultSubnet, fmtGB, nextSiteNumber, parseCameraLimit, seriesMax, sitesWithoutCentral, sparkPath, workRows,
+  allocateFormError, capacityBars, defaultSubnet, fmtGB, gpuRoomText, nextSiteNumber, parseCameraLimit, seriesMax, sitesWithoutCentral, sparkPath, workRows,
 } from "../central";
 import { go, hostHref, navigate } from "../nav";
 import {
@@ -343,6 +343,10 @@ function Bars({ h }: { h: Host }) {
         <span className={`cap-bar ${b.pct >= 90 ? "hot" : b.pct >= 75 ? "warm" : ""}`}><span style={{ width: `${b.pct}%` }} /></span>
         <span className="muted">{b.text}</span>
       </div>))}
+      {/* the cards Sites go on: their GPU shares, and how many more fit (placement refuses a full card) */}
+      {(h.gpu_room ?? []).map((r) => (
+        <p key={`room-${r.index}`} className={`small ${r.slots === 0 ? "warn-text" : "muted"}`} style={{ margin: "2px 0 0" }}>{gpuRoomText(r)}</p>
+      ))}
     </div>
   );
 }

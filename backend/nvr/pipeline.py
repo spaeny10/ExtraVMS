@@ -13,7 +13,7 @@ import cv2
 import httpx
 import numpy as np
 
-from . import aischedule, baseline, cells, detector, frames, identities, journeys, plate, policy, ppe, retention, vlmroute, weaponcheck, zones, merge
+from . import aischedule, baseline, cells, detector, frames, gpumem, identities, journeys, plate, policy, ppe, retention, vlmroute, weaponcheck, zones, merge
 from . import reverify as reverify_mod
 from . import synopsis as vlm
 from .config import settings
@@ -230,14 +230,27 @@ class Pipeline:
         while True:
             event_id = await self.verify_q.get()
             try:
-                await self._verify(event_id)
+                await self._verify_retrying_oom(event_id)
             except Exception as e:  # keep the worker alive
+                if gpumem.is_oom(e):
+                    gpumem.note_oom(e)
                 log.exception("verify %s failed", event_id)
                 db.update_event(event_id, status="error", error=f"verify: {e}")
             row = db.one("SELECT status FROM events WHERE id=?", [event_id])
             if row and row["status"] in ("verified", "rejected", "error"):
                 self.verify_done += 1
             self.publish(event_id)
+
+    async def _verify_retrying_oom(self, event_id: int) -> None:
+        """_verify, once more after a GPU out-of-memory error: this server reached its share of the GPU (gpumem.py),
+        and torch's cache is given back before the retry."""
+        try:
+            await self._verify(event_id)
+        except Exception as e:
+            if not gpumem.is_oom(e):
+                raise
+            gpumem.note_oom(e)
+            await self._verify(event_id)
 
     def check_verify_stall(self, now: float | None = None) -> bool:
         """Verify queue with work and no event finished for detector.STALL_AFTER_S while YOLO claims to be ready:

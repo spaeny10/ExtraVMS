@@ -13,5 +13,6 @@
   "forward_tcp_ports": [],
   "mem_gb": 8,
   "cpus": 4,
+  "gpu_mem_mb": 4096,
   "read_only": true
 }

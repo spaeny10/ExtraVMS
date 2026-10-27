@@ -10,7 +10,7 @@ from . import cameras, db
 
 KINDS = ("offline", "camera_down", "disk", "clock", "detector_fallback", "detector_stalled", "vlm_fallback_active", "event_high", "event_policy", "event_watched",
          "site_link_down", "host_offline", "coverage_budget", "host_queue_growing", "storage_failing", "bridge_offline",
-         "instance_data_full", "db_errors")
+         "instance_data_full", "db_errors", "gpu_memory_full")
 # site_link_down  the server's heartbeat says every camera is unreachable at once (summary.site_link_down): the link to
 #                 the Site (SpeedFusion tunnel, port forwards, the BR1's cellular uplink) is probably down. One alert for
 #                 the server instead of one camera_down per camera; cameras flagged link_down raise no camera_down.
@@ -40,7 +40,9 @@ HUB_KINDS = ("host_offline", "coverage_budget", "host_queue_growing", "instance_
 #   storage_failing    the server's database (or a write probe of its data disk) has failed to write for over a minute:
 #                      events are not being stored (backend nvr/health.py storage_alert). The server still heartbeats
 #                      while its database is dead (a minimal summary), so this reaches the hub.
-HEALTH_KINDS = ("detector_fallback", "detector_stalled", "vlm_fallback_active", "storage_failing")
+#   gpu_memory_full    a central instance ran out of its share of the shared GPU in the last 15 min (backend
+#                      nvr/gpumem.py): events may fail to verify; a larger share (Hosts) or fewer cameras fixes it
+HEALTH_KINDS = ("detector_fallback", "detector_stalled", "vlm_fallback_active", "storage_failing", "gpu_memory_full")
 # Alerts about one site event. Unlike the condition kinds above (offline, disk...), which close when the condition
 # clears and must re-open when it returns, an event happens once: its key is the event id, and the same event is
 # re-published many times (heartbeat attention lists, synopsis, feedback, lock), so it dedupes on any row.
@@ -122,7 +124,7 @@ def on_heartbeat(site: dict, summary: dict, skew_s: float) -> None:
     for kind in HEALTH_KINDS:
         if kind in health:
             a = health[kind]
-            open(site, kind, "", {k: a[k] for k in ("text", "since", "error", "queue") if a.get(k) is not None})
+            open(site, kind, "", {k: a[k] for k in ("text", "since", "error", "queue", "count", "share_mb") if a.get(k) is not None})
         else:
             close(site, kind)
     n = summary.get("db_errors")

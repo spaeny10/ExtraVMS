@@ -3,7 +3,7 @@
  * the bandwidth / storage numbers shown on Site → Servers and Customer → Servers, and the instance's lines on its own
  * server card (Site → Servers). Kept apart from the components so they are unit-tested (central.test.ts).
  */
-import type { CentralInstance, CentralMode, Host, HostCapacity, HubSitesOrg, InstanceWork, Peplink, Server, VllmWork, WorkTrend } from "./api";
+import type { CentralInstance, CentralMode, GpuRoom, Host, HostCapacity, HubSitesOrg, InstanceWork, Peplink, Server, VllmWork, WorkTrend } from "./api";
 
 /** provisioning (the host is creating it) → waiting_enroll (created, not dialed in yet) → running. */
 export const PHASE_LABEL: Record<string, string> = {
@@ -489,11 +489,18 @@ export function instanceWork(hosts: Pick<Host, "id" | "capacity" | "work_trend">
 // ---- CPU / memory of an instance ("Change CPU/memory…"; axiom_host.py set_resources checks the same)
 export const CPUS_RANGE = [1, 64] as const;
 export const MEM_GB_RANGE = [2, 512] as const;
+/** An instance's GPU share in GB (hub hosts.GPU_MEM_MB_RANGE, 1024-49152 MB); 0 = no cap. */
+export const GPU_SHARE_GB_RANGE = [1, 48] as const;
 
 /** The CPU / memory form's checks (blank = keep); hostCpus: the host's CPU count when known. */
-export function resourcesFormError(cpus: string, memGb: string, hostCpus?: number | null): string | null {
-  const c = cpus.trim(), m = memGb.trim();
-  if (!c && !m) return "Enter the CPUs and / or the memory";
+export function resourcesFormError(cpus: string, memGb: string, hostCpus?: number | null, shareGb = ""): string | null {
+  const c = cpus.trim(), m = memGb.trim(), g = shareGb.trim();
+  if (!c && !m && !g) return "Enter the CPUs and / or the memory";
+  if (g) {
+    const n = Number(g);
+    if (!/^\d+(\.\d+)?$/.test(g) || (n !== 0 && (n < GPU_SHARE_GB_RANGE[0] || n > GPU_SHARE_GB_RANGE[1])))
+      return `GPU share: ${GPU_SHARE_GB_RANGE[0]} to ${GPU_SHARE_GB_RANGE[1]} GB, or 0 for no cap`;
+  }
   if (c) {
     const n = Number(c);
     if (!/^\d+(\.\d+)?$/.test(c) || n < CPUS_RANGE[0] || n > CPUS_RANGE[1]) return `CPUs: a number from ${CPUS_RANGE[0]} to ${CPUS_RANGE[1]}`;
@@ -504,6 +511,24 @@ export function resourcesFormError(cpus: string, memGb: string, hostCpus?: numbe
     if (!/^\d+(\.\d+)?$/.test(m) || n < MEM_GB_RANGE[0] || n > MEM_GB_RANGE[1]) return `Memory: ${MEM_GB_RANGE[0]} to ${MEM_GB_RANGE[1]} GB`;
   }
   return null;
+}
+
+const gb = (mb: number) => `${fmtNum(Math.round(mb / 102.4) / 10)} GB`;
+
+/** A card's line under the Hosts bars: "GPU 1 · A10G: 12 GB of 22 GB in Site shares · room for 2 more Sites". */
+export function gpuRoomText(r: GpuRoom): string {
+  const usable = r.reserved_mb + r.room_mb;
+  const more = r.slots === 0 ? "full: no room for another Site" : `room for ${plural(r.slots, "more Site")}`;
+  return `GPU ${r.index} · ${shortGpu(r.name)}: ${gb(r.reserved_mb)} of ${gb(Math.max(usable, r.reserved_mb))} in Site shares · ${more}`;
+}
+
+/** An instance's GPU memory: "4 GB share · peak 2.9 GB" (peak = torch's, from its own report); "" on a CPU instance. */
+export function gpuShareText(c: Pick<CentralInstance, "gpu" | "gpu_mem_mb" | "gpu_share_mb" | "work">): string {
+  if (c.gpu == null) return "";
+  const peak = c.work?.gpu_mem?.peak_mb;
+  const share = c.gpu_mem_mb ? `${gb(c.gpu_mem_mb)} share` : `no cap (counted as ${gb(c.gpu_share_mb ?? 0)})`;
+  const oom = c.work?.gpu_mem?.oom ? ` · ${plural(c.work.gpu_mem.oom, "out-of-memory error")}` : "";
+  return `${share}${peak != null ? ` · peak ${gb(peak)}` : ""}${oom}`;
 }
 
 /** "4 CPUs · 8 GB" ("—" for what is not reported yet). */

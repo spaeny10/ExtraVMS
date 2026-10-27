@@ -1819,6 +1819,7 @@ class CentralIn(BaseModel):
     gpu: int | None = Field(None, ge=0, le=64)           # None = the hub picks (an A10 first, the A40 only if alone)
     name: str | None = Field(None, max_length=120)       # the server's name in the Site; default "Central"
     camera_limit: int | None = Field(None, ge=1, le=hosts.MAX_CAMERA_LIMIT)   # None = no limit (central_cameras.py)
+    gpu_mem_mb: int | None = Field(None, ge=0, le=hosts.GPU_MEM_MB_RANGE[1])   # its GPU share; None = the default, 0 = no cap
 
 
 class CentralPatch(BaseModel):
@@ -1828,9 +1829,11 @@ class CentralPatch(BaseModel):
 
 
 class CentralResources(BaseModel):
-    """Either or both: the instance's CPU limit (docker --cpus) and memory limit in GB; applied live by the host."""
+    """Any of: the instance's CPU limit (docker --cpus) and memory limit in GB (applied live by the host), and its GPU
+    share in MB (0 = no cap; the container is recreated, ~30 s without recording)."""
     cpus: float | None = Field(None, ge=hosts.CPUS_RANGE[0], le=hosts.CPUS_RANGE[1])
     mem_gb: float | None = Field(None, ge=hosts.MEM_GB_RANGE[0], le=hosts.MEM_GB_RANGE[1])
+    gpu_mem_mb: int | None = Field(None, ge=0, le=hosts.GPU_MEM_MB_RANGE[1])
 
 
 class CentralDataQuota(BaseModel):
@@ -1879,7 +1882,7 @@ async def location_central_create(location_id: str, body: CentralIn, u: dict = D
     auth.location_access(u, location_id)
     try:
         ci = await hosts.provision(location_id, body.host_id or None, body.mode, body.subnet, body.public_ip, body.quota_gb, u,
-                                   name=body.name, gpu=body.gpu, camera_limit=body.camera_limit)
+                                   name=body.name, gpu=body.gpu, camera_limit=body.camera_limit, gpu_mem_mb=body.gpu_mem_mb)
     except LookupError as e:
         raise HTTPException(404, str(e))
     except ValueError as e:
@@ -1920,11 +1923,13 @@ async def location_central_resources(location_id: str, ci_id: str, body: Central
     auth.require_super(u)
     _central_of(location_id, ci_id)
     try:
-        await hosts.set_resources(ci_id, body.cpus, body.mem_gb, u)
+        await hosts.set_resources(ci_id, body.cpus, body.mem_gb, u, gpu_mem_mb=body.gpu_mem_mb)
     except LookupError as e:
         raise HTTPException(404, str(e))
     except ValueError as e:
         raise HTTPException(400, str(e))
+    except hosts.Conflict as e:
+        raise HTTPException(409, str(e))
     except hosts.HostError as e:
         raise HTTPException(502, f"{e}: nothing was changed")
     return hosts.instances(db.central_instances.c.id == ci_id)[0]

@@ -9,6 +9,8 @@ export const KIND_LABEL: Record<string, string> = {
   storage_failing: "Storage failing",
   // database writes failed with a storage error ("disk I/O error", "disk is full") in the last 15 minutes
   db_errors: "Database write errors",
+  // a central instance ran out of its share of the shared GPU: events may fail to verify
+  gpu_memory_full: "GPU memory full",
   // an Axiom Bridge at the Site stopped heartbeating: the cameras behind it are not recorded
   bridge_offline: "Bridge offline",
   // hub administrators only: a central recording host stopped heartbeating

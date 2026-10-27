@@ -106,6 +106,8 @@ class Settings(BaseSettings):
     fusionhub_address: str = ""               # SpeedFusion peer for VPN-mode Sites when the host has none of its own
     central_gpu_prefer: str = "A10"           # an instance gets the host GPU whose name has this model (least used first) ...
     central_gpu_avoid: str = "A40"            # ... else the least used GPU that isn't this one (the A40 runs vLLM)
+    central_gpu_mem_mb: int = 4096            # a new instance's share of its GPU, MB (it caps itself there); placement reserves it
+    central_gpu_headroom_mb: int = 1024       # kept free on every card (driver, NVENC playback transcodes) beyond the shares
     central_enroll_ttl_s: int = 86400         # how long an instance's single-use enrollment token stays valid
     host_create_timeout_s: float = 600.0      # create_instance may pull images and set up quotas: minutes
     host_command_timeout_s: float = 120.0     # every other host command

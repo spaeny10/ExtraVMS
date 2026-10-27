@@ -15,8 +15,8 @@ to cameras behind a Site's Axiom Bridge: the agent listens on each instance's ga
     axiom_host.py preflight [--id acme-gate] [--min-free-gb 5] [--json]  # before restarts and redeploys
     axiom_host.py set-camera-network --id acme-gate --subnet 192.168.105.0/24 --public-ip 203.0.113.7 \
         --host cam1.example.net [--clear subnets|public-ips|hosts|all] [--dry-run]
-    axiom_host.py restart-instance --id acme-gate [--recreate] [--image axiom/instance:2026.10.06]
-    axiom_host.py set-resources --id acme-gate --cpus 8 [--mem-gb 16] [--dry-run]
+    axiom_host.py restart-instance --id acme-gate [--recreate] [--image axiom/instance:2026.10.06] [--gpu-mem-mb 4096]
+    axiom_host.py set-resources --id acme-gate --cpus 8 [--mem-gb 16] [--gpu-mem-mb 4096] [--dry-run]
     axiom_host.py set-relay --id acme-gate --port 47000:"Gate RTSP" --port 47001 [--clear] [--dry-run]
     axiom_host.py list | capacity | work | render-firewall | apply-firewall | reconcile | finish-enroll --id ...
     axiom_host.py run --hub wss://hub.axiomvision.ai/host-agent --token-file /etc/axiom/host-token
@@ -51,7 +51,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, wait as futures_wait
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
-VERSION = "0.3.2"
+VERSION = "0.3.3"
 PROTO = 1
 log = logging.getLogger("axiom-host")
 
@@ -86,6 +86,7 @@ DEFAULTS: dict[str, Any] = {
     "fusionhub_network": "10.19.0.0/24",        # FusionHub's LAN side (PEPLINK.md): never a camera network
     "mem_gb": 8,
     "cpus": 4,
+    "gpu_mem_mb": 4096,                         # a new GPU instance's share of its card, MB (NVR_GPU_MEM_MB); 0 = no cap
     "uid_base": 20000,                          # instance uid = uid_base + slot
     "project_base": 70000,                      # XFS project id = project_base + slot
     "instance_dir_quota_gb": 50,                # ZFS mode: quota of each instances/<id> dataset (database, event media)
@@ -735,8 +736,40 @@ INSTANCE_WORK = ("import json,urllib.request as u\n"
                  "q=s.get('queues') or {}\n"
                  "print(json.dumps({'verify_q':q.get('verify'),'synopsis_q':q.get('synopsis'),'yolo_ready':s.get('yolo_ready'),"
                  "'vlm_ready':s.get('vlm_ready'),'vlm_state':s.get('vlm_state'),'yolo_frame_ms':s.get('yolo_frame_ms'),"
+                 "'gpu_mem':s.get('gpu_mem') if isinstance(s.get('gpu_mem'),dict) else None,"
                  "'events':s.get('events') if isinstance(s.get('events'),dict) else None}))\n")
 UNFINISHED = ("open", "pending")   # event statuses still waiting for (or in) verification
+
+
+GPU_MEM_MB_RANGE = (1024, 49152)   # an instance's GPU share (MB); 0 = no cap
+
+
+def gpu_share_arg(v: Any) -> int | None:
+    """A GPU share argument: None / "" = not given, 0 = no cap, else MB within GPU_MEM_MB_RANGE."""
+    if v is None or v == "":
+        return None
+    try:
+        n = int(float(v))
+    except (TypeError, ValueError):
+        raise OpError("gpu_mem_mb must be a whole number of MB (0 = no cap)") from None
+    if n != 0 and not GPU_MEM_MB_RANGE[0] <= n <= GPU_MEM_MB_RANGE[1]:
+        raise OpError(f"gpu_mem_mb must be 0 (no cap) or {GPU_MEM_MB_RANGE[0]}-{GPU_MEM_MB_RANGE[1]} MB")
+    return n
+
+
+def resources_change(old: dict, new: dict) -> str:
+    """"4 -> 8 CPUs, 8 -> 8 GB memory", and ", GPU share 4096 -> 6144 MB" when that changed (none = no cap)."""
+    out = f"{old['cpus']:g} -> {new['cpus']:g} CPUs, {old['mem_gb']:g} -> {new['mem_gb']:g} GB memory"
+    if old.get("gpu_mem_mb") != new.get("gpu_mem_mb"):
+        mb = lambda v: f"{int(v)}" if v else "none"  # noqa: E731
+        out += f", GPU share {mb(old.get('gpu_mem_mb'))} -> {mb(new.get('gpu_mem_mb'))} MB"
+    return out
+
+
+def resources_text(r: dict) -> str:
+    """"4 CPUs, 8 GB memory, GPU share 4096 MB" (the share only on GPU instances that have one)."""
+    out = f"{r['cpus']:g} CPUs, {r['mem_gb']:g} GB memory"
+    return out + (f", GPU share {int(r['gpu_mem_mb'])} MB" if r.get("gpu_mem_mb") else "")
 
 
 def events_done(events: Any) -> int | None:
@@ -762,7 +795,16 @@ def parse_instance_work(out: str) -> dict:
             "yolo_ready": d.get("yolo_ready") if isinstance(d.get("yolo_ready"), bool) else None,
             "vlm_ready": d.get("vlm_ready") if isinstance(d.get("vlm_ready"), bool) else None,
             "vlm_state": str(d["vlm_state"])[:40] if d.get("vlm_state") is not None else None,
-            "yolo_frame_ms": num(d.get("yolo_frame_ms")), "done": events_done(d.get("events"))}
+            "yolo_frame_ms": num(d.get("yolo_frame_ms")), "gpu_mem": gpu_mem_work(d.get("gpu_mem")),
+            "done": events_done(d.get("events"))}
+
+
+def gpu_mem_work(g: Any) -> dict | None:
+    """An instance's /api/system gpu_mem (nvr/gpumem.py): MB of its share, torch's cap, now and peak; OOM count."""
+    if not isinstance(g, dict):
+        return None
+    num = lambda v: v if isinstance(v, (int, float)) and not isinstance(v, bool) else None  # noqa: E731
+    return {k: num(g.get(k)) for k in ("share_mb", "cap_mb", "reserved_mb", "peak_mb", "oom")}
 
 
 def rate_per_min(series: collections.deque, t: float, v: int | None, window_s: float) -> float | None:
@@ -1111,6 +1153,9 @@ class Host:
         hub_url = a.get("hub_url") or self.cfg["hub_url"]
         if urllib.parse.urlsplit(hub_url).scheme not in ("wss", "ws") or not urllib.parse.urlsplit(hub_url).hostname:
             raise OpError("hub_url must be a wss:// URL")
+        gpu_mem = gpu_share_arg(a.get("gpu_mem_mb"))
+        if gpu_mem is None:
+            gpu_mem = gpu_share_arg(self.cfg["gpu_mem_mb"]) or 0
         mem_gb = float(a.get("mem_gb") or self.cfg["mem_gb"])
         cpus = float(a.get("cpus") or self.cfg["cpus"])
         if not (1 <= mem_gb <= 512 and 0.5 <= cpus <= 128):
@@ -1142,7 +1187,8 @@ class Host:
                                   "destroy it or choose another id")
             zfs = {"datasets": datasets, "instance_quota_gb": inst_q}
         return {"id": iid, "location_id": loc, "name": name, "mode": mode, **cams, "host_ips": {}, "relay_ports": [],
-                "quota_gb": quota, "gpu": gpu, "mem_gb": mem_gb, "cpus": cpus, "quota_mode": qm, **zfs,
+                "quota_gb": quota, "gpu": gpu, "gpu_mem_mb": (gpu_mem or None) if gpu is not None else None,
+                "mem_gb": mem_gb, "cpus": cpus, "quota_mode": qm, **zfs,
                 "image": check_image(a.get("image") or self.cfg["image"], self.cfg["image_prefix"]), "hub_url": hub_url,
                 "vlm_url": a.get("vlm_url") or self.cfg["vlm_url"],
                 "vlm_model": a.get("vlm_model") or self.cfg["vlm_model"] or ai.get("AXIOM_VLM_MODEL", ""),
@@ -1185,7 +1231,12 @@ class Host:
                 "--network", self.netname(rec["id"]), "--ip", rec["ip"]]
         for d in c["dns"]:
             argv += ["--dns", d]
-        argv += ["--env-file", str(self.env_path(rec["id"])),
+        argv += ["--env-file", str(self.env_path(rec["id"]))]
+        if rec.get("gpu") is not None and rec.get("gpu_mem_mb"):
+            # its share of the card it shares with other instances (the server caps itself there: nvr/gpumem.py); an
+            # -e wins over the env file, and a recreate (new share) re-reads the registry
+            argv += ["-e", f"NVR_GPU_MEM_MB={int(rec['gpu_mem_mb'])}"]
+        argv += [
                  "--user", f"{uid}:{uid}",
                  "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
                  "--memory", f"{rec['mem_gb']:g}g", "--memory-swap", f"{rec['mem_gb']:g}g", "--cpus", f"{rec['cpus']:g}",
@@ -1520,14 +1571,22 @@ class Host:
                 log.exception("relay listeners not reloaded")
 
     def restart_instance(self, a: dict) -> dict:
+        """docker restart, or (recreate, a new image, a new GPU share) remove and re-run the container. gpu_mem_mb
+        here lets an image upgrade set the share in the same ~30 s gap (set_resources changes it on its own)."""
+        gpu_mem = gpu_share_arg(a.get("gpu_mem_mb"))
         with self.locked():
             reg = self.load()
             rec = self._get(reg, a)
+            if gpu_mem is not None and rec.get("gpu") is None:
+                raise OpError(f"{rec['id']} has no GPU: gpu_mem_mb is a GPU instance's share of its card")
             if a.get("image"):
                 rec["image"] = check_image(a["image"], self.cfg["image_prefix"])
+            if gpu_mem is not None:
+                rec["gpu_mem_mb"] = gpu_mem or None
+            if a.get("image") or gpu_mem is not None:
                 self.save(reg)
         with self._inst_locks[rec["id"]]:
-            if a.get("recreate") or a.get("image"):
+            if a.get("recreate") or a.get("image") or gpu_mem is not None:
                 self.recreate(rec)
                 what = "recreated"
             else:
@@ -1544,10 +1603,11 @@ class Host:
         return os.cpu_count() or 1
 
     def set_resources(self, a: dict) -> dict:
-        """Change an instance's CPU and / or memory limit (docker --cpus, --memory) in the registry and apply them live
-        with `docker update` (no recording gap). Only when that fails is the container recreated with them (~30 s
-        without recording). Either may be left out (kept). If the recreated container does not start, the old limits
-        are restored and the container re-run with them."""
+        """Change an instance's CPU and / or memory limit (docker --cpus, --memory) and / or its GPU share
+        (gpu_mem_mb: NVR_GPU_MEM_MB, 0 = no cap) in the registry. CPU and memory are applied live with `docker update`
+        (no recording gap); a new GPU share, or a live update that fails, recreates the container (~30 s without
+        recording). Any may be left out (kept). If the recreated container does not start, the old values are
+        restored and the container re-run with them."""
         def val(key: str, lo: float, hi: float, what: str) -> float | None:
             v = a.get(key)
             if v is None or v == "":
@@ -1561,30 +1621,34 @@ class Host:
             return f
         cpus = val("cpus", 1, 64, "CPUs")
         mem = val("mem_gb", 2, 512, "GB of memory")
-        if cpus is None and mem is None:
-            raise OpError("give cpus and / or mem_gb")
+        gpu_mem = gpu_share_arg(a.get("gpu_mem_mb"))
+        if cpus is None and mem is None and gpu_mem is None:
+            raise OpError("give cpus and / or mem_gb (and / or gpu_mem_mb)")
         if cpus is not None and cpus > self.host_cpus():
             raise OpError(f"cpus {cpus:g} is more than this host has ({self.host_cpus()})")
         with self.locked():
             reg = self.load()
             rec = self._get(reg, a)
-            old = {"cpus": rec["cpus"], "mem_gb": rec["mem_gb"]}
-            new = {"cpus": old["cpus"] if cpus is None else cpus, "mem_gb": old["mem_gb"] if mem is None else mem}
+            if gpu_mem is not None and rec.get("gpu") is None:
+                raise OpError(f"{rec['id']} has no GPU: gpu_mem_mb is a GPU instance's share of its card")
+            old = {"cpus": rec["cpus"], "mem_gb": rec["mem_gb"], "gpu_mem_mb": rec.get("gpu_mem_mb")}
+            new = {"cpus": old["cpus"] if cpus is None else cpus, "mem_gb": old["mem_gb"] if mem is None else mem,
+                   "gpu_mem_mb": old["gpu_mem_mb"] if gpu_mem is None else (gpu_mem or None)}
             if new == old:
-                return {"detail": f"{rec['id']}: {old['cpus']:g} CPUs, {old['mem_gb']:g} GB memory (unchanged)",
-                        "instance": self.view(rec)} | _plan(self)
+                return {"detail": f"{rec['id']}: {resources_text(old)} (unchanged)", "instance": self.view(rec)} | _plan(self)
             rec.update(new)
             self.save(reg)
+        change = f"{rec['id']}: {resources_change(old, new)}"
         with self._inst_locks[rec["id"]]:   # like restart-instance: the registry lock is not held for the recreate
             # Live first: docker update changes the limits of the running container (no recording gap). A container
-            # that refuses (e.g. memory below what it uses now) or a Docker without it falls back to a recreate.
-            mem = f"{new['mem_gb']:g}g"
-            live = self.exe.run(["docker", "update", "--cpus", f"{new['cpus']:g}", "--memory", mem, "--memory-swap", mem,
-                                 self.cname(rec["id"])], check=False)
-            if live.rc == 0:
-                detail = (f"{rec['id']}: {old['cpus']:g} -> {new['cpus']:g} CPUs, {old['mem_gb']:g} -> {new['mem_gb']:g} GB "
-                          "memory; applied live (no restart)")
-                return {"detail": detail, "instance": self.view(rec)} | _plan(self)
+            # that refuses (e.g. memory below what it uses now) or a Docker without it falls back to a recreate. The
+            # GPU share is an environment variable: only a new container has it.
+            if new["gpu_mem_mb"] == old["gpu_mem_mb"]:
+                mem = f"{new['mem_gb']:g}g"
+                live = self.exe.run(["docker", "update", "--cpus", f"{new['cpus']:g}", "--memory", mem, "--memory-swap", mem,
+                                     self.cname(rec["id"])], check=False)
+                if live.rc == 0:
+                    return {"detail": f"{change}; applied live (no restart)", "instance": self.view(rec)} | _plan(self)
             try:
                 self.recreate(rec)
             except CmdError:
@@ -1597,9 +1661,7 @@ class Host:
                     rec.update(old)
                     self.exe.run(self.docker_run_argv(rec), check=False)
                 raise
-        detail = (f"{rec['id']}: {old['cpus']:g} -> {new['cpus']:g} CPUs, {old['mem_gb']:g} -> {new['mem_gb']:g} GB memory; "
-                  "container recreated")
-        return {"detail": detail, "instance": self.view(rec)} | _plan(self)
+        return {"detail": f"{change}; container recreated", "instance": self.view(rec)} | _plan(self)
 
     def list_instances(self, a: dict | None = None) -> dict:
         reg = self.load()
@@ -1791,6 +1853,7 @@ class Host:
                 "public_ips": rec.get("public_ips", []), "hosts": rec.get("hosts", []),
                 "host_ips": rec.get("host_ips", {}), "quota_mode": rec.get("quota_mode"),
                 "enroll_pending": rec.get("enroll_pending", False), "mem_gb": rec["mem_gb"], "cpus": rec["cpus"],
+                "gpu_mem_mb": rec.get("gpu_mem_mb"),
                 "image": rec["image"], "image_id": (images or {}).get(rec["id"]),
                 "network": rec["net_subnet"], "gateway": rec.get("gateway"),
                 # Axiom Bridge relay: its listen ports on the gateway, and which ones the agent's listeners hold now
@@ -1811,7 +1874,11 @@ class Host:
             ram = {"total": None, "free": None}
         gpus = self.gpus()
         for g in gpus:
-            g["instances"] = sum(1 for r in insts if r.get("gpu") == g["index"])
+            mine = [r for r in insts if r.get("gpu") == g["index"]]
+            g["instances"] = len(mine)
+            # the instances' GPU shares on this card (MB), and how many run without one (no cap)
+            g["shares_mb"] = sum(int(r.get("gpu_mem_mb") or 0) for r in mine)
+            g["unshared"] = sum(1 for r in mine if not r.get("gpu_mem_mb"))
         disks = []
         if self.root.exists():
             mode = self.quota_mode_auto()
@@ -2725,6 +2792,7 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--vlm-model")
     c.add_argument("--mem-gb", type=float)
     c.add_argument("--cpus", type=float)
+    c.add_argument("--gpu-mem-mb", type=int, help="its share of the GPU in MB (default host.json gpu_mem_mb; 0 = no cap)")
     c.add_argument("--image")
     c.add_argument("--quota-mode", choices=QUOTA_MODES, default="auto")
     c.add_argument("--dry-run", action="store_true", help="print the plan (commands, env, firewall); change nothing")
@@ -2768,12 +2836,14 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--id", required=True)
     r.add_argument("--recreate", action="store_true", help="remove and re-run the container (new image/env)")
     r.add_argument("--image")
+    r.add_argument("--gpu-mem-mb", type=int, help="set its GPU share (MB, 0 = no cap) in the same recreate")
     r.add_argument("--dry-run", action="store_true")
 
     sr = sub.add_parser("set-resources", help="change an instance's CPU and / or memory limit and recreate its container")
     sr.add_argument("--id", required=True)
     sr.add_argument("--cpus", type=float, help="CPU limit (docker --cpus), 1-64 and at most the host's CPUs")
     sr.add_argument("--mem-gb", type=float, help="memory limit in GB (docker --memory, no swap), 2-512")
+    sr.add_argument("--gpu-mem-mb", type=int, help="its share of its GPU in MB, 1024-49152 (0 = no cap); recreates it")
     sr.add_argument("--dry-run", action="store_true", help="print the new docker run; change nothing")
 
     rl = sub.add_parser("set-relay", help="replace an instance's Axiom Bridge listen ports (the hub sends them; for repairs)")
@@ -2817,6 +2887,7 @@ def main(argv: list[str] | None = None) -> int:
                     "hosts": [s for v in ns.host or [] for s in v.split(",")],
                     "quota_gb": ns.quota_gb, "gpu": ns.gpu, "enroll_token": token, "hub_url": ns.hub_url,
                     "vlm_url": ns.vlm_url, "vlm_model": ns.vlm_model, "mem_gb": ns.mem_gb, "cpus": ns.cpus,
+                    "gpu_mem_mb": ns.gpu_mem_mb,
                     "image": ns.image, "quota_mode": ns.quota_mode}
             _print(host.create_instance(args))
         elif ns.cmd == "delete-instance":
@@ -2837,9 +2908,10 @@ def main(argv: list[str] | None = None) -> int:
             if fw:
                 _print("\n# dry run: nothing changed. The ruleset this would load:\n" + fw)
         elif ns.cmd == "restart-instance":
-            _print(host.restart_instance({"id": ns.id, "recreate": ns.recreate, "image": ns.image}) | _plan(host))
+            _print(host.restart_instance({"id": ns.id, "recreate": ns.recreate, "image": ns.image,
+                                          "gpu_mem_mb": ns.gpu_mem_mb}) | _plan(host))
         elif ns.cmd == "set-resources":
-            _print(host.set_resources({"id": ns.id, "cpus": ns.cpus, "mem_gb": ns.mem_gb}))
+            _print(host.set_resources({"id": ns.id, "cpus": ns.cpus, "mem_gb": ns.mem_gb, "gpu_mem_mb": ns.gpu_mem_mb}))
         elif ns.cmd == "set-relay":
             if not ns.port and not ns.clear:
                 raise OpError("give --port (repeatable) or --clear")

@@ -9,7 +9,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { confirmDialog, menuKeys, promptDialog, toast, useDismiss } from "@site/ui";
 import { type CentralInstance, type FleetSummary, api } from "../api";
 import {
-  PHASE_LABEL, camerasText, dataText, dataTitle, fmtGB, overLimit, parseCameraLimit, queueText, queueTitle, quotaText, resourcesFormError, resourcesText,
+  PHASE_LABEL, camerasText, dataText, dataTitle, fmtGB, gpuShareText, overLimit, parseCameraLimit, queueText, queueTitle, quotaText, resourcesFormError, resourcesText,
   settling, shortGpu,
 } from "../central";
 import { go, hostHref, settingsHref, siteHref } from "../nav";
@@ -141,7 +141,8 @@ function Row({ c, showHost, ticked, onTick, onChanged, onNetworks, onResources, 
         {c.mode === "vpn" ? `VPN · ${c.subnet ?? "—"}` : c.mode === "bridge" ? "Axiom Bridge" : `Port forward · ${c.public_ip ?? "—"}`}
         {c.camera_network?.pending ? <span className="bad"> · camera addresses not applied yet</span> : null}</td>
       <td className="small" data-label="GPU">{c.gpu != null ? `${c.gpu}${c.gpu_name ? ` · ${shortGpu(c.gpu_name)}` : ""}` : "CPU"}
-        {(c.cpus != null || c.mem_gb != null) && <span className="muted"> · {resourcesText(c.cpus, c.mem_gb)}</span>}</td>
+        {(c.cpus != null || c.mem_gb != null) && <span className="muted"> · {resourcesText(c.cpus, c.mem_gb)}</span>}
+        {c.gpu != null && <div className={c.work?.gpu_mem?.oom ? "warn-text" : "muted"}>{gpuShareText(c)}</div>}</td>
       <td className={`small ${c.problems?.includes("storage") ? "warn-text" : ""}`} data-label="Storage">{quotaText(c.used_gb, c.quota_gb)}</td>
       {/* its data area (database, event media; agent 0.3.2+): "12 GB of 150 GB" */}
       <td className={`small ${c.problems?.includes("data") ? "bad" : ""}`} data-label="Data"
@@ -327,18 +328,22 @@ function BulkDialog({ action, selected, onClose, onDone }: { action: BulkAction;
   );
 }
 
-/** CPU and memory limits of an instance: applied live by its host (docker update), recreated only if that fails. */
+/** CPU and memory limits of an instance: applied live by its host (docker update), recreated only if that fails.
+ *  Its GPU share (GPU instances): a new one always restarts it. */
 function ResourcesDialog({ ci, hostCpus, onClose, onDone }: { ci: CentralInstance; hostCpus: number | null; onClose: () => void; onDone: () => void }) {
   const [cpus, setCpus] = useState(ci.cpus != null ? String(ci.cpus) : "");
   const [mem, setMem] = useState(ci.mem_gb != null ? String(ci.mem_gb) : "");
+  const nowShare = ci.gpu_mem_mb ? Math.round(ci.gpu_mem_mb / 102.4) / 10 : null;
+  const [share, setShare] = useState(nowShare != null ? String(nowShare) : "");
   const [busy, setBusy] = useState(false);
   const site = ci.location_name ?? ci.location_id;
-  const err = resourcesFormError(cpus, mem, hostCpus);
+  const err = resourcesFormError(cpus, mem, hostCpus, share);
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const body: { cpus?: number; mem_gb?: number } = {};
+    const body: { cpus?: number; mem_gb?: number; gpu_mem_mb?: number } = {};
     if (cpus.trim() && Number(cpus) !== ci.cpus) body.cpus = Number(cpus);
     if (mem.trim() && Number(mem) !== ci.mem_gb) body.mem_gb = Number(mem);
+    if (ci.gpu != null && share.trim() && Number(share) !== nowShare) body.gpu_mem_mb = Math.round(Number(share) * 1024);
     if (!Object.keys(body).length) { toast.success("Nothing changed"); onClose(); return; }
     setBusy(true);
     try {
@@ -356,7 +361,11 @@ function ResourcesDialog({ ci, hostCpus, onClose, onDone }: { ci: CentralInstanc
           <input inputMode="decimal" value={cpus} placeholder="e.g. 8" onChange={(e) => setCpus(e.target.value.replace(/[^0-9.]/g, ""))} /></label>
         <label className="field"><span>Memory (GB) <span className="muted small">2-512</span></span>
           <input inputMode="decimal" value={mem} placeholder="e.g. 16" onChange={(e) => setMem(e.target.value.replace(/[^0-9.]/g, ""))} /></label>
-        <p className="small">Applied to the running instance, with no break in recording. Only if the host can't apply them live (for example less memory than the instance uses now) does it restart the instance: about 30 seconds without recording.</p>
+        {ci.gpu != null && (
+          <label className="field"><span>GPU share (GB) <span className="muted small">1-48, 0 = no cap · {gpuShareText(ci)}</span></span>
+            <input inputMode="decimal" value={share} placeholder="e.g. 4" onChange={(e) => setShare(e.target.value.replace(/[^0-9.]/g, ""))} /></label>
+        )}
+        <p className="small">CPUs and memory are applied to the running instance, with no break in recording. Only if the host can't apply them live (for example less memory than the instance uses now) does it restart the instance: about 30 seconds without recording. A new GPU share always restarts it.</p>
         <div className="row">
           <button type="submit" disabled={busy || !!err}>{busy ? "Restarting…" : "Apply and restart"}</button>
           <button type="button" className="ghost" onClick={onClose}>Cancel</button>

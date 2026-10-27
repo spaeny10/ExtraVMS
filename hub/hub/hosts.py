@@ -13,13 +13,14 @@ rest like a server's device token) and keeps the socket open. Protocol (JSON tex
                {"t": "ping"}                                   -> hub answers {"t": "pong"}
   hub -> host  {"t": "cmd", "id": int, "op": create_instance | delete_instance | set_quota | set_instance_quota |
                  set_camera_network | restart_instance | set_resources | set_relay | list, "args": {...}}
-    create_instance  {id, location, name, mode, subnet, public_ip, quota_gb, gpu, enroll_token, hub_url, vlm_url}
+    create_instance  {id, location, name, mode, subnet, public_ip, quota_gb, gpu, gpu_mem_mb, enroll_token, hub_url, vlm_url}
     delete_instance  {id, purge}        purge false = the recordings and database stay on the host
     set_quota        {id, quota_gb}
     set_instance_quota {id, quota_gb, force}  the quota of its data dataset (ZFS instances/<id>: nvr.db, events/; agent 0.3.2+)
     set_camera_network {id, subnets, public_ips, hosts}   the instance's camera allow-list (the hub sends all three)
     restart_instance {id}
-    set_resources    {id, cpus, mem_gb}  CPU / memory limits; applied live (docker update), recreated only if that fails
+    set_resources    {id, cpus, mem_gb, gpu_mem_mb}  CPU / memory limits; applied live (docker update), recreated only if
+                     that fails or the GPU share changed (agent 0.3.3+: gpu_mem_mb)
     set_relay        {id, ports: [{port, label}]}  the instance's Axiom Bridge listen ports (bridges.py; agent 0.3.0+)
     list             {}
 
@@ -218,8 +219,8 @@ class HostRegistry:
         for inst in (frame.get("instances") or [])[:1000] if isinstance(frame.get("instances"), list) else []:
             if not isinstance(inst, dict) or not inst.get("id"):
                 continue
-            info = {k: inst.get(k) for k in ("state", "used_gb", "quota_gb", "gpu", "mode", "location_id", "name", "host_ips",
-                                             "cpus", "mem_gb", "gateway", "relay", "image", "image_id",
+            info = {k: inst.get(k) for k in ("state", "used_gb", "quota_gb", "gpu", "gpu_mem_mb", "mode", "location_id", "name",
+                                             "host_ips", "cpus", "mem_gb", "gateway", "relay", "image", "image_id",
                                              "instance_used_gb", "instance_quota_gb", "instance_free_gb")}
             # only this host's own instances: a host can never report on (or overwrite) another host's rows
             db.run(sa.update(db.central_instances).where(db.central_instances.c.id == str(inst["id"])[:24],
@@ -337,12 +338,16 @@ def hub_agent_url() -> str:
 def host_out(h: dict, instances: list[dict] | None = None, open_alerts: dict | None = None, queue_alerts: dict | None = None,
              qwen: dict | None = None) -> dict:
     mine = [i for i in (instances or []) if i["host_id"] == h["id"] and i["state"] in LIVE_STATES]
+    room = host_room(h)
     return {"id": h["id"], "name": h["name"], "created_at": h["created_at"], "online": bool(h["online"]) and registry.online(h["id"]),
             "last_seen_at": h["last_seen_at"], "hostname": h["hostname"], "version": h["version"], "capacity": h["capacity"] or None,
             "notes": h["notes"], "fusionhub": h["fusionhub"], "agent_ip": h["agent_ip"], "instances": len(mine),
             "quota_gb": sum(int(i["quota_gb"] or 0) for i in mine),
             # what a new instance's storage quota may be: the largest disk's free space minus what its instances may still grow into
-            "room_gb": round(host_room(h)["room_gb"], 1),
+            "room_gb": round(room["room_gb"], 1),
+            # the cards instances go on: GPU shares on each and room for more (placement refuses a card without room)
+            "gpu_room": [{k: (round(v) if isinstance(v, float) else v) for k, v in g.items()} for g in room["gpus"]],
+            "gpu_slots": room["gpu_slots"],
             "offline_since": (open_alerts or {}).get(h["id"]),
             # capacity.work over time (the sparklines) and what is growing; queue_alerts: open host_queue_growing rows
             "work_history": work_history(h["id"]), "work_trend": work_trend(h["id"]),
@@ -556,19 +561,75 @@ def _mem_frac(g: dict) -> float:
     return float(g.get("mem_used_mb") or 0) / total if total > 0 else 1.0
 
 
-def pick_gpu(capacity: dict | None, assigned: dict[int, int] | None = None) -> int | None:
-    """The host GPU a new instance's YOLO runs on: a `central_gpu_prefer` (A10) card if the host has one, else the
-    least used card that isn't `central_gpu_avoid` (the A40 serves vLLM), else the least used card at all; None = no
-    GPU reported. Ties go to the card with the fewest instances already, then the least memory in use."""
+def instance_gpus(capacity: dict | None) -> list[dict]:
+    """The cards instances are placed on: the `central_gpu_prefer` (A10) ones if the host has any, else every card but
+    `central_gpu_avoid` (the A40 serves vLLM), else every card (a host with only an A40)."""
     gpus = _gpus(capacity)
-    if not gpus:
-        return None
-    assigned = assigned or {}
-    key = lambda g: (assigned.get(g["index"], 0), _mem_frac(g), g["index"])  # noqa: E731
     prefer, avoid = _model_re(settings.central_gpu_prefer), _model_re(settings.central_gpu_avoid)
     pool = [g for g in gpus if prefer and prefer.search(str(g.get("name") or ""))]
+    return pool or [g for g in gpus if not (avoid and avoid.search(str(g.get("name") or "")))] or gpus
+
+
+class NoGpuRoom(Exception):
+    """Every card instances are placed on is full of other instances' GPU shares (Conflict for the API)."""
+
+
+GPU_CONTEXT_MB = 512   # the CUDA context outside an instance's torch count (nvr/gpumem.py CONTEXT_MB)
+
+
+def share_mb(ci: dict, work: dict | None = None) -> float:
+    """What an instance holds of its card for placement: its GPU share; one running without a share (created before
+    shares, or 0 = no cap) counts as the default share, or as its own peak if that was more."""
+    info = ci.get("info") or {}
+    s = _num(info.get("gpu_mem_mb"))
+    if s:
+        return s
+    peak = _num(((((work or {}).get("instances") or {}).get(ci["id"]) or {}).get("gpu_mem") or {}).get("peak_mb"))
+    return max(float(settings.central_gpu_mem_mb), (peak + GPU_CONTEXT_MB) if peak else 0.0)
+
+
+def gpu_reserved(host_id: str, capacity: dict | None = None) -> dict[int, float]:
+    """MB of GPU shares on each of the host's cards: its live instances (share_mb)."""
+    work = (capacity or {}).get("work") if isinstance((capacity or {}).get("work"), dict) else None
+    out: dict[int, float] = {}
+    for ci in db.rows(sa.select(db.central_instances).where(db.central_instances.c.host_id == host_id,
+                                                           db.central_instances.c.state.in_(LIVE_STATES))):
+        if ci["gpu"] is not None:
+            out[ci["gpu"]] = out.get(ci["gpu"], 0.0) + share_mb(ci, work)
+    return out
+
+
+def gpu_room(capacity: dict | None, reserved: dict[int, float] | None = None) -> list[dict]:
+    """Each card instances are placed on: total, in use now, the shares on it and the room for another share (MB):
+    the smaller of what the shares leave and what is free now, both less central_gpu_headroom_mb."""
+    reserved = reserved or {}
+    head = float(settings.central_gpu_headroom_mb)
+    out = []
+    for g in instance_gpus(capacity):
+        total, used = float(g.get("mem_total_mb") or 0), float(g.get("mem_used_mb") or 0)
+        res = float(reserved.get(g["index"], 0.0))
+        room = max(0.0, min(total - head - res, total - used - head))
+        out.append({"index": g["index"], "name": g.get("name"), "total_mb": total, "used_mb": used, "reserved_mb": res,
+                    "room_mb": room, "slots": int(room // max(1, settings.central_gpu_mem_mb))})
+    return out
+
+
+def pick_gpu(capacity: dict | None, assigned: dict[int, int] | None = None, reserved: dict[int, float] | None = None,
+             need_mb: float | None = None) -> int | None:
+    """The host GPU a new instance's YOLO runs on: a `central_gpu_prefer` (A10) card if the host has one, else the
+    least used card that isn't `central_gpu_avoid` (the A40 serves vLLM), else the least used card at all; None = no
+    GPU reported. Ties go to the card with the fewest instances already, then the least memory in use. With need_mb
+    (the new instance's share): only cards with room for it (gpu_room), NoGpuRoom when there is none."""
+    pool = instance_gpus(capacity)
     if not pool:
-        pool = [g for g in gpus if not (avoid and avoid.search(str(g.get("name") or "")))] or gpus
+        return None
+    if need_mb is not None:
+        fits = {r["index"] for r in gpu_room(capacity, reserved) if r["room_mb"] >= need_mb}
+        pool = [g for g in pool if g["index"] in fits]
+        if not pool:
+            raise NoGpuRoom(f"no GPU has room for another {need_mb / 1024:g} GB share")
+    assigned = assigned or {}
+    key = lambda g: (assigned.get(g["index"], 0), _mem_frac(g), g["index"])  # noqa: E731
     return min(pool, key=key)["index"]
 
 
@@ -582,10 +643,12 @@ def _assigned_gpus(host_id: str) -> dict[int, int]:
 
 
 def host_room(host: dict) -> dict:
-    """What a host has left: free GPU memory (MB), its live instances, and disk room (GB) = the largest disk's free
+    """What a host has left: GPU room (MB) and slots (how many more default shares fit) on the cards instances are
+    placed on (gpu_room: never the vLLM card), its live instances, and disk room (GB) = the largest disk's free
     space minus what its instances may still grow into (quota - used)."""
     cap = host.get("capacity") or {}
-    gpu_free = sum(max(0.0, float(g.get("mem_total_mb") or 0) - float(g.get("mem_used_mb") or 0)) for g in _gpus(cap))
+    rooms = gpu_room(cap, gpu_reserved(host["id"], cap))
+    gpu_free = sum(r["room_mb"] for r in rooms)
     disks = [d for d in cap.get("disks") or [] if isinstance(d, dict)]
     disk_free = max((float(d.get("free_gb") or 0) for d in disks), default=0.0)
     inst = db.rows(sa.select(db.central_instances).where(db.central_instances.c.host_id == host["id"],
@@ -594,12 +657,14 @@ def host_room(host: dict) -> dict:
     for i in inst:
         used = float(((i.get("info") or {}).get("used_gb")) or 0)
         committed += max(0.0, float(i["quota_gb"] or 0) - used)
-    return {"gpu_free_mb": gpu_free, "instances": len(inst), "disk_free_gb": disk_free, "room_gb": disk_free - committed}
+    return {"gpu_free_mb": gpu_free, "gpu_slots": sum(r["slots"] for r in rooms), "gpu_cards": len(rooms), "gpus": rooms,
+            "instances": len(inst), "disk_free_gb": disk_free, "room_gb": disk_free - committed}
 
 
-def pick_host(quota_gb: int) -> dict | None:
-    """Auto placement: among online hosts with disk room for the quota, the most free GPU memory, then the fewest
-    instances."""
+def pick_host(quota_gb: int, need_mb: float | None = None) -> dict | None:
+    """Auto placement: among online hosts with disk room for the quota and (hosts with GPUs) a card with room for the
+    new instance's GPU share, the most room for more shares, then the most GPU room, then the fewest instances."""
+    need = float(need_mb if need_mb is not None else settings.central_gpu_mem_mb)
     best, best_key = None, None
     for h in db.rows(sa.select(db.hosts)):
         if not registry.online(h["id"]):
@@ -607,7 +672,9 @@ def pick_host(quota_gb: int) -> dict | None:
         r = host_room(h)
         if r["room_gb"] < quota_gb:
             continue
-        k = (-r["gpu_free_mb"], r["instances"], h["name"])
+        if r["gpu_cards"] and not any(g["room_mb"] >= need for g in r["gpus"]):
+            continue
+        k = (-r["gpu_slots"], -r["gpu_free_mb"], r["instances"], h["name"])
         if best_key is None or k < best_key:
             best, best_key = h, k
     return best
@@ -869,10 +936,11 @@ _tasks: set[asyncio.Task] = set()
 
 async def provision(location_id: str, host_id: str | None, mode: str, subnet: str | None, public_ip: str | None, quota_gb: int,
                     by_user: dict | None, *, name: str | None = None, gpu: int | None = None, camera_limit: int | None = None,
-                    wait: bool = False) -> dict:
+                    gpu_mem_mb: int | None = None, wait: bool = False) -> dict:
     """Place a central instance for a Site and ask its host to create it. Returns the new row at once (state
     provisioning); the host's answer arrives in the background (wait=True: before returning). ValueError = bad input,
-    LookupError = unknown Site or host, Conflict = cannot be placed now. camera_limit: None = no limit."""
+    LookupError = unknown Site or host, Conflict = cannot be placed now (no host, or no card with room for its GPU
+    share). camera_limit: None = no limit. gpu_mem_mb: its share of the GPU, None = central_gpu_mem_mb."""
     loc = db.one(sa.select(db.locations).where(db.locations.c.id == location_id))
     if not loc:
         raise LookupError("unknown site")
@@ -883,6 +951,7 @@ async def provision(location_id: str, host_id: str | None, mode: str, subnet: st
     if not isinstance(quota_gb, int) or quota_gb < 10:   # axiom_host refuses less than 10 GB
         raise ValueError("the storage quota must be at least 1 GB")
     _check_limit(camera_limit)
+    share = _check_share(gpu_mem_mb) or settings.central_gpu_mem_mb
     public = _check_public(public_ip) if public_ip and public_ip.strip() else None
     if mode == "forward" and not public:
         raise ValueError("port-forward mode needs the Site's public IP (the BR1's WAN address)")
@@ -898,13 +967,24 @@ async def provision(location_id: str, host_id: str | None, mode: str, subnet: st
         if not registry.online(host_id):
             raise Conflict(f"host {host['name']} is offline")
     else:
-        host = pick_host(quota_gb)
+        host = pick_host(quota_gb, share)
         if not host:
-            raise Conflict("no online host has room for that quota")
+            raise Conflict(f"no online host has room for that quota and a {share / 1024:g} GB GPU share")
+    cap = host.get("capacity")
+    reserved = gpu_reserved(host["id"], cap)
     if gpu is None:
-        gpu = pick_gpu(host.get("capacity"), _assigned_gpus(host["id"]))
-    elif gpu not in {g["index"] for g in _gpus(host.get("capacity"))}:
+        try:
+            gpu = pick_gpu(cap, _assigned_gpus(host["id"]), reserved, share)
+        except NoGpuRoom as e:
+            raise Conflict(f"host {host['name']}: {e} ({gpu_room_text(cap, reserved)})") from None
+    elif gpu not in {g["index"] for g in _gpus(cap)}:
         raise ValueError(f"host {host['name']} has no GPU {gpu}")
+    else:
+        # a chosen card still needs room for the share (an A40 chosen by hand is not counted against vLLM's use)
+        r = next((x for x in gpu_room(cap, reserved) if x["index"] == gpu), None)
+        if r is not None and r["room_mb"] < share:
+            raise Conflict(f"GPU {gpu} on {host['name']} has {r['room_mb'] / 1024:.1f} GB left for shares; this Site's share "
+                           f"is {share / 1024:g} GB (a smaller share, or another card)")
     # every other Site's subnets (its Site networks, not only the one it was created with) and public addresses
     others = [{"subnet": s} for _, fw in taken_elsewhere(None) for s in fw["subnets"]]
     clash = network_conflict(None, _split_public(public)) if public else None
@@ -928,6 +1008,8 @@ async def provision(location_id: str, host_id: str | None, mode: str, subnet: st
                       "quota_gb": quota_gb, "gpu": gpu, "state": "provisioning", "last_error": None, "created_at": t,
                       "created_by": (by_user or {}).get("id"), "updated_at": t, "ready_at": None, "info": None, "info_at": None,
                       "camera_limit": camera_limit,
+                      # its GPU share until the host's heartbeat reports it (placement counts it from the start)
+                      **({"info": {"gpu_mem_mb": share}} if gpu is not None else {}),
                       # the Site networks = what the host's create_instance allows: the subnet and the public address,
                       # whatever the mode; the cameras' own public addresses are added (auto) as they are set up
                       "camera_network": {**site_nets, "auto": {"public_ips": [], "hosts": []}, "applied": site_nets}}
@@ -941,9 +1023,12 @@ async def provision(location_id: str, host_id: str | None, mode: str, subnet: st
     token = mint_enroll_token(ci)
     args = {"id": ci["id"], "location": location_id, "name": ci["name"], "mode": mode, "subnet": ci["subnet"], "public_ip": public,
             "quota_gb": quota_gb, "gpu": gpu, "enroll_token": token, "hub_url": hub_agent_url(), "vlm_url": settings.central_vlm_url}
+    if gpu is not None:
+        args["gpu_mem_mb"] = share
     _audit(by_user, loc["org_id"], None, f"central recording provisioning: {loc['name']} on {host['name']}",
            {"location_id": location_id, "instance_id": ci["id"], "host_id": host["id"], "mode": mode, "subnet": ci["subnet"],
-            "public_ip": public, "site_number": ci["site_number"], "quota_gb": quota_gb, "gpu": gpu, "camera_limit": camera_limit})
+            "public_ip": public, "site_number": ci["site_number"], "quota_gb": quota_gb, "gpu": gpu, "camera_limit": camera_limit,
+            "gpu_mem_mb": share if gpu is not None else None})
     task = asyncio.create_task(_create(ci, args, loc, host), name=f"central-create-{ci['id']}")
     _tasks.add(task)
     task.add_done_callback(_tasks.discard)
@@ -965,7 +1050,9 @@ async def _create(ci: dict, args: dict, loc: dict, host: dict) -> None:
     if ok:
         vals: dict = {"ready_at": time.time()}
         if isinstance(res.get("instance"), dict):
-            vals |= {"info": res["instance"], "info_at": time.time()}
+            # the GPU share placement counted stays unless the host says otherwise (an agent before 0.3.3 doesn't)
+            share = {"gpu_mem_mb": (cur.get("info") or {}).get("gpu_mem_mb")} if (cur.get("info") or {}).get("gpu_mem_mb") else {}
+            vals |= {"info": {**share, **res["instance"]}, "info_at": time.time()}
         _set(ci["id"], **vals)
         log.info("central instance %s created on %s", ci["id"], host["name"])
         return
@@ -1064,17 +1151,39 @@ async def set_instance_quota(ci_id: str, quota_gb: int, by_user: dict | None, fo
 MAX_CAMERA_LIMIT = 500
 CPUS_RANGE = (1, 64)         # axiom_host.py set_resources also refuses more CPUs than the host has
 MEM_GB_RANGE = (2, 512)
+GPU_MEM_MB_RANGE = (1024, 49152)   # an instance's GPU share (axiom_host.py GPU_MEM_MB_RANGE); 0 = no cap
 
 
-async def set_resources(ci_id: str, cpus: float | None, mem_gb: float | None, by_user: dict | None) -> dict:
-    """The instance's CPU and / or memory limits: a set_resources round trip (applied live with docker update; the
-    container is recreated only if that fails), then kept in its info and audited. ValueError = bad input, HostError = offline or refused
-    (nothing changed then)."""
+def _check_share(mb) -> int | None:
+    """A GPU share in MB: None = not given, 0 = no cap, else within GPU_MEM_MB_RANGE."""
+    if mb is None:
+        return None
+    if not isinstance(mb, int) or isinstance(mb, bool) or (mb != 0 and not GPU_MEM_MB_RANGE[0] <= mb <= GPU_MEM_MB_RANGE[1]):
+        raise ValueError(f"the GPU share must be {GPU_MEM_MB_RANGE[0]}-{GPU_MEM_MB_RANGE[1]} MB, or 0 for no cap")
+    return mb
+
+
+def gpu_room_text(capacity: dict | None, reserved: dict[int, float]) -> str:
+    """"GPU 1 NVIDIA A10G: 13.0 of 22.5 GB shared, 9.5 GB free now" for each card instances are placed on."""
+    return "; ".join(f"GPU {r['index']} {r['name']}: {r['reserved_mb'] / 1024:.1f} of "
+                     f"{(r['total_mb'] - settings.central_gpu_headroom_mb) / 1024:.1f} GB shared, "
+                     f"{(r['total_mb'] - r['used_mb']) / 1024:.1f} GB free now" for r in gpu_room(capacity, reserved)) or "no GPUs"
+
+
+async def set_resources(ci_id: str, cpus: float | None, mem_gb: float | None, by_user: dict | None,
+                        gpu_mem_mb: int | None = None) -> dict:
+    """The instance's CPU and / or memory limits and / or GPU share (0 = no cap): a set_resources round trip (CPU and
+    memory applied live with docker update; a new GPU share, or a live update that fails, recreates the container),
+    then kept in its info and audited. A larger share needs room on its card. ValueError = bad input, Conflict = no
+    room, HostError = offline or refused (nothing changed then)."""
     ci = get_instance(ci_id)
     if not ci or ci["state"] in ("deleting", "deleted"):
         raise LookupError("unknown central instance")
-    if cpus is None and mem_gb is None:
-        raise ValueError("send cpus and / or mem_gb")
+    if cpus is None and mem_gb is None and gpu_mem_mb is None:
+        raise ValueError("send cpus, mem_gb and / or gpu_mem_mb")
+    _check_share(gpu_mem_mb)
+    if gpu_mem_mb is not None and ci["gpu"] is None:
+        raise ValueError("this instance has no GPU: a GPU share needs one")
     if cpus is not None and not CPUS_RANGE[0] <= cpus <= CPUS_RANGE[1]:
         raise ValueError(f"CPUs must be {CPUS_RANGE[0]}-{CPUS_RANGE[1]}")
     if mem_gb is not None and not MEM_GB_RANGE[0] <= mem_gb <= MEM_GB_RANGE[1]:
@@ -1085,19 +1194,34 @@ async def set_resources(ci_id: str, cpus: float | None, mem_gb: float | None, by
     if mem_gb is not None:
         args["mem_gb"] = mem_gb
     info = ci.get("info") or {}
-    before = {"cpus": _num(info.get("cpus")), "mem_gb": _num(info.get("mem_gb"))}
+    if gpu_mem_mb:
+        host = db.one(sa.select(db.hosts).where(db.hosts.c.id == ci["host_id"])) or {}
+        cap = host.get("capacity")
+        reserved = gpu_reserved(ci["host_id"], cap)
+        mine = share_mb(ci, cap.get("work") if isinstance((cap or {}).get("work"), dict) else None)
+        r = next((x for x in gpu_room(cap, reserved) if x["index"] == ci["gpu"]), None)
+        if r is not None and gpu_mem_mb > mine and r["room_mb"] < gpu_mem_mb - mine:
+            raise Conflict(f"GPU {ci['gpu']} has {r['room_mb'] / 1024:.1f} GB left for shares: this Site's share can grow "
+                           f"to {(mine + r['room_mb']) / 1024:.1f} GB at most")
+    if gpu_mem_mb is not None:
+        args["gpu_mem_mb"] = gpu_mem_mb
+    before = {"cpus": _num(info.get("cpus")), "mem_gb": _num(info.get("mem_gb")), "gpu_mem_mb": _num(info.get("gpu_mem_mb"))}
     res = await registry.command(ci["host_id"], "set_resources", args)
     if not res.get("ok"):
         raise HostError(str(res.get("detail") or "the host refused"))
     got = res.get("instance") if isinstance(res.get("instance"), dict) else {}
     after = {"cpus": _num(got.get("cpus")) if _num(got.get("cpus")) is not None else (cpus if cpus is not None else before["cpus"]),
-             "mem_gb": _num(got.get("mem_gb")) if _num(got.get("mem_gb")) is not None else (mem_gb if mem_gb is not None else before["mem_gb"])}
+             "mem_gb": _num(got.get("mem_gb")) if _num(got.get("mem_gb")) is not None else (mem_gb if mem_gb is not None else before["mem_gb"]),
+             "gpu_mem_mb": (_num(got.get("gpu_mem_mb")) if "gpu_mem_mb" in got
+                            else (float(gpu_mem_mb) or None) if gpu_mem_mb is not None else before["gpu_mem_mb"])}
     _set(ci_id, info={**info, **after}, info_at=time.time())
     loc = db.one(sa.select(db.locations.c.name).where(db.locations.c.id == ci["location_id"])) or {"name": ci["location_id"]}
     show = lambda v, unit: "?" if v is None else f"{v:g} {unit}"  # noqa: E731
     _audit(by_user, ci["org_id"], ci["server_id"],
            f"central recording CPU/memory: {loc['name']} {show(before['cpus'], 'CPUs')}, {show(before['mem_gb'], 'GB')} -> "
-           f"{show(after['cpus'], 'CPUs')}, {show(after['mem_gb'], 'GB')}",
+           f"{show(after['cpus'], 'CPUs')}, {show(after['mem_gb'], 'GB')}"
+           + (f", GPU share {show(before['gpu_mem_mb'], 'MB')} -> {show(after['gpu_mem_mb'], 'MB')}"
+              if before["gpu_mem_mb"] != after["gpu_mem_mb"] else ""),
            {"location_id": ci["location_id"], "instance_id": ci_id, "from": before, "to": after, "detail": str(res.get("detail") or "")[:300]})
     return get_instance(ci_id) or ci
 
@@ -1314,6 +1438,9 @@ def instance_out(ci: dict, names: dict, hub_admin: bool) -> dict:
                 "gpu": ci["gpu"], "gpu_name": gpu_name, "last_error": ci["last_error"], "host_state": info.get("state"),
                 # its CPU / memory limits on the host, as last reported (set_resources changes them)
                 "cpus": _num(info.get("cpus")), "mem_gb": _num(info.get("mem_gb")), "host_cpus": _num(cap.get("cpus")),
+                # its GPU share as set (None = no cap, or an agent before 0.3.3) and what placement counts for it (share_mb)
+                "gpu_mem_mb": _num(info.get("gpu_mem_mb")),
+                "gpu_share_mb": share_mb(ci, cap.get("work") if isinstance(cap.get("work"), dict) else None) if ci["gpu"] is not None else None,
                 # its data area (/data: database, event media; agent 0.3.2+): quota None = none of its own (XFS / no quota)
                 "instance_used_gb": _num(info.get("instance_used_gb")), "instance_quota_gb": _num(info.get("instance_quota_gb")),
                 "instance_free_gb": _num(info.get("instance_free_gb")),

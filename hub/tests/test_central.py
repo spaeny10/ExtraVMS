@@ -159,6 +159,33 @@ def test_gpu_choice():
         settings.central_gpu_prefer = old
 
 
+def test_gpu_room_counts_shares_on_instance_cards_only():
+    """Room for another Site's GPU share: what the shares leave and what is free now, both less the headroom, on the
+    cards instances go on (never the A40 that serves vLLM, however much it has free)."""
+    cap = {"gpus": [{"index": 0, "name": "NVIDIA A40", "mem_total_mb": 49140, "mem_used_mb": 30000},
+                    {"index": 1, "name": "NVIDIA A10G", "mem_total_mb": 23028, "mem_used_mb": 8000}]}
+    rooms = hosts.gpu_room(cap, {1: 12288})
+    assert [r["index"] for r in rooms] == [1]
+    assert rooms[0]["room_mb"] == 23028 - 1024 - 12288 and rooms[0]["slots"] == 2     # the shares bind, not today's use
+    assert hosts.gpu_room(cap, {1: 0})[0]["room_mb"] == 23028 - 8000 - 1024             # nothing shared: today's use binds
+    assert hosts.gpu_room(cap, {1: 30000})[0]["room_mb"] == 0
+    assert hosts.pick_gpu(cap, None, {1: 12288}, 4096) == 1
+    with pytest.raises(hosts.NoGpuRoom):
+        hosts.pick_gpu(cap, None, {1: 20000}, 4096)
+    assert hosts.pick_gpu({"gpus": []}, None, {}, 4096) is None                          # no GPU at all: the CPU, as before
+    two = {"gpus": [{"index": 0, "name": "NVIDIA A10", "mem_total_mb": 23028, "mem_used_mb": 100},
+                    {"index": 1, "name": "NVIDIA A10", "mem_total_mb": 23028, "mem_used_mb": 100}]}
+    assert hosts.pick_gpu(two, {0: 1, 1: 4}, {0: 19000, 1: 4096}, 4096) == 1             # the only card with room
+    # an instance's share: its own, else the default or its peak (+ the CUDA context) when that was more
+    ci = {"id": "ci_x", "info": {"gpu_mem_mb": 6144}}
+    assert hosts.share_mb(ci) == 6144
+    bare = {"id": "ci_y", "info": {}}
+    assert hosts.share_mb(bare) == settings.central_gpu_mem_mb
+    work = {"instances": {"ci_y": {"gpu_mem": {"peak_mb": 5000}}}}
+    assert hosts.share_mb(bare, work) == 5000 + hosts.GPU_CONTEXT_MB
+    assert hosts.share_mb(bare, {"instances": {"ci_y": {"gpu_mem": {"peak_mb": 900}}}}) == settings.central_gpu_mem_mb
+
+
 def test_provision_command_round_trip_and_enroll(world):
     base, root, org, a = world["base"], world["root"], world["org"], world["a"]
     small = root.post("/api/hub/hosts", json={"name": "Small"}).json()
@@ -171,7 +198,7 @@ def test_provision_command_round_trip_and_enroll(world):
             seen_args.append(cmd["args"])
             return {"ok": True, "detail": "created", "instance": {"id": cmd["args"]["id"], "state": "running", "used_gb": 0}}
         return {"ok": True, "detail": "done"}
-    h_small = FakeHost(base, small["token"], capacity(gpus=[{"index": 0, "name": "NVIDIA A10", "mem_total_mb": 23028, "mem_used_mb": 20000}]), answer, "small")
+    h_small = FakeHost(base, small["token"], capacity(gpus=[{"index": 0, "name": "NVIDIA A10", "mem_total_mb": 23028, "mem_used_mb": 12000}]), answer, "small")
     h_big = FakeHost(base, big["token"], capacity(), answer, "big")
     h_full = FakeHost(base, full["token"], capacity(gpus=[{"index": 0, "name": "NVIDIA A10", "mem_total_mb": 99999, "mem_used_mb": 0}], free_gb=50), answer, "full")
     try:
@@ -192,7 +219,7 @@ def test_provision_command_round_trip_and_enroll(world):
         args = wait(lambda: seen_args[-1] if seen_args else None)
         assert args == {"id": ci["id"], "location": a["id"], "name": "Central", "mode": "vpn", "subnet": f"10.20.{n}.0/24", "public_ip": None,
                         "quota_gb": 4000, "gpu": 1, "enroll_token": args["enroll_token"], "hub_url": "ws://testserver/agent",
-                        "vlm_url": "http://vllm:8000/v1"}
+                        "vlm_url": "http://vllm:8000/v1", "gpu_mem_mb": 4096}
         assert h_big.cmds[-1]["op"] == "create_instance" and isinstance(h_big.cmds[-1]["id"], int)
         assert not h_small.cmds and not h_full.cmds
         token = args["enroll_token"]
@@ -780,6 +807,98 @@ def test_set_resources(world):
         assert r.status_code == 502 and "more than this host has" in r.text and "nothing was changed" in r.text
         assert hosts.get_instance(ci["id"])["info"]["cpus"] == 8
         assert len(db.rows(sa.select(db.audit_log).where(db.audit_log.c.action.like("central recording CPU/memory%")))) == 2
+    finally:
+        fh.close()
+        if ci:
+            root.delete(f"/api/locations/{loc['id']}/central/{ci['id']}?force=true")
+
+
+def test_gpu_placement_reserves_shares(world):
+    """Each Site on a card reserves its GPU share: the card takes Sites until the shares fill it, then placement says
+    so (409) instead of squeezing another one on; a smaller share still fits. The Hosts list shows the room."""
+    base, root, org = world["base"], world["root"], world["org"]
+    host = root.post("/api/hub/hosts", json={"name": "Sharer"}).json()
+    hid = host["host"]["id"]
+    gpus = [{"index": 0, "name": "NVIDIA A40", "mem_total_mb": 49140, "mem_used_mb": 30000},
+            {"index": 1, "name": "NVIDIA A10G", "mem_total_mb": 23028, "mem_used_mb": 1000}]
+    fh = FakeHost(base, host["token"], capacity(gpus=gpus), None, "sharer")
+    fh.answer = lambda cmd: ({"ok": True, "detail": "created", "instance": {"id": cmd["args"]["id"], "state": "running"}}
+                             if cmd["op"] == "create_instance" else {"ok": True, "detail": "done"})
+    old = settings.central_gpu_mem_mb
+    settings.central_gpu_mem_mb = 8192                     # (23028 - 1024) // 8192 = 2 Sites per A10G
+    made = []
+    try:
+        wait(lambda: hosts.registry.online(hid))
+        h = next(x for x in root.get("/api/hub/hosts").json()["hosts"] if x["id"] == hid)
+        assert [g["index"] for g in h["gpu_room"]] == [1] and h["gpu_slots"] == 2   # the A40's 19 GB free never counts
+        locs = [root.post(f"/api/orgs/{org['id']}/locations", json={"name": f"Share {i}"}).json() for i in range(4)]
+        for loc in locs[:2]:
+            r = root.post(f"/api/locations/{loc['id']}/central", json={"mode": "vpn", "quota_gb": 100, "host_id": hid})
+            assert r.status_code == 200, r.text
+            made.append((loc, r.json()))
+            assert r.json()["gpu"] == 1 and fh.cmds[-1]["args"]["gpu_mem_mb"] == 8192
+        r = root.post(f"/api/locations/{locs[2]['id']}/central", json={"mode": "vpn", "quota_gb": 100, "host_id": hid})
+        assert r.status_code == 409 and "no GPU has room" in r.text and "16.0 of 21.5 GB shared" in r.text, r.text
+        r = root.post(f"/api/locations/{locs[2]['id']}/central", json={"mode": "vpn", "quota_gb": 100, "host_id": hid, "gpu": 1})
+        assert r.status_code == 409 and "this Site's share is 8 GB" in r.text
+        # a small Site's share still fits in what is left
+        r = root.post(f"/api/locations/{locs[2]['id']}/central", json={"mode": "vpn", "quota_gb": 100, "host_id": hid, "gpu_mem_mb": 4096})
+        assert r.status_code == 200, r.text
+        made.append((locs[2], r.json()))
+        assert fh.cmds[-1]["args"]["gpu_mem_mb"] == 4096
+        assert root.post(f"/api/locations/{locs[3]['id']}/central", json={"quota_gb": 100, "host_id": hid, "gpu_mem_mb": 512}).status_code == 400
+        h = next(x for x in root.get("/api/hub/hosts").json()["hosts"] if x["id"] == hid)
+        assert h["gpu_room"][0]["reserved_mb"] == 8192 * 2 + 4096 and h["gpu_slots"] == 0
+        # the A40 chosen by hand is not placed against vLLM's memory by these rules, but still needs free memory
+        r = root.post(f"/api/locations/{locs[3]['id']}/central", json={"mode": "vpn", "quota_gb": 100, "host_id": hid, "gpu": 0})
+        assert r.status_code == 200, r.text
+        made.append((locs[3], r.json()))
+    finally:
+        settings.central_gpu_mem_mb = old
+        fh.close()
+        for loc, ci in made:
+            root.delete(f"/api/locations/{loc['id']}/central/{ci['id']}?force=true")
+
+
+def test_set_resources_gpu_share(world):
+    """A Site's GPU share changes with a set_resources round trip (the host recreates it), within its card's room;
+    a CPU instance has none to change."""
+    base, root, org = world["base"], world["root"], world["org"]
+    loc = root.post(f"/api/orgs/{org['id']}/locations", json={"name": "Yard GS"}).json()
+    host = root.post("/api/hub/hosts", json={"name": "Shareresizer"}).json()
+    hid = host["host"]["id"]
+
+    def answer(cmd):
+        a = cmd["args"]
+        if cmd["op"] == "create_instance":
+            return {"ok": True, "detail": "created", "instance": {"id": a["id"], "state": "running", "cpus": 4, "mem_gb": 8,
+                                                                    "gpu_mem_mb": a.get("gpu_mem_mb")}}
+        if cmd["op"] == "set_resources":
+            return {"ok": True, "detail": "recreated", "instance": {"id": a["id"], "state": "running", "cpus": 4, "mem_gb": 8,
+                                                                    "gpu_mem_mb": a.get("gpu_mem_mb") or None}}
+        return {"ok": True, "detail": "done"}
+    gpus = [{"index": 1, "name": "NVIDIA A10G", "mem_total_mb": 23028, "mem_used_mb": 1000}]
+    fh = FakeHost(base, host["token"], capacity(gpus=gpus), answer, "shareresizer")
+    ci = None
+    try:
+        wait(lambda: hosts.registry.online(hid))
+        ci = root.post(f"/api/locations/{loc['id']}/central", json={"mode": "vpn", "quota_gb": 100, "host_id": hid}).json()
+        wait(lambda: hosts.get_instance(ci["id"])["ready_at"])
+        url = f"/api/locations/{loc['id']}/central/{ci['id']}/resources"
+        r = root.put(url, json={"gpu_mem_mb": 6144})
+        assert r.status_code == 200, r.text
+        assert fh.cmds[-1]["op"] == "set_resources" and fh.cmds[-1]["args"] == {"id": ci["id"], "gpu_mem_mb": 6144}
+        assert hosts.get_instance(ci["id"])["info"]["gpu_mem_mb"] == 6144
+        act = db.rows(sa.select(db.audit_log).where(db.audit_log.c.org_id == org["id"],
+                                                    db.audit_log.c.action.like("central recording CPU/memory: Yard GS%")))
+        assert act and act[-1]["action"].endswith("GPU share 4096 MB -> 6144 MB")
+        # more than the card can give: refused before the host hears of it
+        sent = len(fh.cmds)
+        r = root.put(url, json={"gpu_mem_mb": 30000})
+        assert r.status_code == 409 and "can grow to" in r.text and len(fh.cmds) == sent
+        assert root.put(url, json={"gpu_mem_mb": 512}).status_code == 400
+        r = root.put(url, json={"gpu_mem_mb": 0})                     # no cap
+        assert r.status_code == 200 and fh.cmds[-1]["args"] == {"id": ci["id"], "gpu_mem_mb": 0}
     finally:
         fh.close()
         if ci:

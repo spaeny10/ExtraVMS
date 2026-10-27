@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  fmtNum, fmtRate, instanceWork, queueText, queueTitle, resourcesFormError, resourcesText, seriesMax, sparkPath, vllmLine, vllmTitle, workRows, yoloLine,
+  fmtNum, fmtRate, gpuRoomText, gpuShareText, instanceWork, queueText, queueTitle, resourcesFormError, resourcesText, seriesMax, sparkPath, vllmLine, vllmTitle, workRows, yoloLine,
 } from "./central";
 import type { HostCapacity, HostGpu, InstanceWork, VllmWork } from "./api";
 
@@ -123,9 +123,33 @@ describe("CPU / memory form", () => {
     expect(resourcesFormError("", "1024")).toBe("Memory: 2 to 512 GB");
     expect(resourcesFormError("x", "")).toBe("CPUs: a number from 1 to 64");
   });
+  it("takes a GPU share in GB, or 0 for no cap", () => {
+    expect(resourcesFormError("", "", null, "6")).toBeNull();
+    expect(resourcesFormError("", "", null, "0")).toBeNull();
+    expect(resourcesFormError("", "", null, "0.5")).toBe("GPU share: 1 to 48 GB, or 0 for no cap");
+    expect(resourcesFormError("", "", null, "64")).toBe("GPU share: 1 to 48 GB, or 0 for no cap");
+    expect(resourcesFormError("", "", null, "")).toBe("Enter the CPUs and / or the memory");
+  });
   it("shows the limits", () => {
     expect(resourcesText(4, 8)).toBe("4 CPUs · 8 GB");
     expect(resourcesText(1, 2.5)).toBe("1 CPU · 2.5 GB");
     expect(resourcesText(null, null)).toBe("— CPUs · — GB");
+  });
+});
+
+describe("GPU shares", () => {
+  it("says how much of a card the Sites' shares hold and how many more fit", () => {
+    const r = { index: 1, name: "NVIDIA A10G", total_mb: 23028, used_mb: 7923, reserved_mb: 12288, room_mb: 9716, slots: 2 };
+    expect(gpuRoomText(r)).toBe("GPU 1 · A10G: 12 GB of 21.5 GB in Site shares · room for 2 more Sites");
+    expect(gpuRoomText({ ...r, reserved_mb: 22000, room_mb: 0, slots: 0 })).toBe("GPU 1 · A10G: 21.5 GB of 21.5 GB in Site shares · full: no room for another Site");
+    expect(gpuRoomText({ ...r, slots: 1 })).toContain("room for 1 more Site");
+  });
+  it("shows an instance's share, its peak and out-of-memory errors", () => {
+    const work = { ok: true, gpu_mem: { share_mb: 4096, cap_mb: 3584, reserved_mb: 1500, peak_mb: 2970, oom: 0 } };
+    expect(gpuShareText({ gpu: 1, gpu_mem_mb: 4096, gpu_share_mb: 4096, work })).toBe("4 GB share · peak 2.9 GB");
+    expect(gpuShareText({ gpu: 1, gpu_mem_mb: 4096, gpu_share_mb: 4096, work: { ...work, gpu_mem: { ...work.gpu_mem, oom: 3 } } }))
+      .toBe("4 GB share · peak 2.9 GB · 3 out-of-memory errors");
+    expect(gpuShareText({ gpu: 1, gpu_mem_mb: null, gpu_share_mb: 4608, work: null })).toBe("no cap (counted as 4.5 GB)");
+    expect(gpuShareText({ gpu: null, gpu_mem_mb: null, gpu_share_mb: null, work: null })).toBe("");
   });
 });

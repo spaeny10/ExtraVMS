@@ -102,6 +102,14 @@ def test_detector_health_alerts_follow_the_heartbeat(client, superuser):
     assert [r for r in _rows(s) if r["closed_at"] is None] == []
     assert "detector_fallback" in alerts.KINDS and "detector_stalled" in alerts.KINDS
     assert not set(alerts.HEALTH_KINDS) & set(alerts.EVENT_KINDS)
+    # a central instance out of its GPU share (nvr/gpumem.py) opens and closes the same way
+    oom = {"kind": "gpu_memory_full", "text": "GPU memory full: this server reached its share of the GPU; events may fail to verify",
+           "since": 1200.0, "count": 3, "share_mb": 4096}
+    alerts.on_heartbeat(s, {"health_alerts": [oom]}, 0)
+    rows = [r for r in _rows(s) if r["closed_at"] is None]
+    assert [r["kind"] for r in rows] == ["gpu_memory_full"] and rows[0]["detail"]["share_mb"] == 4096
+    alerts.on_heartbeat(s, {}, 0)
+    assert [r for r in _rows(s) if r["closed_at"] is None] == []
 
 
 def test_storage_failing_alert_follows_the_heartbeat(client, superuser):

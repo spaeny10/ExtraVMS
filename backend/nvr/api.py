@@ -27,7 +27,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from . import assistant, backup, baseline, cells, footage, frames, health, identities, journeys, keep, mediamtx, policy, ptz, retention, streams, zones
 from . import synopsis as vlm
-from . import advisor, ai_serve, detector, direct, hub_agent, lan_cert, lan_guard, sdbackfill, site_actions, siteconfig
+from . import advisor, ai_serve, detector, direct, gpumem, hub_agent, lan_cert, lan_guard, sdbackfill, site_actions, siteconfig
 from . import camweb, deterrence, deterrence_api, device_api, speakers_api, talkdown
 from . import aischedule, clipask, plate, snapshots, vlmroute
 from . import summary as summary_mod
@@ -2523,6 +2523,8 @@ async def system():
         "yolo_model": settings.yolo_model,
         "health_alerts": _health_alerts(),
         "yolo_frame_ms": _median(getattr(state.pipeline.verifier, "frame_ms", None)),
+        # this server's GPU memory (torch's now and peak, its share on a shared card, out-of-memory errors): gpumem.py
+        "gpu_mem": gpumem.status(),
         "events": counts,
         "webrtc_port": settings.mediamtx_webrtc_port,
         "backup": backup.status(),

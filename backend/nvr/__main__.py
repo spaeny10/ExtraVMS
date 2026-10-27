@@ -22,6 +22,10 @@ if __name__ == "__main__":
     # crash-looped without ever reaching the retention pass that would have freed space (diskguard.py).
     from . import diskguard
     diskguard.preopen(settings.data_dir, settings.disk_emergency_free_gb, settings.backup_dir)
+    # a central instance's share of the GPU it shares with other Sites, before any model loads (gpumem.py)
+    if settings.gpu_mem_mb > 0:
+        from . import gpumem
+        gpumem.apply()
     # proxy_headers=False: no reverse proxy sits in front of the NVR, and uvicorn's default (trust
     # X-Forwarded-For from 127.0.0.1) let any local process choose the client address the app sees
     uvicorn.run("nvr.api:app", host=settings.host, port=settings.port, log_level="info", proxy_headers=False)
