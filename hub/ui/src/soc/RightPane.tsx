@@ -58,7 +58,7 @@ export function RespondPane({ me, incident: i, detail, actions, cmd, phone = fal
       <CallList incident={i} contacts={detail.contacts} log={detail.log} actions={actions} enabled={mine} phone={phone} />
       <section className="soc-sop" aria-label="Procedures">
         <h3>Procedure</h3>
-        {steps.length === 0 && <p className="muted small">No procedure applies to this incident. Site → Settings → Procedures adds one.</p>}
+        {steps.length === 0 && <p className="muted small">No procedure applies to this incident. Site → Settings → Monitoring adds one.</p>}
         {steps.length > 0 && (
           <ol className="soc-steps">
             {steps.map((s, n) => (
@@ -90,7 +90,7 @@ export function CallList({ incident: i, contacts, log, actions, enabled, phone }
   return (
     <section className="soc-calls" aria-label="Call list">
       <h3>Call list</h3>
-      {sorted.length === 0 && <p className="muted small">No contacts for this Site. Site → Settings → Contacts adds them.</p>}
+      {sorted.length === 0 && <p className="muted small">No contacts for this Site. Site → Settings → Monitoring adds them.</p>}
       <ol>
         {sorted.map((c) => (
           <li key={c.id ?? c.name} className={`soc-contact ${next && c.id === next.id ? "next" : ""}`} aria-current={next && c.id === next.id ? "step" : undefined}>

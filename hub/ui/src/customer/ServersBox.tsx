@@ -9,7 +9,7 @@ import { useMemo, useState } from "react";
 import type { LiveStats, Org, Server, Site } from "../api";
 import { ago } from "../api";
 import { CENTRAL_TAG } from "../central";
-import { go, siteHref } from "../nav";
+import { go, settingsHref, siteHref } from "../nav";
 import { ServerMenu, useLiveStats } from "../servers";
 import {
   type ServerFilters, NO_FILTERS, UNASSIGNED, aiText, cameraCounts, camDown, downText, filterServers, groupBySite, hasProblems, latestVersion,
@@ -36,7 +36,7 @@ function ServerName({ s, latest }: { s: Server; latest: string | null }) {
       {updateAvailable(s, latest) && <span className="chip small update-chip" title={`Runs ${s.version}; the newest among your servers is ${latest}`}>update available</span>}
       {s.retired_at ? <span className="alert-kind">retired</span> : null}
       {s.central && (s.location_id
-        ? <div className="small"><a className="central-tag" href={siteHref(s.location_id, "servers")} onClick={go(siteHref(s.location_id, "servers"))}>{CENTRAL_TAG}</a></div>
+        ? <div className="small"><a className="central-tag" href={settingsHref(s.location_id, "servers")} onClick={go(settingsHref(s.location_id, "servers"))}>{CENTRAL_TAG}</a></div>
         : <div className="small central-tag">{CENTRAL_TAG}</div>)}
       {sub && <div className="muted small">{sub}</div>}
     </>
@@ -122,7 +122,7 @@ function Card({ s, ctx }: { s: Server; ctx: Ctx }) {
 function GroupHead({ id, name, count }: { id?: string; name: string; count: number }) {
   const n = `${count} server${count === 1 ? "" : "s"}`;
   return id
-    ? <><a href={siteHref(id, "servers")} onClick={go(siteHref(id, "servers"))}>{name}</a> <span className="muted small">· {n}</span></>
+    ? <><a href={settingsHref(id, "servers")} onClick={go(settingsHref(id, "servers"))}>{name}</a> <span className="muted small">· {n}</span></>
     : <>{name} <span className="muted small">· {n}</span></>;
 }
 

@@ -1,7 +1,7 @@
 /**
- * Site → Settings → Contacts: the ordered call list SOC operators work down during an incident (first row = first
+ * Site → Settings → Monitoring, call list: the ordered call list SOC operators work down during an incident (first row = first
  * call). Edited as a whole and saved with one PUT, so reordering and edits land together and the audit row shows the
- * full list. Customer admins and SOC supervisors edit it (canEditMonitoring); nobody else sees this tab.
+ * full list. Customer admins and SOC supervisors edit it (canEditMonitoring); nobody else sees it.
  */
 import { useCallback, useEffect, useState } from "react";
 import { confirmDialog, toast } from "@site/ui";

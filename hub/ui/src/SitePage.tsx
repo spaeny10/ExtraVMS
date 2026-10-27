@@ -37,7 +37,7 @@ import { alertBadge } from "./siteHealth";
 import { TabToolsSlot } from "./tabTools";
 
 const TAB_LABEL: Record<SiteTab, [string, string]> = {
-  live: ["Live", "live"], timeline: ["Timeline", "timeline"], find: ["Find", "find"], ask: ["Ask", "sparkle"], alerts: ["Alerts", "alert"], servers: ["Servers", "grid"], settings: ["Settings", "settings"],
+  live: ["Live", "live"], timeline: ["Timeline", "timeline"], find: ["Find", "find"], ask: ["Ask", "sparkle"], alerts: ["Alerts", "alert"], settings: ["Settings", "settings"],
 };
 
 /** The Site with its servers (retired ones included, marked), read again when the hub says one of them came, went or
@@ -111,13 +111,12 @@ export function SitePage({ org, me, siteId, tab, section = "general", serverId, 
         <div ref={setTools} className="site-tabbar-tools" />
       </div>
       <TabToolsSlot.Provider value={tools}>
-      {serverId ? (server ? <ServerPanel site={site} server={server} admin={admin} onChanged={reload} /> : <p className="muted">That server isn't in this site. <a href={siteHref(site.id, "servers")} onClick={go(siteHref(site.id, "servers"))}>Servers</a></p>)
+      {serverId ? (server ? <ServerPanel site={site} server={server} admin={admin} onChanged={reload} /> : <p className="muted">That server isn't in this site. <a href={settingsHref(site.id, "servers")} onClick={go(settingsHref(site.id, "servers"))}>Servers</a></p>)
         : tab === "live" ? <SiteLive org={siteOrg} site={site} />
         : tab === "timeline" ? <SiteTimeline org={siteOrg} site={site} query={location.search} canRecoverSd={admin} />
         : tab === "find" ? <SiteFind org={siteOrg} site={site} />
         : tab === "ask" ? <SiteAsk site={site} threadId={threadId} />
         : tab === "alerts" ? <><SiteIncidents site={site} /><SiteAlerts org={siteOrg} site={site} /></>
-        : tab === "servers" ? <ServersTab site={site} admin={admin} onChanged={reload} />
         : <SettingsSections site={site} org={siteOrg} me={me} section={section} admin={admin} onChanged={reload} cov={cov} setCov={setCov} />}
       </TabToolsSlot.Provider>
     </>
@@ -201,36 +200,56 @@ function ServersTab({ site, admin, onChanged }: { site: Site; admin: boolean; on
   );
 }
 
-const SECTION_LABEL: Record<SettingsSection, string> = { general: "General", cameras: "Cameras", monitoring: "Monitoring", contacts: "Contacts", procedures: "Procedures" };
+const SECTION_LABEL: Record<SettingsSection, string> = { general: "General", servers: "Servers", cameras: "Cameras", monitoring: "Monitoring" };
 
 /**
- * Settings sub-tabs. Cameras (camera groups, talk-down speakers) is shown to everyone, edited by the Site's admins (the
+ * Settings sub-tabs. Servers (the Site's servers as cards, for everyone who sees the Site) was a top-level tab. Cameras (camera groups, talk-down speakers) is shown to everyone, edited by the Site's admins (the
  * hub says who: can_edit); its Camera web pages card (open a camera's own settings page) only to the Site's admins and hub
  * administrators (canOpenCameraWeb). Monitoring is shown to everyone (read-only: is the SOC watching now, and until when); its
- * editor, Contacts and Procedures are for customer admins and SOC supervisors (canEditMonitoring). Arm/disarm now is
- * for customer operators and up, and SOC staff. A section someone may not open falls back to General.
+ * editor and the call list and procedures below it are for customer admins and SOC supervisors (canEditMonitoring). Arm/disarm
+ * now is for customer operators and up, and SOC staff. A section someone may not open falls back to General.
  */
 function SettingsSections({ site, org, me, section, admin, onChanged, cov, setCov }: {
   site: Site; org: Org; me: Me; section: SettingsSection; admin: boolean; onChanged: () => void; cov: SiteCoverage | null; setCov: (c: SiteCoverage) => void;
 }) {
   const editor = canEditMonitoring(org, me);
   const canArm = editor || isSocUser(me) || org.role === "operator";
-  const allowed = SETTINGS_SECTIONS.filter((s) => editor || s === "general" || s === "cameras" || s === "monitoring");
-  const cur = allowed.includes(section) ? section : "general";
-  const strip = useTabStrip(cur);
+  const strip = useTabStrip(section);
   return (
     <>
       <div ref={strip.ref} className={`segmented settings-tabs ${strip.className}`} role="tablist">
-        {allowed.map((s) => (
-          <button key={s} role="tab" aria-selected={cur === s} className={cur === s ? "active" : ""} onClick={() => navigate(settingsHref(site.id, s))}>{SECTION_LABEL[s]}</button>
+        {SETTINGS_SECTIONS.map((s) => (
+          <button key={s} role="tab" aria-selected={section === s} className={section === s ? "active" : ""} onClick={() => navigate(settingsHref(site.id, s))}>{SECTION_LABEL[s]}</button>
         ))}
       </div>
-      {cur === "general" ? <SettingsTab site={site} admin={admin} onChanged={onChanged} me={me} org={org} cov={cov} setCov={setCov} />
-        : cur === "cameras" ? <><CamerasBox key={site.id} site={site} />{canOpenCameraWeb(me, org) && <CameraWebCard key={`web-${site.id}`} site={site} />}</>
-        : cur === "monitoring" ? <MonitoringBox key={site.id} site={site} canEdit={editor} canArm={canArm} />
-        : cur === "contacts" ? <ContactsBox key={site.id} site={site} />
-        : <ProceduresBox key={site.id} site={site} />}
+      {section === "general" ? <SettingsTab site={site} admin={admin} onChanged={onChanged} me={me} org={org} cov={cov} setCov={setCov} />
+        : section === "servers" ? <ServersTab site={site} admin={admin} onChanged={onChanged} />
+        : section === "cameras" ? <><CamerasBox key={site.id} site={site} />{canOpenCameraWeb(me, org) && <CameraWebCard key={`web-${site.id}`} site={site} />}</>
+        : <MonitoringSection site={site} editor={editor} canArm={canArm} />}
     </>
+  );
+}
+
+/** Settings › Monitoring: when the SOC watches, then (for editors) whom it calls and what it follows; old Contacts/Procedures links scroll to theirs. */
+function MonitoringSection({ site, editor, canArm }: { site: Site; editor: boolean; canArm: boolean }) {
+  useEffect(() => {
+    const id = location.hash.slice(1);
+    if (id !== "contacts" && id !== "procedures") return;
+    // the boxes load their data first, so wait for the part to have its height
+    const t = setTimeout(() => document.getElementById(id)?.scrollIntoView({ block: "start" }), 400);
+    return () => clearTimeout(t);
+  }, [site.id]);
+  return (
+    <div className="monitoring-section">
+      <MonitoringBox key={site.id} site={site} canEdit={editor} canArm={canArm} />
+      {editor && <section id="contacts" className="monitoring-part"><ContactsBox key={site.id} site={site} /></section>}
+      {editor && (
+        <section id="procedures" className="monitoring-part">
+          <h3>Procedures</h3>
+          <ProceduresBox key={site.id} site={site} />
+        </section>
+      )}
+    </div>
   );
 }
 
@@ -271,7 +290,7 @@ function SettingsTab({ site, admin, onChanged, me, org, cov, setCov }: {
     try { await api.deleteLocation(site.id); toast.success(`${site.name} deleted`); navigate("/sites"); } catch (e) { toast.error(e); }
   };
   return (
-    // the saved point's cellular coverage (for those who see coverage: useCoverage) beside the address and map, below on narrower screens
+    // the saved point's cellular coverage (for those who see coverage: useCoverage) below the form, folded to one line
     <div className="settings-general">
       <div className="card site-settings">
         <label className="field"><span>Name</span><input value={f.name} disabled={!admin} maxLength={120} onChange={(e) => setF({ ...f, name: e.target.value })} /></label>
@@ -291,7 +310,7 @@ function SettingsTab({ site, admin, onChanged, me, org, cov, setCov }: {
             <button disabled={!dirty || !f.name.trim()} onClick={save}>Save</button>
             <span className="spacer" />
             <button className="ghost small" disabled={remaining > 0} onClick={del}>Delete site</button>
-            {remaining > 0 && <span className="muted small">Move or remove its {remaining} server{remaining > 1 ? "s" : ""} first (Servers tab).</span>}
+            {remaining > 0 && <span className="muted small">Move or remove its {remaining} server{remaining > 1 ? "s" : ""} first (Settings › Servers).</span>}
           </div>
         )}
         <p className="muted small" style={{ marginBottom: 0 }}>Created {fmtTime(site.created_at)} · updated {ago(site.updated_at)}</p>

@@ -34,7 +34,7 @@ describe("matchRoute", () => {
   });
 
   it("site tabs", () => {
-    for (const tab of ["live", "timeline", "find", "ask", "alerts", "servers"])
+    for (const tab of ["live", "timeline", "find", "ask", "alerts"])
       expect(matchRoute(`/sites/l_abc/${tab}`)).toEqual({ page: "site", siteId: "l_abc", tab });
     // Ask sits between Find and Alerts
     expect(SITE_TABS.slice(2, 5)).toEqual(["find", "ask", "alerts"]);
@@ -50,7 +50,7 @@ describe("matchRoute", () => {
 
   it("settings sections; bare /settings is General", () => {
     expect(matchRoute("/sites/l_abc/settings")).toEqual({ page: "site", siteId: "l_abc", tab: "settings", section: "general" });
-    for (const section of ["general", "monitoring", "contacts", "procedures"])
+    for (const section of ["general", "servers", "cameras", "monitoring"])
       expect(matchRoute(`/sites/l_abc/settings/${section}`)).toEqual({ page: "site", siteId: "l_abc", tab: "settings", section });
     expect(matchRoute("/sites/l_abc/settings/bogus")).toEqual({ page: "site", siteId: "l_abc", tab: "settings", section: "general", redirect: "/sites/l_abc/settings" });
   });
@@ -67,7 +67,9 @@ describe("matchRoute", () => {
   });
 
   it("a server inside a site", () => {
-    expect(matchRoute("/sites/l_abc/servers/s_123")).toEqual({ page: "server", siteId: "l_abc", serverId: "s_123", tab: "servers" });
+    expect(matchRoute("/sites/l_abc/servers/s_123")).toEqual({ page: "server", siteId: "l_abc", serverId: "s_123", tab: "settings" });
+    // the Servers tab moved under Settings
+    expect(matchRoute("/sites/l_abc/servers")).toEqual({ page: "site", siteId: "l_abc", tab: "settings", section: "servers", redirect: "/sites/l_abc/settings/servers" });
   });
 
   it("customer tabs, default and unknown", () => {
@@ -94,12 +96,16 @@ it("/fleet redirects to /sites", () => {
 
 describe("hrefs", () => {
   it("round-trip through matchRoute", () => {
-    expect(matchRoute(siteHref("l_1", "servers"))).toEqual({ page: "site", siteId: "l_1", tab: "servers" });
+    expect(matchRoute(siteHref("l_1", "alerts"))).toEqual({ page: "site", siteId: "l_1", tab: "alerts" });
+    expect(matchRoute(settingsHref("l_1", "servers"))).toEqual({ page: "site", siteId: "l_1", tab: "settings", section: "servers" });
     expect(matchRoute(serverHref("l_1", "s_2"))).toMatchObject({ page: "server", siteId: "l_1", serverId: "s_2" });
   });
   it("settings and SOC round-trip through matchRoute", () => {
     expect(settingsHref("l 1")).toBe("/sites/l%201/settings");
-    expect(matchRoute(settingsHref("l_1", "contacts"))).toEqual({ page: "site", siteId: "l_1", tab: "settings", section: "contacts" });
+    expect(matchRoute(settingsHref("l_1", "monitoring"))).toEqual({ page: "site", siteId: "l_1", tab: "settings", section: "monitoring" });
+    // the old Contacts and Procedures sub-tabs are parts of Monitoring now
+    expect(matchRoute("/sites/l_1/settings/contacts")).toEqual({ page: "site", siteId: "l_1", tab: "settings", section: "monitoring", redirect: "/sites/l_1/settings/monitoring#contacts" });
+    expect(matchRoute("/sites/l_1/settings/procedures").redirect).toBe("/sites/l_1/settings/monitoring#procedures");
     expect(matchRoute(settingsHref("l_1", "general")).section).toBe("general");
     expect(socHref()).toBe("/soc");
     expect(matchRoute(socHref("supervisor")).socTab).toBe("supervisor");
@@ -127,7 +133,7 @@ describe("topNav", () => {
 
   it("inside a Site (every tab and the server panel): no Find or Alerts, the Site's tabs own them", () => {
     for (const p of ["/sites/l_1/live", "/sites/l_1/timeline", "/sites/l_1/find", "/sites/l_1/alerts", "/sites/l_1/servers",
-      "/sites/l_1/settings/contacts", "/sites/l_1/servers/s_1"]) {
+      "/sites/l_1/settings/monitoring", "/sites/l_1/servers/s_1"]) {
       expect(labels(p)).toEqual(["Home", "Sites", "Customer", "Audit", "Account"]);
       expect(labels(p, true)).toEqual(["Home", "Sites", "SOC", "Customer", "Audit", "Account"]);
     }

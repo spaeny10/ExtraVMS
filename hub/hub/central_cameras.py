@@ -319,7 +319,7 @@ async def check(ci: dict, kind: str, path: str, body) -> list[str]:
             if ci.get("mode") == "bridge" and classify(addr)[0] == "private":
                 # an Axiom Bridge Site: a LAN address is fine once the Site's bridge carries it (bridges.bridge_fill)
                 raise Refused(400, f"{_norm(addr)} is not a camera the Site's Axiom Bridge carries yet: add it under "
-                                   "Site › Servers › Axiom Bridge › Add a camera… (name, LAN address and login: it is added to "
+                                   "Site › Settings › Servers › Axiom Bridge › Add a camera… (name, LAN address and login: it is added to "
                                    "recording there), or map it there first and then add it here with that same address") from e
             raise
 

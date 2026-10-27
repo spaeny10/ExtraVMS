@@ -1,5 +1,5 @@
 /**
- * Site → Settings → Procedures: the SOPs an operator follows for an incident at this Site. Each procedure applies to
+ * Site → Settings → Monitoring, procedures: the SOPs an operator follows for an incident at this Site. Each procedure applies to
  * one kind of incident (category; "default" = any) from a minimum priority up, and is a checklist of steps; ticks are
  * written to the incident's log, and required steps must be ticked before resolving. Saved as a whole with one PUT.
  */

@@ -12,10 +12,10 @@ import { Icon, useDismiss } from "@site/ui";
 import { type Camera, type Server, type Site, type SiteCoverage, ago, api } from "../api";
 import { bestCarrier, fmtScore } from "../coverage";
 import { certOfferDismissed, directStateOf, useDirect, useDirectVersion } from "../direct";
-import { go, navigate, serverHref, settingsHref } from "../nav";
+import { go, serverHref, settingsHref } from "../nav";
 import { cityState, fmtCoord, hasPoint } from "../place";
 import { type ServerHealth, healthLabel, offersText, siteHealth } from "../siteHealth";
-import { COVERAGE_ANCHOR } from "./CoverageCard";
+import { openCoverage } from "./CoverageCard";
 
 const linkDown = (s: Server) => s.summary?.site_link_down === true;
 
@@ -161,12 +161,7 @@ function CoverageLine({ site, cov }: { site: Site; cov: SiteCoverage }) {
   const best = bestCarrier(cov.data);
   if (!best) return null;
   const href = settingsHref(site.id, "general");
-  const open = (e: React.MouseEvent) => {
-    e.preventDefault();
-    navigate(href);
-    // the map loads lazily above it: scroll once it has had a moment to take its height
-    setTimeout(() => document.getElementById(COVERAGE_ANCHOR)?.scrollIntoView({ behavior: "smooth", block: "start" }), 250);
-  };
+  const open = (e: React.MouseEvent) => { e.preventDefault(); openCoverage(site.id); };
   return (
     <span className="small">
       <a className={`chip cov-chip ${cov.evaluation ? "eval" : ""}`} href={href} onClick={open}

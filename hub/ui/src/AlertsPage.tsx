@@ -11,7 +11,7 @@ import { actionsHref } from "./customer/fleetActions";
 import { type EventRef, alertEvent, cameraNameFor } from "./eventOpen";
 import { HubEventDetail, useCameraNames } from "./HubEventDetail";
 import { KIND_LABEL } from "./labels";
-import { consoleHref, consoleTimelineHref, go, inPlace, navigate, serverHref, siteHref } from "./nav";
+import { consoleHref, consoleTimelineHref, go, inPlace, navigate, serverHref, settingsHref, siteHref } from "./nav";
 import { DigestCard } from "./SitesPage";
 import { siteTimelineHref } from "./timelineLink";
 
@@ -21,8 +21,8 @@ function alertLinks(a: Alert): [string | null, string] {
   if (d.id && d.camera_id) {
     return [a.location_id ? siteTimelineHref(a.location_id, a.site_id, d.camera_id, d.id) : null, consoleTimelineHref(a.site_id, { cam: d.camera_id, event: d.id })];
   }
-  if (a.kind === "bridge_offline") {   // an Axiom Bridge (site_id = the bridge) has no console: its Site's Servers tab lists it
-    const here = siteHref(a.location_id ?? String(d.location_id ?? ""), "servers");
+  if (a.kind === "bridge_offline") {   // an Axiom Bridge (site_id = the bridge) has no console: its Site's Settings › Servers lists it
+    const here = settingsHref(a.location_id ?? String(d.location_id ?? ""), "servers");
     return [here, here];
   }
   return [a.location_id ? serverHref(a.location_id, a.site_id) : null, consoleHref(a.site_id, a.kind === "camera_down" ? "cameras" : "")];

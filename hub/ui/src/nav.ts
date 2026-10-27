@@ -26,13 +26,15 @@ export const inPlace = (fn: () => void) => (e: React.MouseEvent) => {
 /** An <a> click that stays in the app (plain href kept so middle-click / open-in-new-tab still work). */
 export const go = (path: string) => inPlace(() => navigate(path));
 
-export const SITE_TABS = ["live", "timeline", "find", "ask", "alerts", "servers", "settings"] as const;
+export const SITE_TABS = ["live", "timeline", "find", "ask", "alerts", "settings"] as const;
 export type SiteTab = (typeof SITE_TABS)[number];
 export const CUSTOMER_TABS = ["sites", "servers", "members", "invites", "ai", "actions"] as const;
 export type CustomerTab = (typeof CUSTOMER_TABS)[number];
 
-/** Site → Settings sub-tabs. General is the Site's own form; the others configure SOC monitoring of the Site. */
-export const SETTINGS_SECTIONS = ["general", "cameras", "monitoring", "contacts", "procedures"] as const;
+/** Site → Settings sub-tabs. General is the Site's own form; Servers its servers (a top-level tab before); Monitoring all of its SOC set-up (armed hours, call list, procedures). */
+export const SETTINGS_SECTIONS = ["general", "servers", "cameras", "monitoring"] as const;
+/** The old Contacts and Procedures sub-tabs, now parts of Monitoring: their links land on that part (/settings/monitoring#contacts). */
+const MONITORING_PARTS = ["contacts", "procedures"] as const;
 export type SettingsSection = (typeof SETTINGS_SECTIONS)[number];
 /** The SOC area: the operator queue (and one incident, for pop-outs and phones), the supervisor view, reports. */
 export type SocTab = "queue" | "incident" | "supervisor" | "reports";
@@ -98,11 +100,14 @@ export function matchRoute(path: string): Route {
     case undefined: return { page: "home" };
     case "sites": {
       if (!a) return { page: "sites" };
-      if (b === "servers" && c) return { page: "server", siteId: a, serverId: c, tab: "servers" };
+      // one server's panel sits under Settings › Servers; the bare /servers was the Site's Servers tab
+      if (b === "servers" && c) return { page: "server", siteId: a, serverId: c, tab: "settings" };
+      if (b === "servers") return { page: "site", siteId: a, tab: "settings", section: "servers", redirect: settingsHref(a, "servers") };
       // bare /settings is General (the form that was the whole tab before the SOC sub-tabs, so old links still land there)
       if (b === "settings") {
         if (!c) return { page: "site", siteId: a, tab: "settings", section: "general" };
         if (isOneOf(SETTINGS_SECTIONS, c)) return { page: "site", siteId: a, tab: "settings", section: c };
+        if (isOneOf(MONITORING_PARTS, c)) return { page: "site", siteId: a, tab: "settings", section: "monitoring", redirect: `${settingsHref(a, "monitoring")}#${c}` };
         return { page: "site", siteId: a, tab: "settings", section: "general", redirect: settingsHref(a, "general") };
       }
       // Site › Ask: one conversation has its own path, so it can be bookmarked and Back works between conversations

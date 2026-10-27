@@ -4,18 +4,30 @@
  * score bar 0–10 with coverage, reliability and performance; FCC signal with its band and the covered share at
  * 0.5/1/2 km; nearby speed-test medians with test and failure counts; measured vs estimated; the upload fit for the
  * cameras' need). Hub administrators and the Site's admins can look it up again (it costs units; confirmed first). On
- * the trial plan it is for hub administrators only and says so. Beside the Settings card on wide screens, below it on
- * narrower ones (it lays itself out by its own width: hub.css container query).
+ * the trial plan it is for hub administrators only and says so. Below the Settings card, folded to one line (the best
+ * carrier and its upload fit) until opened; the header's coverage chip opens it. It lays itself out by its own width
+ * (hub.css container query).
  */
 import { useState } from "react";
+import { navigate, settingsHref } from "../nav";
 import { confirmDialog, toast } from "@site/ui";
 import { type CoverageCarrier, type CoverageEntry, type Site, type SiteCoverage, type UploadFit, api, fmtTime } from "../api";
 import {
-  BAND_LABEL, FIT_LABEL, TECH_LABEL, carrierName, costText, fmtScore, medText, needText, pctText, radiusText, scoreClass, signalBand,
+  BAND_LABEL, FIT_LABEL, TECH_LABEL, bestCarrier, carrierName, costText, fmtScore, medText, needText, pctText, radiusText, scoreClass, signalBand,
   sortCarriers, testsText, unitsText, uploadFit,
 } from "../coverage";
 
 export const COVERAGE_ANCHOR = "cellular-coverage";
+
+/** Settings › General with the coverage card open and scrolled to (the map above it loads lazily, so after a moment). */
+export function openCoverage(siteId: string) {
+  navigate(settingsHref(siteId, "general"));
+  setTimeout(() => {
+    const el = document.getElementById(COVERAGE_ANCHOR);
+    if (el instanceof HTMLDetailsElement) el.open = true;
+    el?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, 250);
+}
 
 export function EvaluationBanner() {
   return (
@@ -105,11 +117,23 @@ export function CoverageCard({ site, cov, onChanged }: { site: Site; cov: SiteCo
   };
   const carriers = sortCarriers(cov.data?.carriers ?? []);
   const wait = cov.refresh_wait_s ?? 0;
+  const best = bestCarrier(cov.data);
+  const bestEntry = best ? carriers.find((c) => c.code === best.code)?.tech[best.technology] : undefined;
   return (
-    <div className="card cov-card" id={COVERAGE_ANCHOR}>
+    <details className="card cov-card" id={COVERAGE_ANCHOR}>
+      {/* folded: the best carrier and whether its upload carries the cameras */}
+      <summary>
+        <h3>Cellular coverage</h3>
+        {best ? (
+          <>
+            <span className="small">best here {best.name} {TECH_LABEL[best.technology] ?? best.technology.toUpperCase()} <strong>{fmtScore(best.score)}</strong></span>
+            {bestEntry && <FitChip fit={uploadFit(cov.need.mbps, bestEntry.speed?.upload)} />}
+          </>
+        ) : <span className="muted small">{cov.data ? "no carrier data here" : "not looked up yet"}</span>}
+        {cov.evaluation && <span className="chip small cov-chip eval" title="Evaluation only: hub administrators">evaluation</span>}
+      </summary>
       <div className="row">
-        <h3 style={{ margin: 0 }}>Cellular coverage</h3>
-        <span className="muted small">which carrier, and will the upload carry the cameras</span>
+        <span className="muted small">Which carrier, and will the upload carry the cameras.</span>
         <span className="spacer" />
         {cov.can_refresh && cov.locatable && (
           <button className="small ghost" disabled={busy || wait > 0} onClick={refresh}
@@ -141,6 +165,6 @@ export function CoverageCard({ site, cov, onChanged }: { site: Site; cov: SiteCo
         </>
       )}
       <p className="muted small cov-source">{cov.source}. Speeds are medians of crowdsourced tests near the Site; a fit is a guide, not a guarantee.</p>
-    </div>
+    </details>
   );
 }

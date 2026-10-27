@@ -12,7 +12,7 @@ import {
   PHASE_LABEL, camerasText, dataText, dataTitle, fmtGB, overLimit, parseCameraLimit, queueText, queueTitle, quotaText, resourcesFormError, resourcesText,
   settling, shortGpu,
 } from "../central";
-import { go, hostHref, siteHref } from "../nav";
+import { go, hostHref, settingsHref, siteHref } from "../nav";
 import {
   type BulkAction, INSTANCE_MODES, INSTANCE_PROBLEMS, INSTANCE_SORTS, INSTANCE_SORT_LABEL, INSTANCE_STATES, type ListQuery, MODE_LABEL, PROBLEM_LABEL,
   STATE_LABEL, bulkPlan, bulkValueError, camerasDown, defaultOrder, downText, imageTitle, instanceParams, lastPage, pageText, rowProblems, withQuery,
@@ -130,7 +130,7 @@ function Row({ c, showHost, ticked, onTick, onChanged, onNetworks, onResources, 
     <tr className={ticked ? "ticked" : ""}>
       <td className="lead">
         <input type="checkbox" className="row-tick" aria-label={`Select ${site}`} checked={ticked} onChange={(e) => onTick(e.target.checked)} />{" "}
-        <a href={siteHref(c.location_id, "servers")} onClick={go(siteHref(c.location_id, "servers"))}>{site}</a>
+        <a href={settingsHref(c.location_id, "servers")} onClick={go(settingsHref(c.location_id, "servers"))}>{site}</a>
         {c.site_number != null && <span className="muted small"> · site #{c.site_number}</span>}
       </td>
       <td className="small">{c.org_name ?? c.org_id}</td>

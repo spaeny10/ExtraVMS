@@ -1003,7 +1003,7 @@ async def delete_location(location_id: str, move_to: str | None = None, u: dict 
     servers = db.rows(sa.select(db.sites.c.id).where(db.sites.c.location_id == location_id))
     if db.one(sa.select(db.central_instances.c.id).where(db.central_instances.c.location_id == location_id,
                                                          db.central_instances.c.state.in_(hosts.LIVE_STATES))):
-        raise HTTPException(409, "this site has central recording: a hub administrator must remove it first (Servers tab)")
+        raise HTTPException(409, "this site has central recording: a hub administrator must remove it first (Settings › Servers)")
     target = None
     if servers:
         if not move_to:
