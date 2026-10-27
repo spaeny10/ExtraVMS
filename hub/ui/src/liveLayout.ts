@@ -360,21 +360,46 @@ export function viewSummary(layout: LiveLayout, liveKeys: string[], shown: numbe
 
 // ---------------------------------------------------------------- keyboard
 
+/** A tile's box on screen (getBoundingClientRect), by its key. */
+export type TileRect = { key: string; left: number; top: number; right: number; bottom: number };
+/** px two tiles may overlap at a shared edge and still count as side by side (borders, rounding) */
+const EDGE_PX = 2;
+
+/** Tiles in reading order: by row (top), then left to right. */
+const readingOrder = (rects: TileRect[]) => [...rects].sort((a, b) => Math.round(a.top) - Math.round(b.top) || a.left - b.left);
+
 /**
- * The grid's arrow keys (docs/live-views-spec.md, Keyboard): the tile `key` moves the focus to from tile `i` of `n`
- * laid out `cols` wide, in visual order; null = nowhere (an edge, or not a move key). Down from a row above a short
- * last row lands on that row's last tile rather than nowhere. Home / End go to the first / last tile.
+ * The grid's arrow keys (docs/live-views-spec.md, Keyboard), by where the tiles are on screen, so they work the same in
+ * Grid, Focus and Freeform whatever the tiles' sizes: the tile `key` moves the focus to from `from`; null = nowhere (an
+ * edge, or not a move key). An arrow goes to the nearest tile that way which lines up with this one (shares some of its
+ * rows for Left / Right, some of its columns for Up / Down), the one starting nearest this one's top or left edge on a
+ * tie (the strip's first tile beside Focus mode's large camera). With none lined up: Left / Right step through reading
+ * order (the end of a row to the next one's start), Up / Down go to the nearest row that way (a short last row's
+ * nearest tile). Home / End go to the first / last tile in reading order.
  */
-export function gridMove(i: number, key: string, cols: number, n: number): number | null {
-  if (n <= 0 || i < 0 || i >= n) return null;
-  const c = Math.max(1, cols);
-  switch (key) {
-    case "ArrowLeft": return i > 0 ? i - 1 : null;
-    case "ArrowRight": return i < n - 1 ? i + 1 : null;
-    case "ArrowUp": return i >= c ? i - c : null;
-    case "ArrowDown": return i + c < n ? i + c : Math.floor(i / c) < Math.floor((n - 1) / c) ? n - 1 : null;
-    case "Home": return i === 0 ? null : 0;
-    case "End": return i === n - 1 ? null : n - 1;
-    default: return null;
+export function tileMove(rects: TileRect[], from: string, key: string): string | null {
+  const f = rects.find((r) => r.key === from);
+  if (!f) return null;
+  const order = readingOrder(rects);
+  const at = order.indexOf(f);
+  if (key === "Home") return at > 0 ? order[0].key : null;
+  if (key === "End") return at < order.length - 1 ? order[order.length - 1].key : null;
+  const across = key === "ArrowLeft" || key === "ArrowRight";
+  if (!across && key !== "ArrowUp" && key !== "ArrowDown") return null;
+  const ahead = (c: TileRect) => ({
+    ArrowRight: c.left >= f.right - EDGE_PX, ArrowLeft: c.right <= f.left + EDGE_PX,
+    ArrowDown: c.top >= f.bottom - EDGE_PX, ArrowUp: c.bottom <= f.top + EDGE_PX,
+  })[key as "ArrowRight"];
+  const gap = (c: TileRect) => ({ ArrowRight: c.left - f.right, ArrowLeft: f.left - c.right, ArrowDown: c.top - f.bottom, ArrowUp: f.top - c.bottom })[key as "ArrowRight"];
+  const lined = (c: TileRect) => (across ? Math.min(f.bottom, c.bottom) - Math.max(f.top, c.top) : Math.min(f.right, c.right) - Math.max(f.left, c.left)) > EDGE_PX;
+  const offset = (c: TileRect) => (across ? Math.abs(c.top - f.top) : Math.abs(c.left - f.left));
+  const cands = rects.filter((c) => c !== f && ahead(c));
+  const best = (cs: TileRect[]) => cs.sort((a, b) => Math.round(gap(a)) - Math.round(gap(b)) || offset(a) - offset(b))[0]?.key ?? null;
+  const inLine = best(cands.filter(lined));
+  if (inLine) return inLine;
+  if (across) {
+    const next = order[at + (key === "ArrowRight" ? 1 : -1)];
+    return next?.key ?? null;
   }
+  return best(cands);
 }

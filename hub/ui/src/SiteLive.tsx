@@ -42,7 +42,7 @@
  * (canDeter); the calls go to the camera's own server through the hub.
  *
  * Keyboard (desktop, docs/live-views-spec.md): one tile is in the Tab order; the arrow keys, Home and End move between
- * tiles in visual order (only while a tile itself has the focus, so PTZ and digital zoom keep their own arrows), Enter
+ * tiles by where they are on screen, in every mode (only while a tile itself has the focus, so PTZ and digital zoom keep their own arrows), Enter
  * expands, Escape or Backspace collapses (Escape leaves fullscreen first) and F toggles fullscreen. Keys are
  * left alone while typing, in a menu or dialog, and the page-wide ones in the SOC's embed (it has its own chords).
  * Fullscreen fills the screen with the grid alone; the activity column hides until it ends. It is the shared helper's
@@ -78,8 +78,8 @@ import { makeHubSource, mediaApi, siteApi } from "./hubSource";
 import { talkByCamera } from "./site/cameraGroups";
 import { TabToolsSlot } from "./tabTools";
 import { COLUMN_CHOICES, EMPTY_LAYOUT, type LayoutAction, type LiveFocus, type LiveLayout, type LiveMode, type QualityMode, applyFocus, arrange, coerceLayout,
-  GRID_COLS, type Span, focusKey, freeCols, freeRowPx, gridMove, isDirty, isVisible, layoutCols, layoutReducer, loadActivityPref, loadLayout, loadLayoutId, saveActivityPref, saveLayout,
-  saveLayoutId, shownSpan, spanAt, tileLabel, tileQuality, tileSpan, toSavedConfig, viewSummary, wrapIndex } from "./liveLayout";
+  GRID_COLS, type Span, focusKey, freeCols, freeRowPx, isDirty, isVisible, layoutCols, layoutReducer, loadActivityPref, loadLayout, loadLayoutId, saveActivityPref, saveLayout,
+  saveLayoutId, shownSpan, spanAt, tileLabel, tileMove, tileQuality, tileSpan, toSavedConfig, viewSummary, wrapIndex } from "./liveLayout";
 
 /** live: full camera record from the server · loading: server online, cameras not fetched yet · unreachable: the
  *  server is online at the hub but its camera list failed (busy tunnel, restarting) · offline: the server is offline */
@@ -348,13 +348,19 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
       else if (!focused) showTile(key, key);
       return;
     }
-    const keys = grid.map((t) => t.key);
-    const cols = gridRef.current ? getComputedStyle(gridRef.current).gridTemplateColumns.split(" ").filter(Boolean).length : 1;
-    const to = gridMove(keys.indexOf(key), e.key, cols, keys.length);
+    // by where the tiles are on screen: the same in every mode, whatever their sizes (liveLayout tileMove)
+    const rects = [...(gridRef.current?.querySelectorAll<HTMLElement>("[data-live-key]") ?? [])].map((el) => {
+      const r = el.getBoundingClientRect();
+      return { key: el.dataset.liveKey!, left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+    });
+    const to = tileMove(rects, key, e.key);
     if (to === null) return;
     e.preventDefault();
-    setTabKey(keys[to]);
-    cellOf(gridRef.current, keys[to])?.focus();
+    setTabKey(to);
+    const cell = cellOf(gridRef.current, to);
+    cell?.focus();
+    // a tile off screen (a long strip, a tall Freeform grid) comes into view
+    cell?.scrollIntoView({ block: "nearest" });
   };
   const tabbable = grid.some((t) => t.key === tabKey) ? tabKey : grid[0]?.key;
   return (

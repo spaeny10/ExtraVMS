@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { EMPTY_LAYOUT, type LiveLayout, applyFocus, arrange, clampSpan, coerceLayout, defaultSpan, focusKey, freeCols, freeRowPx, gridCols, gridMove, isDirty,
+import { EMPTY_LAYOUT, type LiveLayout, applyFocus, arrange, clampSpan, coerceLayout, defaultSpan, focusKey, freeCols, freeRowPx, gridCols, isDirty,
   isVisible, layoutCols, layoutIdStorageKey, layoutReducer, layoutStorageKey, parseLayout, shownKeys, shownSpan, spanAt, streamMode, tileLabel, tileQuality,
-  tileSpan, toSavedConfig, viewSummary, wrapIndex } from "./liveLayout";
+  tileMove, tileSpan, toSavedConfig, viewSummary, wrapIndex, type TileRect } from "./liveLayout";
 
 describe("gridCols", () => {
   it("is square-ish and at most 4 wide, like the server's LiveView", () => {
@@ -223,32 +223,58 @@ describe("the View menu (streamMode, viewSummary)", () => {
   });
 });
 
-describe("gridMove", () => {
-  // 7 tiles, 3 wide:  0 1 2 / 3 4 5 / 6
-  it("moves left and right in reading order, stopping at the ends", () => {
-    expect(gridMove(0, "ArrowLeft", 3, 7)).toBeNull();
-    expect(gridMove(2, "ArrowRight", 3, 7)).toBe(3);
-    expect(gridMove(6, "ArrowRight", 3, 7)).toBeNull();
+describe("tileMove (arrow keys by position)", () => {
+  // boxes of w x h at (x, y), keyed by name
+  const box = (key: string, x: number, y: number, w: number, h: number): TileRect => ({ key, left: x, top: y, right: x + w, bottom: y + h });
+  // Grid: 7 tiles, 3 wide (100 x 75, 8 px gaps):  t0 t1 t2 / t3 t4 t5 / t6
+  const grid = Array.from({ length: 7 }, (_, i) => box(`t${i}`, (i % 3) * 108, Math.floor(i / 3) * 83, 100, 75));
+  const mv = (from: number, key: string) => tileMove(grid, `t${from}`, key);
+
+  it("Grid: left and right in reading order, stopping at the ends", () => {
+    expect(mv(0, "ArrowLeft")).toBeNull();
+    expect(mv(0, "ArrowRight")).toBe("t1");
+    expect(mv(2, "ArrowRight")).toBe("t3");
+    expect(mv(3, "ArrowLeft")).toBe("t2");
+    expect(mv(6, "ArrowRight")).toBeNull();
   });
-  it("moves up and down a column", () => {
-    expect(gridMove(4, "ArrowUp", 3, 7)).toBe(1);
-    expect(gridMove(1, "ArrowUp", 3, 7)).toBeNull();
-    expect(gridMove(0, "ArrowDown", 3, 7)).toBe(3);
+  it("Grid: up and down a column; a short last row's nearest tile, and nothing below it", () => {
+    expect(mv(4, "ArrowUp")).toBe("t1");
+    expect(mv(1, "ArrowUp")).toBeNull();
+    expect(mv(0, "ArrowDown")).toBe("t3");
+    expect(mv(5, "ArrowDown")).toBe("t6");
+    expect(mv(6, "ArrowDown")).toBeNull();
   });
-  it("lands on a short last row's last tile, and stops below it", () => {
-    expect(gridMove(5, "ArrowDown", 3, 7)).toBe(6);
-    expect(gridMove(6, "ArrowDown", 3, 7)).toBeNull();
+  it("Home, End, other keys and unknown tiles", () => {
+    expect(mv(4, "Home")).toBe("t0");
+    expect(mv(4, "End")).toBe("t6");
+    expect(mv(0, "Home")).toBeNull();
+    expect(mv(6, "End")).toBeNull();
+    expect(mv(4, "Enter")).toBeNull();
+    expect(tileMove(grid, "x", "ArrowRight")).toBeNull();
+    expect(tileMove([], "x", "Home")).toBeNull();
   });
-  it("jumps to the first and last tile, and ignores other keys", () => {
-    expect(gridMove(4, "Home", 3, 7)).toBe(0);
-    expect(gridMove(4, "End", 3, 7)).toBe(6);
-    expect(gridMove(6, "End", 3, 7)).toBeNull();
-    expect(gridMove(4, "Enter", 3, 7)).toBeNull();
+  it("Focus mode, strip beside: right from the large camera is the strip's first tile, left from any strip tile comes back", () => {
+    const big = box("big", 0, 0, 800, 600);
+    const strip = [0, 1, 2, 3].map((i) => box(`s${i}`, 808, i * 208, 228, 200));
+    const all = [big, ...strip];
+    expect(tileMove(all, "big", "ArrowRight")).toBe("s0");
+    expect(tileMove(all, "s2", "ArrowLeft")).toBe("big");
+    expect(tileMove(all, "s0", "ArrowDown")).toBe("s1");
+    expect(tileMove(all, "s3", "ArrowLeft")).toBe("s2");  // below the large camera: reading order
+    expect(tileMove(all, "big", "ArrowDown")).toBe("s3");
   });
-  it("treats one column as a list and an empty grid as nowhere", () => {
-    expect(gridMove(1, "ArrowDown", 1, 3)).toBe(2);
-    expect(gridMove(0, "ArrowDown", 0, 3)).toBe(1);
-    expect(gridMove(0, "ArrowRight", 3, 0)).toBeNull();
+  it("Freeform: mixed sizes go by what lines up", () => {
+    // [ A 8x6 ][ B 4x3 ]
+    //          [ C 4x3 ]
+    // [ D 4x3 ][ E 4x3 ][ F 4x3 ]
+    const tiles = [box("A", 0, 0, 800, 450), box("B", 808, 0, 392, 221), box("C", 808, 229, 392, 221),
+      box("D", 0, 458, 392, 221), box("E", 400, 458, 400, 221), box("F", 808, 458, 392, 221)];
+    expect(tileMove(tiles, "A", "ArrowRight")).toBe("B");
+    expect(tileMove(tiles, "C", "ArrowLeft")).toBe("A");
+    expect(tileMove(tiles, "A", "ArrowDown")).toBe("D");
+    expect(tileMove(tiles, "E", "ArrowUp")).toBe("A");
+    expect(tileMove(tiles, "B", "ArrowDown")).toBe("C");
+    expect(tileMove(tiles, "C", "ArrowDown")).toBe("F");
   });
 });
 
