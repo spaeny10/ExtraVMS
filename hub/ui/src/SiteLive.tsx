@@ -24,8 +24,10 @@
  * a wide window or under it on a narrow one; a click on a strip tile makes it the large one) or Freeform (each tile
  * its own size on a 12-column grid, 6 columns on a narrow one). Every mode is one CSS grid over the same tiles, so a
  * change of mode or of the large camera moves tiles without reconnecting them. Tiles reorder by dragging the ⠿ grip
- * in their bar (desktop); the phone picks a layout only, one camera at a time whatever its mode. The logic is
- * liveLayout.ts.
+ * in their bar (desktop; in Freeform only while editing); the phone picks a layout only, one camera at a time whatever
+ * its mode. Freeform's "Edit tiles" (toolbar) gives each tile a corner to drag to a new size, snapping to whole cells
+ * (double-click it: back to the default size), and Shift+arrows resize the tile with the keyboard focus; Done or Esc
+ * ends it, and Save keeps the sizes in the named layout. The logic is liveLayout.ts.
  *
  * Streams: a tile is on Auto unless the viewer picked SD or HD for it (on the tile, All SD / All HD, or a saved layout
  * holding a pick): Auto goes HD on a large or expanded tile with a clean link, two at a time (LiveQuality.tsx), and
@@ -76,8 +78,8 @@ import { makeHubSource, mediaApi, siteApi } from "./hubSource";
 import { talkByCamera } from "./site/cameraGroups";
 import { TabToolsSlot } from "./tabTools";
 import { COLUMN_CHOICES, EMPTY_LAYOUT, type LayoutAction, type LiveFocus, type LiveLayout, type LiveMode, type QualityMode, applyFocus, arrange, coerceLayout,
-  focusKey, freeCols, freeRowPx, gridMove, isDirty, isVisible, layoutCols, layoutReducer, loadActivityPref, loadLayout, loadLayoutId, saveActivityPref, saveLayout,
-  saveLayoutId, shownSpan, tileLabel, tileQuality, tileSpan, toSavedConfig, viewSummary, wrapIndex } from "./liveLayout";
+  GRID_COLS, type Span, focusKey, freeCols, freeRowPx, gridMove, isDirty, isVisible, layoutCols, layoutReducer, loadActivityPref, loadLayout, loadLayoutId, saveActivityPref, saveLayout,
+  saveLayoutId, shownSpan, spanAt, tileLabel, tileQuality, tileSpan, toSavedConfig, viewSummary, wrapIndex } from "./liveLayout";
 
 /** live: full camera record from the server · loading: server online, cameras not fetched yet · unreachable: the
  *  server is online at the hub but its camera list failed (busy tunnel, restarting) · offline: the server is offline */
@@ -184,6 +186,11 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
 
   const q = (key: string): QualityMode => tileQuality(layout, key);
   const [expanded, setExpanded] = useState<string | null>(null);
+  // Freeform's tile editing (resize corners, grips): a mode of the page, not of the layout
+  const [editing, setEditing] = useState(false);
+  useEffect(() => { if (layout.mode !== "free") setEditing(false); }, [layout.mode]);
+  const editingRef = useRef(editing);
+  editingRef.current = editing;
   // Expand narrows the activity column to that camera too, until the viewer asks for everything again
   const [feedAll, setFeedAll] = useState(false);
   useEffect(() => { setFeedAll(false); }, [expanded]);
@@ -215,6 +222,8 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
   const expandedShown = !!expanded && shown.some((t) => t.key === expanded);
   const fit = useExpandFit(gridRef, !isPhone && (expandedShown || layout.mode === "focus"), fs.on, fs.rotated);
   const gridBox = useGridBox(gridRef, !isPhone && tiles.length > 0);
+  const setSpan = (key: string, span: Span | null) => dispatch({ type: "span", key, span });
+  const resize = useTileResize(gridBox.w, setSpan);
   // keyboard: the tile in the Tab order, and the one to focus once the grid has re-rendered (after expand / collapse)
   const [tabKey, setTabKey] = useState<string | null>(null);
   const refocus = useRef<string | null>(null);
@@ -242,7 +251,10 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
       const cell = el?.closest?.(".site-live-cell");
       if (cell && cell !== el) return;
       const open = expandedRef.current;
-      if ((e.key === "Escape" || e.key === "Backspace") && open) {
+      if (e.key === "Escape" && !open && editingRef.current) {
+        e.preventDefault();
+        setEditing(false);
+      } else if ((e.key === "Escape" || e.key === "Backspace") && open) {
         e.preventDefault();
         setExpanded(null);
         setTabKey(open);
@@ -282,7 +294,11 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
   const mode: LiveMode | null = focused ? null : grid.length > 1 ? layout.mode : "auto";
   const placed = placeTiles(mode, grid.map((t) => t.key), layout, gridBox);
   const bigKey = placed.big;
-  const draggable = !compact && grid.length > 1;
+  // sizes are edited on the full 12-column grid only (on 6 they are drawn halved)
+  const canEdit = mode === "free" && !compact && freeCols(gridBox.w) === GRID_COLS;
+  const editNow = editing && canEdit;
+  // Freeform reorders only while editing: a grip there would move a tile by accident
+  const draggable = !compact && grid.length > 1 && (mode !== "free" || editNow);
   const liveKeys = shown.filter((t) => t.state === "live").map((t) => t.key);
   // the tab row's right side (or, without a Site page around, its own row): Layout, Save while changed, Activity, View
   const toolbar = !compact && (
@@ -294,6 +310,17 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
           Activity
         </button>
       )}
+      {mode === "free" && !editNow && (
+        <button className="ghost small" onClick={() => setEditing(true)} disabled={!canEdit}
+          title={canEdit ? "Resize and reorder the tiles" : "Widen the window to edit tile sizes (a narrow one draws them on 6 columns)"}>
+          Edit tiles
+        </button>
+      )}
+      {editNow && <>
+        <button className="ghost small" onClick={() => dispatch({ type: "resetSpans" })} disabled={!Object.keys(layout.spans).length}
+          title="Every tile back to its default size">Reset sizes</button>
+        <button className="small" onClick={() => setEditing(false)} title="Stop editing (Esc); Save keeps the sizes in the layout">Done</button>
+      </>}
       <ViewMenu tiles={ordered} layout={layout} liveKeys={liveKeys} multi={multi} dispatch={dispatch} dirty={dirty} onRevert={revert}
         named={named.enabled ? named : null} current={() => toSavedConfig(allKeys, layout)} />
       <button className="ghost small icon-act" onClick={fs.toggle} aria-pressed={fs.on} aria-label={fs.on ? "Leave fullscreen" : "Fullscreen"}
@@ -305,7 +332,15 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
   // arrows, Home and End between tiles, Enter to expand: only while a tile itself has the focus (the notes at the top)
   const onGridKey = (e: React.KeyboardEvent<HTMLDivElement>) => {
     const key = (e.target as HTMLElement).dataset?.liveKey;
-    if (!key || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    if (!key || e.altKey || e.ctrlKey || e.metaKey) return;
+    if (e.shiftKey) {
+      const step = editNow ? SPAN_KEYS[e.key] : undefined;
+      if (!step) return;
+      e.preventDefault();
+      const [w, h] = tileSpan(layout, key, grid.length);
+      setSpan(key, [w + step[0], h + step[1]]);
+      return;
+    }
     if (e.key === "Enter") {
       e.preventDefault();
       // Focus mode: a strip tile becomes the large one; the large one (or any other mode's tile) expands
@@ -335,8 +370,14 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
             </button>
           )}
           {fs.debugView}
+          {editNow && (
+            <p className="muted small live-edit-hint" role="status">
+              Drag a tile's corner to resize it (double-click the corner: default size), its ⠿ grip to move it · Shift+arrows resize the selected tile ·
+              Done or Esc when finished, then Save to keep it in the layout
+            </p>
+          )}
           <div ref={gridRef} onKeyDown={onGridKey}
-            className={`live-grid ${focused ? "expanded" : mode === "auto" && layoutCols(layout, grid.length) === 1 ? "one" : ""} ${placed.className}`}
+            className={`live-grid ${focused ? "expanded" : mode === "auto" && layoutCols(layout, grid.length) === 1 ? "one" : ""} ${placed.className} ${editNow ? "editing" : ""}`}
             style={{ gridTemplateColumns: `repeat(${focused ? 1 : layoutCols(layout, grid.length)}, minmax(0, 1fr))`,
               ...placed.style,
               // a lone tile fits the window (styles.css .live-grid.one): the hub's header, tabs and toolbar above it
@@ -352,6 +393,8 @@ function SiteLiveView({ org, site, focus: want = null, persist = true, compact =
               const strip = !!bigKey && !big;
               return (
                 <SiteTile key={t.key} t={t} {...tileProps} focused={!!focused} big={big} style={placed.cell(t.key)} tab={t.key === tabbable}
+                  resize={editNow ? { onCorner: (e) => resize.start(t.key, tileSpan(layout, t.key, grid.length), e), reset: () => setSpan(t.key, null),
+                    span: tileSpan(layout, t.key, grid.length), active: resize.key === t.key } : undefined}
                   onCellFocus={() => setTabKey(t.key)} onPick={strip ? () => dispatch({ type: "focus", key: t.key }) : undefined}
                   drag={draggable ? { onGrip: (e) => drag.start(t.key, tileLabel(t.server.name, t.name, multi), e), dragging: drag.dragKey === t.key,
                     dropTarget: drag.dropKey === t.key } : undefined}
@@ -652,6 +695,58 @@ function useTileDrag(onDrop: (key: string, onto: string) => void) {
     setGhost({ name, x: e.clientX, y: e.clientY });
   };
   return { dragKey, dropKey, ghost, start };
+}
+
+/** Shift+arrow: the change to a Freeform tile's [columns, rows] */
+const SPAN_KEYS: Record<string, [number, number]> = { ArrowRight: [1, 0], ArrowLeft: [-1, 0], ArrowDown: [0, 1], ArrowUp: [0, -1] };
+
+/** A Freeform tile's corner while editing (useTileResize) and its size now. */
+type TileResize = { onCorner: (e: React.PointerEvent) => void; reset: () => void; span: Span; active: boolean };
+
+/**
+ * Freeform editing: drag a tile's corner and its span follows the pointer in whole cells, measured from where the tile
+ * was when the drag began (the grid reflows as it grows; measured from its new place the size would jump about). Esc
+ * puts the size back.
+ */
+function useTileResize(gridPx: number, setSpan: (key: string, span: Span | null) => void) {
+  const [key, setKey] = useState<string | null>(null);
+  const spanRef = useRef(setSpan);
+  spanRef.current = setSpan;
+  const stop = useRef<(() => void) | null>(null);
+  useEffect(() => () => stop.current?.(), []);
+  const start = (k: string, was: Span, e: React.PointerEvent) => {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    const cell = (e.currentTarget as HTMLElement).closest<HTMLElement>(".site-live-cell");
+    if (!cell || !gridPx) return;
+    e.preventDefault();
+    e.stopPropagation();
+    stop.current?.();
+    const r = cell.getBoundingClientRect();
+    const colPx = (gridPx - LIVE_GAP_PX * (GRID_COLS - 1)) / GRID_COLS;
+    const rowPx = freeRowPx(gridPx, GRID_COLS, LIVE_GAP_PX);
+    let last = was;
+    const move = (ev: PointerEvent) => {
+      ev.preventDefault();
+      const next = spanAt(ev.clientX - r.left, ev.clientY - r.top, colPx, rowPx, LIVE_GAP_PX);
+      if (next[0] !== last[0] || next[1] !== last[1]) { last = next; spanRef.current(k, next); }
+    };
+    const esc = (ev: KeyboardEvent) => { if (ev.key === "Escape") { ev.preventDefault(); ev.stopPropagation(); spanRef.current(k, was); end(); } };
+    const end = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+      window.removeEventListener("keydown", esc, true);
+      stop.current = null;
+      setKey(null);
+    };
+    stop.current = end;
+    window.addEventListener("pointermove", move, { passive: false });
+    window.addEventListener("pointerup", end);
+    window.addEventListener("pointercancel", end);
+    window.addEventListener("keydown", esc, true);
+    setKey(k);
+  };
+  return { key, start };
 }
 
 // ---------------------------------------------------------------- Latest activity (LiveView's feed, across servers)
@@ -985,8 +1080,8 @@ const STATE_TEXT: Record<Exclude<TileState, "live">, string> = { offline: "Serve
 /** A grid tile's part in a drag (useTileDrag): its grip, and whether it is the one dragged or the one under the pointer. */
 type TileDrag = { onGrip: (e: React.PointerEvent) => void; dragging: boolean; dropTarget: boolean };
 
-function SiteTile({ t, source, multi, q, dispatch, activeOf, talkOf, deter, extra, phone, onSwipe, drag, focused = false, big = false, style, onPick, tab,
-  onCellFocus }: TileCommon & {
+function SiteTile({ t, source, multi, q, dispatch, activeOf, talkOf, deter, extra, phone, onSwipe, drag, focused = false, big = false, style, onPick, resize,
+  tab, onCellFocus }: TileCommon & {
   t: Tile; extra?: React.ReactNode; phone?: boolean; onSwipe?: (dir: -1 | 1) => void; drag?: TileDrag;
   /** the tile is the expanded one */
   focused?: boolean;
@@ -996,6 +1091,8 @@ function SiteTile({ t, source, multi, q, dispatch, activeOf, talkOf, deter, extr
   style?: React.CSSProperties;
   /** Focus mode's strip: a click on the picture makes this the large camera */
   onPick?: () => void;
+  /** Freeform editing: the corner that resizes the tile */
+  resize?: TileResize;
   /** keyboard (the desktop grid): true = the tile in the Tab order, false = reached with the arrows; absent = not focusable */
   tab?: boolean;
   onCellFocus?: () => void;
@@ -1020,7 +1117,7 @@ function SiteTile({ t, source, multi, q, dispatch, activeOf, talkOf, deter, extr
   const active = activeOf(t.key);
   const grip = drag && <span className="sync-grip" title="Drag to reorder" onPointerDown={drag.onGrip}>⠿</span>;
   return (
-    <div ref={box} className={`site-live-cell ${focused ? "focused" : ""} ${big ? "big" : ""} ${onPick ? "pickable" : ""} ${drag?.dragging ? "dragging" : ""} ${drag?.dropTarget ? "drop-target" : ""}`}
+    <div ref={box} className={`site-live-cell ${focused ? "focused" : ""} ${big ? "big" : ""} ${onPick ? "pickable" : ""} ${drag?.dragging ? "dragging" : ""} ${drag?.dropTarget ? "drop-target" : ""} ${resize?.active ? "resizing" : ""}`}
       data-live-key={t.key} style={style}
       tabIndex={tab === undefined ? undefined : tab ? 0 : -1} role={tab === undefined ? undefined : "group"}
       aria-label={tab === undefined ? undefined : `${label}${t.state === "live" ? (active ? `, ${active.camera_class} event in progress` : "") : `, ${STATE_TEXT[t.state]}`}${focused ? ", expanded" : big ? ", large" : ""}`}
@@ -1075,6 +1172,11 @@ function SiteTile({ t, source, multi, q, dispatch, activeOf, talkOf, deter, extr
           </div>
         </div>
       )}
+      {resize && (
+        <span className="live-resize" onPointerDown={resize.onCorner} onDoubleClick={resize.reset} aria-hidden="true"
+          title={`${resize.span[0]} × ${resize.span[1]} · drag to resize, double-click for the default size`} />
+      )}
+      {resize?.active && <span className="live-resize-size" aria-hidden="true">{resize.span[0]} × {resize.span[1]}</span>}
     </div>
   );
 }
