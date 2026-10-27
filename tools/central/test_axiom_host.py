@@ -2015,5 +2015,286 @@ class GpuShare(unittest.TestCase):
         self.assertIn("'gpu_mem':s.get('gpu_mem')", ah.INSTANCE_WORK)
 
 
+class InferExec(FakeExec):
+    """FakeExec that keeps the inference services' containers (docker run / rm -f of axiom-infer-gpuN change them;
+    `docker ps --filter label=axiom.infer` lists them). A docker run of a container named in `fail` exits 1."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.infer: dict[int, str] = {}
+        self.fail: set[str] = set()
+
+    def _run(self, argv, input, timeout):
+        if argv[:2] == ["docker", "ps"] and "label=axiom.infer" in argv:
+            self.calls.append(list(argv))
+            return ah.Result(0, "".join(f"{g}\t{s}\n" for g, s in self.infer.items()), "")
+        if argv[:2] == ["docker", "run"]:
+            name = argv[argv.index("--name") + 1]
+            if name in self.fail:
+                self.calls.append(list(argv))
+                return ah.Result(1, "", f"cannot start {name}\n")
+            if name.startswith("axiom-infer-gpu"):
+                self.infer[int(name[len("axiom-infer-gpu"):])] = "running"
+        if argv[:3] == ["docker", "rm", "-f"] and argv[3].startswith("axiom-infer-gpu"):
+            self.infer.pop(int(argv[3][len("axiom-infer-gpu"):]), None)
+        return super()._run(argv, input, timeout)
+
+
+STATS = {"ok": True, "uptime_s": 99, "busy": 0.25, "queues": {"verify": 2, "background": 0, "index": 5},
+         "latency": {"verify": {"n": 10, "wait_p50_ms": 3.0, "p50_ms": 40.0, "p95_ms": 120.5}},
+         "sites": {"acme-gate": {"requests": 4, "frames": 30, "gpu_s": 0.42, "last": 1.0}}, "oom": 0,
+         "memory": {"allocated_mb": 5000, "reserved_mb": 6100, "peak_reserved_mb": 6300}}
+
+
+class SharedInference(unittest.TestCase):
+    """Shared inference (nvr/inferd.py): one service per card, instances created or switched onto it, their tokens,
+    the service's container, and its numbers in capacity.work."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.exe = InferExec()
+        self.host = make_host(self.tmp, self.exe)
+        self.host.cfg["infer_ready_s"] = 0
+        self.asked: list[tuple[str, dict]] = []
+        self.down = False
+
+        def call(path, header, timeout):   # the service's socket
+            self.asked.append((path, header))
+            if self.down:
+                raise ConnectionRefusedError("no service")
+            if header.get("token") != self.host.load()["infer"].get("host_token"):
+                return {"ok": False, "kind": "unauthorized", "error": "unknown token"}
+            return {"ok": True, "proto": 1} if header["op"] == "hello" else dict(STATS)
+        self.host.infer_call = call
+
+    def rec(self, iid="acme-gate"):
+        return self.host.load()["instances"][iid]
+
+    def tokens(self) -> dict:
+        return json.loads((self.host.infer_etc_dir / "tokens.json").read_text())
+
+    def runs(self, name: str) -> list[list[str]]:
+        return [c for c in self.exe.cmds("docker run") if c[c.index("--name") + 1] == name]
+
+    def last_run(self, name="axiom-acme-gate") -> list[str]:
+        return self.runs(name)[-1]
+
+    @staticmethod
+    def env_files(argv: list[str]) -> list[str]:
+        return [Path(argv[i + 1]).name for i, a in enumerate(argv) if a == "--env-file"]
+
+    def test_create_shared(self):
+        self.host.cfg["inference"] = "shared"
+        out = self.host.create_instance(dict(VPN_ARGS))
+        rec = self.rec()
+        self.assertEqual((rec["inference"], rec["gpu_mem_mb"]), ("shared", 4096))   # the share kept for a switch back
+        self.assertGreaterEqual(len(rec["infer_token"]), 40)
+        names = [c[c.index("--name") + 1] for c in self.exe.cmds("docker run")]
+        self.assertEqual(names, ["axiom-infer-gpu1", "axiom-acme-gate"])           # the service before the instance
+        run = self.last_run()
+        self.assertEqual(self.env_files(run), ["instance.env", "inference.env"])
+        self.assertNotIn("-e", run)                                                # no NVR_GPU_MEM_MB: no models here
+        self.assertIn(f"type=bind,src={self.host.infer_sock_dir},dst=/run/axiom-infer,readonly", run)
+        self.assertIn("device=1", run)                                             # the card stays, for video
+        env = ah.read_env_file(self.host.infer_env_path("acme-gate"))
+        self.assertEqual(env, {"NVR_INFER_SOCKET": "/run/axiom-infer/gpu1.sock", "NVR_INFER_TOKEN": rec["infer_token"]})
+        host_token = self.host.load()["infer"]["host_token"]
+        self.assertEqual(self.tokens(), {rec["infer_token"]: "acme-gate", host_token: "_host"})
+        self.assertEqual(self.host.load()["infer"]["image"], "axiom/instance:latest")
+        self.assertEqual((out["instance"]["inference"], out["instance"]["gpu_mem_mb"]), ("shared", None))
+        cap = self.host.capacity()
+        g1 = [g for g in cap["gpus"] if g["index"] == 1][0]
+        self.assertEqual((g1["instances"], g1["shared"], g1["shares_mb"], g1["unshared"], g1["infer"]), (1, 1, 0, 0, "running"))
+        g0 = [g for g in cap["gpus"] if g["index"] == 0][0]
+        self.assertIsNone(g0["infer"])                                             # the vLLM card: no service
+        self.assertEqual(cap["inference"], {"mode": "shared", "gpus": [1], "image": "axiom/instance:latest"})
+        self.host.create_instance(dict(FWD_ARGS))                                  # no GPU: its own (CPU) models
+        self.assertEqual(self.rec("beta-yard")["inference"], "per_instance")
+        with self.assertRaises(ah.OpError) as e:
+            self.host.create_instance({**FWD_ARGS, "id": "c-cpu", "location": "loc_c", "public_ip": "198.51.100.9",
+                                       "inference": "shared"})
+        self.assertIn("needs a GPU", str(e.exception))
+        with self.assertRaises(ah.OpError):
+            self.host.create_instance({**VPN_ARGS, "id": "c-bad", "location": "loc_d", "subnet": "10.20.9.0/24",
+                                       "inference": "both"})
+
+    def test_service_container(self):
+        argv = self.host.infer_run_argv(1, "axiom/instance:abc1234")
+        self.assertEqual(argv[argv.index("--network") + 1], "none")                # its socket is its only door
+        self.assertEqual(argv[argv.index("--user") + 1], "19999:19999")
+        self.assertIn(f"type=bind,src={self.host.infer_sock_dir},dst=/run/axiom-infer", argv)
+        self.assertIn(f"type=bind,src={self.host.infer_etc_dir},dst=/etc/axiom-infer,readonly", argv)
+        self.assertNotIn("--env-file", argv)                                       # no instance's secrets
+        self.assertIn("--read-only", argv)
+        self.assertIn("/data:rw,nosuid,nodev,size=16m", argv)                      # no anonymous volumes
+        self.assertIn("/run/axiom-infer/gpu1.sock", argv[argv.index("--health-cmd") + 1])
+        i = argv.index("axiom/instance:abc1234")
+        self.assertEqual(argv[i - 1], "device=1")
+        self.assertEqual(argv[i + 1:], ["python", "-m", "nvr.inferd", "--listen", "/run/axiom-infer/gpu1.sock",
+                                         "--device", "cuda:0", "--tokens", "/etc/axiom-infer/tokens.json"])
+
+    def test_switch_to_shared_and_back(self):
+        self.host.create_instance(dict(VPN_ARGS))
+        self.assertEqual(self.rec()["inference"], "per_instance")
+        self.assertFalse((self.host.infer_etc_dir / "tokens.json").exists())       # nothing shared on this host yet
+        out = self.host.set_inference({"id": "acme-gate", "inference": "shared"})
+        self.assertIn("per_instance -> shared", out["detail"])
+        rec = self.rec()
+        self.assertEqual(self.asked[-1], (str(self.host.infer_host_socket(1)),
+                                          {"op": "hello", "token": self.host.load()["infer"]["host_token"]}))
+        names = [c[c.index("--name") + 1] for c in self.exe.cmds("docker run")]
+        self.assertEqual(names[-2:], ["axiom-infer-gpu1", "axiom-acme-gate"])
+        self.assertEqual(self.env_files(self.last_run()), ["instance.env", "inference.env"])
+        self.assertEqual(self.tokens()[rec["infer_token"]], "acme-gate")
+        self.assertIn("unchanged", self.host.set_inference({"id": "acme-gate", "inference": "shared"})["detail"])
+        self.assertEqual(self.exe.cmds("docker run")[len(names):], [])
+        out = self.host.set_inference({"id": "acme-gate", "inference": "per_instance"})
+        self.assertIn("shared -> per_instance", out["detail"])
+        run = self.last_run()
+        self.assertEqual(self.env_files(run), ["instance.env"])
+        self.assertIn("NVR_GPU_MEM_MB=4096", run)                                  # its share back
+        self.assertNotIn("infer_token", self.rec())
+        self.assertEqual(self.tokens(), {})                                        # its token revoked
+        self.assertEqual(self.exe.infer, {})                                       # the card's service: nobody left
+        self.assertFalse(self.host.infer_env_path("acme-gate").exists())
+        with self.assertRaises(ah.OpError):
+            self.host.set_inference({"id": "acme-gate", "inference": "remote"})
+
+    def test_switch_rolls_back(self):
+        self.host.create_instance(dict(VPN_ARGS))
+        self.down = True                                                           # the service never answers
+        with self.assertRaises(ah.OpError) as e:
+            self.host.set_inference({"id": "acme-gate", "inference": "shared"})
+        self.assertIn("did not answer", str(e.exception))
+        self.assertEqual([c for c in self.exe.cmds("docker rm") if "axiom-acme-gate" in c], [])   # never touched
+        self.assertEqual(self.rec()["inference"], "per_instance")
+        self.assertNotIn("infer_token", self.rec())
+        self.assertEqual(self.exe.infer, {})                                       # the service it started: removed
+        self.assertEqual(self.tokens(), {})
+        self.assertEqual(len(self.runs("axiom-acme-gate")), 1)
+        self.down = False                                                         # the recreate itself fails
+        self.exe.fail = {"axiom-acme-gate"}
+        with self.assertRaises(ah.CmdError):
+            self.host.set_inference({"id": "acme-gate", "inference": "shared"})
+        self.assertEqual(self.rec()["inference"], "per_instance")
+        self.assertIn("NVR_GPU_MEM_MB=4096", self.last_run())                      # re-run as it was
+        self.assertEqual(self.env_files(self.last_run()), ["instance.env"])
+
+    def test_delete_revokes_and_removes(self):
+        self.host.cfg["inference"] = "shared"
+        self.host.create_instance(dict(VPN_ARGS))
+        self.host.create_instance({**VPN_ARGS, "id": "c-two", "location": "loc_c", "subnet": "10.20.9.0/24"})
+        gone = self.rec()["infer_token"]
+        self.host.delete_instance({"id": "acme-gate", "keep_data": True})
+        self.assertNotIn(gone, self.tokens())
+        self.assertIn("c-two", self.tokens().values())
+        self.assertFalse(self.host.infer_env_path("acme-gate").exists())          # its kept data holds no token
+        self.assertEqual(self.exe.infer, {1: "running"})                           # c-two still uses it
+        self.host.delete_instance({"id": "c-two", "purge": True})
+        self.assertEqual((self.exe.infer, self.tokens()), ({}, {}))
+
+    def test_ensure_is_quiet_and_repairs(self):
+        self.host.cfg["inference"] = "shared"
+        self.host.create_instance(dict(VPN_ARGS))
+        tokens = self.host.infer_etc_dir / "tokens.json"
+        before, runs = tokens.stat().st_mtime_ns, len(self.exe.cmds("docker run"))
+        out = self.host.ensure_infer(self.host.load())
+        self.assertEqual(out, {"gpus": [1], "started": [], "removed": []})
+        self.assertEqual((tokens.stat().st_mtime_ns, len(self.exe.cmds("docker run"))), (before, runs))
+        self.exe.infer.clear()                                                     # someone removed the container
+        self.assertEqual(self.host.reconcile()["infer"]["started"], [1])
+        self.assertEqual(self.exe.infer, {1: "running"})
+        self.host.cfg["infer_gpus"] = [0]                                          # a second card always on
+        self.assertEqual(self.host.ensure_infer(self.host.load())["started"], [0])
+        env = ah.read_env_file(self.host.infer_env_path("acme-gate"))
+        self.assertEqual(env["NVR_INFER_SOCKET"], "/run/axiom-infer/gpu1.sock,/run/axiom-infer/gpu0.sock")
+        self.assertEqual(ah.infer_sockets(0, [0, 1, 2]), "/run/axiom-infer/gpu0.sock,/run/axiom-infer/gpu1.sock,"
+                         "/run/axiom-infer/gpu2.sock")
+
+    def test_restart_infer(self):
+        with self.assertRaises(ah.OpError):
+            self.host.restart_infer({})                                            # nothing shared here
+        self.host.cfg["inference"] = "shared"
+        self.host.create_instance(dict(VPN_ARGS))
+        out = self.host.restart_infer({"image": "axiom/instance:new1234"})
+        self.assertIn("GPU 1 recreated (axiom/instance:new1234)", out["detail"])
+        self.assertIn("axiom/instance:new1234", self.runs("axiom-infer-gpu1")[-1])
+        self.assertEqual(self.host.load()["infer"]["image"], "axiom/instance:new1234")
+        self.host.ensure_infer(self.host.load())
+        self.exe.infer.clear()
+        self.host.ensure_infer(self.host.load())                                   # a restart keeps the new image
+        self.assertIn("axiom/instance:new1234", self.runs("axiom-infer-gpu1")[-1])
+        for bad in ({"image": "evil/miner:1"}, {"gpu": 0}, {"gpu": "x"}):
+            with self.assertRaises(ah.OpError):
+                self.host.restart_infer(bad)
+
+    def test_no_gpu_share_while_shared(self):
+        self.host.cfg["inference"] = "shared"
+        self.host.host_cpus = lambda: 80
+        self.host.create_instance(dict(VPN_ARGS))
+        for op in (self.host.set_resources, self.host.restart_instance):
+            with self.assertRaises(ah.OpError) as e:
+                op({"id": "acme-gate", "gpu_mem_mb": 6144})
+            self.assertIn("shared inference", str(e.exception))
+        self.assertIn("applied live", self.host.set_resources({"id": "acme-gate", "cpus": 6})["detail"])
+
+    def test_work_and_status(self):
+        self.host.cfg["inference"] = "shared"
+        self.host.create_instance(dict(VPN_ARGS))
+        self.host.work.http_get = lambda url, timeout: (_ for _ in ()).throw(OSError("no vLLM here"))
+        w = self.host.work.collect()["infer"]["1"]
+        self.assertEqual((w["ok"], w["gpu"], w["busy_pct"], w["verify_p95_ms"], w["reserved_mb"], w["queues"]["index"]),
+                         (True, 1, 25.0, 120.5, 6100, 5))
+        self.assertEqual(w["instances"], {"acme-gate": {"requests": 4, "frames": 30, "gpu_s": 0.42}})
+        self.assertEqual(self.host.capacity()["work"]["infer"]["1"]["busy_pct"], 25.0)
+        self.down = True
+        w = self.host.work.collect()["infer"]["1"]
+        self.assertEqual((w["ok"], w["busy_pct"]), (False, 25.0))                  # the last good numbers, marked old
+        self.assertIn("ConnectionRefusedError", w["error"])
+        self.down = False
+        st = self.host.infer_status()
+        self.assertEqual([(s["gpu"], s["state"], s["instances"], s["work"]["ok"]) for s in st["services"]],
+                         [(1, "running", ["acme-gate"], True)])
+        self.assertEqual(ah.infer_work("nonsense"), {"ok": False, "error": "no stats in the answer"})
+        self.assertIsNone(ah.infer_work({"busy": "x"})["busy_pct"])
+
+    def test_dry_run_create_shared(self):
+        exe = ah.Exec(dry_run=True)
+        host = make_host(self.tmp / "dry", exe)
+        host.cfg["inference"] = "shared"
+        out = host.create_instance(dict(VPN_ARGS))
+        dr = out["dry_run"]
+        self.assertIn("NVR_INFER_SOCKET=/run/axiom-infer/gpu1.sock", dr["inference_env"])
+        self.assertIn("<inference token:", dr["inference_env"])
+        self.assertTrue(any("axiom-infer-gpu1" in c.get("cmd", []) for c in dr["steps"]))
+        self.assertFalse((host.infer_etc_dir / "tokens.json").exists())
+
+    @unittest.skipUnless(hasattr(__import__("socket"), "AF_UNIX") and sys.platform != "win32", "Unix sockets")
+    def test_infer_call_speaks_the_wire_format(self):
+        import socket
+        import struct
+        import threading
+        path = str(self.tmp / "s.sock")
+        srv = socket.socket(socket.AF_UNIX)
+        srv.bind(path)
+        srv.listen(1)
+        got = {}
+
+        def serve():
+            c, _ = srv.accept()
+            with c:
+                hlen, plen = struct.unpack("!II", c.recv(8))
+                got["header"] = json.loads(c.recv(hlen))
+                hb = json.dumps({**STATS, "arrays": []}).encode()
+                c.sendall(struct.pack("!II", len(hb), 0) + hb)
+        t = threading.Thread(target=serve)
+        t.start()
+        out = ah.infer_call(path, {"op": "stats", "token": "t"}, 5)
+        t.join()
+        srv.close()
+        self.assertEqual(got["header"], {"op": "stats", "token": "t", "arrays": []})
+        self.assertEqual(ah.infer_work(out)["busy_pct"], 25.0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

@@ -18,6 +18,8 @@ to cameras behind a Site's Axiom Bridge: the agent listens on each instance's ga
     axiom_host.py restart-instance --id acme-gate [--recreate] [--image axiom/instance:2026.10.06] [--gpu-mem-mb 4096]
     axiom_host.py set-resources --id acme-gate --cpus 8 [--mem-gb 16] [--gpu-mem-mb 4096] [--dry-run]
     axiom_host.py set-relay --id acme-gate --port 47000:"Gate RTSP" --port 47001 [--clear] [--dry-run]
+    axiom_host.py set-inference --id acme-gate --mode shared|per_instance [--dry-run]   # its card's inference service
+    axiom_host.py restart-infer [--gpu 1] [--image axiom/instance:2026.10.27] | infer-status
     axiom_host.py list | capacity | work | render-firewall | apply-firewall | reconcile | finish-enroll --id ...
     axiom_host.py run --hub wss://hub.axiomvision.ai/host-agent --token-file /etc/axiom/host-token
 
@@ -37,6 +39,7 @@ import logging
 import os
 import random
 import re
+import secrets
 import shlex
 import shutil
 import socket
@@ -51,7 +54,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, wait as futures_wait
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
-VERSION = "0.3.3"
+VERSION = "0.4.0"
 PROTO = 1
 log = logging.getLogger("axiom-host")
 
@@ -102,6 +105,15 @@ DEFAULTS: dict[str, Any] = {
     "work_exec_timeout_s": 4,                   # one instance's docker exec
     # Axiom Bridge relay: each instance's listen ports on its gateway (the hub allocates 47000-47999 per instance)
     "relay_port_range": [47000, 47999],
+    # Shared inference (backend nvr/inferd.py, docs/shared-inference-plan.md): one service per GPU holds YOLO, PPE,
+    # re-ID and CLIP once; a shared instance sends it frames over a Unix socket instead of loading them itself
+    "inference": "per_instance",                # how new GPU instances run their models: "per_instance" or "shared"
+    "infer_gpus": [],                           # cards that always run a service; others run one while a shared instance uses them
+    "infer_image": "",                          # the services' image when they first start ("" = `image`); restart_infer changes it
+    "infer_uid": 19999,                         # the services' uid (below uid_base: never an instance's)
+    "infer_mem_gb": 16,
+    "infer_cpus": 8,
+    "infer_ready_s": 300,                       # set_inference: how long a new service may take to load its models
 }
 
 PROBE = ("import json,urllib.request as u\n"
@@ -160,8 +172,9 @@ class Exec:
             return Result(124, "", f"{argv[0]}: timed out after {timeout:.0f} s")
         return Result(p.returncode, p.stdout, p.stderr)
 
-    def write(self, path: Path, text: str, mode: int = 0o600, display: str | None = None) -> None:
-        self.plan.append({"file": str(path), "mode": oct(mode), "content": text if display is None else display})
+    def write(self, path: Path, text: str, mode: int = 0o600, display: str | None = None, uid: int | None = None) -> None:
+        self.plan.append({"file": str(path), "mode": oct(mode), "content": text if display is None else display,
+                          **({"owner": f"{uid}:{uid}"} if uid is not None else {})})
         if self.dry_run:
             return
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -170,6 +183,8 @@ class Exec:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
         os.chmod(tmp, mode)
+        if uid is not None and hasattr(os, "chown"):
+            os.chown(tmp, uid, uid)
         os.replace(tmp, path)
 
     def mkdir(self, path: Path, mode: int, uid: int | None = None) -> None:
@@ -807,6 +822,85 @@ def gpu_mem_work(g: Any) -> dict | None:
     return {k: num(g.get(k)) for k in ("share_mb", "cap_mb", "reserved_mb", "peak_mb", "oom")}
 
 
+# ---------------------------------------------------------------- shared inference (nvr/inferd.py)
+
+INFER_MODES = ("per_instance", "shared")
+INFER_SOCK = "/run/axiom-infer"       # in the containers: the services' sockets (<root>/infer/sock on the host)
+INFER_ETC = "/etc/axiom-infer"        # in a service: its tokens.json (<root>/infer/etc on the host)
+INFER_HOST_SITE = "_host"             # the agent's own token in tokens.json (stats reads), never an instance id
+SHARED_NO_SHARE = ("{} uses the shared inference service: it has no GPU share (its models are in the service; "
+                   "set_inference per_instance first)")
+_INFER_HEAD = struct.Struct("!II")    # nvr/inferwire.py: header length, payload length, then the JSON header
+
+
+def infer_cname(gpu: int) -> str:
+    return f"axiom-infer-gpu{gpu}"
+
+
+def infer_socket(gpu: int) -> str:
+    """A service's socket as the containers see it."""
+    return f"{INFER_SOCK}/gpu{gpu}.sock"
+
+
+def infer_sockets(gpu: int | None, gpus: list[int]) -> str:
+    """NVR_INFER_SOCKET: the service on the instance's own card first, then the others (the client fails over)."""
+    order = ([gpu] if gpu in gpus else []) + [g for g in gpus if g != gpu]
+    return ",".join(infer_socket(g) for g in order)
+
+
+def render_infer_env(rec: dict, gpus: list[int], mask: bool = False) -> str:
+    """inference.env, a shared instance's second --env-file: where its host's services are and its token."""
+    token = f"<inference token: {len(rec['infer_token'])} chars>" if mask else rec["infer_token"]
+    return "\n".join([f"# {rec['id']}'s shared inference (nvr/inference.py): written by axiom_host.py {VERSION}",
+                      _env_value("NVR_INFER_SOCKET", infer_sockets(rec.get("gpu"), gpus)),
+                      _env_value("NVR_INFER_TOKEN", token)]) + "\n"
+
+
+def infer_work(stats: Any) -> dict:
+    """A service's stats answer (inferd.Service.stats) -> the numbers capacity.work carries: GPU busy share over the
+    last minute, queue depths, verify latency, memory, and per instance its requests, frames and GPU-seconds since
+    the service started (the hub turns those into rates)."""
+    if not isinstance(stats, dict):
+        return {"ok": False, "error": "no stats in the answer"}
+    num = lambda v: v if isinstance(v, (int, float)) and not isinstance(v, bool) else None  # noqa: E731
+    lat = stats.get("latency") if isinstance(stats.get("latency"), dict) else {}
+    ver = lat.get("verify") if isinstance(lat.get("verify"), dict) else {}
+    mem = stats.get("memory") if isinstance(stats.get("memory"), dict) else {}
+    sites = stats.get("sites") if isinstance(stats.get("sites"), dict) else {}
+    busy = num(stats.get("busy"))
+    return {"ok": True, "uptime_s": num(stats.get("uptime_s")), "busy_pct": round(busy * 100, 1) if busy is not None else None,
+            "queues": {p: num(v) for p, v in (stats.get("queues") or {}).items()} if isinstance(stats.get("queues"), dict) else {},
+            "verify_p50_ms": num(ver.get("p50_ms")), "verify_p95_ms": num(ver.get("p95_ms")),
+            "verify_wait_p50_ms": num(ver.get("wait_p50_ms")), "oom": num(stats.get("oom")),
+            "reserved_mb": num(mem.get("reserved_mb")), "peak_mb": num(mem.get("peak_reserved_mb")),
+            "instances": {str(k): {f: num(v.get(f)) for f in ("requests", "frames", "gpu_s")}
+                          for k, v in sites.items() if isinstance(v, dict)}}
+
+
+def infer_call(path: str, header: dict, timeout: float) -> dict:
+    """One request without arrays (hello, stats) to a service's socket on this host; its answer header."""
+    def exact(s: socket.socket, n: int) -> bytes:
+        buf = b""
+        while len(buf) < n:
+            got = s.recv(n - len(buf))
+            if not got:
+                raise ConnectionError("the service closed the connection")
+            buf += got
+        return buf
+    with socket.socket(getattr(socket, "AF_UNIX")) as s:
+        s.settimeout(timeout)
+        s.connect(path)
+        hb = json.dumps({**header, "arrays": []}, separators=(",", ":")).encode()
+        s.sendall(_INFER_HEAD.pack(len(hb), 0) + hb)
+        hlen, plen = _INFER_HEAD.unpack(exact(s, _INFER_HEAD.size))
+        if hlen > 1 << 20 or plen:
+            raise ValueError("unexpected answer")
+        out = json.loads(exact(s, hlen))
+    if not isinstance(out, dict):
+        raise ValueError("unexpected answer")
+    return out
+
+
 def rate_per_min(series: collections.deque, t: float, v: int | None, window_s: float) -> float | None:
     """Append (t, v) to `series` and return the increase per minute over up to `window_s`. A count that went down
     counts as no progress since the last reading: the earlier readings are lowered by the drop, so the rate goes on.
@@ -867,6 +961,7 @@ class Host:
         self.relay_connected = False
         self.on_relay_change: Callable[[], None] | None = None   # the agent reloads its listeners
         self._image_id: tuple[str | None, float] = (None, 0.0)   # (ID of cfg image, when read)
+        self.infer_call: Callable[[str, dict, float], dict] = infer_call   # a service's socket (tests replace it)
 
     # -- registry
     @property
@@ -882,11 +977,13 @@ class Host:
         reg.setdefault("next_slot", 0)
         reg.setdefault("hub_ips", [])
         reg.setdefault("instances", {})
+        reg.setdefault("infer", {})   # the shared inference services: {image, host_token} once one has run
         for rec in reg["instances"].values():   # registries from before camera networks: same allow-list as before
             for k in CAMERA_KEYS:
                 rec.setdefault(k, [])
             rec.setdefault("host_ips", {})
             rec.setdefault("relay_ports", [])   # registries from before the Axiom Bridge relay
+            rec.setdefault("inference", "per_instance")   # registries from before shared inference
         return reg
 
     def save(self, reg: dict) -> None:
@@ -930,6 +1027,21 @@ class Host:
 
     def env_path(self, iid: str) -> Path:
         return self.inst_dir(iid) / "instance.env"
+
+    def infer_env_path(self, iid: str) -> Path:
+        return self.inst_dir(iid) / "inference.env"
+
+    @property
+    def infer_sock_dir(self) -> Path:
+        return self.root / "infer" / "sock"
+
+    @property
+    def infer_etc_dir(self) -> Path:
+        return self.root / "infer" / "etc"
+
+    def infer_host_socket(self, gpu: int) -> Path:
+        """A service's socket as the host (the agent's stats reads) sees it."""
+        return self.infer_sock_dir / f"gpu{gpu}.sock"
 
     @staticmethod
     def cname(iid: str) -> str:
@@ -1156,6 +1268,11 @@ class Host:
         gpu_mem = gpu_share_arg(a.get("gpu_mem_mb"))
         if gpu_mem is None:
             gpu_mem = gpu_share_arg(self.cfg["gpu_mem_mb"]) or 0
+        inference = a.get("inference") or (self.cfg["inference"] if gpu is not None else "per_instance")
+        if inference not in INFER_MODES:
+            raise OpError("inference must be per_instance or shared")
+        if inference == "shared" and gpu is None:
+            raise OpError("inference shared needs a GPU: the instance's service is the one on its card")
         mem_gb = float(a.get("mem_gb") or self.cfg["mem_gb"])
         cpus = float(a.get("cpus") or self.cfg["cpus"])
         if not (1 <= mem_gb <= 512 and 0.5 <= cpus <= 128):
@@ -1188,6 +1305,7 @@ class Host:
             zfs = {"datasets": datasets, "instance_quota_gb": inst_q}
         return {"id": iid, "location_id": loc, "name": name, "mode": mode, **cams, "host_ips": {}, "relay_ports": [],
                 "quota_gb": quota, "gpu": gpu, "gpu_mem_mb": (gpu_mem or None) if gpu is not None else None,
+                "inference": inference, **({"infer_token": secrets.token_urlsafe(32)} if inference == "shared" else {}),
                 "mem_gb": mem_gb, "cpus": cpus, "quota_mode": qm, **zfs,
                 "image": check_image(a.get("image") or self.cfg["image"], self.cfg["image_prefix"]), "hub_url": hub_url,
                 "vlm_url": a.get("vlm_url") or self.cfg["vlm_url"],
@@ -1232,9 +1350,13 @@ class Host:
         for d in c["dns"]:
             argv += ["--dns", d]
         argv += ["--env-file", str(self.env_path(rec["id"]))]
-        if rec.get("gpu") is not None and rec.get("gpu_mem_mb"):
+        shared = rec.get("inference") == "shared"
+        if shared:   # the host's inference services (ensure_infer writes this file): no models load in here
+            argv += ["--env-file", str(self.infer_env_path(rec["id"]))]
+        elif rec.get("gpu") is not None and rec.get("gpu_mem_mb"):
             # its share of the card it shares with other instances (the server caps itself there: nvr/gpumem.py); an
-            # -e wins over the env file, and a recreate (new share) re-reads the registry
+            # -e wins over the env file, and a recreate (new share) re-reads the registry. A shared instance keeps
+            # the share in the registry for a switch back, but has none: its models are in the service
             argv += ["-e", f"NVR_GPU_MEM_MB={int(rec['gpu_mem_mb'])}"]
         argv += [
                  "--user", f"{uid}:{uid}",
@@ -1246,12 +1368,41 @@ class Host:
                  "--log-opt", f"max-file={c['log_max_file']}",
                  "--mount", f"type=bind,src={self.inst_dir(rec['id']) / 'data'},dst=/data",
                  "--mount", f"type=bind,src={self.rec_dir(rec['id'])},dst=/recordings"]
+        if shared:   # read-only is enough to connect to a socket; the directory, so a restarted service's new socket shows
+            argv += ["--mount", f"type=bind,src={self.infer_sock_dir},dst={INFER_SOCK},readonly"]
         if c["read_only"]:
             argv += ["--read-only", "--tmpfs", f"/tmp:rw,nosuid,nodev,size={c['tmpfs_mb']}m"]
-        if rec.get("gpu") is not None:
+        if rec.get("gpu") is not None:   # shared: the card stays for video (ffmpeg's NVENC / NVDEC)
             argv += ["--gpus", f"device={rec['gpu']}"]
         argv.append(rec["image"])
         return argv
+
+    def infer_run_argv(self, gpu: int, image: str) -> list[str]:
+        """One GPU's inference service: the instance image running `python -m nvr.inferd`, no network at all (its
+        socket is its only door), its own uid, the card as cuda:0, the tokens directory read-only."""
+        c = self.cfg
+        uid = int(c["infer_uid"])
+        sock = infer_socket(gpu)
+        mem = f"{float(c['infer_mem_gb']):g}g"
+        return ["docker", "run", "-d", "--name", infer_cname(gpu), "--hostname", infer_cname(gpu),
+                "--label", f"axiom.infer={gpu}", "--network", "none",
+                "--user", f"{uid}:{uid}", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+                "--memory", mem, "--memory-swap", mem, "--cpus", f"{float(c['infer_cpus']):g}",
+                "--pids-limit", str(c["pids_limit"]), "--shm-size", f"{c['shm_mb']}m",
+                "--restart", "unless-stopped", "--init", "--stop-timeout", "10",
+                "--log-driver", "json-file", "--log-opt", f"max-size={c['log_max_size']}",
+                "--log-opt", f"max-file={c['log_max_file']}",
+                # tmpfs over the image's /data and /recordings volumes: no anonymous volume per (re)start
+                "--read-only", "--tmpfs", f"/tmp:rw,nosuid,nodev,size={c['tmpfs_mb']}m",
+                "--tmpfs", "/data:rw,nosuid,nodev,size=16m", "--tmpfs", "/recordings:rw,nosuid,nodev,size=1m",
+                "--mount", f"type=bind,src={self.infer_sock_dir},dst={INFER_SOCK}",
+                "--mount", f"type=bind,src={self.infer_etc_dir},dst={INFER_ETC},readonly",
+                # the image's own health check asks the site server's API, which does not run here
+                "--health-cmd", f"python -c \"import socket; socket.socket(socket.AF_UNIX).connect('{sock}')\"",
+                "--health-interval", "60s", "--health-timeout", "10s", "--health-start-period", "300s",
+                "--health-retries", "3",
+                "--gpus", f"device={gpu}", image,
+                "python", "-m", "nvr.inferd", "--listen", sock, "--device", "cuda:0", "--tokens", f"{INFER_ETC}/tokens.json"]
 
     def network_argv(self, rec: dict) -> list[str]:
         return ["docker", "network", "create", "--driver", "bridge", "--subnet", rec["net_subnet"],
@@ -1350,7 +1501,11 @@ class Host:
                 reg["next_slot"] = slot + 1
                 fw = self.apply_firewall(reg)    # rules exist before the container's first packet
                 self.save(reg)
+                if rec["inference"] == "shared":   # undo runs backwards: this after _forget, the token dropped
+                    undo.append(lambda: self.ensure_infer(self.load()))
                 undo.append(lambda: self._forget(iid))
+                if rec["inference"] == "shared":   # its card's service, its token, its inference.env
+                    self.ensure_infer(reg)
                 r = self.exe.run(self.vllm_connect_argv(rec), check=False)
                 if r.rc != 0:
                     warnings.append(f"vLLM container not connected yet ({r.err.strip()[:120]}); reconcile retries")
@@ -1367,6 +1522,8 @@ class Host:
                 out["dry_run"] = {"docker_run": shlex.join(self.docker_run_argv(rec)),
                                   "network": shlex.join(self.network_argv(rec)),
                                   "env": render_env(rec, enroll_token=token, vlm_key=vlm_key, mask=True),
+                                  **({"inference_env": render_infer_env(rec, self.infer_gpus(reg), mask=True)}
+                                     if rec["inference"] == "shared" else {}),
                                   "firewall": fw, "steps": list(self.exe.plan)}
             return out
 
@@ -1411,6 +1568,8 @@ class Host:
                 del reg["instances"][iid]
                 self.apply_firewall(reg)
                 self.save(reg)
+                if rec.get("inference") == "shared":   # its token revoked; its card's service gone if it was the last
+                    self.ensure_infer(reg)
                 if rec["quota_mode"] == "xfs":
                     mount = self.fs_info()[0] or str(self.root)
                     self.exe.run(["xfs_quota", "-x", "-c", f"limit -p bsoft=0 bhard=0 {rec['project_id']}", mount],
@@ -1429,6 +1588,8 @@ class Host:
                     env = self.env_path(iid)
                     if env.exists() and not self.exe.dry_run:
                         self.exe.write(env, scrub_enroll_token(env.read_text(encoding="utf-8")), 0o600)
+                        with contextlib.suppress(OSError):   # a revoked inference token
+                            self.infer_env_path(iid).unlink()
         self.probe_cache.pop(iid, None)
         if not self.exe.dry_run:
             self._relay_changed()   # its relay listeners close
@@ -1579,6 +1740,8 @@ class Host:
             rec = self._get(reg, a)
             if gpu_mem is not None and rec.get("gpu") is None:
                 raise OpError(f"{rec['id']} has no GPU: gpu_mem_mb is a GPU instance's share of its card")
+            if gpu_mem is not None and rec.get("inference") == "shared":
+                raise OpError(SHARED_NO_SHARE.format(rec["id"]))
             if a.get("image"):
                 rec["image"] = check_image(a["image"], self.cfg["image_prefix"])
             if gpu_mem is not None:
@@ -1631,6 +1794,8 @@ class Host:
             rec = self._get(reg, a)
             if gpu_mem is not None and rec.get("gpu") is None:
                 raise OpError(f"{rec['id']} has no GPU: gpu_mem_mb is a GPU instance's share of its card")
+            if gpu_mem is not None and rec.get("inference") == "shared":
+                raise OpError(SHARED_NO_SHARE.format(rec["id"]))
             old = {"cpus": rec["cpus"], "mem_gb": rec["mem_gb"], "gpu_mem_mb": rec.get("gpu_mem_mb")}
             new = {"cpus": old["cpus"] if cpus is None else cpus, "mem_gb": old["mem_gb"] if mem is None else mem,
                    "gpu_mem_mb": old["gpu_mem_mb"] if gpu_mem is None else (gpu_mem or None)}
@@ -1663,6 +1828,217 @@ class Host:
                 raise
         return {"detail": f"{change}; container recreated", "instance": self.view(rec)} | _plan(self)
 
+    # -- shared inference (nvr/inferd.py): one service per GPU, the shared instances send it their frames
+    def infer_gpus(self, reg: dict) -> list[int]:
+        """The cards that run a service: host.json infer_gpus, and every card a shared instance is on."""
+        out = {int(g) for g in self.cfg.get("infer_gpus") or []}
+        out |= {int(r["gpu"]) for r in reg["instances"].values() if r.get("inference") == "shared" and r.get("gpu") is not None}
+        return sorted(out)
+
+    def infer_states(self) -> dict[int, str]:
+        r = self.exe.query(["docker", "ps", "-a", "--filter", "label=axiom.infer",
+                            "--format", '{{.Label "axiom.infer"}}\t{{.State}}'])
+        out = {}
+        for line in r.out.splitlines():
+            g, _, state = line.partition("\t")
+            if g.strip().isdigit():
+                out[int(g)] = state.strip()
+        return out
+
+    def _write_if_changed(self, path: Path, text: str, mode: int, *, display: str | None = None,
+                          uid: int | None = None) -> bool:
+        """Exec.write, skipped when the file already says exactly this (the services re-read tokens.json whenever
+        it changes, and the maintenance pass runs every minute)."""
+        if not self.exe.dry_run:
+            with contextlib.suppress(OSError):
+                if path.read_text(encoding="utf-8") == text:
+                    return False
+        self.exe.write(path, text, mode, display=display, uid=uid)
+        return True
+
+    def _infer_files(self, reg: dict, want: list[int]) -> None:
+        """The services' tokens.json (every shared instance's token -> its id, plus the agent's own) and each shared
+        instance's inference.env. The first time a service is wanted: the agent's token and the services' image."""
+        tokens_path = self.infer_etc_dir / "tokens.json"
+        if not want and not tokens_path.exists():
+            return
+        inf = reg["infer"]
+        if want and not (inf.get("host_token") and inf.get("image")):
+            inf.setdefault("host_token", secrets.token_urlsafe(32))
+            inf.setdefault("image", check_image(self.cfg["infer_image"] or self.cfg["image"], self.cfg["image_prefix"]))
+            self.save(reg)
+        uid = int(self.cfg["infer_uid"])
+        for path, mode, owner in ((self.root / "infer", 0o755, None), (self.infer_sock_dir, 0o755, uid),
+                                  (self.infer_etc_dir, 0o700, uid)):
+            if self.exe.dry_run or not path.is_dir():
+                self.exe.mkdir(path, mode, owner)
+        shared = [r for r in reg["instances"].values() if r.get("inference") == "shared" and r.get("infer_token")]
+        tokens = {r["infer_token"]: r["id"] for r in shared}
+        if want and inf.get("host_token"):
+            tokens[inf["host_token"]] = INFER_HOST_SITE
+        self._write_if_changed(tokens_path, json.dumps(tokens, indent=1, sort_keys=True) + "\n", 0o600, uid=uid,
+                               display=f"<{len(tokens)} tokens: {', '.join(sorted(tokens.values())) or 'none'}>")
+        for r in shared:
+            self._write_if_changed(self.infer_env_path(r["id"]), render_infer_env(r, want), 0o600,
+                                   display=render_infer_env(r, want, mask=True))
+
+    def ensure_infer(self, reg: dict) -> dict:
+        """Under the registry lock: the files (_infer_files), a service started on every card that needs one and
+        has none, and a service removed from a card nothing needs any more (its ~6 GB of models freed)."""
+        want = self.infer_gpus(reg)
+        self._infer_files(reg, want)
+        states = self.infer_states()
+        started = [g for g in want if g not in states]
+        for g in started:
+            self.exe.run(self.infer_run_argv(g, reg["infer"]["image"]))
+        removed = [g for g in states if g not in want]
+        for g in removed:
+            self.exe.run(["docker", "rm", "-f", infer_cname(g)], check=False)
+        if started or removed:
+            log.info("inference services: started on GPU %s, removed from GPU %s", started or "-", removed or "-")
+        return {"gpus": want, "started": started, "removed": removed}
+
+    def infer_hello(self, gpu: int, token: str | None, timeout: float) -> dict:
+        r = self.infer_call(str(self.infer_host_socket(gpu)), {"op": "hello", "token": token}, timeout)
+        if not r.get("ok"):
+            raise RuntimeError(str(r.get("error") or "refused"))
+        return r
+
+    def read_infer(self, gpu: int, token: str | None, timeout: float) -> dict:
+        """One service's stats (infer_work); raises when it doesn't answer."""
+        r = self.infer_call(str(self.infer_host_socket(gpu)), {"op": "stats", "token": token}, timeout)
+        if not r.get("ok"):
+            raise RuntimeError(str(r.get("error") or "refused"))
+        return infer_work(r)
+
+    def wait_infer(self, gpu: int) -> dict:
+        """Until the card's service answers (its models loaded), at most infer_ready_s; OpError after that."""
+        token = self.load()["infer"].get("host_token")
+        deadline = time.monotonic() + float(self.cfg["infer_ready_s"])
+        while True:
+            try:
+                return self.infer_hello(gpu, token, 10)
+            except (OSError, ValueError, RuntimeError) as e:
+                last = f"{type(e).__name__}: {e}"[:200]
+            if time.monotonic() >= deadline:
+                raise OpError(f"the inference service on GPU {gpu} did not answer within "
+                              f"{float(self.cfg['infer_ready_s']):g} s ({last}); see docker logs {infer_cname(gpu)}")
+            time.sleep(2)
+
+    def set_inference(self, a: dict) -> dict:
+        """Move an instance between its own models (per_instance) and its host's inference service (shared): one
+        recreate, ~30 s without recording. To shared: the card's service starts first (if it isn't running) and must
+        answer before the instance moves, so its events never wait on models still loading; a new token each time.
+        Back: the token is revoked after the recreate, and a service no instance needs any more is removed. If the
+        service doesn't answer or the recreated container doesn't start, the old mode is restored."""
+        mode = a.get("inference")
+        if mode not in INFER_MODES:
+            raise OpError("inference must be per_instance or shared")
+        with self.locked():
+            reg = self.load()
+            rec = self._get(reg, a)
+            iid, old = rec["id"], rec.get("inference") or "per_instance"
+            if mode == old:
+                return {"detail": f"{iid}: inference {mode} (unchanged)", "instance": self.view(rec)} | _plan(self)
+            if mode == "shared" and rec.get("gpu") is None:
+                raise OpError(f"{iid} has no GPU: inference shared uses the service on the instance's card")
+            before = {"inference": old, "infer_token": rec.get("infer_token")}
+            rec["inference"] = mode
+            if mode == "shared":
+                rec["infer_token"] = secrets.token_urlsafe(32)
+            else:
+                rec.pop("infer_token", None)
+            self.save(reg)
+        recreating = False
+        with self._inst_locks[iid]:
+            try:
+                if mode == "shared":
+                    with self.locked():   # its card's service, its token in tokens.json, its inference.env
+                        self.ensure_infer(self.load())
+                    if not self.exe.dry_run:
+                        self.wait_infer(int(rec["gpu"]))
+                recreating = True
+                self.recreate(rec)
+            except (OpError, CmdError):
+                if not self.exe.dry_run:
+                    with self.locked():
+                        reg = self.load()
+                        if iid in reg["instances"]:
+                            cur = reg["instances"][iid]
+                            for k, v in before.items():
+                                if v is None:
+                                    cur.pop(k, None)
+                                else:
+                                    cur[k] = v
+                            self.save(reg)
+                            self.ensure_infer(reg)
+                    for k, v in before.items():
+                        if v is None:
+                            rec.pop(k, None)
+                        else:
+                            rec[k] = v
+                    if recreating:   # the old container is gone: back as it was
+                        self.exe.run(self.docker_run_argv(rec), check=False)
+                raise
+        if mode == "per_instance":
+            with self.locked():
+                reg = self.load()
+                self.ensure_infer(reg)
+                if not self.exe.dry_run:
+                    with contextlib.suppress(OSError):
+                        self.infer_env_path(iid).unlink()
+        what = ("its models now run in the GPU %s inference service" % rec["gpu"] if mode == "shared"
+                else "its own models again")
+        return {"detail": f"{iid}: inference {old} -> {mode}, container recreated; {what}",
+                "instance": self.view(rec)} | _plan(self)
+
+    def restart_infer(self, a: dict) -> dict:
+        """Recreate the inference services (every one, or `gpu`'s), on `image` when given: it becomes the services'
+        image. The shared instances' verification pauses while the models load (their events wait, none are lost);
+        recording, live view and playback carry on."""
+        with self.locked():
+            reg = self.load()
+            want = self.infer_gpus(reg)
+            gpu = a.get("gpu")
+            if gpu is not None and gpu != "":
+                try:
+                    gpu = int(gpu)
+                except (TypeError, ValueError):
+                    raise OpError("gpu must be a GPU index") from None
+                if gpu not in want:
+                    raise OpError(f"no inference service on GPU {gpu} (this host runs them on {want or 'none'})")
+            gpus = [gpu] if isinstance(gpu, int) else want
+            if not gpus:
+                raise OpError("this host runs no inference service (no shared instance, host.json infer_gpus empty)")
+            if a.get("image"):
+                reg["infer"]["image"] = check_image(a["image"], self.cfg["image_prefix"])
+                self.save(reg)
+            self._infer_files(reg, want)
+            image = reg["infer"]["image"]
+            for g in gpus:
+                self.exe.run(["docker", "rm", "-f", infer_cname(g)], check=False)
+                self.exe.run(self.infer_run_argv(g, image))
+        return {"detail": f"inference service on GPU {', '.join(map(str, gpus))} recreated ({image})"} | _plan(self)
+
+    def infer_status(self, a: dict | None = None) -> dict:
+        """Each service: its container's state, the shared instances on its card and its stats."""
+        reg = self.load()
+        want, states = self.infer_gpus(reg), self.infer_states()
+        token = reg["infer"].get("host_token")
+        rows = []
+        for g in sorted(set(want) | set(states)):
+            row = {"gpu": g, "state": states.get(g, "missing"), "wanted": g in want, "socket": infer_socket(g),
+                   "instances": sorted(r["id"] for r in reg["instances"].values()
+                                       if r.get("inference") == "shared" and r.get("gpu") == g)}
+            if states.get(g) == "running":
+                try:
+                    row["work"] = self.read_infer(g, token, 5)
+                except (OSError, ValueError, RuntimeError) as e:
+                    row["work"] = {"ok": False, "error": f"{type(e).__name__}: {e}"[:200]}
+            rows.append(row)
+        return {"detail": f"{len(rows)} inference service(s)", "mode": self.cfg["inference"],
+                "image": reg["infer"].get("image"), "services": rows}
+
     def list_instances(self, a: dict | None = None) -> dict:
         reg = self.load()
         states = self.docker_states()
@@ -1675,12 +2051,13 @@ class Host:
                "set_quota": self.set_quota, "set_instance_quota": self.set_instance_quota,
                "set_camera_network": self.set_camera_network,
                "restart_instance": self.restart_instance, "set_resources": self.set_resources,
-               "set_relay": self.set_relay, "list": self.list_instances}
+               "set_relay": self.set_relay, "list": self.list_instances,
+               "set_inference": self.set_inference, "restart_infer": self.restart_infer, "infer_status": self.infer_status}
         if op not in ops:
             raise OpError(f"unknown op {op!r}")
         if not isinstance(args, dict):
             raise OpError("args must be an object")
-        if args.get("dry_run") and op != "list":
+        if args.get("dry_run") and op not in ("list", "infer_status"):
             return Host(self.cfg, Exec(dry_run=True), self.resolver).dispatch(op, {k: v for k, v in args.items() if k != "dry_run"})
         return ops[op](args)
 
@@ -1853,7 +2230,9 @@ class Host:
                 "public_ips": rec.get("public_ips", []), "hosts": rec.get("hosts", []),
                 "host_ips": rec.get("host_ips", {}), "quota_mode": rec.get("quota_mode"),
                 "enroll_pending": rec.get("enroll_pending", False), "mem_gb": rec["mem_gb"], "cpus": rec["cpus"],
-                "gpu_mem_mb": rec.get("gpu_mem_mb"),
+                # shared: its models run in the host's service on its card, so it holds no share of that card
+                "inference": rec.get("inference") or "per_instance",
+                "gpu_mem_mb": None if rec.get("inference") == "shared" else rec.get("gpu_mem_mb"),
                 "image": rec["image"], "image_id": (images or {}).get(rec["id"]),
                 "network": rec["net_subnet"], "gateway": rec.get("gateway"),
                 # Axiom Bridge relay: its listen ports on the gateway, and which ones the agent's listeners hold now
@@ -1873,12 +2252,18 @@ class Host:
         except OSError:
             ram = {"total": None, "free": None}
         gpus = self.gpus()
+        infer_want = self.infer_gpus(reg)
+        infer_states = self.infer_states() if infer_want else {}
         for g in gpus:
             mine = [r for r in insts if r.get("gpu") == g["index"]]
+            own = [r for r in mine if r.get("inference") != "shared"]
             g["instances"] = len(mine)
-            # the instances' GPU shares on this card (MB), and how many run without one (no cap)
-            g["shares_mb"] = sum(int(r.get("gpu_mem_mb") or 0) for r in mine)
-            g["unshared"] = sum(1 for r in mine if not r.get("gpu_mem_mb"))
+            # the per-instance instances' GPU shares on this card (MB), and how many run without one (no cap)
+            g["shares_mb"] = sum(int(r.get("gpu_mem_mb") or 0) for r in own)
+            g["unshared"] = sum(1 for r in own if not r.get("gpu_mem_mb"))
+            # shared inference: the instances whose models run in this card's service, and that service's container
+            g["shared"] = len(mine) - len(own)
+            g["infer"] = infer_states.get(g["index"], "missing") if g["index"] in infer_want else None
         disks = []
         if self.root.exists():
             mode = self.quota_mode_auto()
@@ -1896,7 +2281,9 @@ class Host:
                "relay": {"port_range": list(self.cfg["relay_port_range"]), "connected": self.relay_connected},
                # the image new instances are created from (host.json `image`) and its Docker image ID: the hub flags
                # instances whose container runs another ID (the tags differ by design: instances run git-rev tags)
-               "image": self.cfg["image"], "image_id": self.image_id()}
+               "image": self.cfg["image"], "image_id": self.image_id(),
+               # how new GPU instances run their models, and the cards with an inference service (nvr/inferd.py)
+               "inference": {"mode": self.cfg["inference"], "gpus": infer_want, "image": reg["infer"].get("image")}}
         work = self.work.snapshot()   # the last collection (WorkMonitor.collect runs beside the heartbeat)
         if work is not None:
             ids = set(reg["instances"])
@@ -1982,6 +2369,11 @@ class Host:
             parents = None
             states = self.docker_states()
             nets = set(self.exe.query(["docker", "network", "ls", "--format", "{{.Name}}"]).out.split())
+            try:   # before the instances: a shared one's inference.env and service
+                infer = self.ensure_infer(reg)
+            except (OpError, CmdError) as e:   # the instances still start (a shared one waits, with its alert)
+                log.error("inference services: %s", e)
+                infer = {"error": str(e)[:300]}
             created = []
             for rec in reg["instances"].values():
                 if rec["quota_mode"] == "xfs":
@@ -2002,7 +2394,7 @@ class Host:
                     created.append(rec["id"])
             vllm = self.ensure_vllm(reg)
         return {"detail": "reconciled", "hub_ips": reg["hub_ips"], "hub_ips_changed": old != reg["hub_ips"],
-                "containers_started": created, "vllm_attached": vllm}
+                "containers_started": created, "vllm_attached": vllm, "infer": infer}
 
 
 # ---------------------------------------------------------------- work queues (capacity.work)
@@ -2034,6 +2426,7 @@ class WorkMonitor:
         self.vllm: dict | None = None
         self._vllm_reads: collections.deque = collections.deque(maxlen=16)   # (t, vllm_sample)
         self.instances: dict[str, dict] = {}
+        self.infer: dict[str, dict] = {}            # GPU index (str) -> its inference service's numbers (infer_work)
         self._done: dict[str, collections.deque] = {}
         self.at: float | None = None
 
@@ -2132,6 +2525,9 @@ class WorkMonitor:
             reg = self.host.load()
             states = self.host.docker_states()
             jobs: dict[str, Future] = {"\0vllm": self._pool.submit(self.read_vllm, max(1.0, budget - 1))}
+            infer_token = reg["infer"].get("host_token")
+            for g in self.host.infer_gpus(reg):   # each inference service's stats, over its socket
+                jobs[f"\0infer{g}"] = self._pool.submit(self.host.read_infer, g, infer_token, per_exec)
             busy: dict[str, str] = {}
             for iid, rec in reg["instances"].items():
                 if states.get(iid) != "running":
@@ -2154,6 +2550,18 @@ class WorkMonitor:
                     v = {**{k: x for k, x in self.vllm.items() if k not in ("ok", "error")}, **{k: x for k, x in v.items() if k != "at"},
                          "at": self.vllm.get("at")}
                 self.vllm = v
+                infer: dict[str, dict] = {}
+                for key in [k for k in jobs if k.startswith("\0infer")]:
+                    g, f = key[len("\0infer"):], jobs.pop(key)
+                    if f.done() and f.exception() is None:
+                        infer[g] = {**f.result(), "gpu": int(g), "at": round(now, 1)}
+                    else:   # the last good numbers, marked old
+                        err = (f"no answer within {budget:g} s" if not f.done()
+                               else f"{type(f.exception()).__name__}: {f.exception()}"[:200])
+                        prev = self.infer.get(g) or {}
+                        infer[g] = {**{k: x for k, x in prev.items() if k not in ("ok", "error")}, "gpu": int(g),
+                                    "ok": False, "error": err, "at": prev.get("at")}
+                self.infer = infer
                 fresh: dict[str, dict] = {}
                 for iid, rec in reg["instances"].items():
                     f = jobs.get(iid)
@@ -2175,11 +2583,12 @@ class WorkMonitor:
         return self.snapshot() or {}
 
     def snapshot(self) -> dict | None:
-        """capacity.work: {at, vllm, instances: {id: ...}}, or None before the first collection."""
+        """capacity.work: {at, vllm, instances: {id: ...}, infer: {gpu: ...}}, or None before the first collection."""
         with self._lock:
             if self.at is None:
                 return None
-            return {"at": self.at, "vllm": dict(self.vllm or {}), "instances": {k: dict(v) for k, v in self.instances.items()}}
+            return {"at": self.at, "vllm": dict(self.vllm or {}), "instances": {k: dict(v) for k, v in self.instances.items()},
+                    "infer": {k: dict(v) for k, v in self.infer.items()}}
 
 
 # ---------------------------------------------------------------- agent mode
@@ -2318,6 +2727,7 @@ class Agent:
                 now = time.time()
                 reg = self.host.load()
                 await asyncio.to_thread(self.host.ensure_vllm, reg)
+                await asyncio.to_thread(self._ensure_infer)   # a missing inference service starts again
                 for rec in reg["instances"].values():
                     cached = self.host.probe_cache.get(rec["id"], {})
                     if rec.get("enroll_pending") or now - cached.get("at", 0) > self.PROBE_S:
@@ -2338,6 +2748,10 @@ class Agent:
             except Exception:
                 log.exception("maintenance pass failed")
             await asyncio.sleep(self.MAINT_S)
+
+    def _ensure_infer(self) -> None:
+        with self.host.locked():
+            self.host.ensure_infer(self.host.load())
 
     async def run_forever(self) -> None:
         try:
@@ -2793,6 +3207,8 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--mem-gb", type=float)
     c.add_argument("--cpus", type=float)
     c.add_argument("--gpu-mem-mb", type=int, help="its share of the GPU in MB (default host.json gpu_mem_mb; 0 = no cap)")
+    c.add_argument("--inference", choices=INFER_MODES, help="its own models, or its card's shared inference service "
+                   "(default host.json inference)")
     c.add_argument("--image")
     c.add_argument("--quota-mode", choices=QUOTA_MODES, default="auto")
     c.add_argument("--dry-run", action="store_true", help="print the plan (commands, env, firewall); change nothing")
@@ -2852,6 +3268,17 @@ def main(argv: list[str] | None = None) -> int:
     rl.add_argument("--clear", action="store_true", help="no relay ports at all")
     rl.add_argument("--dry-run", action="store_true", help="print the new ruleset; change nothing")
 
+    si = sub.add_parser("set-inference", help="move an instance to its card's shared inference service or back to its "
+                        "own models (recreates it: ~30 s without recording)")
+    si.add_argument("--id", required=True)
+    si.add_argument("--mode", required=True, choices=INFER_MODES)
+    si.add_argument("--dry-run", action="store_true")
+    ri = sub.add_parser("restart-infer", help="recreate the inference services (verification pauses while models load)")
+    ri.add_argument("--gpu", type=int, help="just this card's service")
+    ri.add_argument("--image", help="run the services on this image from now on")
+    ri.add_argument("--dry-run", action="store_true")
+    sub.add_parser("infer-status", help="each inference service: state, its shared instances, load and latency")
+
     sub.add_parser("list")
     sub.add_parser("capacity")
     w = sub.add_parser("work", help="what the GPUs are working through (capacity.work): vLLM and each instance's queues")
@@ -2887,7 +3314,7 @@ def main(argv: list[str] | None = None) -> int:
                     "hosts": [s for v in ns.host or [] for s in v.split(",")],
                     "quota_gb": ns.quota_gb, "gpu": ns.gpu, "enroll_token": token, "hub_url": ns.hub_url,
                     "vlm_url": ns.vlm_url, "vlm_model": ns.vlm_model, "mem_gb": ns.mem_gb, "cpus": ns.cpus,
-                    "gpu_mem_mb": ns.gpu_mem_mb,
+                    "gpu_mem_mb": ns.gpu_mem_mb, "inference": ns.inference,
                     "image": ns.image, "quota_mode": ns.quota_mode}
             _print(host.create_instance(args))
         elif ns.cmd == "delete-instance":
@@ -2928,6 +3355,12 @@ def main(argv: list[str] | None = None) -> int:
                 _print("\n# dry run: nothing changed. The ruleset this would load:\n" + fw)
             elif not host.exe.dry_run:
                 print("the running agent opens the listeners within a minute", file=sys.stderr)
+        elif ns.cmd == "set-inference":
+            _print(host.set_inference({"id": ns.id, "inference": ns.mode}))
+        elif ns.cmd == "restart-infer":
+            _print(host.restart_infer({"gpu": ns.gpu, "image": ns.image}))
+        elif ns.cmd == "infer-status":
+            _print(host.infer_status())
         elif ns.cmd == "list":
             _print(host.list_instances()["instances"])
         elif ns.cmd == "capacity":

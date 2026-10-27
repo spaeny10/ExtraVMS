@@ -14,5 +14,8 @@
   "mem_gb": 8,
   "cpus": 4,
   "gpu_mem_mb": 4096,
+  "inference": "per_instance",
+  "infer_gpus": [],
+  "infer_image": "",
   "read_only": true
 }

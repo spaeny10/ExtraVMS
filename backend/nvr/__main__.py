@@ -22,8 +22,9 @@ if __name__ == "__main__":
     # crash-looped without ever reaching the retention pass that would have freed space (diskguard.py).
     from . import diskguard
     diskguard.preopen(settings.data_dir, settings.disk_emergency_free_gb, settings.backup_dir)
-    # a central instance's share of the GPU it shares with other Sites, before any model loads (gpumem.py)
-    if settings.gpu_mem_mb > 0:
+    # a central instance's share of the GPU it shares with other Sites, before any model loads (gpumem.py); none on
+    # one using its host's inference service: no model loads here, and the cap would import torch for nothing
+    if settings.gpu_mem_mb > 0 and not settings.infer_socket:
         from . import gpumem
         gpumem.apply()
     # proxy_headers=False: no reverse proxy sits in front of the NVR, and uvicorn's default (trust

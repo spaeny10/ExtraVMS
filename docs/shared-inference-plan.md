@@ -168,7 +168,27 @@ YOLO in fp32: 85 vs 113 frames/s, still far beyond the load.
      - A 10-frame event's round trip was 212 ms over Windows loopback TCP, letterboxing included. Measure again on
        a Unix socket on fred; if the frame bytes dominate, send JPEG or shared memory instead.
 2. **axiom_host** (0.4.0): run and supervise the services, create instances in shared mode, report service work,
-   switch an existing instance between modes (one recreate, ~30 s recording gap). PROTOCOL.md / README.
+   switch an existing instance between modes (one recreate, ~30 s recording gap). PROTOCOL.md / README. Built
+   2026-10-27, not deployed:
+   - **Services:** `axiom-infer-gpu<N>` is the instance image running `python -m nvr.inferd`. It has
+     `--network none`, its own uid (19999), a read-only root and the card as cuda:0. It runs on every card a shared
+     instance uses, plus host.json `infer_gpus`. A missing service is started again on create, switch, reconcile and
+     every maintenance minute; one nothing needs any more is removed.
+   - **Sockets and tokens:** sockets in `<root>/infer/sock`, mounted read-only into shared instances at
+     `/run/axiom-infer`. Each instance has its own token, listed in `<root>/infer/etc/tokens.json` (owned by the
+     services' uid), plus the agent's own token for its stats reads.
+   - **A shared instance:** a second env file, `inference.env`, holds `NVR_INFER_SOCKET` (its card first, then the
+     others) and `NVR_INFER_TOKEN`. There is no `NVR_GPU_MEM_MB`. The card stays attached for video.
+   - **Ops:**
+     - `set_inference`: to shared, the service must answer before the instance is recreated; any failure puts the
+       old mode back.
+     - `restart_infer`: recreates the services, optionally on a new image.
+     - `infer_status`.
+     - `create_instance`: takes `inference`; host.json `inference` is the default for GPU instances.
+   - **Reporting:** `capacity.inference`; `gpus[].shared` / `.infer`; `work.infer` per card (busy %, queues, verify
+     p50/p95, memory, per-instance requests / frames / GPU-seconds). In the instance view, `inference`, and
+     `gpu_mem_mb` null while shared.
+   - **Tests:** 11 in test_axiom_host.py `SharedInference`. The real socket round trip runs on Linux only.
 3. **Hub**: shared-mode placement, Hosts page service panel, the two alerts, per-Site GPU-seconds.
 4. **Migrate fred**, one Site at a time, each with a day of watching verify latency and verdicts: Test-Site,
    Jetstream, then Bingo. The per-instance models free up as each one moves.
