@@ -607,6 +607,15 @@ def augment(calls: list[dict], question: str, now: float | None = None) -> list[
                     "min_priority": None, "group_by": None}
             calls.append({"tool": tool, "args": args})
             have.add(tool)
+    # A footage search never goes alone: the events' descriptions usually say it too ("maroon long-sleeved shirt"),
+    # and that database search takes a second where the footage search can use the whole time budget and find nothing.
+    fs = next((c for c in calls if c["tool"] == "search_footage" and c["args"].get("text")), None)
+    if fs and not any(c["tool"] == "search_events" and c["args"].get("text") for c in calls):
+        f = fs["args"]
+        calls.insert(calls.index(fs), {"tool": "search_events", "args": {
+            "text": f["text"], "camera": f.get("camera"), "since": f.get("since"), "until": f.get("until"),
+            "label": query_label(question), "min_priority": None, "group_by": None,
+            **({"newest": True} if f.get("newest") else {})}})
     # A question about a period ("what happened overnight?", "was it quiet today?") is answered from that period's
     # events: list the latest ones and count them. A briefing alone spans a different period and reads as hearsay.
     win = time_window(question, now)
@@ -917,37 +926,70 @@ async def t_same_subject(a: dict, refs: Refs) -> tuple[list[str], int]:
 
 
 async def t_search_footage(a: dict, refs: Refs) -> tuple[list[str], int]:
+    """Site Ask (retrieve.py) passes `_footage_s`, the time this search may take: the Otso checks run together and
+    whatever is confirmed by then is kept (it used to lose everything when time ran out); `_unchecked` says how many
+    of the best matches were not checked in time. Each stage's time goes to the log."""
     if ctx.footage is None:
         return ["Footage search is not available."], 0
-    from .footage import moments
+    from .footage import moments, tile_jpeg
+    t0 = time.monotonic()
+    end = t0 + a["_footage_s"] if a.get("_footage_s") is not None else None
     vec = await ctx.footage.embed_text(a.get("text") or "")
+    t_embed = time.monotonic()
     cams = [a["camera"]] if a.get("camera") else [c["id"] for c in db.cameras()]
     hits = await asyncio.to_thread(ctx.footage.index.search, vec, cams, a.get("since"), a.get("until"), 300)
     ms = moments(hits, 6)
+    t_index = time.monotonic()
+    stages = f"embed {t_embed - t0:.1f} s, index {t_index - t_embed:.1f} s ({len(hits)} hits, {len(ms)} moments)"
     if not ms:
+        log.info("footage search %r: %s", a.get("text"), stages)
         return ["No footage indexed for that range."], 0
-    from .footage import tile_jpeg
     # Visual similarity alone is often wrong: Qwen looks at the best few, and only confirmed ones are passed on.
-    lines, checked = [], 0
-    for m in ms[:FOOTAGE_VERIFY]:
+    best = ms[:FOOTAGE_VERIFY]
+    took: list[tuple[float, float]] = []   # (frame decode, Otso check) seconds per finished check
+
+    async def check(m: dict) -> dict | None:
+        s0 = time.monotonic()
         img = await asyncio.to_thread(tile_jpeg, m["camera_id"], m["ts"], m["tile"])
+        s1 = time.monotonic()
         if not img:
-            continue
+            return None
         try:
             r = await vlm.footage_match(img, a.get("text") or "")
         except Exception as e:  # noqa: BLE001
             log.warning("footage check failed: %s", e)
+            return None
+        took.append((s1 - s0, time.monotonic() - s1))
+        return r
+
+    tasks = [asyncio.ensure_future(check(m)) for m in best]
+    try:
+        done, pending = await asyncio.wait(tasks, timeout=None if end is None else max(0.0, end - time.monotonic()))
+    finally:
+        for t in tasks:   # out of time, or this search was cancelled: stop the checks still running
+            if not t.done():
+                t.cancel()
+    lines, checked = [], 0
+    for m, t in zip(best, tasks):
+        r = t.result() if t in done else None
+        if r is None:
             continue
         checked += 1
         if r.get("matches") and r.get("confidence") in ("medium", "high"):
             lines.append((m["ts"], f"[{refs.moment(m)}] {_cam_name(m['camera_id'])}, {_when(m['ts'])}"
                                    + (f" (for {m['end'] - m['start']:.0f} s)" if m["end"] - m["start"] >= 5 else "")
                                    + f" - CHECKED: yes, {r.get('seen') or 'matches'}"))
+    if pending:
+        a["_unchecked"] = len(pending)
+    log.info("footage search %r: %s, checks %.1f s (decode max %.1f s, Otso max %.1f s; %d checked, %d confirmed, "
+             "%d not finished in time)", a.get("text"), stages, time.monotonic() - t_index,
+             max((d for d, _ in took), default=0.0), max((c for _, c in took), default=0.0), checked, len(lines), len(pending))
     if a.get("newest"):  # "last seen": the latest confirmed moment first
         lines.sort(key=lambda x: -x[0])
+    late = f" {len(pending)} more could not be checked in time." if pending else ""
     head = (f"Footage search: Otso checked the best {checked} visual matches; {len(lines)} actually show it."
-            + (" Newest first." if a.get("newest") and lines else "")
-            if checked else "Footage search: the matches could not be checked.")
+            + (" Newest first." if a.get("newest") and lines else "") + late
+            if checked else "Footage search: the matches could not be checked" + (" in time." if pending else "."))
     return [head, *(l for _, l in lines)], len(lines)
 
 

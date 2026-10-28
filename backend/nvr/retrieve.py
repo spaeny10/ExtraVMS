@@ -51,6 +51,7 @@ FAST_MIN_S = 8.0           # a database lookup still runs (with up to this long,
 MIN_RUN_S = 1.0            # less than this left before HARD_S: a lookup is skipped (a note says so)
 FALLBACK_MIN_S = 3.0       # the "nothing found" fallbacks only start with this much left before HARD_S
 SPARE_S = 2.0              # of a lookup's time, kept for the database after the text embedding / people estimate
+FOOTAGE_SPARE_S = 0.5      # a footage search stops waiting for its Otso checks this long before its limit, keeping what is confirmed
 MAX_ITEMS = 60
 HISTORY_TURNS = 4
 _clock = time.monotonic    # tests use a fake clock
@@ -321,7 +322,8 @@ async def run(calls: list[dict], ev: Evidence, question: str, now: float, deadli
             limit = min(left, hard_left) if tool in SLOW_TOOLS else min(max(left, FAST_MIN_S), hard_left)
             spare = 0.0 if left < 1 else max(0.0, limit - SPARE_S)   # the budget is spent: no embedding, no estimate
             run_args = {**a, "_embed_s": spare} if tool == "search_events" and a.get("text") else \
-                {**a, "_people_s": spare} if tool == "count_events" else a
+                {**a, "_people_s": spare} if tool == "count_events" else \
+                {**a, "_footage_s": max(0.0, limit - FOOTAGE_SPARE_S)} if tool == "search_footage" else a
             try:
                 lines, n, found = await asyncio.wait_for(_lookup(tool, run_args, label, ev, now, notes), limit)
             except asyncio.TimeoutError:
@@ -333,6 +335,8 @@ async def run(calls: list[dict], ev: Evidence, question: str, now: float, deadli
                 cut_short = True
             if run_args.get("_keyword_only"):
                 unfinished(f"{label} searched by keywords only (the search by meaning was skipped to answer in time)", a)
+            if run_args.get("_unchecked"):
+                unfinished(f"{label}: {run_args['_unchecked']} of its best matches were skipped to answer in time", a)
             if run_args.get("_people_skipped"):
                 notes.append("The different-people estimate was left out to answer in time.")
         for eid in dict.fromkeys(ev.call_events):   # search_events, list_unusual, list_journeys' members

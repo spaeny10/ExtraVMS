@@ -332,6 +332,75 @@ def test_the_sites_time_zone_sets_the_days():
     assert run("Did the cleaning lady come today?", tz="Mars/Olympus")["window"]["from"] == ts(6, 0)
 
 
+class FakeFootage:
+    """assistant.ctx.footage stand-in: a text embedding and an index that returns the given hits."""
+
+    def __init__(self, hits):
+        self.index = self
+        self.hits = hits
+
+    async def embed_text(self, text):
+        return [0.0]
+
+    def search(self, vec, cams, since, until, k):
+        return [h for h in self.hits if h[0] in cams]
+
+
+def test_a_footage_only_plan_still_searches_the_events():
+    """World Headquarters, 2026-10-28: for "maroon long-sleeved shirt" the planner picked search_footage alone on two
+    servers; it used the whole 20 s and found nothing, while the events' descriptions said "maroon long-sleeved shirt".
+    Asking again worked only because the planner then picked search_events. A footage search now always comes with an
+    event search for the same text, which runs first."""
+    IDS["maroon"] = add("cam1", ts(6, 9, 52), "person", "A man in a maroon long-sleeved shirt walks to the exit doors.")
+    plan = assistant.check_plan({"calls": [{"tool": "search_footage", "text": "maroon long-sleeved shirt"}]},
+                                "maroon long-sleeved shirt", NOW)
+    assert [(c["tool"], c["args"]["text"]) for c in plan] == [("search_events", "maroon long-sleeved shirt"),
+                                                               ("search_footage", "maroon long-sleeved shirt")], plan
+
+    async def slow_footage(a, ev):
+        await asyncio.sleep(5)
+        return [], 0
+    PLANNER.plans = [{"calls": [{"tool": "search_footage", "text": "maroon long-sleeved shirt"}]}]
+    funcs = {**assistant.TOOL_FUNCS, "search_footage": slow_footage}
+    with mock.patch.object(retrieve, "BUDGET_S", 0.3), mock.patch.object(assistant, "TOOL_FUNCS", funcs):
+        r = run("maroon long-sleeved shirt")
+    assert IDS["maroon"] in {e["event_id"] for e in events(r)}, r
+    assert [c["tool"] for c in r["calls"]][:2] == ["search_events", "search_footage"], r["calls"]
+    assert any(n.startswith("search_footage") for n in r["incomplete"]), r["incomplete"]
+
+
+def test_footage_checks_run_together_and_keep_what_finished():
+    """Out of time, the footage search used to be cancelled whole, losing the matches Otso had already confirmed. Now
+    its checks run at the same time, the confirmed ones are kept, and only the unchecked ones are reported."""
+    from nvr import footage
+    hits = [("cam1", ts(6, 9), 0, 0.9), ("cam2", ts(6, 9, 30), 0, 0.8), ("cam1", ts(6, 12), 0, 0.7)]
+    fast = f"cam1@{ts(6, 9)}".encode()
+    started = []
+
+    async def footage_match(img, query):
+        started.append(img)
+        if img != fast:
+            await asyncio.sleep(5)    # a slow check never finishes in time
+        return {"matches": True, "confidence": "high", "seen": "a man in a maroon shirt"}
+    PLANNER.plans = [{"calls": [{"tool": "search_events", "text": "maroon shirt"},
+                                {"tool": "search_footage", "text": "maroon shirt"}]}]
+    with mock.patch.object(assistant.ctx, "footage", FakeFootage(hits)), \
+            mock.patch.object(footage, "tile_jpeg", lambda cam, t, tile: f"{cam}@{t}".encode()), \
+            mock.patch.object(vlm, "footage_match", footage_match), \
+            mock.patch.multiple(retrieve, BUDGET_S=1.0, HARD_S=1.5):
+        t0 = time.monotonic()
+        r = run("maroon shirt")
+        took = time.monotonic() - t0
+    assert took < 1.4, took                                              # the footage search stopped itself in time
+    assert len(started) == 3, started                                     # all three checks ran at the same time
+    found = [x for x in r["results"] if x["kind"] == "footage"]
+    assert [(x["camera_id"], x["ts"]) for x in found] == [("cam1", ts(6, 9))], found
+    assert "CHECKED: yes" in found[0]["text"]
+    inc = r["incomplete"]
+    assert any("2 of its best matches were skipped to answer in time" in n for n in inc), inc
+    assert not any("took too long" in n for n in inc), inc               # nothing was lost to the hard cut
+
+
 if __name__ == "__main__":
     setup_module()
     for name, fn in list(globals().items()):
