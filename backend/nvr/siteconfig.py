@@ -137,7 +137,8 @@ def _deterrence_config(c: dict) -> dict | None:
 def export_config() -> dict:
     cams = []
     for c in db.cameras():
-        cams.append({k: v for k, v in c.items() if k != "password"})
+        # a traffic camera's push setup holds its secret (traffic.py): set up again after a restore (Camera › Traffic)
+        cams.append({k: v for k, v in c.items() if k not in ("password", "traffic")})
     links = db.all("SELECT cam_a, cam_b, min_s, max_s, one_way FROM camera_links")
     layouts = [{"name": r["name"], "config": json.loads(r["config"])} for r in db.all("SELECT name, config FROM layouts")]
     dashboards = [{"name": r["name"], "config": json.loads(r["config"])} for r in db.all("SELECT name, config FROM dashboards")]

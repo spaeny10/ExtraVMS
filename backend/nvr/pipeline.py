@@ -13,7 +13,7 @@ import cv2
 import httpx
 import numpy as np
 
-from . import aischedule, baseline, cells, detector, frames, gpumem, identities, inference, journeys, plate, policy, ppe, retention, vlmroute, weaponcheck, zones, merge
+from . import aischedule, baseline, cells, detector, frames, gpumem, identities, inference, journeys, plate, policy, ppe, retention, traffic, vlmroute, weaponcheck, zones, merge
 from . import reverify as reverify_mod
 from . import synopsis as vlm
 from .config import settings
@@ -313,6 +313,8 @@ class Pipeline:
             # held where the camera's own path left it (e, as the tracker closed it)
             self.tracker.rejected(e)
         label = result.get("camera_class") or e["camera_class"]   # a "motion" event takes the class YOLO found
+        if result["status"] == "verified" and label == "vehicle" and traffic.reads_plates(e["camera_id"]):
+            traffic.attach_to_event(event_id)   # a traffic camera's own read of this moment gives the plate (traffic.py)
         if result["status"] == "verified" and label == "vehicle":
             clip = await self.get_clip()
             await asyncio.get_running_loop().run_in_executor(self.gpu, identities.embed_vehicle, clip, event_id)
@@ -738,7 +740,7 @@ class Pipeline:
             log.info("event %s changed while Qwen described it (merged): description dropped", event_id)
             return
         db.update_event(event_id, synopsis=summary, synopsis_json=result, threat=result.get("threat_level"), error=None)
-        if settings.plate_read and plate.is_vehicle(e) and not now_e.get("plate"):
+        if settings.plate_read and plate.is_vehicle(e) and not now_e.get("plate") and not traffic.reads_plates(e["camera_id"]):
             # the plate, when legible, from a full-resolution crop of the vehicle (plate.py): it rides on the
             # description, so it follows its AI-schedule handling; a plate read earlier is never undone here
             try:

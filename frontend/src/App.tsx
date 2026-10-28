@@ -6,13 +6,14 @@ import { CamerasView, LiveView, SystemView } from "./Views";
 import { Dialogs, Icon, OfflineBanner, Toaster } from "./ui";
 import { FindView } from "./Find";
 import { HomeView } from "./Home";
+import { PlatesView } from "./Plates";
 import { ThemeToggle } from "./ThemeToggle";
 import { TimelineView } from "./Timeline";
 import { NavContext, parseTimelineHash, timelineHash, type TimelineFocus, type TimelineTarget } from "./nav";
 
-const TABS = ["Home", "Live", "Find", "Timeline", "Settings"] as const;
+const TABS = ["Home", "Live", "Find", "Timeline", "Plates", "Settings"] as const;
 type Tab = (typeof TABS)[number];
-const TAB_ICON: Record<Tab, string> = { Home: "home", Live: "live", Find: "find", Timeline: "timeline", Settings: "settings" };
+const TAB_ICON: Record<Tab, string> = { Home: "home", Live: "live", Find: "find", Timeline: "timeline", Plates: "car", Settings: "settings" };
 
 /** "#ask", "#live"... (home-screen shortcuts) open that tab */
 const hashTab = (): Tab | null => {
@@ -52,6 +53,8 @@ export default function App() {
   const [live, setLive] = useState<NvrEvent | null>(null);
   const [focus, setFocus] = useState<TimelineFocus | null>(null);
   const [hub, setHub] = useState<HubStatus | null>(null);   // for the "Hub" link in the top bar
+  // Plates is a tab only on a server with a traffic camera set up (or when it is the tab already open: a #plates link)
+  const [plates, setPlates] = useState(false);
 
   const choose = useCallback((t: Tab) => {
     setTab(t);
@@ -119,6 +122,7 @@ export default function App() {
   useEffect(() => {
     loadCameras();
     api.system().then((s) => setPort(s.webrtc_port)).catch(() => {});
+    api.trafficStatus().then((s) => setPlates(s.cameras.length > 0)).catch(() => {});
     api.events({ limit: 20, status: "open,pending,verified" }).then(setRecent).catch(() => {});
     const t = setInterval(loadCameras, 15000);
     const loadHub = () => api.hub().then(setHub).catch(() => {});
@@ -161,7 +165,7 @@ export default function App() {
           <img className="logo" src="axiom.webp" alt="Axiom Vision" />
         </div>
         <nav>
-          {TABS.map((t) => (
+          {TABS.filter((t) => t !== "Plates" || plates || tab === t).map((t) => (
             <button key={t} className={tab === t ? "active" : ""} onClick={() => choose(t)}>
               <Icon name={TAB_ICON[t]} className="tab-icon" size={20} />
               <span className="tab-label">{t}</span>
@@ -179,6 +183,7 @@ export default function App() {
         {tab === "Home" && <HomeView cameras={cameras} port={port} onGo={choose} />}
         {tab === "Live" && <LiveView cameras={cameras.filter((c) => c.enabled)} port={port} recent={recent} />}
         {tab === "Find" && <FindView cameras={cameras} live={live} />}
+        {tab === "Plates" && <PlatesView />}
         {tab === "Timeline" && <TimelineView cameras={cameras} focus={focus} onClearFocus={() => { setFocus(null); history.replaceState(null, "", location.pathname); }} />}
         {tab === "Settings" && <SettingsView cameras={cameras} port={port} reload={loadCameras} />}
       </main>

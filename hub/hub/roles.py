@@ -4,9 +4,11 @@ viewer   watch: every GET (but the talk-down voice, a camera's own settings and 
          signaling (offer and hang-up), media, playback, frames
 operator act: PTZ / relay / presets, talk-down (play / stop a message on a speaker, Hold to Talk, Describe & warn, the voice and its
          preview), deterrence (a camera's strobe, siren, light and relays, and reading what it has), naming people and
-         vehicles, reading a vehicle's plate, feedback and synopsis edits, locks, Ask and clip chat, reprocess, briefings on demand
+         vehicles, reading a vehicle's plate, plate lists (allow / deny / watch) and reading a traffic camera's settings,
+         feedback and synopsis edits, locks, Ask and clip chat, reprocess, briefings on demand
 admin    configure: cameras (and their own settings over ONVIF: clock, encoders, imaging, rules, reboot; their automatic
-         deterrence rules; a Milesight's white light, warning light, siren volume and one-click disarm), speakers and
+         deterrence rules; a Milesight's white light, warning light, siren volume and one-click disarm; a traffic camera's
+         plate reader and push), speakers and
          their message library, the talk-down voice, zones, retention, topology, remote AI, backups, site rules, SD card recovery
 owner    everything an admin can, plus org members and billing (hub-side only)
 Unknown non-GET routes need admin, so a new site endpoint is never accidentally open to viewers.
@@ -26,7 +28,12 @@ RULES: list[tuple[set[str], re.Pattern, str]] = [
     ({"GET", "HEAD"}, re.compile(r"^/api/cameras/([^/]+/)?device(/|$)"), "operator"),
     # deterrence (backend deterrence_api.py): what a camera can set off, what runs, its log and rules; operator, as acting is
     ({"GET", "HEAD"}, re.compile(r"^/api/cameras/[^/]+/deterrence(/|$)"), "operator"),
+    # a traffic camera's own settings (backend traffic_api.py: its plate reader, push slots, SD card): operator to read,
+    # admin to change (the /api/cameras rule)
+    ({"GET", "HEAD"}, re.compile(r"^/api/cameras/[^/]+/traffic$"), "operator"),
     ({"GET", "HEAD"}, re.compile(r".*"), "viewer"),
+    ({"POST"}, re.compile(r"^/api/traffic/push/"), "owner"),   # cameras push on the LAN; the site refuses it through the hub anyway
+    ({"POST", "PUT", "DELETE"}, re.compile(r"^/api/traffic/lists(/|$)"), "operator"),   # plate lists: like watching a vehicle
     ({"POST"}, re.compile(r"^/api/whep/"), "viewer"),
     ({"DELETE"}, re.compile(r"^/api/whep/[^/]+/[^/]+$"), "viewer"),   # ends the viewer's own live session (WhepPlayer teardown)
     ({"POST"}, re.compile(r"^/api/(assistant/ask|assistant/plan|assistant/retrieve|assistant/warm|remote/warm|query/parse)$"), "viewer"),

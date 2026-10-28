@@ -1,0 +1,72 @@
+{
+ "sdcardStatus": 0,
+ "sdcardDiskStatus": 2,
+ "sdcardFullStatus": 1,
+ "sdcardTotalSize": "0",
+ "sdcardFreeSize": "0",
+ "sdcardUseSize": "0",
+ "sdEncryptStatus": 0,
+ "sdcardFileSystem": -1,
+ "nasList": [
+  {
+   "nasIndex": 0,
+   "nasAddress": "",
+   "nasFilePath": "",
+   "nasRecycle": 0,
+   "nasMountType": 0,
+   "nasTotalSize": "",
+   "nasFreeSize": "",
+   "nasUserName": "",
+   "nasPassword": "",
+   "nasStatus": 0
+  },
+  {
+   "nasIndex": 1,
+   "nasAddress": "",
+   "nasFilePath": "",
+   "nasRecycle": 0,
+   "nasMountType": 0,
+   "nasTotalSize": "",
+   "nasFreeSize": "",
+   "nasUserName": "",
+   "nasPassword": "",
+   "nasStatus": 0
+  },
+  {
+   "nasIndex": 2,
+   "nasAddress": "",
+   "nasFilePath": "",
+   "nasRecycle": 0,
+   "nasMountType": 0,
+   "nasTotalSize": "",
+   "nasFreeSize": "",
+   "nasUserName": "",
+   "nasPassword": "",
+   "nasStatus": 0
+  },
+  {
+   "nasIndex": 3,
+   "nasAddress": "",
+   "nasFilePath": "",
+   "nasRecycle": 0,
+   "nasMountType": 0,
+   "nasTotalSize": "",
+   "nasFreeSize": "",
+   "nasUserName": "",
+   "nasPassword": "",
+   "nasStatus": 0
+  },
+  {
+   "nasIndex": 4,
+   "nasAddress": "",
+   "nasFilePath": "",
+   "nasRecycle": 0,
+   "nasMountType": 0,
+   "nasTotalSize": "",
+   "nasFreeSize": "",
+   "nasUserName": "",
+   "nasPassword": "",
+   "nasStatus": 0
+  }
+ ]
+}

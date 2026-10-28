@@ -1,0 +1,69 @@
+{
+ "postEvents": 31,
+ "automaticRetransmission": 1,
+ "http": {
+  "httpList": [
+   {
+    "index": 0,
+    "enable": 0,
+    "url": "",
+    "user": "",
+    "password": "",
+    "method": 1,
+    "snapshotType": 2,
+    "eventMask": 765,
+    "statusReportEnable": 0,
+    "statusReportInterval": 300
+   },
+   {
+    "index": 1,
+    "enable": 0,
+    "url": "",
+    "user": "",
+    "password": "",
+    "method": 1,
+    "snapshotType": 2,
+    "eventMask": 0,
+    "statusReportEnable": 0,
+    "statusReportInterval": 300
+   },
+   {
+    "index": 2,
+    "enable": 0,
+    "url": "",
+    "user": "",
+    "password": "",
+    "method": 1,
+    "snapshotType": 2,
+    "eventMask": 0,
+    "statusReportEnable": 0,
+    "statusReportInterval": 300
+   }
+  ]
+ },
+ "tcp": {
+  "enable": 0,
+  "port": 3344,
+  "eventMask": 765
+ },
+ "MQTT": {
+  "enable": 0,
+  "topic": "Traffic Message Post",
+  "port": 1883,
+  "host": "",
+  "user": "",
+  "password": "",
+  "eventMask": 765,
+  "tlsEnable": 0,
+  "tlsCertificateType": 0,
+  "CA": 0,
+  "clientCertificate": 0,
+  "clientKey": 0
+ },
+ "templateMode": 1,
+ "templateFormat": 0,
+ "more": {
+  "metadataEnable": 0,
+  "base64ImgPush": 1
+ }
+}

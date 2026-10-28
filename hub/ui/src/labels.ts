@@ -13,6 +13,8 @@ export const KIND_LABEL: Record<string, string> = {
   gpu_memory_full: "GPU memory full",
   // a central instance can't reach its host's shared AI service: events wait and verify once it answers
   inference_unavailable: "AI service unavailable",
+  // a traffic camera set up to push its plate reads has sent nothing for 15 minutes: reads are being lost
+  traffic_push_silent: "Plate reads stopped",
   // an Axiom Bridge at the Site stopped heartbeating: the cameras behind it are not recorded
   bridge_offline: "Bridge offline",
   // hub administrators only: a central recording host stopped heartbeating

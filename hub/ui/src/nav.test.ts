@@ -38,6 +38,9 @@ describe("matchRoute", () => {
       expect(matchRoute(`/sites/l_abc/${tab}`)).toEqual({ page: "site", siteId: "l_abc", tab });
     // Ask sits between Find and Alerts
     expect(SITE_TABS.slice(2, 5)).toEqual(["find", "ask", "alerts"]);
+    // Plates (traffic cameras) after Alerts, Settings last
+    expect(matchRoute("/sites/l_abc/plates")).toEqual({ page: "site", siteId: "l_abc", tab: "plates" });
+    expect(SITE_TABS.slice(-2)).toEqual(["plates", "settings"]);
   });
 
   it("site ask conversations", () => {

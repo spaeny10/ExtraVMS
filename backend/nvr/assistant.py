@@ -25,7 +25,7 @@ import time
 from typing import AsyncIterator
 from zoneinfo import ZoneInfo
 
-from . import baseline, identities, retention, vlmroute
+from . import baseline, identities, retention, traffic, vlmroute
 from . import synopsis as vlm
 from .config import settings
 from .db import db
@@ -1059,8 +1059,9 @@ async def run_calls(calls: list[dict], refs: Refs, question: str | None = None) 
 MAKE_MODEL = (
     "A make or model is usually inferred by the camera AI from what a vehicle looks like: when a match rests on a "
     "description, say so (for example 'described as likely a Nissan Titan'), never state it as fact. A license plate is "
-    "known only where a line says 'license plate ...' (read from the footage when it was legible); when the matching lines "
-    "have none, say no plate was read for them, and never guess or complete a plate."
+    "known only where a line says 'license plate ...' (read from the footage when it was legible, or by a traffic camera's "
+    "plate reader with how sure it was); when the matching lines have none, say no plate was read for them, and never guess "
+    "or complete a plate. A plate reader's state and direction are only what it reported: say 'reported'."
 )
 
 ANSWER_SYSTEM = (
@@ -1100,6 +1101,21 @@ def _handles_note(refs: "Refs") -> str:
     return "Handles you may cite: " + ", ".join(hs[:40]) + "."
 
 
+async def _plate_lines(question: str, now: float) -> str:
+    """A traffic camera's own plate reads for a question naming a plate or asking for one (traffic.ask_evidence)."""
+    win = time_window(question, now)
+    try:
+        found = await asyncio.to_thread(traffic.ask_evidence, question, win["since"] if win else None,
+                                        win["until"] if win else None, now)
+    except Exception:  # noqa: BLE001 - the answer stands on the other lookups
+        log.exception("plate reads for Ask failed")
+        return ""
+    if not found:
+        return ""
+    return "\nPlate reads (traffic cameras' own plate readers):\n" + "\n".join(
+        f"- {_cam_name(x['camera_id'])}, {_when(x['ts'], now)}: {x['text']}" for x in found)
+
+
 async def ask(thread_id: int | None, question: str) -> AsyncIterator[dict]:
     """Streams NDJSON-able chunks: thread, user, plan, calls, model, fallback?, delta..., done | error."""
     now = time.time()
@@ -1120,6 +1136,7 @@ async def ask(thread_id: int | None, question: str) -> AsyncIterator[dict]:
         calls = check_plan(raw, question, now)
         refs = Refs()
         results, summary = await run_calls(calls, refs, question)
+        results += await _plate_lines(question, now)
         calls_meta = {"calls": summary, "refs": refs.as_dict(), "planner": raw.get("_model")}
         yield {"type": "calls", **calls_meta}
         messages = [{"role": "system", "content": ANSWER_SYSTEM + " " + _handles_note(refs)},

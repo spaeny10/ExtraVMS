@@ -146,6 +146,17 @@ class Settings(BaseSettings):
     plate_read: bool = True
     plate_min_px: int = 120
     plate_rate_s: float = 30.0
+    # Traffic cameras (traffic.py): reads they push with the camera's own plate reader. Reads and their crops are kept
+    # traffic_keep_days; the full snapshot only for a list hit (the recording has the frame) unless traffic_keep_full.
+    # A read at traffic_attach_min_conf or more puts its plate on the vehicle event of that moment; a list hit needs
+    # traffic_list_min_conf. traffic_push_base: the address cameras push to ("http://192.168.1.5:8080"); empty = this
+    # server's address on the camera's network and `port`. No push for traffic_silent_s from a camera set up: alert.
+    traffic_keep_days: int = 30
+    traffic_keep_full: bool = False
+    traffic_attach_min_conf: float = 0.6
+    traffic_list_min_conf: float = 0.5
+    traffic_push_base: str = ""
+    traffic_silent_s: float = 900.0
     # Back-to-back fragments of one visit on a camera merge into one event before Qwen describes it (merge.py)
     track_merge_gap: float = 10.0           # a fragment starting within this of the previous one may merge
     merge_max_seconds: float = 300.0        # never grow one event beyond this

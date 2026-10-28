@@ -318,6 +318,55 @@ CREATE TABLE IF NOT EXISTS deterrence_log (
     error       TEXT
 );
 CREATE INDEX IF NOT EXISTS deterrence_log_cam ON deterrence_log(camera_id, ts);
+-- Traffic cameras' own plate reads (traffic.py): one row per read the camera pushed (most have no plate; a Kansas car
+-- shows its plate only going away). Reads of one pass share pass_id (the pass's first read); best=1 marks the pass's most
+-- confident read. images: JSON plate, vehicle (full, violation) paths under data_dir. list / list_match: the plate list hit
+-- (allow | deny | watch, exact | near); event_id: the Axiom event the read is on (a vehicle event at that moment, or the
+-- alarm a deny / watch hit opened).
+CREATE TABLE IF NOT EXISTS vehicle_reads (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    camera_id       TEXT NOT NULL,
+    ts              REAL NOT NULL,
+    received_at     REAL NOT NULL,
+    kind            TEXT NOT NULL DEFAULT 'regular',   -- the camera's event_type, lowercased
+    plate           TEXT,                             -- normalized (plate.normalize), NULL when none was read
+    plate_raw       TEXT,
+    confidence      REAL,                             -- 0..1 as the camera reports it
+    region          TEXT,                             -- the camera's state / country guess: a hint only
+    plate_type      TEXT,
+    plate_color     TEXT,
+    vehicle_type    TEXT,
+    vehicle_color   TEXT,
+    vehicle_brand   TEXT,
+    direction       TEXT,                             -- approach | away | NULL (the camera's guess)
+    speed           REAL,
+    alarm           TEXT,
+    detection_region TEXT,
+    box             TEXT,                             -- JSON [l, t, r, b] normalized: the vehicle
+    plate_box       TEXT,
+    images          TEXT,
+    pass_id         INTEGER,
+    best            INTEGER NOT NULL DEFAULT 1,
+    list            TEXT,
+    list_match      TEXT,
+    list_entry      INTEGER,
+    event_id        INTEGER,
+    extra           TEXT                              -- JSON: the rest of the push (data_list, sn, ...)
+);
+CREATE INDEX IF NOT EXISTS vehicle_reads_cam_ts ON vehicle_reads(camera_id, ts);
+CREATE INDEX IF NOT EXISTS vehicle_reads_ts ON vehicle_reads(ts);
+CREATE INDEX IF NOT EXISTS vehicle_reads_plate ON vehicle_reads(plate);
+-- Plate lists (traffic.py): allow (marks the read, no alarm), deny (a high-priority alarm), watch (medium)
+CREATE TABLE IF NOT EXISTS plate_lists (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    plate       TEXT NOT NULL,                        -- normalized
+    list        TEXT NOT NULL,                        -- allow | deny | watch
+    note        TEXT NOT NULL DEFAULT '',
+    expires_at  REAL,
+    created_at  REAL NOT NULL,
+    by          TEXT,
+    UNIQUE (plate, list)
+);
 CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(synopsis, labels, content='', contentless_delete=1);
 CREATE VIRTUAL TABLE IF NOT EXISTS events_vec USING vec0(embedding float[{EMBED_DIM}]);
 """
@@ -372,6 +421,7 @@ MIGRATIONS = [
     ("cameras", "deterrence_rules", "TEXT"),
     # a camera's deterrence settings (deterrence.clean_config): JSON {siren_source: auto | relay | speaker}; NULL = defaults
     ("cameras", "deterrence_config", "TEXT"),
+    ("cameras", "traffic", "TEXT"),                 # JSON {enabled, secret, slot, zone_offset_s}: a traffic camera's push (traffic.py)
     ("deterrence_log", "via", "TEXT"),           # how it went: relay | aux | speaker (the siren through a talk-down speaker)
     # merged events (merge.py): the camera tracks folded into this one, JSON [{event, track, from, to, why}], and for a
     # group of people the most of them in view at once (>= 2; NULL = one person / never merged)
@@ -728,6 +778,7 @@ class Database:
             c["ptz_config"] = json.loads(c["ptz_config"]) if c.get("ptz_config") else None
             c["deterrence_rules"] = json.loads(c["deterrence_rules"]) if c.get("deterrence_rules") else []
             c["deterrence_config"] = json.loads(c["deterrence_config"]) if c.get("deterrence_config") else {}
+            c["traffic"] = json.loads(c["traffic"]) if c.get("traffic") else None
             c["streams"] = json.loads(c["streams"]) if c.get("streams") else None
         return cams
 

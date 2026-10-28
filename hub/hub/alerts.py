@@ -10,7 +10,7 @@ from . import cameras, db
 
 KINDS = ("offline", "camera_down", "disk", "clock", "detector_fallback", "detector_stalled", "vlm_fallback_active", "event_high", "event_policy", "event_watched",
          "site_link_down", "host_offline", "coverage_budget", "host_queue_growing", "storage_failing", "bridge_offline",
-         "instance_data_full", "db_errors", "gpu_memory_full", "inference_unavailable", "inference_slow")
+         "instance_data_full", "db_errors", "gpu_memory_full", "inference_unavailable", "inference_slow", "traffic_push_silent")
 # site_link_down  the server's heartbeat says every camera is unreachable at once (summary.site_link_down): the link to
 #                 the Site (SpeedFusion tunnel, port forwards, the BR1's cellular uplink) is probably down. One alert for
 #                 the server instead of one camera_down per camera; cameras flagged link_down raise no camera_down.
@@ -48,8 +48,10 @@ HUB_KINDS = ("host_offline", "coverage_budget", "host_queue_growing", "instance_
 #                      nvr/gpumem.py): events may fail to verify; a larger share (Hosts) or fewer cameras fixes it
 #   inference_unavailable  a central instance on its host's shared inference service (backend nvr/inference.py) has
 #                      not reached it for 30 s: events wait in its queue and verify once it answers
+#   traffic_push_silent  a traffic camera set up to push its plate reads (backend nvr/traffic.py) sent nothing, not even
+#                      its 5-minute status report, for 15 min: reads are being lost (the camera resends only with an SD card)
 HEALTH_KINDS = ("detector_fallback", "detector_stalled", "vlm_fallback_active", "storage_failing", "gpu_memory_full",
-                "inference_unavailable")
+                "inference_unavailable", "traffic_push_silent")
 # Alerts about one site event. Unlike the condition kinds above (offline, disk...), which close when the condition
 # clears and must re-open when it returns, an event happens once: its key is the event id, and the same event is
 # re-published many times (heartbeat attention lists, synopsis, feedback, lock), so it dedupes on any row.

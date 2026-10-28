@@ -3,7 +3,8 @@
    has its own Apply that writes to the camera at once (not with the dialog's Save) and shows what the camera reads
    back. "Fix clocks…" (Settings › Cameras) sets several cameras' clocks at once. Pure logic: cameraDevice.ts.
    A Milesight camera that answers its web API also gets its lights, siren volume and one-click disarm here
-   (backend milesight.py; the form's logic is deterrence.ts). */
+   (backend milesight.py; the form's logic is deterrence.ts), and a Milesight traffic camera its plate reader's push
+   to this server (TrafficSetup.tsx). */
 import { useEffect, useId, useState } from "react";
 import { BASE, api, type Camera } from "./api";
 import { cameraWebUrl } from "./cameraEdit";
@@ -15,6 +16,7 @@ import {
 } from "./cameraDevice";
 import { MUTE_LABELS, type MilesightDraft, type MilesightExtras, type MilesightWrite, type MsSection, milesightChanges, milesightDraft,
   milesightProblems, sectionBody } from "./deterrence";
+import { TrafficSetupSection } from "./TrafficSetup";
 import { confirmDialog, errorText, toast } from "./ui";
 
 export function CameraDevicePanel({ camera, active }: { camera: Camera; active: boolean }) {
@@ -83,6 +85,7 @@ export function CameraDevicePanel({ camera, active }: { camera: Camera; active: 
         <WebPageNote camera={camera} />
 
         <MilesightSection camera={camera} />
+        <TrafficSetupSection camera={camera} />
 
         <h3 className="spaced">Restart</h3>
         <RebootSection camera={camera} />

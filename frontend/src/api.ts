@@ -7,6 +7,7 @@ import type { AnalyticsRule, AudioEncoder, CameraDevice, CameraTime, ClockResult
 import type { CatalogVoice, Spoken, VoiceEngines, VoiceSetting } from "./talkdownVoice";
 import type { LiveCodecs } from "./codecs";
 import type { DeterConfig, DeterRequest, DeterRule, DeterRules, Deterrence, DeterrenceBrief, MilesightExtras, MilesightWrite } from "./deterrence";
+import type { CameraTraffic, Counts, CountsQuery, ImageKind, ListEntry, ListEntryEdit, ListEntryIn, ReadDetail, ReadsPage, ReadsQuery, TrafficStatus } from "./traffic";
 /** include = detect only here; exclude = mask out; area = just a name for a place (never filters);
  * ppe = people who stay in it must wear the required items (backend/nvr/ppe.py; never filters) */
 export type ZoneType = "include" | "exclude" | "area" | "ppe";
@@ -827,6 +828,20 @@ export function makeApi(base: string, opts: ApiOptions = {}) {
   milesight: (camera: string) => req<MilesightExtras>(`/api/cameras/${camera}/device/milesight`),
   setMilesight: (camera: string, body: MilesightWrite) =>
     req<MilesightExtras & { written: Record<string, unknown> }>(`/api/cameras/${camera}/device/milesight`, json("PUT", body)),
+  // traffic cameras (traffic_api.py): the plate reads they push, counts, plate lists (changes: operator), a camera's
+  // traffic setup (read: operator, set up / stop: admin)
+  trafficReads: (p: ReadsQuery = {}) => req<ReadsPage>(`/api/traffic/reads?${qs({ ...p, plates: p.plates ? "true" : undefined, all: p.all ? "true" : undefined })}`),
+  trafficRead: (id: number) => req<ReadDetail>(`/api/traffic/reads/${id}`),
+  /** a read's picture (JPEG): kinds the read lists in `images` */
+  trafficImage: (id: number, kind: ImageKind) => u(`/api/traffic/reads/${id}/image/${kind}`),
+  trafficCounts: (p: CountsQuery = {}) => req<Counts>(`/api/traffic/counts?${qs(p)}`),
+  trafficStatus: () => req<TrafficStatus>("/api/traffic/status"),
+  plateLists: () => req<ListEntry[]>("/api/traffic/lists"),
+  addPlateEntry: (b: ListEntryIn) => req<ListEntry>("/api/traffic/lists", json("POST", b)),
+  editPlateEntry: (id: number, b: ListEntryEdit) => req<ListEntry>(`/api/traffic/lists/${id}`, json("PUT", b)),
+  deletePlateEntry: (id: number) => req<{ ok: boolean }>(`/api/traffic/lists/${id}`, { method: "DELETE" }),
+  cameraTraffic: (camera: string) => req<CameraTraffic>(`/api/cameras/${camera}/traffic`),
+  setCameraTraffic: (camera: string, b: { enabled: boolean; plate_reading?: boolean }) => req<CameraTraffic>(`/api/cameras/${camera}/traffic`, json("PUT", b)),
   rebootCamera: (camera: string) => req<{ ok: boolean; message: string }>(`/api/cameras/${camera}/device/reboot`, { method: "POST" }),
   cameraSd: (camera: string, refresh = false) => req<SdStatus & { camera_id: string }>(`/api/cameras/${camera}/sd${refresh ? "?refresh=true" : ""}`),
   sdGaps: (camera?: string, hours?: number) => req<SdGaps>(`/api/sd/gaps?${qs({ camera, hours })}`),

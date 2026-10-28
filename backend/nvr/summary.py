@@ -13,7 +13,7 @@ import time
 
 import httpx
 
-from . import aischedule, backup, detector, direct, health, mediamtx, retention, talkdown, tts, vlmroute
+from . import aischedule, backup, detector, direct, health, mediamtx, retention, talkdown, traffic, tts, vlmroute
 from .config import settings
 from .db import db
 
@@ -72,9 +72,10 @@ async def site_summary(state, since: float | None = None, version: str = "") -> 
         "retention_alert": retention.alert,
         "queues": {"verify": p.verify_q.qsize(), "synopsis": p.synopsis_q.qsize()},
         "yolo_ready": detector.yolo_status(p)["yolo_ready"], "vlm_ready": p.vlm_ready, "vlm_model": settings.vlm_model,
-        # storage_failing / detector_fallback / detector_stalled / vlm_fallback_active / site_link_down: the hub opens an
-        # alert per kind while it is listed (hub alerts.py)
-        "health_alerts": _storage_alerts() + detector.health_alerts(p) + vlmroute.router.health_alerts() + ([link] if link else []),
+        # storage_failing / detector_fallback / detector_stalled / vlm_fallback_active / site_link_down /
+        # traffic_push_silent: the hub opens an alert per kind while it is listed (hub alerts.py)
+        "health_alerts": _storage_alerts() + detector.health_alerts(p) + vlmroute.router.health_alerts() + ([link] if link else [])
+        + traffic.health.alerts(),
         "site_link_down": bool(link),
         "storage": dict(db.storage),   # {ok, error, failing_since, last_ok, reopens, errors_total} (db.py): is the database taking writes
         # statements that failed on storage in the last 15 minutes (the hub's db_errors alert), and the data dir's own

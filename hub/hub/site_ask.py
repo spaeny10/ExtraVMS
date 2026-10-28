@@ -55,7 +55,7 @@ PROMPT_ITEMS = 45            # evidence lines in the answer prompt (newest first
 RATE_LIMIT, RATE_WINDOW_S = 20, 60.0
 MAX_THREADS = 100
 ACTIONS_PATH = "/customer/actions"
-TIMED = ("event", "footage", "journey", "gap")
+TIMED = ("event", "footage", "journey", "gap", "plate")   # plate: a traffic camera's own plate read (backend traffic.py)
 
 
 # ---------------------------------------------------------------- instructions go to Customer › Actions
@@ -274,6 +274,8 @@ def _key(sid: str, it: dict) -> tuple:
         return (sid, k, it.get("event_id"), it.get("ts"))
     if k == "gap":
         return (sid, k, it.get("camera_id"), it.get("ts"))
+    if k == "plate":
+        return (sid, k, it.get("read_id"))
     return (sid, k, it.get("camera_id"), it.get("text"))
 
 
@@ -437,6 +439,9 @@ def evidence_line(x: dict, tz: dt.tzinfo, now: float) -> str:
         return f"[#{x['ref']}] Journey {_span(ts, x.get('end_ts'), tz, now)} across {' → '.join(x.get('cameras') or [])}: {x.get('text') or ''}"
     if k == "gap":
         return f"{cam} was not recording {_span(ts, x.get('end_ts'), tz, now)} ({x.get('minutes')} min)"
+    if k == "plate":
+        return (f"{cam}, {fmt_time(ts, tz, now)}: {x.get('text') or ''}"
+                + ("  (EARLIER: before the period asked about)" if x.get("earlier") else ""))
     if k == "briefing":
         return (f"BACKGROUND ONLY: a briefing written for {_span(ts, x.get('end_ts'), tz, now)}, a different span than the "
                 f"question may ask about: {x.get('text') or ''}")
@@ -517,8 +522,9 @@ ANSWER_SYSTEM = (
     # the same words as the servers' own Ask (backend/nvr/assistant.py MAKE_MODEL)
     "A make or model is usually inferred by the camera AI from what a vehicle looks like: when a match rests on a "
     "description, say so (for example 'described as likely a Nissan Titan'), never state it as fact. A license plate is "
-    "known only where a line says 'license plate ...' (read from the footage when it was legible); when the matching lines "
-    "have none, say no plate was read for them, and never guess or complete a plate."
+    "known only where a line says 'license plate ...' (read from the footage when it was legible, or by a traffic camera's "
+    "plate reader with how sure it was); when the matching lines have none, say no plate was read for them, and never guess "
+    "or complete a plate. A plate reader's state and direction are only what it reported: say 'reported'."
 )
 
 

@@ -13,6 +13,8 @@ the text block the answer model reads, each lookup's findings come back as items
   {kind: "count", text, counts}                                             count_events (counts are structured)
   {kind: "briefing", ts, end_ts, text, background: true}
   {kind: "note", text, camera_id?}                                          e.g. "recorded continuously"
+  {kind: "plate", read_id, ts, camera_id, camera_name, plate, confidence, event_id, text}
+                                                                            a traffic camera's own plate read (traffic.py)
 
 When the question names a period ("overnight") and a fallback lookup had to look wider, items outside it carry
 `earlier: true` (before it) or `later: true` (after it). `text` never starts with the camera or the time (the hub formats those in the Site's time zone). Nothing is written:
@@ -36,6 +38,7 @@ import re
 import time
 
 from . import assistant as A
+from . import traffic
 from .db import db
 
 log = logging.getLogger("nvr.retrieve")
@@ -416,6 +419,11 @@ async def _retrieve(question: str, history: list[dict] | None, now: float | None
     notes += more
     items = keep_class(items, A.class_intent(used))
     window = _window(used, calls, now)
+    try:   # a traffic camera's plate reads for a question naming a plate or asking for one (traffic.ask_evidence)
+        items += await asyncio.to_thread(traffic.ask_evidence, used, window["from"] if window else None,
+                                         window["to"] if window else None, now)
+    except Exception:  # noqa: BLE001 - the rest of the evidence stands without them
+        log.exception("retrieve: plate reads failed")
     if window and A.time_window(used, now):
         # a fallback lookup widens the period ("nothing overnight: the latest since then"): say which side each is on
         for x in items:
@@ -427,7 +435,7 @@ async def _retrieve(question: str, history: list[dict] | None, now: float | None
     events = [x for x in items if x["kind"] == "event"]
     count_items = [x for x in items if x["kind"] == "count"]
     counts = dict(count_items[0]["counts"]) if count_items else {}
-    counts["found"] = {k: sum(1 for x in items if x["kind"] == k) for k in ("event", "footage", "journey", "gap")}
+    counts["found"] = {k: sum(1 for x in items if x["kind"] == k) for k in ("event", "footage", "journey", "gap", "plate")}
     off = dt.datetime.fromtimestamp(now, zone) if zone else dt.datetime.fromtimestamp(now).astimezone()
     out = {
         "question": used, "asked": question, "window": window,

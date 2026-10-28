@@ -1,0 +1,423 @@
+{
+ "lprLicense": "REDACTED",
+ "licenseStatus": 1,
+ "lprVersion": 4,
+ "lprEnable": 0,
+ "optimalPushMechanism": 0,
+ "plateSize": {
+  "enable": 0,
+  "width": 10,
+  "height": 10,
+  "startX": 955,
+  "startY": 535
+ },
+ "areaList": "United States",
+ "noSupportSerialformatList": "China;India;Iran;Iraq;Japan;South Korea;Taiwan;Thailand;Bangladesh;Mongolia;SG&MY&TH;Germany;Russia;Lebanon;Saudi Arabia;Israel;Oman;Southeast Asia;Laos",
+ "curArea": "United States",
+ "country": 21,
+ "nightModeEnable": 1,
+ "dayToNight": 36,
+ "nightToDay": 82,
+ "nightModeEffectiveTime": 0,
+ "nightModeStartHour": 18,
+ "nightModeStartMinute": 0,
+ "nightModeStopHour": 6,
+ "nightModeStopMinute": 0,
+ "nightModeLevel": 4,
+ "inputNo": 15,
+ "lprWidth": 1920,
+ "lprHeight": 1080,
+ "processMode": 0,
+ "repeatCheckTimeVal": 4000,
+ "repeatCheckTimeUnit": 0,
+ "dayNightModeEnable": 0,
+ "speedDetect": 0,
+ "cameraHeight": "5.0",
+ "lineDistance1": "10.0",
+ "lineDistance2": "30.0",
+ "linePixel1": 75,
+ "linePixel2": 25,
+ "plateColorEnable": 1,
+ "vehicleTypeEnable": 1,
+ "vehicleColorEnable": 1,
+ "roiIdEnable": 0,
+ "directionEnable": 1,
+ "regionEnable": 1,
+ "vehicleBrandEnable": 1,
+ "effectivePresetsScene": 0,
+ "normalRoiList": [
+  {
+   "roiIndex": 0,
+   "name": "ROI_1",
+   "position": "0:0:0:0"
+  },
+  {
+   "roiIndex": 1,
+   "name": "ROI_2",
+   "position": "0:0:0:0"
+  },
+  {
+   "roiIndex": 2,
+   "name": "ROI_3",
+   "position": "0:0:0:0"
+  },
+  {
+   "roiIndex": 3,
+   "name": "ROI_4",
+   "position": "0:0:0:0"
+  }
+ ],
+ "advancedRoiList": [
+  {
+   "presetIndex": 0,
+   "roiList": [
+    {
+     "roiIndex": 0,
+     "presetName": "ROI_1",
+     "presetPosition": "0:0:0:0"
+    },
+    {
+     "roiIndex": 1,
+     "presetName": "ROI_2",
+     "presetPosition": "0:0:0:0"
+    },
+    {
+     "roiIndex": 2,
+     "presetName": "ROI_3",
+     "presetPosition": "0:0:0:0"
+    },
+    {
+     "roiIndex": 3,
+     "presetName": "ROI_4",
+     "presetPosition": "0:0:0:0"
+    }
+   ]
+  },
+  {
+   "presetIndex": 1,
+   "roiList": [
+    {
+     "roiIndex": 0,
+     "presetName": "ROI_1",
+     "presetPosition": "0:0:0:0"
+    },
+    {
+     "roiIndex": 1,
+     "presetName": "ROI_2",
+     "presetPosition": "0:0:0:0"
+    },
+    {
+     "roiIndex": 2,
+     "presetName": "ROI_3",
+     "presetPosition": "0:0:0:0"
+    },
+    {
+     "roiIndex": 3,
+     "presetName": "ROI_4",
+     "presetPosition": "0:0:0:0"
+    }
+   ]
+  },
+  {
+   "presetIndex": 2,
+   "roiList": [
+    {
+     "roiIndex": 0,
+     "presetName": "ROI_1",
+     "presetPosition": "0:0:0:0"
+    },
+    {
+     "roiIndex": 1,
+     "presetName": "ROI_2",
+     "presetPosition": "0:0:0:0"
+    },
+    {
+     "roiIndex": 2,
+     "presetName": "ROI_3",
+     "presetPosition": "0:0:0:0"
+    },
+    {
+     "roiIndex": 3,
+     "presetName": "ROI_4",
+     "presetPosition": "0:0:0:0"
+    }
+   ]
+  },
+  {
+   "presetIndex": 3,
+   "roiList": [
+    {
+     "roiIndex": 0,
+     "presetName": "ROI_1",
+     "presetPosition": "0:0:0:0"
+    },
+    {
+     "roiIndex": 1,
+     "presetName": "ROI_2",
+     "presetPosition": "0:0:0:0"
+    },
+    {
+     "roiIndex": 2,
+     "presetName": "ROI_3",
+     "presetPosition": "0:0:0:0"
+    },
+    {
+     "roiIndex": 3,
+     "presetName": "ROI_4",
+     "presetPosition": "0:0:0:0"
+    }
+   ]
+  }
+ ],
+ "normalPolygonList": [
+  {
+   "polygonIndex": 0,
+   "name": "ROI_1",
+   "polygonX": "-1:-1:-1:-1:",
+   "polygonY": "-1:-1:-1:-1:",
+   "triggerLine": {
+    "enable": 0,
+    "startX": 0,
+    "startY": 0,
+    "endX": 0,
+    "endY": 0
+   },
+   "laneDirection": 1
+  },
+  {
+   "polygonIndex": 1,
+   "name": "ROI_2",
+   "polygonX": "-1:-1:-1:-1:",
+   "polygonY": "-1:-1:-1:-1:",
+   "triggerLine": {
+    "enable": 0,
+    "startX": 0,
+    "startY": 0,
+    "endX": 0,
+    "endY": 0
+   },
+   "laneDirection": 1
+  },
+  {
+   "polygonIndex": 2,
+   "name": "ROI_3",
+   "polygonX": "-1:-1:-1:-1:",
+   "polygonY": "-1:-1:-1:-1:",
+   "triggerLine": {
+    "enable": 0,
+    "startX": 0,
+    "startY": 0,
+    "endX": 0,
+    "endY": 0
+   },
+   "laneDirection": 1
+  },
+  {
+   "polygonIndex": 3,
+   "name": "ROI_4",
+   "polygonX": "-1:-1:-1:-1:",
+   "polygonY": "-1:-1:-1:-1:",
+   "triggerLine": {
+    "enable": 0,
+    "startX": 0,
+    "startY": 0,
+    "endX": 0,
+    "endY": 0
+   },
+   "laneDirection": 1
+  }
+ ],
+ "advancedPolygonList": [
+  {
+   "presetIndex": 0,
+   "polygonList": [
+    {
+     "polygonIndex": 0,
+     "presetName": "ROI_1",
+     "polygonPresetX": "-1:-1:-1:-1:",
+     "polygonPresetY": "-1:-1:-1:-1:"
+    },
+    {
+     "polygonIndex": 1,
+     "presetName": "ROI_2",
+     "polygonPresetX": "-1:-1:-1:-1:",
+     "polygonPresetY": "-1:-1:-1:-1:"
+    },
+    {
+     "polygonIndex": 2,
+     "presetName": "ROI_3",
+     "polygonPresetX": "-1:-1:-1:-1:",
+     "polygonPresetY": "-1:-1:-1:-1:"
+    },
+    {
+     "polygonIndex": 3,
+     "presetName": "ROI_4",
+     "polygonPresetX": "-1:-1:-1:-1:",
+     "polygonPresetY": "-1:-1:-1:-1:"
+    }
+   ]
+  },
+  {
+   "presetIndex": 1,
+   "polygonList": [
+    {
+     "polygonIndex": 0,
+     "presetName": "ROI_1",
+     "polygonPresetX": "-1:-1:-1:-1:",
+     "polygonPresetY": "-1:-1:-1:-1:"
+    },
+    {
+     "polygonIndex": 1,
+     "presetName": "ROI_2",
+     "polygonPresetX": "-1:-1:-1:-1:",
+     "polygonPresetY": "-1:-1:-1:-1:"
+    },
+    {
+     "polygonIndex": 2,
+     "presetName": "ROI_3",
+     "polygonPresetX": "-1:-1:-1:-1:",
+     "polygonPresetY": "-1:-1:-1:-1:"
+    },
+    {
+     "polygonIndex": 3,
+     "presetName": "ROI_4",
+     "polygonPresetX": "-1:-1:-1:-1:",
+     "polygonPresetY": "-1:-1:-1:-1:"
+    }
+   ]
+  },
+  {
+   "presetIndex": 2,
+   "polygonList": [
+    {
+     "polygonIndex": 0,
+     "presetName": "ROI_1",
+     "polygonPresetX": "-1:-1:-1:-1:",
+     "polygonPresetY": "-1:-1:-1:-1:"
+    },
+    {
+     "polygonIndex": 1,
+     "presetName": "ROI_2",
+     "polygonPresetX": "-1:-1:-1:-1:",
+     "polygonPresetY": "-1:-1:-1:-1:"
+    },
+    {
+     "polygonIndex": 2,
+     "presetName": "ROI_3",
+     "polygonPresetX": "-1:-1:-1:-1:",
+     "polygonPresetY": "-1:-1:-1:-1:"
+    },
+    {
+     "polygonIndex": 3,
+     "presetName": "ROI_4",
+     "polygonPresetX": "-1:-1:-1:-1:",
+     "polygonPresetY": "-1:-1:-1:-1:"
+    }
+   ]
+  },
+  {
+   "presetIndex": 3,
+   "polygonList": [
+    {
+     "polygonIndex": 0,
+     "presetName": "ROI_1",
+     "polygonPresetX": "-1:-1:-1:-1:",
+     "polygonPresetY": "-1:-1:-1:-1:"
+    },
+    {
+     "polygonIndex": 1,
+     "presetName": "ROI_2",
+     "polygonPresetX": "-1:-1:-1:-1:",
+     "polygonPresetY": "-1:-1:-1:-1:"
+    },
+    {
+     "polygonIndex": 2,
+     "presetName": "ROI_3",
+     "polygonPresetX": "-1:-1:-1:-1:",
+     "polygonPresetY": "-1:-1:-1:-1:"
+    },
+    {
+     "polygonIndex": 3,
+     "presetName": "ROI_4",
+     "polygonPresetX": "-1:-1:-1:-1:",
+     "polygonPresetY": "-1:-1:-1:-1:"
+    }
+   ]
+  }
+ ],
+ "confidence": 4,
+ "postEnable": 1,
+ "postType": 1,
+ "postHttpMethod": 1,
+ "postHttpSnapshotType": 0,
+ "postHttpUrl": "",
+ "postHttpUser": "",
+ "postHttpPassword": "",
+ "httpList": [
+  {
+   "index": 0,
+   "enable": 0,
+   "url": "",
+   "user": "",
+   "password": "",
+   "method": 1,
+   "snapshotType": 2
+  },
+  {
+   "index": 1,
+   "enable": 0,
+   "url": "",
+   "user": "",
+   "password": "",
+   "method": 1,
+   "snapshotType": 2
+  },
+  {
+   "index": 2,
+   "enable": 0,
+   "url": "",
+   "user": "",
+   "password": "",
+   "method": 1,
+   "snapshotType": 2
+  }
+ ],
+ "postTcpPort": 3344,
+ "encryptionChip": 255,
+ "areaType": 6,
+ "whiteLedExternal": 0,
+ "irLedExternal": 0,
+ "detectionMode": 0,
+ "vehicleEnhancement": 0,
+ "notSupportPlateMode": 0,
+ "scheduleList": [
+  {
+   "scheduleIndex": 0,
+   "schedule": "00:00:24:00;"
+  },
+  {
+   "scheduleIndex": 1,
+   "schedule": "00:00:24:00;"
+  },
+  {
+   "scheduleIndex": 2,
+   "schedule": "00:00:24:00;"
+  },
+  {
+   "scheduleIndex": 3,
+   "schedule": "00:00:24:00;"
+  },
+  {
+   "scheduleIndex": 4,
+   "schedule": "00:00:24:00;"
+  },
+  {
+   "scheduleIndex": 5,
+   "schedule": "00:00:24:00;"
+  },
+  {
+   "scheduleIndex": 6,
+   "schedule": "00:00:24:00;"
+  }
+ ]
+}

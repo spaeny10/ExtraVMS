@@ -26,7 +26,8 @@ export const inPlace = (fn: () => void) => (e: React.MouseEvent) => {
 /** An <a> click that stays in the app (plain href kept so middle-click / open-in-new-tab still work). */
 export const go = (path: string) => inPlace(() => navigate(path));
 
-export const SITE_TABS = ["live", "timeline", "find", "ask", "alerts", "settings"] as const;
+/** Plates: the plate reads, plate lists and traffic counts of the Site's traffic cameras (SitePlates). */
+export const SITE_TABS = ["live", "timeline", "find", "ask", "alerts", "plates", "settings"] as const;
 export type SiteTab = (typeof SITE_TABS)[number];
 export const CUSTOMER_TABS = ["sites", "servers", "members", "invites", "ai", "actions"] as const;
 export type CustomerTab = (typeof CUSTOMER_TABS)[number];

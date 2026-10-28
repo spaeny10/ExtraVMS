@@ -1,9 +1,10 @@
 /**
  * One Site: a header line (Customer › Site, the Map button, the health pill, ⋮), one row with the tabs Live · Timeline ·
- * Find · Ask · Alerts · Servers · Settings and, on the right, the current tab's toolbar (Live's: tabTools.ts), and the server panel
+ * Find · Ask · Alerts · Plates · Settings and, on the right, the current tab's toolbar (Live's: tabTools.ts), and the server panel
  * at /sites/:id/servers/:serverId. Live is the combined grid (SiteLive), Find the server UI's Find over the Site's
  * servers (SiteFind: search and filters), Ask one answer for the whole Site in private conversations (site/SiteAsk,
- * /sites/:id/ask/:thread), Alerts the customer-wide page scoped to this Site (AlertsPage's SiteAlerts).
+ * /sites/:id/ask/:thread), Alerts the customer-wide page scoped to this Site (AlertsPage's SiteAlerts), Plates the server
+ * UI's Plates page over the Site's servers with traffic cameras (SitePlates).
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Icon, confirmDialog, promptDialog, toast } from "@site/ui";
@@ -28,6 +29,7 @@ import { ServerActions, ServerCard, useLiveStats } from "./servers";
 import { SiteLive } from "./SiteLive";
 import { SiteTimeline } from "./SiteTimeline";
 import { SiteFind } from "./SiteFind";
+import { SitePlates } from "./SitePlates";
 import { SiteAsk } from "./site/SiteAsk";
 import { SiteAlerts } from "./AlertsPage";
 import { useFleetRefresh } from "./fleetRefresh";
@@ -37,7 +39,7 @@ import { alertBadge } from "./siteHealth";
 import { TabToolsSlot } from "./tabTools";
 
 const TAB_LABEL: Record<SiteTab, [string, string]> = {
-  live: ["Live", "live"], timeline: ["Timeline", "timeline"], find: ["Find", "find"], ask: ["Ask", "sparkle"], alerts: ["Alerts", "alert"], settings: ["Settings", "settings"],
+  live: ["Live", "live"], timeline: ["Timeline", "timeline"], find: ["Find", "find"], ask: ["Ask", "sparkle"], alerts: ["Alerts", "alert"], plates: ["Plates", "car"], settings: ["Settings", "settings"],
 };
 
 /** The Site with its servers (retired ones included, marked), read again when the hub says one of them came, went or
@@ -117,6 +119,7 @@ export function SitePage({ org, me, siteId, tab, section = "general", serverId, 
         : tab === "find" ? <SiteFind org={siteOrg} site={site} />
         : tab === "ask" ? <SiteAsk site={site} threadId={threadId} />
         : tab === "alerts" ? <><SiteIncidents site={site} /><SiteAlerts org={siteOrg} site={site} /></>
+        : tab === "plates" ? <SitePlates site={site} />
         : <SettingsSections site={site} org={siteOrg} me={me} section={section} admin={admin} onChanged={reload} cov={cov} setCov={setCov} />}
       </TabToolsSlot.Provider>
     </>

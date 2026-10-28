@@ -35,5 +35,6 @@ describe("KIND_LABEL", () => {
     expect(KIND_LABEL.instance_data_full).toBe("Central data storage full");
     expect(KIND_LABEL.inference_slow).toBe("Central AI service slow");
     expect(KIND_LABEL.inference_unavailable).toBe("AI service unavailable");
+    expect(KIND_LABEL.traffic_push_silent).toBe("Plate reads stopped");
   });
 });

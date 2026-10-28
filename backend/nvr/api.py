@@ -28,7 +28,7 @@ from pydantic import BaseModel, Field, model_validator
 from . import assistant, backup, baseline, cells, footage, frames, health, identities, journeys, keep, mediamtx, policy, ptz, retention, streams, zones
 from . import synopsis as vlm
 from . import advisor, ai_serve, detector, direct, gpumem, hub_agent, inference, lan_cert, lan_guard, sdbackfill, site_actions, siteconfig
-from . import camweb, deterrence, deterrence_api, device_api, speakers_api, talkdown
+from . import camweb, deterrence, deterrence_api, device_api, speakers_api, talkdown, traffic, traffic_api
 from . import aischedule, clipask, plate, snapshots, vlmroute
 from . import summary as summary_mod
 from .config import ROOT, settings
@@ -125,6 +125,7 @@ async def lifespan(app: FastAPI):
     p.tracker.away_preset = state.ptz.away_preset
     p.tracker.away_between = state.ptz.away_between
     p.deterrence = deterrence.manager   # automatic deterrence rules on verified events
+    traffic_api.pipeline = p   # plate-list alarms are published and described like any verified event
     # cameras whose RTSP stream has no metadata track at all: auto mode takes their ONVIF events (ruleevents.py)
     p.tracker.metadata_missing = lambda cid: bool((ing := state.ingests.get(cid)) and ing.meta.no_track)
     state.hub = hub_agent.HubAgent(app, state)
@@ -158,6 +159,7 @@ async def lifespan(app: FastAPI):
         ("mediamtx-config-check", _mediamtx_config_check()),
         ("streams", state.streams.run()),
         ("speaker-check", talkdown.check_loop()),
+        ("traffic-retention", traffic.prune_loop()),   # plate reads past traffic_keep_days
     ]]
     https = _https_server() if settings.direct_enabled else None
     https_task = asyncio.create_task(_serve_https(https), name="https") if https is not None else None
@@ -233,6 +235,7 @@ app.include_router(speakers_api.router)   # IP speakers and talk-down (talkdown.
 app.include_router(camweb.router)   # camera web pages through the hub, tunnel-only (see camweb.py)
 app.include_router(device_api.router)   # camera settings over ONVIF: clock, encoders, imaging, rules, reboot (camdevice.py)
 app.include_router(deterrence_api.router)   # strobe / siren / light / relays, and automatic rules (deterrence.py)
+app.include_router(traffic_api.router)   # traffic cameras' plate reads, counts, plate lists, their setup (traffic.py)
 
 
 DIRECT_WRITES = re.compile(r"^/api/whep/")   # WebRTC session lifecycle: the only non-GET a direct browser may send

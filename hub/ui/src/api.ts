@@ -723,7 +723,8 @@ export function subscribeFleet(org: string, onMessage: (m: FleetMessage) => void
 /** One piece of the merged evidence an answer was written from. `ref` is what the answer cites: [#ref] for events and
  * journeys ("123", or "123a"/"123b" when two servers' events share an id), [ref] for footage ("F1"). */
 export type SiteAskSource = {
-  ref?: string; kind: "event" | "footage" | "journey" | "gap" | "note" | "briefing";
+  /** plate: a traffic camera's own plate read (backend traffic.py ask_evidence), a one-line row */
+  ref?: string; kind: "event" | "footage" | "journey" | "gap" | "note" | "briefing" | "plate";
   server_id: string; server_name: string; event_id?: number; event_ids?: number[]; camera_id?: string; camera?: string; cameras?: string[];
   ts?: number; end_ts?: number; label?: string; priority?: string; snapshot?: boolean; text?: string; synopsis?: string; earlier?: boolean; later?: boolean;
   minutes?: number; ongoing?: boolean; background?: boolean;
