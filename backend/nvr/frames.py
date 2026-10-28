@@ -142,13 +142,46 @@ class Recording:
         return f"Recording({self.camera_id!r})"
 
 
-SEEK_GAP_S = 3.0   # a target further than this past the last decoded frame is reached by a seek, not by decoding on
+SEEK_GAP_S = 3.0   # a target further than this past the last packet read is reached by a seek, not by reading on
+
+_hw_off_until = 0.0   # NVDEC failed on a segment the CPU then decoded: CPU only until then
+HW_OFF_S = 600.0
+
+
+def _hwaccel():
+    """PyAV's HWAccel for settings.decode_hwaccel ("cuda": the GPU's NVDEC), or None to decode on the CPU. Frames stay
+    on the card (is_hw_owned) and only the ones handed out are downloaded. FFmpeg makes its own CUDA context
+    (primary_ctx 0): sharing the device's primary context fails ("Operation not supported") once torch has made it
+    with other flags, as on a server running its own models."""
+    if not settings.decode_hwaccel or time.time() < _hw_off_until:
+        return None
+    from av.codec.hwaccel import HWAccel
+    kind, _, dev = settings.decode_hwaccel.partition(":")
+    return HWAccel(device_type=kind, device=dev or "0", allow_software_fallback=False, is_hw_owned=True,
+                   options={"primary_ctx": "0"} if kind == "cuda" else None)
+
+
+def _bgr(fr) -> np.ndarray:
+    """A decoded frame as full-resolution BGR. An NVDEC frame (cuda, or nv12 once downloaded) is first made planar,
+    so swscale converts it exactly as the CPU decoder's yuv(j)420p frame: its nv12 input path rounds the chroma
+    differently (mean 0.2, up to 44 levels apart), while the decoded planes themselves are identical."""
+    if fr.format.name not in ("cuda", "nv12"):
+        return fr.to_ndarray(format="bgr24")
+    sw = fr.reformat(format="nv12") if fr.format.name == "cuda" else fr
+    w, h = sw.width, sw.height
+    y = np.frombuffer(sw.planes[0], np.uint8).reshape(-1, sw.planes[0].line_size)[:h, :w]
+    uv = np.frombuffer(sw.planes[1], np.uint8).reshape(-1, sw.planes[1].line_size)[:h // 2, :w]
+    yuv = np.concatenate([y.reshape(-1), uv[:, 0::2].reshape(-1), uv[:, 1::2].reshape(-1)]).reshape(h * 3 // 2, w)
+    planar = av.VideoFrame.from_ndarray(yuv, format="yuvj420p" if int(fr.color_range) == 2 else "yuv420p")
+    planar.color_range, planar.colorspace = fr.color_range, fr.colorspace
+    return planar.to_ndarray(format="bgr24")
 
 
 def iter_recording(camera_id: str, targets: list[float], tol: float = 0.6, seek_gap: float = SEEK_GAP_S):
     """Yield (target, BGR frame) for the recorded frame nearest each target epoch (within `tol` s), in time order,
-    full resolution. Close targets share one forward decode (like verifier.grab_frames over a clip); a far one is
-    reached with a seek to its keyframe. Targets with nothing recorded near them are left out. Blocking."""
+    full resolution. Only the GOPs that hold a target are decoded (_decode_segment); a far target is reached with a
+    seek to its keyframe. Targets with nothing recorded near them are left out. Blocking."""
+    global _hw_off_until
     wanted = sorted({float(t) for t in targets})
     if not wanted:
         return
@@ -167,53 +200,98 @@ def iter_recording(camera_id: str, targets: list[float], tol: float = 0.6, seek_
         else:
             groups.append((best[0], best[1], [w]))
     for path, seg_start, ws in groups:
+        done: set[float] = set()
         try:
-            yield from _decode_segment(path, seg_start, ws, tol, seek_gap)
+            hw = _hwaccel()
+            if hw is not None:
+                try:
+                    for w, img in _decode_segment(path, seg_start, ws, tol, seek_gap, hw):
+                        done.add(w)
+                        yield w, img
+                    continue
+                except (av.FFmpegError, OSError, ValueError) as e:   # the CPU does the rest, and the next ones a while
+                    _hw_off_until = time.time() + HW_OFF_S
+                    log.warning("NVDEC failed on %s/%s (%s): decoding on the CPU for %.0f min", camera_id, path.name,
+                                e, HW_OFF_S / 60)
+                gc.collect()
+                yield from _decode_segment(path, seg_start, [w for w in ws if w not in done], tol, seek_gap)
+            else:
+                yield from _decode_segment(path, seg_start, ws, tol, seek_gap)
         except (av.FFmpegError, OSError) as e:   # a damaged or vanished segment: the other segments still count
             log.warning("reading %s/%s failed: %s", camera_id, path.name, e)
         finally:
             gc.collect()   # PyAV frames are freed late (see verifier.grab_frames)
 
 
-def _decode_segment(path: Path, seg_start: float, ws: list[float], tol: float, seek_gap: float):
-    with av.open(str(path)) as c:
+def _decode_segment(path: Path, seg_start: float, ws: list[float], tol: float, seek_gap: float, hw=None):
+    """iter_recording's work in one segment. Packets are read (demuxed: cheap) from the first target's keyframe on,
+    but decoded only in the GOPs that hold a target, from the keyframe to the first frame at or past the target: a
+    4 MP HEVC frame costs ~20 ms to decode, so a 2 s GOP with no target in it is ~1.2 CPU-seconds saved. One decoder
+    thread: frame threads (thread_type AUTO, ~16 on a big host) decoded the same frames for 2.5x the CPU-seconds
+    and no gain in wall time (2026-10-28 on fred), since each seek or early stop throws their read-ahead away."""
+    with av.open(str(path), **({"hwaccel": hw} if hw is not None else {})) as c:
         s = c.streams.video[0]
-        s.thread_type = "AUTO"
+        cc = s.codec_context
+        cc.thread_count = 1
         tb = float(s.time_base)
         base = s.start_time or 0
-        best: dict[float, tuple[float, object]] = {}   # target -> (distance, av frame): converted once, when yielded
-        i, it, pos, sought = 0, None, None, -1
+        best: dict[float, tuple[float, object]] = {}   # target -> (distance, av frame): converted once, when handed out
+        i, pos, sought = 0, None, -1
+        pending: list = []   # packets the decoder hasn't had: since the last one it had, or since the latest keyframe
+        out: list = []       # (target, BGR) ready to yield
+
+        def found(fr):
+            """Fold a decoded frame in; hand out the targets it is at or past (no later frame is nearer)."""
+            nonlocal i
+            if fr.pts is None:
+                return
+            ft = seg_start + (fr.pts - base) * tb
+            for w in ws[i:]:
+                if w - tol >= ft:
+                    break
+                d = abs(w - ft)
+                if d < tol and (w not in best or d < best[w][0]):
+                    best[w] = (d, fr)
+            while i < len(ws) and ft >= ws[i]:
+                if ws[i] in best:
+                    out.append((ws[i], _bgr(best.pop(ws[i])[1])))
+                i += 1
+
         while i < len(ws):
-            if it is None or pos is None or (ws[i] - tol) - pos > seek_gap:
+            if pos is None or (i != sought and (ws[i] - tol) - pos > seek_gap):
                 c.seek(base + int(max(0.0, ws[i] - tol - seg_start) / tb), stream=s, backward=True, any_frame=False)
-                it, sought = c.decode(s), i
+                sought, pending = i, []
             reseek = False
-            for fr in it:
-                if fr.pts is None:
+            for pkt in c.demux(s):
+                if pkt.pts is None:   # the demuxer's end-of-stream packet
                     continue
-                ft = seg_start + (fr.pts - base) * tb
-                pos = ft
-                j = i
-                while j < len(ws) and ws[j] - tol < ft:   # targets whose window this frame has reached
-                    d = abs(ws[j] - ft)
-                    if d < tol and (ws[j] not in best or d < best[ws[j]][0]):
-                        best[ws[j]] = (d, fr)
-                    j += 1
-                while i < len(ws) and ft > ws[i] + tol:   # windows this frame has passed: done
-                    if ws[i] in best:
-                        yield ws[i], best.pop(ws[i])[1].to_ndarray(format="bgr24")
-                    i += 1
-                # far from the next target: seek, unless this decode began with a seek for it (a long GOP: the seek
+                pos = seg_start + (pkt.pts - base) * tb
+                if pkt.is_keyframe:
+                    pending = []
+                pending.append(pkt)
+                if pos >= ws[i] - tol:   # the next target's window is reached: decode up to here
+                    for p in pending:
+                        for fr in cc.decode(p):
+                            found(fr)
+                    pending = []
+                    yield from out
+                    out.clear()
+                # far from the next target: seek, unless the read began with a seek for it (a long GOP: the seek
                 # lands on a keyframe further back than seek_gap, and seeking again would land there again)
-                if i < len(ws) and i != sought and (ws[i] - tol) - ft > seek_gap:
+                if i < len(ws) and i != sought and (ws[i] - tol) - pos > seek_gap:
                     reseek = True
                     break
                 if i >= len(ws):
                     break
             if not reseek:   # the segment ended (or everything was found): what is left has what it has
+                if i < len(ws):
+                    for fr in cc.decode(None):   # frames the decoder still holds (B-frames)
+                        found(fr)
+                    yield from out
+                    out.clear()
                 for w in ws[i:]:
                     if w in best:
-                        yield w, best.pop(w)[1].to_ndarray(format="bgr24")
+                        yield w, _bgr(best.pop(w)[1])
                 return
 
 

@@ -49,7 +49,7 @@ def frame_img(i: int, w=320, h=180, people=False, n=1) -> np.ndarray:
     return img
 
 
-def make_segment(cam: str, start: float, seconds: float, gop: int = FPS, people=False) -> Path:
+def make_segment(cam: str, start: float, seconds: float, gop: int = FPS, people=False, bf: int = 0) -> Path:
     """A recording segment as MediaMTX names it (start time in the file name)."""
     d = REC / cam
     d.mkdir(parents=True, exist_ok=True)
@@ -57,7 +57,7 @@ def make_segment(cam: str, start: float, seconds: float, gop: int = FPS, people=
     c = av.open(str(path), "w")
     s = c.add_stream("libx264", rate=FPS)
     s.width, s.height, s.pix_fmt = 320, 180, "yuv420p"
-    s.options = {"g": str(gop), "keyint_min": str(gop), "sc_threshold": "0", "bf": "0", "qp": "0"}
+    s.options = {"g": str(gop), "keyint_min": str(gop), "sc_threshold": "0", "bf": str(bf), "qp": "0"}
     n = int(seconds * FPS)
     for i in range(n):
         for p in s.encode(av.VideoFrame.from_ndarray(frame_img(i, people=people, n=n), format="bgr24")):
@@ -103,6 +103,69 @@ def test_long_gop_far_targets_do_not_seek_forever():
     got = frames.recording_frames("cam2", [T0 + 2, T0 + 15, T0 + 28])
     assert set(got) == {T0 + 2, T0 + 15, T0 + 28} and at(got[T0 + 28]) == 0
     assert time.time() - t0 < 20
+
+
+def _nearest_by_full_decode(cam: str, targets: list[float], tol: float = 0.6) -> dict[float, np.ndarray]:
+    """The reference: every frame of every segment decoded, the nearest one within tol per target (earlier on a tie)."""
+    frs = []
+    for start, path in frames._segments(cam, fresh=True):
+        with av.open(str(path)) as c:
+            frs += [(start + fr.time, fr.to_ndarray(format="bgr24")) for fr in c.decode(video=0) if fr.time is not None]
+    out = {}
+    for w in targets:
+        segs = [(st, f) for st, f in frames._segments(cam) if st <= w + tol]
+        if not segs:
+            continue
+        seg_start = segs[-1][0]   # iter_recording's choice: the last segment starting before w + tol
+        nxt = [st for st, _ in frames._segments(cam) if st > seg_start]
+        mine = [(t, img) for t, img in frs if t >= seg_start and (not nxt or t < nxt[0])]
+        cands = [(abs(t - w), k, img) for k, (t, img) in enumerate(mine) if abs(t - w) < tol]
+        if cands:
+            out[w] = min(cands, key=lambda x: (x[0], x[1]))[2]
+    return out
+
+
+def test_only_gops_with_a_target_are_decoded_and_the_frames_are_the_nearest():
+    """_decode_segment decodes from a target's keyframe to the frame at/past it and skips GOPs without a target: the
+    frames must be exactly those a full decode picks, with and without B-frames, for sparse and dense targets."""
+    import random
+    for cam, bf in (("sp0", 0), ("sp2", 2)):
+        make_segment(cam, T0, 12, gop=15, bf=bf)
+        make_segment(cam, T0 + 12, 6, gop=15, bf=bf)   # back to back: a target near the boundary
+        rnd = random.Random(bf)
+        sparse = [T0 + 0.33, T0 + 4.07, T0 + 4.31, T0 + 9.5, T0 + 11.95, T0 + 12.02, T0 + 17.7, T0 + 30]
+        dense = [T0 + 2 + k * 0.2 for k in range(20)]   # weapon-check-like: ~5 a second
+        for targets in (sparse, dense, [T0 + rnd.uniform(-1, 19) for _ in range(12)]):
+            got = frames.recording_frames(cam, targets)
+            want = _nearest_by_full_decode(cam, targets)
+            assert set(got) == set(want), (cam, sorted(set(got) ^ set(want)))
+            for w in want:
+                assert np.array_equal(got[w], want[w]), (cam, w - T0)
+            order = [t for t, _ in frames.iter_recording(cam, targets)]
+            assert order == sorted(order)
+
+
+def test_nvdec_frames_convert_like_the_cpu_and_failing_nvdec_falls_back():
+    """An NVDEC frame arrives as nv12; _bgr makes it planar first so swscale gives the CPU's exact BGR. A failing
+    hardware decoder hands the segment to the CPU and rests for HW_OFF_S."""
+    with av.open(str(sorted((REC / "sp0").glob("*.mp4"))[0])) as c:
+        fr = next(c.decode(video=0))
+        fr.color_range = 2   # cameras send full-range yuvj420p
+        cpu = fr.to_ndarray(format="bgr24")
+        nv12 = fr.reformat(format="nv12")
+        nv12.color_range, nv12.colorspace = fr.color_range, fr.colorspace
+        assert np.array_equal(frames._bgr(nv12), cpu)
+    from av.codec.hwaccel import HWAccel
+    targets = [T0 + 1.0, T0 + 5.5, T0 + 13.0]
+    cpu = frames.recording_frames("sp0", targets)
+    old, off = frames._hwaccel, frames._hw_off_until
+    frames._hwaccel = lambda: HWAccel(device_type="cuda", device="99", allow_software_fallback=False, is_hw_owned=True)
+    try:
+        got = frames.recording_frames("sp0", targets)
+        assert set(got) == set(cpu) and all(np.array_equal(got[t], cpu[t]) for t in cpu)
+        assert frames._hw_off_until > time.time() + frames.HW_OFF_S - 60
+    finally:
+        frames._hwaccel, frames._hw_off_until = old, off
 
 
 def test_grab_frames_reads_a_recording_source_or_a_clip():

@@ -473,7 +473,7 @@ def clip_evidence(clip: Path, predict: Callable[[list], list], deadline: float |
     import av
     with av.open(str(clip)) as container:
         stream = container.streams.video[0]
-        stream.thread_type = "AUTO"
+        stream.codec_context.thread_count = 1   # frame threads cost 2.5x the CPU for no gain (frames._decode_segment)
         dur = float(stream.duration * stream.time_base) if stream.duration else (
             container.duration / 1e6 if container.duration else MAX_FRAMES / FPS)
         targets, step = span_targets(0.0, dur)

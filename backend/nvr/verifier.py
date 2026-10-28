@@ -286,7 +286,7 @@ def grab_frames(clip: "Path | frames.Recording", clip_start: float, targets: lis
     best: dict[float, tuple[float, np.ndarray]] = {}
     with av.open(str(clip)) as container:
         stream = container.streams.video[0]
-        stream.thread_type = "AUTO"
+        stream.codec_context.thread_count = 1   # frame threads cost 2.5x the CPU for no gain (frames._decode_segment)
         last_target = wanted[-1] - clip_start
         for frame in container.decode(stream):
             if frame.time is None:

@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     clip_pre_roll: float = 5.0             # cameras report a person a step or two late: keep the doorway on the clip
     clip_post_roll: float = 3.0
     recording_lag: float = 3.0              # wait for MediaMTX to flush fMP4 parts before fetching
+    # "cuda": decode recorded frames (frames.iter_recording: verification, PPE, the weapon check) on the GPU's NVDEC,
+    # pixel for pixel what the CPU decodes; the CPU takes over for 10 minutes after a failure. Needs the driver's
+    # libnvcuvid (libnvidia-decode) and ~350 MB of the card per server process. Empty: the CPU
+    decode_hwaccel: str = ""
 
     # YOLO
     yolo_model: str = "yolo11s.pt"
