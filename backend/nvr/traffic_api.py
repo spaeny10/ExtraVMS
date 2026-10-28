@@ -8,6 +8,9 @@ GET  /api/traffic/reads                    newest first: ?camera, since, until, 
                                            not just its best), before_id, limit
 GET  /api/traffic/reads/{id}               one read
 GET  /api/traffic/reads/{id}/image/{kind}  plate | vehicle | full | violation
+POST /api/traffic/reads/{id}/plate         Read plate: Otso reads the vehicle crop now (operator; metered "plate"; one
+                                           run per read every plate_rate_s, 429 with Retry-After); kept beside the
+                                           camera's read: {result, plate, plate_raw, region, confidence, reason, read, list}
 GET  /api/traffic/counts                   vehicles per hour or day (?camera, since, until, bucket hour | day)
 GET  /api/traffic/status                   each traffic camera: set up, last push, reads and plates today
 GET  /api/traffic/lists                    the plate lists
@@ -35,7 +38,9 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from . import traffic
+import httpx
+
+from . import aischedule, plate, traffic
 from .config import settings
 from .db import db
 from .onvif_soap import OnvifError
@@ -117,9 +122,45 @@ async def one_read(read_id: int):
 @router.get("/api/traffic/reads/{read_id}/image/{kind}")
 async def read_image(read_id: int, kind: Literal["plate", "vehicle", "full", "violation"]):
     f = traffic.image_path(read_id, kind)
+    if f is None and kind == "vehicle" and traffic.read(read_id):   # sent without one: cut from the recording now
+        if await asyncio.to_thread(traffic.cut_from_recording, read_id):
+            f = traffic.image_path(read_id, kind)
     if f is None:
         raise HTTPException(404, "no such picture")
     return FileResponse(f, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
+
+
+@router.post("/api/traffic/reads/{read_id}/plate")
+async def read_plate(read_id: int, request: Request):
+    """Read plate on a read the camera's own reader missed (or doubted): Otso looks at the camera's vehicle crop. A
+    person asked, so it runs outside the Site's AI hours too, metered as "plate" (as Read plate on an event)."""
+    require(request, "operator")
+    if not traffic.read(read_id):
+        raise HTTPException(404, "unknown read")
+    if pipeline is None or not pipeline.vlm_ready:
+        raise HTTPException(503, "Otso is not ready yet")
+    wait = traffic.read_limiter.wait_s(read_id)
+    if wait > 0:
+        raise HTTPException(429, f"this plate was just read; try again in {wait:.0f} s", headers={"Retry-After": str(int(wait) + 1)})
+    await asyncio.to_thread(traffic.cut_from_recording, read_id)   # no vehicle picture yet: from the recording
+    crops = await asyncio.to_thread(traffic.otso_crops, read_id)
+    if not crops:
+        raise HTTPException(400, "no picture of the vehicle was kept for this read")
+    traffic.read_limiter.start(read_id)
+    try:
+        with aischedule.job(plate.KIND):
+            result = await asyncio.wait_for(plate.read(crops, "chat"), plate.TIMEOUT_S)
+    except (asyncio.TimeoutError, httpx.TimeoutException):
+        raise HTTPException(504, "Otso took too long to read the plate; try again in a moment")
+    except Exception as ex:  # noqa: BLE001 - the model is down or misconfigured
+        log.warning("traffic read %s: plate read failed: %s", read_id, ex)
+        raise HTTPException(502, f"the plate could not be read: {str(ex)[:200]}")
+    finally:
+        traffic.read_limiter.done(read_id)
+    r = await asyncio.to_thread(traffic.store_otso, read_id, result)
+    hit = traffic.match_list(result.get("plate")) if result.get("result") == "read" else None
+    out = {k: result.get(k) for k in ("result", "plate", "plate_raw", "region", "confidence", "reason", "model", "crops")}
+    return {**out, "read": r, "list": {k: hit[k] for k in ("list", "match", "plate", "note")} if hit else None}
 
 
 @router.get("/api/traffic/counts")

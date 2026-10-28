@@ -24,6 +24,20 @@ export type Read = {
   box: [number, number, number, number] | null; plate_box: [number, number, number, number] | null;
   images: ImageKind[]; pass_id: number | null; best: boolean;
   list: PlateList | null; list_match: "exact" | "near" | null; list_entry: number | null; event_id: number | null;
+  /** where the vehicle picture came from: the camera's push, or cut from the recording (the camera sent none) */
+  vehicle_source?: "camera" | "recording" | null;
+  /** Otso's own look at the vehicle crop, on demand (Read plate), kept beside the camera's read; otso_plate when it read one */
+  otso?: OtsoRead | null; otso_plate?: string | null;
+};
+export type OtsoRead = {
+  at: number; result: "read" | "unreadable" | "skipped"; plate?: string; plate_raw?: string; region?: string;
+  confidence?: "medium" | "high"; reason?: string; model?: string;
+};
+/** POST /api/traffic/reads/{id}/plate: Otso's answer, the read as now stored, and the list the plate is on (if any). */
+export type ReadPlateResult = {
+  result: OtsoRead["result"]; plate: string | null; plate_raw: string | null; region: string | null;
+  confidence: "medium" | "high" | null; reason: string | null; read: Read;
+  list: { list: PlateList; match: "exact" | "near"; plate: string; note: string } | null;
 };
 /** GET /api/traffic/reads/{id}: the read and every read of its pass, oldest first. */
 export type ReadDetail = Read & { pass?: Read[] };
@@ -77,6 +91,16 @@ export type CameraTraffic =
 
 /** "1691 AJN", or "No plate" (most reads: an approaching car in a rear-plate state). */
 export const plateText = (r: Pick<Read, "plate">): string => (r.plate ? formatPlate(r.plate) : "No plate");
+
+/** The plate to show and act on: the camera's, else the one Otso read when a person asked (Read plate). */
+export const knownPlate = (r: Pick<Read, "plate" | "otso_plate">): string | null => r.plate ?? r.otso_plate ?? null;
+
+/** Otso's answer as one line: "Otso: 407 MFL · KS (high)" or why it couldn't ("Otso couldn't read it"). */
+export function otsoText(o: OtsoRead | null | undefined): string {
+  if (!o) return "";
+  if (o.result === "read" && o.plate) return `Otso: ${formatPlate(o.plate, o.region)}${o.confidence ? ` (${o.confidence})` : ""}`;
+  return "Otso couldn't read it";
+}
 
 /** Confidence bands: 0.6 puts a plate on the vehicle's event (traffic_attach_min_conf), 0.8 is the camera's "high". */
 export function confBand(c: number | null | undefined): "high" | "medium" | "low" | null {

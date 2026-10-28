@@ -10,7 +10,15 @@ statusReportInterval (300 s). The camera resends a missed push only when it has 
   normalized to the camera's frame. Time: the camera's zone offset is learned from fresh pushes (local time minus
   receive time, to the quarter hour) and kept on the camera; a resent read keeps its own time.
 - Crops: the plate and vehicle crops of every read; the full snapshot only for a list hit (the recording has the frame)
-  unless settings.traffic_keep_full. Under data_dir/traffic/<camera>/<YYYY-MM-DD>/.
+  unless settings.traffic_keep_full. Under data_dir/traffic/<camera>/<YYYY-MM-DD>/. A read pushed without a vehicle
+  picture (cam8 with "optimal push" on leaves it out of ~1 in 8 reads, 2026-10-28) gets one from the recording: the
+  camera records continuously, so REC_DELAY_S after the read (the recording has that moment by then) the vehicle box is
+  cut from the full-resolution recorded frame at the read's time + settings.traffic_rec_shift_s (`...-vehicle-rec.jpg`,
+  `vehicle_source` "recording"). The shift was measured on cam8: matching each plate-only read's plate crop against the
+  recording, the strong matches (0.97-0.99) were all at -0.4 s, and at the read's own time a highway car is already
+  ~10 m on (the box shows road). Matching itself was too noisy to choose the frame (right frames scored 0.38-0.97), so
+  the fixed shift is used and the UI says the picture is from the recording, with the moment in the Timeline beside it.
+  An older read without one is cut the first time its picture is asked for.
 - Passes: reads of one camera less than PASS_GAP_S apart whose plates share PASS_COMMON characters in order are one
   pass (671AED / 3671AED / 387AED); `best` marks the most confident. A parked vehicle is one pass too: the camera
   re-reads it every few seconds (cam8 aimed at a car lot, 2026-10-28: one blue car 56 times in a minute), so a read of
@@ -22,6 +30,10 @@ statusReportInterval (300 s). The camera resends a missed push only when it has 
   vehicle) with the plate, the crops and a site rule (`policy`, kind "plate_list": high for deny, medium for watch), so
   it reaches the hub's alerts and the SOC like any broken rule. Exact or near (one character off, plates of 5+). The
   same plate on the same list and camera within LIST_COOLDOWN_S joins the open alarm.
+- Read plate (on demand): the camera's reader misses plates its own crops show (cam8, 2026-10-28: plates ~60 px wide
+  in its 1080p frame, 18 % of reads with a plate); a person can have Otso read the vehicle crop (plate.read, metered
+  "plate", one run per read every settings.plate_rate_s). Otso's answer is kept beside the camera's (`otso`,
+  `otso_plate`), never over it, and search finds it.
 - Setup (camera_state / configure): Milesight's own API (milesight.py): plate reading on, one push slot pointed at
   /api/traffic/push/<camera>/<secret> with every event type and a status report.
 - Health: a camera set up but silent for settings.traffic_silent_s raises traffic_push_silent.
@@ -61,6 +73,8 @@ PARKED_GAP_S = 30.0
 PARKED_IOU = 0.8
 RECENT_READS = 200                 # per camera, for both (a busy lot reads several vehicles a second)
 LIST_COOLDOWN_S = 600.0
+REC_DELAY_S = 8.0                  # after a read without a vehicle picture: recording_lag (3 s) and a margin
+REC_TRIES = 3                      # ...tried again 10 s apart when the recording isn't there yet
 SKEW_MAX_S = 120.0                 # a fresh push this far from the receive time (after the zone) has a wrong clock
 RESEND_MAX_S = 7 * 86400           # a resent read (SD card) may be this old
 BODY_MAX = 8 * 1024 * 1024
@@ -392,6 +406,8 @@ def ingest(cam: dict, p: dict, received: float | None = None) -> dict:
                                  ((r["vehicle_type"] or "").lower() or None, (r["vehicle_color"] or "").lower() or None))
     db.execute("UPDATE vehicle_reads SET pass_id=?, best=? WHERE id=?", [pass_id, int(best), read_id])
     health.heard(cam["id"], "read", received)
+    if "vehicle" not in images:
+        from_recording.add(read_id, received + REC_DELAY_S)
     out = {"read_id": read_id, "event_id": None, "alarm_id": None, "list": hit["list"] if hit else None}
     if alarm:
         out["alarm_id"] = open_alarm(cam, read_id, hit)
@@ -406,10 +422,13 @@ def read(read_id: int) -> dict | None:
 
 
 def public(r: dict) -> dict:
-    out = {k: r[k] for k in r if k not in ("box", "plate_box", "images", "extra")}
+    out = {k: r[k] for k in r if k not in ("box", "plate_box", "images", "extra", "otso")}
+    out["otso"] = json.loads(r["otso"]) if r.get("otso") else None
     out["box"] = json.loads(r["box"]) if r.get("box") else None
     out["plate_box"] = json.loads(r["plate_box"]) if r.get("plate_box") else None
-    out["images"] = sorted((json.loads(r["images"]) if r.get("images") else {}).keys())
+    imgs = json.loads(r["images"]) if r.get("images") else {}
+    out["images"] = sorted(imgs.keys())
+    out["vehicle_source"] = ("recording" if imgs["vehicle"].endswith("-rec.jpg") else "camera") if imgs.get("vehicle") else None
     out["best"] = bool(r.get("best"))
     return out
 
@@ -419,6 +438,90 @@ def image_path(read_id: int, kind: str) -> Path | None:
     rel = (json.loads(r["images"]) if r and r["images"] else {}).get(kind)
     f = settings.data_dir / rel if rel else None
     return f if f is not None and f.is_file() else None
+
+
+read_limiter = plate.Limiter()   # Read plate on a read: its own limiter (plate.limiter is keyed by event id)
+
+
+def cut_from_recording(read_id: int) -> bool:
+    """The vehicle picture of a read the camera sent without one, cut from the recorded frame at the read's time (the
+    camera's box, padded as plate.crop does; the whole frame without a box). True when the read has a vehicle picture
+    now; False when the recording has nothing there (yet)."""
+    from . import frames
+    r = db.one("SELECT * FROM vehicle_reads WHERE id=?", [read_id])
+    if not r:
+        return True
+    images = json.loads(r["images"]) if r["images"] else {}
+    if images.get("vehicle"):
+        return True
+    img = frames.recorded_frame(r["camera_id"], r["ts"] + settings.traffic_rec_shift_s)
+    if img is None:
+        return False
+    import cv2
+    box = json.loads(r["box"]) if r["box"] else [0.0, 0.0, 1.0, 1.0]
+    ok, buf = cv2.imencode(".jpg", plate.crop(img, box), [cv2.IMWRITE_JPEG_QUALITY, 90])
+    if not ok:
+        return False
+    d = media_root() / r["camera_id"] / dt.datetime.fromtimestamp(r["ts"]).strftime("%Y-%m-%d")
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / f"{int(r['ts'] * 1000)}-{secrets.token_hex(3)}-vehicle-rec.jpg"
+    f.write_bytes(buf.tobytes())
+    images["vehicle"] = str(f.relative_to(settings.data_dir)).replace("\\", "/")
+    db.execute("UPDATE vehicle_reads SET images=? WHERE id=?", [json.dumps(images), read_id])
+    return True
+
+
+class FromRecording:
+    """Reads waiting for their vehicle picture from the recording: (due time, read id, tries)."""
+
+    def __init__(self) -> None:
+        self.due: deque = deque()
+        self.lock = threading.Lock()
+
+    def add(self, read_id: int, at: float, tries: int = 0) -> None:
+        with self.lock:
+            if len(self.due) < 5000:   # a camera flooding plate-only reads: the rest are cut when looked at
+                self.due.append((at, read_id, tries))
+
+    def take(self, now: float) -> list[tuple[float, int, int]]:
+        with self.lock:
+            ready = [x for x in self.due if x[0] <= now]
+            self.due = deque(x for x in self.due if x[0] > now)
+            return ready
+
+    async def run(self) -> None:
+        while True:
+            for _at, read_id, tries in self.take(time.time()):
+                try:
+                    done = await asyncio.to_thread(cut_from_recording, read_id)
+                except Exception:  # noqa: BLE001 - one read's picture must not stop the rest
+                    log.exception("traffic: vehicle picture from the recording for read %s failed", read_id)
+                    done = True
+                if not done and tries + 1 < REC_TRIES:
+                    self.add(read_id, time.time() + 10, tries + 1)
+            await asyncio.sleep(1)
+
+
+from_recording = FromRecording()
+
+
+def otso_crops(read_id: int) -> list[bytes]:
+    """What Otso looks at: the camera's vehicle crop (full resolution of the vehicle), then the full frame when kept."""
+    out = []
+    for kind in ("vehicle", "full"):
+        f = image_path(read_id, kind)
+        if f is not None:
+            out.append(f.read_bytes())
+    return out
+
+
+def store_otso(read_id: int, result: dict) -> dict | None:
+    """Keep Otso's answer on the read (a read plate, or why not), beside the camera's own."""
+    info = {"at": round(time.time(), 1), **{k: result[k] for k in ("result", "plate", "plate_raw", "region", "confidence",
+                                                                   "reason", "model", "crops") if result.get(k) not in (None, "")}}
+    db.execute("UPDATE vehicle_reads SET otso=?, otso_plate=? WHERE id=?",
+               [json.dumps(info), result.get("plate") if result.get("result") == "read" else None, read_id])
+    return read(read_id)
 
 
 # ---------------------------------------------------------------- events
@@ -551,14 +654,14 @@ def search(camera: str | None = None, since: float | None = None, until: float |
     if qn:
         base = list(where), list(params)
         if len(qn) >= 5:   # near plates (one character off) seen in the same window
-            seen = db.all(f"SELECT DISTINCT plate FROM vehicle_reads WHERE plate IS NOT NULL{' AND ' if base[0] else ''}"
-                          f"{' AND '.join(base[0])} LIMIT 50000", base[1])
+            seen = db.all(f"SELECT DISTINCT COALESCE(plate, otso_plate) AS plate FROM vehicle_reads WHERE COALESCE(plate, otso_plate) "
+                          f"IS NOT NULL{' AND ' if base[0] else ''}{' AND '.join(base[0])} LIMIT 50000", base[1])
             near_plates = sorted({s["plate"] for s in seen if s["plate"] != qn and near(s["plate"], qn)})[:20]
-        where.append("(plate LIKE ? OR pass_id IN (SELECT pass_id FROM vehicle_reads WHERE plate LIKE ?)"
-                     + "".join(" OR plate=?" for _ in near_plates) + ")")
-        params += [f"%{qn}%", f"%{qn}%", *near_plates]
+        where.append("(plate LIKE ? OR otso_plate LIKE ? OR pass_id IN (SELECT pass_id FROM vehicle_reads WHERE plate LIKE ?)"
+                     + "".join(" OR plate=? OR otso_plate=?" for _ in near_plates) + ")")
+        params += [f"%{qn}%", f"%{qn}%", f"%{qn}%", *(p for x in near_plates for p in (x, x))]
     elif plates_only:
-        where.append("plate IS NOT NULL")
+        where.append("(plate IS NOT NULL OR otso_plate IS NOT NULL)")
     if not all_reads and not qn:
         where.append("best=1")
     rows = db.all("SELECT * FROM vehicle_reads" + (f" WHERE {' AND '.join(where)}" if where else "")

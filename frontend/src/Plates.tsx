@@ -2,7 +2,11 @@
  * Plates (backend traffic.py, traffic_api.py): what this server's traffic cameras read themselves and pushed here.
  *  - Reads: search a plate or part of one (near plates, one character off, come back as "Possible: …" chips that search
  *    them), filters, the reads newest first with their plate and vehicle crops, "Load more" by before_id; a read opens
- *    a panel with the larger picture and the other reads of that vehicle's pass, and its event when it has one.
+ *    a panel with the larger picture and the other reads of that vehicle's pass, and its event when it has one. The
+ *    camera's reader misses plates its own crops show (cam8: plates ~60 px wide), so the panel has Read plate: Otso
+ *    reads the vehicle crop (operator), its answer shown and kept beside the camera's, and searchable. A read the camera
+ *    sent without a vehicle picture shows one cut from the recording (the server does it, marked "From the recording"),
+ *    and Timeline opens the recording at the read's moment to check it.
  *  - Lists: allow / deny / watch plates with a note and an optional expiry. Deny and watch hits raise an alarm event
  *    (deny high, watch medium); allow only marks the read. Changes need the operator role (a viewer gets the 403).
  *  - Traffic: vehicles per hour (24 h) and per day (7 days), all of them and those with a plate, and each camera's push
@@ -13,31 +17,36 @@
  */
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { api as localSite, fmtTime, fmtWhen, type Camera, type SiteApi } from "./api";
+import { useNav } from "./nav";
 import { EventDetail } from "./EventDetail";
-import { formatPlate } from "./plate";
+import { formatPlate, plateError } from "./plate";
 import {
   type Bar, type Direction, type ListEntry, type Period, type PlateList, type Read, type ReadDetail, type TrafficStatus, PERIODS, PLATE_LISTS,
   VEHICLE_COLORS, VEHICLE_TYPES, confBand, confText, countBars, countsSummary, dateFromExpiry, directionText, expiryFromDate, expiryText,
-  filterOptions, isSilent, listBadge, listError, listName, nearChip, onList, periodSince, plateProblem, plateText, pushText, stateText, timeAgo,
-  vehicleText,
+  filterOptions, isSilent, knownPlate, listBadge, listError, listName, nearChip, onList, otsoText, periodSince, plateProblem, plateText, pushText,
+  stateText, timeAgo, vehicleText,
 } from "./traffic";
 import { Icon, confirmDialog, errorText, promptDialog, toast } from "./ui";
 
 /** A server the page can show (the hub: each of the Site's servers with traffic cameras). */
 export type PlatesSource = { id: string; name: string; api: SiteApi };
+/** The recording at a read's moment: which source, camera and time (the hub opens its Site Timeline). */
+export type PlatesMoment = { source: string; camera: string; ts: number };
 /** An event to open: on which source, and the camera names of that server. */
 export type PlatesEvent = { source: string; id: number; cameraName: (id: string) => string; onClose: () => void };
 type Section = "reads" | "lists" | "traffic";
 const PAGE = 50;
 const STATUS_POLL_MS = 30000;
 
-export function PlatesView({ site = localSite, sources, renderEvent }: {
+export function PlatesView({ site = localSite, sources, renderEvent, openTimeline }: {
   /** the server (default: this one) */
   site?: SiteApi;
   /** several servers (the hub's Site): a picker; the first is shown first */
   sources?: PlatesSource[];
   /** how an event opens (the hub: its own viewer for that server); default the server UI's EventDetail */
   renderEvent?: (ev: PlatesEvent) => ReactNode;
+  /** how the recording at a read's moment opens (the hub: its Site Timeline); default this server UI's Timeline */
+  openTimeline?: (m: PlatesMoment) => void;
 }) {
   const [src, setSrc] = useState(sources?.[0]?.id ?? "");
   const picked = sources?.find((s) => s.id === src) ?? sources?.[0];
@@ -58,14 +67,18 @@ export function PlatesView({ site = localSite, sources, renderEvent }: {
         )}
       </div>
       {/* keyed by server: nothing of one server's search or lists stays on screen for another */}
-      <PlatesBody key={picked?.id ?? ""} a={a} section={section} source={picked?.id ?? ""} renderEvent={renderEvent} />
+      <PlatesBody key={picked?.id ?? ""} a={a} section={section} source={picked?.id ?? ""} renderEvent={renderEvent} openTimeline={openTimeline} />
     </div>
   );
 }
 
-function PlatesBody({ a, section, source, renderEvent }: {
-  a: SiteApi; section: Section; source: string; renderEvent?: (ev: PlatesEvent) => ReactNode;
+function PlatesBody({ a, section, source, renderEvent, openTimeline }: {
+  a: SiteApi; section: Section; source: string; renderEvent?: (ev: PlatesEvent) => ReactNode; openTimeline?: (m: PlatesMoment) => void;
 }) {
+  const nav = useNav();
+  // this server UI: its own Timeline, focused on a few seconds around the read (id 0 = a moment, not an event)
+  const toTimeline = (camera: string, ts: number) => (openTimeline ? openTimeline({ source, camera, ts })
+    : nav.openInTimeline({ id: 0, camera_id: camera, start_ts: ts - 3, end_ts: ts + 3, camera_class: "plate read" }));
   const [cameras, setCameras] = useState<Camera[]>([]);
   const [status, setStatus] = useState<TrafficStatus | null>(null);
   const [statusErr, setStatusErr] = useState("");
@@ -87,7 +100,7 @@ function PlatesBody({ a, section, source, renderEvent }: {
     {status && status.cameras.length === 0 && (
       <p className="muted small">No traffic cameras on this server yet. Set one up under Settings › Cameras › (the camera) › Camera › Traffic.</p>
     )}
-    {section === "reads" && <ReadsSection a={a} status={status} name={name} onEvent={setEventId} />}
+    {section === "reads" && <ReadsSection a={a} status={status} name={name} onEvent={setEventId} onTimeline={toTimeline} />}
     {section === "lists" && <ListsSection a={a} name={name} />}
     {section === "traffic" && <TrafficSection a={a} status={status} />}
     {eventId !== null && (renderEvent ? renderEvent({ source, id: eventId, cameraName: name, onClose: closeEvent })
@@ -103,8 +116,9 @@ type Filters = {
 };
 const NO_FILTERS: Filters = { q: "", camera: "", period: "24h", type: "", color: "", direction: "", list: "", plates: false, min_conf: 0 };
 
-function ReadsSection({ a, status, name, onEvent }: {
+function ReadsSection({ a, status, name, onEvent, onTimeline }: {
   a: SiteApi; status: TrafficStatus | null; name: (id: string) => string; onEvent: (id: number) => void;
+  onTimeline: (camera: string, ts: number) => void;
 }) {
   const [f, setF] = useState<Filters>(NO_FILTERS);
   const [typed, setTyped] = useState("");
@@ -218,7 +232,8 @@ function ReadsSection({ a, status, name, onEvent }: {
       {reads && more && (
         <div className="center"><button className="ghost" disabled={busy} onClick={() => load(reads[reads.length - 1]?.id)}>{busy ? "Loading…" : "Load more"}</button></div>
       )}
-      {open !== null && <ReadPanel a={a} id={open} name={name} onClose={() => setOpen(null)} onEvent={onEvent} />}
+      {open !== null && <ReadPanel a={a} id={open} name={name} onClose={() => setOpen(null)} onEvent={onEvent}
+        onTimeline={(camera, ts) => { setOpen(null); onTimeline(camera, ts); }} />}
     </section>
   );
 }
@@ -236,13 +251,14 @@ function ReadRow({ r, a, camera, onOpen, onEvent }: { r: Read; a: SiteApi; camer
     <div className={`plate-read${r.list ? ` on-${r.list}` : ""}`}>
       <button className="plate-read-main" onClick={onOpen} title="Open this read">
         <span className="plate-read-thumbs">
-          {r.images.includes("vehicle") ? <img className="vehicle-crop" src={a.trafficImage(r.id, "vehicle")} alt="" loading="lazy" />
-            : <span className="thumb-empty vehicle-crop">{r.vehicle_type ?? "vehicle"}</span>}
+          <VehicleThumb r={r} a={a} />
           {r.images.includes("plate") && <img className="plate-crop" src={a.trafficImage(r.id, "plate")} alt="" loading="lazy" />}
         </span>
         <span className="plate-read-body">
           <span className="plate-read-head">
-            <strong className={`plate-text${r.plate ? "" : " muted"}`}>{plateText(r)}</strong>
+            {!r.plate && r.otso_plate
+              ? <><strong className="plate-text">{formatPlate(r.otso_plate)}</strong><span className="badge" title="Read by Otso when a person asked; the camera read no plate">Otso</span></>
+              : <strong className={`plate-text${r.plate ? "" : " muted"}`}>{plateText(r)}</strong>}
             {band && <span className={`badge conf-${band}`} title="The camera's confidence in the plate">{confText(r.confidence)}</span>}
             <ListBadge r={r} />
           </span>
@@ -261,17 +277,29 @@ function ReadRow({ r, a, camera, onOpen, onEvent }: { r: Read; a: SiteApi; camer
 }
 
 /** One read: the larger picture, its details, the other reads of the vehicle's pass, quick list adds. */
-function ReadPanel({ a, id: initial, name, onClose, onEvent }: {
+/** The vehicle's picture in a row: the camera's, or (it sent none) the one the server cuts from the recording on
+ *  first view; the vehicle type when there is neither. */
+function VehicleThumb({ r, a }: { r: Read; a: SiteApi }) {
+  const [failed, setFailed] = useState(false);
+  if (failed) return <span className="thumb-empty vehicle-crop">{r.vehicle_type ?? "vehicle"}</span>;
+  return <img className="vehicle-crop" src={a.trafficImage(r.id, "vehicle")} alt="" loading="lazy" onError={() => setFailed(true)}
+    title={r.vehicle_source === "camera" ? undefined : "From the recording: the camera sent no picture of the vehicle"} />;
+}
+
+function ReadPanel({ a, id: initial, name, onClose, onEvent, onTimeline }: {
   a: SiteApi; id: number; name: (id: string) => string; onClose: () => void; onEvent: (id: number) => void;
+  onTimeline: (camera: string, ts: number) => void;
 }) {
+  const [noPicture, setNoPicture] = useState(false);
   const [id, setId] = useState(initial);
   const [r, setR] = useState<ReadDetail | null>(null);
   const [err, setErr] = useState("");
   const [full, setFull] = useState(false);
+  const [reading, setReading] = useState(false);
   useEffect(() => {
     let alive = true;
     setErr("");
-    a.trafficRead(id).then((x) => { if (alive) { setR(x); setFull(false); } }).catch((e) => { if (alive) setErr(errorText(e)); });
+    a.trafficRead(id).then((x) => { if (alive) { setR(x); setFull(false); setNoPicture(false); } }).catch((e) => { if (alive) setErr(errorText(e)); });
     return () => { alive = false; };
   }, [a, id]);
   useEffect(() => {
@@ -280,19 +308,35 @@ function ReadPanel({ a, id: initial, name, onClose, onEvent }: {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
+  const readPlate = async () => {
+    if (!r) return;
+    setReading(true);
+    try {
+      const res = await a.trafficReadPlate(r.id);
+      setR({ ...res.read, pass: r.pass });
+      if (res.result === "read" && res.plate) {
+        toast.success(`Otso read ${formatPlate(res.plate, res.region)}`);
+        if (res.list && res.list.list !== "allow") toast.error(`${formatPlate(res.plate)} is ${res.list.match === "near" ? "one character off a plate " : ""}on the ${res.list.list} list${res.list.note ? ` (${res.list.note})` : ""}`);
+      } else toast.error("Otso couldn't read this plate either");
+    } catch (e) { toast.error(plateError(e)); }
+    setReading(false);
+  };
   const add = async (list: PlateList) => {
-    if (!r?.plate) return;
-    const note = await promptDialog(`Add ${formatPlate(r.plate)} to the ${list} list?`, {
+    const plate = r && knownPlate(r);
+    if (!plate) return;
+    const note = await promptDialog(`Add ${formatPlate(plate)} to the ${list} list?`, {
       message: list === "allow" ? "Its reads are marked; no alarm." : `A read of it raises a ${list === "deny" ? "high" : "medium"}-priority alarm.`,
       label: "Note (who, why)", confirmLabel: "Add",
     });
     if (note === null) return;
     try {
-      await a.addPlateEntry({ plate: r.plate, list, note });
-      toast.success(`${formatPlate(r.plate)} added to the ${list} list`);
+      await a.addPlateEntry({ plate, list, note });
+      toast.success(`${formatPlate(plate)} added to the ${list} list`);
     } catch (e) { toast.error(listError(e, errorText)); }
   };
-  const shown = r && (full && r.images.includes("full") ? "full" : r.images.includes("vehicle") ? "vehicle" : r.images.includes("full") ? "full" : null);
+  // the vehicle picture is asked for even when the camera sent none: the server cuts it from the recording then
+  const shown = r && (full && r.images.includes("full") ? "full" : !noPicture ? "vehicle" : r.images.includes("full") ? "full" : null);
+  const fromRecording = !!r && shown === "vehicle" && r.vehicle_source !== "camera";
   const pass = (r?.pass ?? []).filter((x) => x.id !== r?.id);
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -305,8 +349,10 @@ function ReadPanel({ a, id: initial, name, onClose, onEvent }: {
         {r && (
           <div className="plate-panel-body">
             <div className="plate-panel-picture">
-              {shown ? <img src={a.trafficImage(r.id, shown)} alt={`${vehicleText(r) || "Vehicle"} ${r.plate ?? ""}`} />
-                : <div className="thumb-empty">No picture kept</div>}
+              {shown ? <img src={a.trafficImage(r.id, shown)} alt={`${vehicleText(r) || "Vehicle"} ${r.plate ?? ""}`}
+                  onError={() => { if (shown === "vehicle") setNoPicture(true); }} />
+                : <div className="thumb-empty">No picture: nothing recorded at this moment</div>}
+              {fromRecording && <p className="muted small">From the recording: the camera sent no picture of the vehicle. Check the moment in the Timeline.</p>}
               <div className="row small">
                 {r.images.includes("plate") && <img className="plate-crop big" src={a.trafficImage(r.id, "plate")} alt={`Plate ${r.plate ?? ""}`} />}
                 {r.images.includes("full") && r.images.includes("vehicle") && (
@@ -323,6 +369,7 @@ function ReadPanel({ a, id: initial, name, onClose, onEvent }: {
               </div>
               <dl className="plate-facts">
                 {r.plate_raw && r.plate_raw !== r.plate && <><dt>As read</dt><dd>{r.plate_raw}</dd></>}
+                {r.otso && <><dt>Otso</dt><dd>{otsoText(r.otso)} <span className="muted small">(read on request, {new Date(r.otso.at * 1000).toLocaleTimeString()})</span></dd></>}
                 {r.region && <><dt>State</dt><dd>{r.region} <span className="muted small">(reported by the camera: a hint)</span></dd></>}
                 <dt>Vehicle</dt><dd>{vehicleText(r) || <span className="muted">not given</span>}</dd>
                 {r.direction && <><dt>Direction</dt><dd>{directionText(r.direction)}</dd></>}
@@ -334,7 +381,16 @@ function ReadPanel({ a, id: initial, name, onClose, onEvent }: {
               </dl>
               <div className="row">
                 {r.event_id != null && <button onClick={() => onEvent(r.event_id!)}><Icon name="play" size={14} /> Open event</button>}
-                {r.plate && <span className="row small plates-add">
+                <button className="ghost" onClick={() => onTimeline(r.camera_id, r.ts)} title="The recording at this moment">
+                  <Icon name="timeline" size={14} /> Timeline
+                </button>
+                {r.images.includes("vehicle") && (
+                  <button className="ghost" disabled={reading} onClick={readPlate}
+                    title="Otso looks at the camera's picture of this vehicle and reads the plate only if it is clearly legible">
+                    <Icon name="sparkle" size={14} /> {reading ? "Reading…" : r.otso ? "Read again" : r.plate ? "Check with Otso" : "Read plate"}
+                  </button>
+                )}
+                {knownPlate(r) && <span className="row small plates-add">
                   <span className="muted">Add to</span>
                   {PLATE_LISTS.map((l) => <button key={l} className={`ghost small list-${l}`} onClick={() => add(l)}>{listName(l).replace(/ list$/, "")}</button>)}
                 </span>}

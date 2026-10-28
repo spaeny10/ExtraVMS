@@ -7,7 +7,7 @@ import type { AnalyticsRule, AudioEncoder, CameraDevice, CameraTime, ClockResult
 import type { CatalogVoice, Spoken, VoiceEngines, VoiceSetting } from "./talkdownVoice";
 import type { LiveCodecs } from "./codecs";
 import type { DeterConfig, DeterRequest, DeterRule, DeterRules, Deterrence, DeterrenceBrief, MilesightExtras, MilesightWrite } from "./deterrence";
-import type { CameraTraffic, Counts, CountsQuery, ImageKind, ListEntry, ListEntryEdit, ListEntryIn, ReadDetail, ReadsPage, ReadsQuery, TrafficStatus } from "./traffic";
+import type { CameraTraffic, Counts, CountsQuery, ImageKind, ListEntry, ListEntryEdit, ListEntryIn, ReadDetail, ReadPlateResult, ReadsPage, ReadsQuery, TrafficStatus } from "./traffic";
 /** include = detect only here; exclude = mask out; area = just a name for a place (never filters);
  * ppe = people who stay in it must wear the required items (backend/nvr/ppe.py; never filters) */
 export type ZoneType = "include" | "exclude" | "area" | "ppe";
@@ -834,6 +834,8 @@ export function makeApi(base: string, opts: ApiOptions = {}) {
   trafficRead: (id: number) => req<ReadDetail>(`/api/traffic/reads/${id}`),
   /** a read's picture (JPEG): kinds the read lists in `images` */
   trafficImage: (id: number, kind: ImageKind) => u(`/api/traffic/reads/${id}/image/${kind}`),
+  /** Read plate on a read the camera missed: Otso reads its vehicle crop (operator; one run per read every 30 s) */
+  trafficReadPlate: (id: number) => req<ReadPlateResult>(`/api/traffic/reads/${id}/plate`, { method: "POST" }),
   trafficCounts: (p: CountsQuery = {}) => req<Counts>(`/api/traffic/counts?${qs(p)}`),
   trafficStatus: () => req<TrafficStatus>("/api/traffic/status"),
   plateLists: () => req<ListEntry[]>("/api/traffic/lists"),

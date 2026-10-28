@@ -447,6 +447,95 @@ def test_config_export_leaves_the_push_secret_out():
     assert SECRET not in out and '"traffic"' not in out
 
 
+def test_read_plate_on_demand():
+    """The camera said "No plates" on a crop that shows one: Otso reads it (fake model), kept beside the camera's read,
+    searchable, list hit reported; the rate limit, the operator role, Otso not ready."""
+    from nvr import plate as plate_mod
+    reset()
+    c = cam()
+    t0 = time.time()
+    rid = traffic.ingest(c, push_read("No Plates", "0.00", at=t0), t0 + 0.4)["read_id"]
+    traffic.add_entry("407MFL", "watch", note="red Fiesta")
+    asked = []
+
+    async def fake_ask(img, priority):
+        asked.append((len(img), priority))
+        return {"legible": True, "plate": "407 MFL", "region": "Kansas", "confidence": "high", "_model": "fake"}
+
+    class P:
+        vlm_ready = True
+    real_ask, real_pipe = plate_mod.ask, traffic_api.pipeline
+    plate_mod.ask, traffic_api.pipeline = fake_ask, P()
+    try:
+        assert call("POST", f"/api/traffic/reads/{rid}/plate", role="viewer").status_code == 403
+        r = call("POST", f"/api/traffic/reads/{rid}/plate", role="operator")
+        assert r.status_code == 200, r.text
+        j = r.json()
+        assert j["result"] == "read" and j["plate"] == "407MFL" and j["confidence"] == "high" and j["region"] == "KS"
+        assert j["read"]["plate"] is None and j["read"]["otso"]["plate"] == "407MFL" and j["read"]["otso_plate"] == "407MFL"
+        assert j["list"] == {"list": "watch", "match": "exact", "plate": "407MFL", "note": "red Fiesta"}
+        assert asked and asked[0][1] == "chat"   # the vehicle crop, at a person's priority
+        assert call("POST", f"/api/traffic/reads/{rid}/plate", role="operator").status_code == 429
+        found = call("GET", "/api/traffic/reads?q=407MFL").json()["reads"]
+        assert [x["id"] for x in found] == [rid]
+        assert rid in [x["id"] for x in call("GET", "/api/traffic/reads?plates=true").json()["reads"]]
+        P.vlm_ready = False
+        traffic.read_limiter.last.clear()
+        assert call("POST", f"/api/traffic/reads/{rid}/plate").status_code == 503
+        assert call("POST", "/api/traffic/reads/999999/plate").status_code == 404
+    finally:
+        plate_mod.ask, traffic_api.pipeline = real_ask, real_pipe
+        traffic.read_limiter.last.clear()
+
+
+def test_vehicle_picture_from_the_recording():
+    """cam8 with optimal push: a read with only its plate crop. Its vehicle picture is cut from the recorded frame at the
+    read's time (the camera's box), queued after the push and on first view for an older read; nothing recorded: none."""
+    from nvr import frames
+    reset()
+    c = cam()
+    t0 = time.time()
+    frame = np.zeros((1520, 2688, 3), np.uint8)
+    frame[400:1200, 1150:2600] = (40, 40, 200)   # the vehicle where the fixture's box is (0.43..0.97, 0.15..0.77)
+    asked = []
+
+    def fake_recorded(camera_id, t):
+        asked.append((camera_id, round(t, 3)))
+        return frame if camera_id == "cam8" else None
+    real = frames.recorded_frame
+    frames.recorded_frame = fake_recorded
+    traffic.from_recording.due.clear()
+    try:
+        out = traffic.ingest(c, push_read("ABB473", "0.87", at=t0, vehicle_snapshot="-", full_snapshot="-"), t0 + 0.5)
+        rid = out["read_id"]
+        r = traffic.read(rid)
+        assert r["images"] == ["plate"] and r["vehicle_source"] is None
+        due = list(traffic.from_recording.due)
+        assert due and due[0][1] == rid and abs(due[0][0] - (t0 + 0.5 + traffic.REC_DELAY_S)) < 0.01
+        assert traffic.cut_from_recording(rid) and asked[-1] == ("cam8", round(r["ts"] + settings.traffic_rec_shift_s, 3))
+        r = traffic.read(rid)
+        assert r["images"] == ["plate", "vehicle"] and r["vehicle_source"] == "recording"
+        crop = cv2.imread(str(traffic.image_path(rid, "vehicle")))
+        assert crop is not None and crop[crop.shape[0] // 2, crop.shape[1] // 2].tolist() == [40, 40, 200]
+        assert traffic.cut_from_recording(rid)   # already has one: nothing decoded again
+        assert len(asked) == 1
+        # an older read without one: cut when its picture is asked for
+        old = traffic.ingest(c, push_read("OLD4567", "0.9", at=t0 + 30, vehicle_snapshot="-"), t0 + 30.5)["read_id"]
+        got = call("GET", f"/api/traffic/reads/{old}/image/vehicle")
+        assert got.status_code == 200 and got.content[:2] == b"\xff\xd8"
+        assert traffic.read(old)["vehicle_source"] == "recording"
+        # a camera's own picture stays "camera"
+        own = traffic.ingest(c, push_read("OWN1234", "0.9", at=t0 + 60), t0 + 60.5)["read_id"]
+        assert traffic.read(own)["vehicle_source"] == "camera"
+        # nothing recorded there: no picture, and the queue tries again later
+        frames.recorded_frame = lambda camera_id, t: None
+        none = traffic.ingest(c, push_read("NONE123", "0.9", at=t0 + 90, vehicle_snapshot="-"), t0 + 90.5)["read_id"]
+        assert not traffic.cut_from_recording(none) and call("GET", f"/api/traffic/reads/{none}/image/vehicle").status_code == 404
+    finally:
+        frames.recorded_frame = real
+        traffic.from_recording.due.clear()
+
+
 def test_hub_roles():
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "hub"))
     from hub import roles
@@ -458,6 +547,7 @@ def test_hub_roles():
     assert roles.required_role("GET", "/api/cameras/cam8/traffic") == "operator"
     assert roles.required_role("PUT", "/api/cameras/cam8/traffic") == "admin"
     assert roles.required_role("POST", "/api/traffic/push/cam8/x") == "owner"
+    assert roles.required_role("POST", "/api/traffic/reads/12/plate") == "operator"
 
 
 if __name__ == "__main__":

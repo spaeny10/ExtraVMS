@@ -34,6 +34,7 @@ RULES: list[tuple[set[str], re.Pattern, str]] = [
     ({"GET", "HEAD"}, re.compile(r".*"), "viewer"),
     ({"POST"}, re.compile(r"^/api/traffic/push/"), "owner"),   # cameras push on the LAN; the site refuses it through the hub anyway
     ({"POST", "PUT", "DELETE"}, re.compile(r"^/api/traffic/lists(/|$)"), "operator"),   # plate lists: like watching a vehicle
+    ({"POST"}, re.compile(r"^/api/traffic/reads/\d+/plate$"), "operator"),   # Read plate on a traffic read: one Otso look, as on an event
     ({"POST"}, re.compile(r"^/api/whep/"), "viewer"),
     ({"DELETE"}, re.compile(r"^/api/whep/[^/]+/[^/]+$"), "viewer"),   # ends the viewer's own live session (WhepPlayer teardown)
     ({"POST"}, re.compile(r"^/api/(assistant/ask|assistant/plan|assistant/retrieve|assistant/warm|remote/warm|query/parse)$"), "viewer"),

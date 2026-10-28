@@ -160,6 +160,7 @@ async def lifespan(app: FastAPI):
         ("streams", state.streams.run()),
         ("speaker-check", talkdown.check_loop()),
         ("traffic-retention", traffic.prune_loop()),   # plate reads past traffic_keep_days
+        ("traffic-pictures", traffic.from_recording.run()),   # a read sent without a vehicle picture: from the recording
     ]]
     https = _https_server() if settings.direct_enabled else None
     https_task = asyncio.create_task(_serve_https(https), name="https") if https is not None else None

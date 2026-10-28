@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   type PushSlot, confBand, confText, countBars, countsSummary, dateFromExpiry, directionText, expiryFromDate, expiryText, filterOptions,
   isSilent, listBadge, listError, nearChip, normPlate, onList, periodSince, plateProblem, plateText, pushText, slotText, stateText, timeAgo,
-  vehicleText,
+  vehicleText, knownPlate, otsoText,
 } from "./traffic";
 
 describe("one read", () => {
@@ -149,5 +149,18 @@ describe("camera setup", () => {
     expect(slotText([slot(0, true, "http://x/other"), slot(1, false, "")])).toBe("Not set up (a push slot is free)");
     expect(slotText([slot(0, true, "http://x/a"), slot(1, false, "http://x/b")])).toBe("Not set up (all push slots are in use)");
     expect(slotText([{ ...slot(2, false, "http://nvr/api/traffic/push/cam8/•••", true) }])).toMatch(/switched off on the camera/);
+  });
+});
+
+describe("Otso's Read plate", () => {
+  it("shows the camera's plate first, else Otso's", () => {
+    expect(knownPlate({ plate: "1691AJN", otso_plate: "407MFL" })).toBe("1691AJN");
+    expect(knownPlate({ plate: null, otso_plate: "407MFL" })).toBe("407MFL");
+    expect(knownPlate({ plate: null })).toBeNull();
+  });
+  it("says what Otso read, or that it couldn't", () => {
+    expect(otsoText({ at: 1, result: "read", plate: "407MFL", region: "KS", confidence: "high" })).toBe("Otso: 407 MFL · KS (high)");
+    expect(otsoText({ at: 1, result: "unreadable", reason: "not legible" })).toBe("Otso couldn't read it");
+    expect(otsoText(null)).toBe("");
   });
 });

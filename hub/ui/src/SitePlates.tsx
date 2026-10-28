@@ -2,7 +2,8 @@
  * A Site's Plates tab: the server UI's Plates page (frontend/src/Plates.tsx: plate reads, plate lists, traffic counts)
  * over the Site's online servers that have a traffic camera set up, each through its hub-proxied client (siteApi).
  * Which servers have one is each server's own /api/traffic/status; with several, the page's server picker switches
- * between them (reads, lists and counts are per server). An event opens in HubEventDetail in place, as on Find.
+ * between them (reads, lists and counts are per server). An event opens in HubEventDetail in place, as on Find; a
+ * read's Timeline opens the Site's Timeline at that moment on that camera.
  * A Site without traffic cameras says so; an older server without the traffic API counts as none.
  */
 import { useEffect, useMemo, useState } from "react";
@@ -10,6 +11,8 @@ import { PlatesView, type PlatesSource } from "@site/Plates";
 import type { Site } from "./api";
 import { HubEventDetail } from "./HubEventDetail";
 import { siteApi } from "./hubSource";
+import { navigate } from "./nav";
+import { siteTimelineHref } from "./timelineLink";
 
 export function SitePlates({ site }: { site: Site }) {
   const servers = useMemo(() => site.servers.filter((s) => !s.retired_at), [site.servers]);
@@ -43,6 +46,7 @@ export function SitePlates({ site }: { site: Site }) {
   return <>
     {offline.length > 0 && <p className="muted small site-timeline-note">Not included: {offline.map((s) => s.name).join(", ")} (offline).</p>}
     <PlatesView key={site.id} sources={sources}
+      openTimeline={(m) => navigate(siteTimelineHref(site.id, m.source, m.camera, null, Math.floor(m.ts - 3)))}
       renderEvent={(ev) => <HubEventDetail ev={{ server: ev.source, id: ev.id, location: site.id }} cameraName={ev.cameraName} onClose={ev.onClose} />} />
   </>;
 }

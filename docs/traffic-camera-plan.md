@@ -86,6 +86,14 @@ Decided while building:
   restore, set the camera up again.
 - **Plate reads in Ask.** Ask (server and hub Site Ask) gets the reads for a question naming a plate, or asking for one
   ("tag of the white truck?"), as their own evidence kind `plate`.
+- **Parked vehicles are one pass.** Same type and colour, box IoU >= 0.8, within 30 s. Pointed at a car lot, cam8 re-read
+  one car 56 times a minute.
+- **Read plate on demand.** The camera's reader misses plates its own crops show (plates ~60 px wide in its 1080p
+  frame). An operator can have Otso read the crop; the answer is kept beside the camera's and is searchable.
+- **Pictures from the recording.** With "optimal push" on, the camera leaves the vehicle picture out of about 1 read in
+  8. The server cuts it from the recording at the read's time - 0.4 s (`traffic_rec_shift_s`). Strong plate-crop
+  matches on cam8 were all at -0.4 s; at the read's own time a highway car has already left the box. The read panel says
+  the picture is from the recording and links to the Timeline at that moment.
 
 ### Phase 1: plate reads in Axiom (site server)
 - Push receiver `POST /api/traffic/push/{camera}/{secret}`: per-camera secret, no login (the camera can't log in),
