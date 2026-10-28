@@ -241,6 +241,21 @@ function InstanceMenu({ ci, onChanged, onNetworks, onResources, onRemove }: { ci
       onChanged();
     } catch (e) { toast.error(e); }
   };
+  // agent 0.4.0+: its models on its card's shared AI service, or its own in a GPU share (one restart either way)
+  const switchAi = async () => {
+    const toShared = ci.inference !== "shared";
+    if (!(await confirmDialog(toShared ? `Move ${site} onto the shared AI service?` : `Give ${site} its own AI models again?`, {
+      message: (toShared
+        ? "Its detection, PPE, re-ID and search models run on GPU " + ci.gpu + "'s shared AI service instead of in its own GPU share. The host starts the service first if needed. "
+        : "It loads its own models again, in a GPU share of its own (the card needs room for it). ")
+        + "The instance restarts: about 30 seconds without recording.",
+      confirmLabel: "Move it" }))) return;
+    try {
+      await api.setCentralInference(ci.location_id, ci.id, toShared ? "shared" : "per_instance");
+      toast.success(toShared ? `${site} uses the shared AI service` : `${site} runs its own AI models`);
+      onChanged();
+    } catch (e) { toast.error(e); }
+  };
   const offlineTitle = offline ? "The host is offline" : undefined;
   return (
     <div ref={box} className="menu-anchor">
@@ -252,6 +267,10 @@ function InstanceMenu({ ci, onChanged, onNetworks, onResources, onRemove }: { ci
             title={offlineTitle ?? (hasDataQuota ? "The quota of its database and event media" : "Only for instances with a data quota of their own (ZFS hosts, agent 0.3.2+); here it shares the storage quota")}
             onClick={item(dataStorage)}>Change data storage…</button>
           <button role="menuitem" disabled={!live || offline} title={offlineTitle ?? "CPU and memory limits (the instance restarts)"} onClick={item(onResources)}>Change CPU/memory…</button>
+          {ci.gpu != null && ci.inference != null && (
+            <button role="menuitem" disabled={!live || offline} title={offlineTitle} onClick={item(switchAi)}>
+              {ci.inference === "shared" ? "Use its own AI models…" : "Use the shared AI service…"}</button>
+          )}
           <button role="menuitem" disabled={!live} onClick={item(limit)}>Change camera limit…</button>
           <button role="menuitem" disabled={!live || offline} title={offlineTitle} onClick={item(onNetworks)}>Site networks…</button>
           <div className="menu-sep" role="separator" />
@@ -361,7 +380,7 @@ function ResourcesDialog({ ci, hostCpus, onClose, onDone }: { ci: CentralInstanc
           <input inputMode="decimal" value={cpus} placeholder="e.g. 8" onChange={(e) => setCpus(e.target.value.replace(/[^0-9.]/g, ""))} /></label>
         <label className="field"><span>Memory (GB) <span className="muted small">2-512</span></span>
           <input inputMode="decimal" value={mem} placeholder="e.g. 16" onChange={(e) => setMem(e.target.value.replace(/[^0-9.]/g, ""))} /></label>
-        {ci.gpu != null && (
+        {ci.gpu != null && ci.inference !== "shared" && (
           <label className="field"><span>GPU share (GB) <span className="muted small">1-48, 0 = no cap · {gpuShareText(ci)}</span></span>
             <input inputMode="decimal" value={share} placeholder="e.g. 4" onChange={(e) => setShare(e.target.value.replace(/[^0-9.]/g, ""))} /></label>
         )}

@@ -33,5 +33,7 @@ describe("KIND_LABEL", () => {
     expect(KIND_LABEL.host_offline).toBe("Central host offline");
     expect(KIND_LABEL.host_queue_growing).toBe("Central host queue growing");
     expect(KIND_LABEL.instance_data_full).toBe("Central data storage full");
+    expect(KIND_LABEL.inference_slow).toBe("Central AI service slow");
+    expect(KIND_LABEL.inference_unavailable).toBe("AI service unavailable");
   });
 });

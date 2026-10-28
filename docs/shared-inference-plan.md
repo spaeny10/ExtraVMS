@@ -189,7 +189,24 @@ YOLO in fp32: 85 vs 113 frames/s, still far beyond the load.
      p50/p95, memory, per-instance requests / frames / GPU-seconds). In the instance view, `inference`, and
      `gpu_mem_mb` null while shared.
    - **Tests:** 11 in test_axiom_host.py `SharedInference`. The real socket round trip runs on Linux only.
-3. **Hub**: shared-mode placement, Hosts page service panel, the two alerts, per-Site GPU-seconds.
+3. **Hub**: shared-mode placement, Hosts page service panel, the two alerts, per-Site GPU-seconds. Built 2026-10-28, not
+   deployed:
+   - **Placement** (hosts.py `infer_room`, `pick_shared_gpu`): a host's own default (capacity.inference) or Allocate's
+     choice decides. A card takes another shared Site below `HUB_CENTRAL_INFER_MAX_SITES` (30) Sites, if its service
+     wasn't busier than `HUB_CENTRAL_INFER_BUSY_MAX` (60 %) in the hub's ~30 minutes of history, and if it runs a service
+     or has `HUB_CENTRAL_INFER_SERVICE_MB` (6 GB) free for one; cards with a service first. A shared Site holds no
+     share, and the service counts as 6 GB against per-instance shares on the card. RAM and CPU still aren't placement
+     inputs (a shared Site uses ~150 MB of RAM).
+   - **Switching** from the Hosts page: a Site's ⋯ menu (`PUT /api/locations/{loc}/central/{ci}/inference`, audited),
+     the host card's "Restart AI services…" (`POST /api/hub/hosts/{id}/restart-infer`, optionally on a new image).
+   - **Hosts page:** per service its state, busy %, verify p50 / p95, memory and Sites, the five Sites with the most
+     GPU time over the hub's history, an "AI busy %" sparkline, and each card's room for shared Sites.
+   - **Alerts:** `inference_unavailable` (a Site health kind, from the server's heartbeat) and `inference_slow`
+     (hub administrators: verify p95 above `HUB_CENTRAL_INFER_SLOW_MS`, 2 s, for 5 minutes with requests coming in, or
+     not answering for 2 minutes while Sites use it). The 2 s is the service's own arrival-to-answer time per request,
+     not the open question 3 budget (event close to verdict).
+   - **GPU-seconds per Site** are shown, not stored: the hub adds up the counters' increases over its in-memory history
+     (open question 2: metering for pricing would need them kept per day, like the Qwen seconds).
 4. **Migrate fred**, one Site at a time, each with a day of watching verify latency and verdicts: Test-Site,
    Jetstream, then Bingo. The per-instance models free up as each one moves.
 5. **Load test before the 120 Sites:** replay Bingo's worst hour (1,225 events) concurrently as if from 20 Sites

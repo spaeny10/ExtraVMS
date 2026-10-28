@@ -19,10 +19,11 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { confirmDialog, promptDialog, toast } from "@site/ui";
-import { type CentralInstance, type CentralMode, type FleetSummary, type Host, type HubSitesOrg, type QwenDays, ago, api, fmtTime, qs } from "../api";
+import { type CentralInstance, type CentralMode, type FleetSummary, type Host, type HubSitesOrg, type InferMode, type QwenDays, ago, api, fmtTime, qs } from "../api";
 import { dayShare, monthOf, qwenText, qwenTitle } from "../site/aiSchedule";
 import {
-  allocateFormError, capacityBars, defaultSubnet, fmtGB, gpuRoomText, nextSiteNumber, parseCameraLimit, seriesMax, sitesWithoutCentral, sparkPath, workRows,
+  allocateFormError, capacityBars, defaultSubnet, fmtGB, gpuRoomText, inferLine, inferRoomText, nextSiteNumber, parseCameraLimit, seriesMax, sitesWithoutCentral,
+  sparkPath, workRows,
 } from "../central";
 import { go, hostHref, navigate } from "../nav";
 import {
@@ -227,6 +228,7 @@ function AllocateDialog({ host, central, onClose, onDone }: { host: Host; centra
   const [quota, setQuota] = useState("2000");
   const [limit, setLimit] = useState("");
   const [name, setName] = useState("Central");
+  const [ai, setAi] = useState<InferMode | "">("");
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     api.hubSites().then((o) => setOrgs([...o].sort((a, b) => a.org.name.localeCompare(b.org.name)))).catch((e) => { toast.error(e); setOrgs([]); });
@@ -240,7 +242,7 @@ function AllocateDialog({ host, central, onClose, onDone }: { host: Host; centra
     try {
       const edited = subnet.trim() && !(next && subnet.trim() === defaultSubnet(next));
       await api.provisionCentral(site, { host_id: host.id, mode, quota_gb: Number(quota), camera_limit: parseCameraLimit(limit).value, name: name.trim() || null,
-        subnet: mode === "vpn" && edited ? subnet.trim() : null, public_ip: mode === "forward" ? publicIp.trim() : null });
+        subnet: mode === "vpn" && edited ? subnet.trim() : null, public_ip: mode === "forward" ? publicIp.trim() : null, ...(ai ? { inference: ai } : {}) });
       toast.success("Provisioning started");
       onDone();
     } catch (er) { toast.error(er); } finally { setBusy(false); }
@@ -280,6 +282,15 @@ function AllocateDialog({ host, central, onClose, onDone }: { host: Host; centra
         <label className="field"><span>Camera limit <span className="muted small">blank = no limit</span></span>
           <input inputMode="numeric" value={limit} placeholder="no limit" onChange={(e) => setLimit(e.target.value.replace(/[^0-9]/g, ""))} /></label>
         <label className="field"><span>Server name in the Site</span><input value={name} maxLength={120} onChange={(e) => setName(e.target.value)} /></label>
+        {host.inference && (
+          <label className="field"><span>AI models <span className="muted small">detection, PPE, re-ID, search</span></span>
+            <select value={ai} onChange={(e) => setAi(e.target.value as InferMode | "")}>
+              <option value="">The host's default ({host.inference === "shared" ? "its shared AI service" : "their own"})</option>
+              <option value="shared">The GPU's shared AI service (no GPU share of its own)</option>
+              <option value="per_instance">Their own, in a GPU share</option>
+            </select>
+          </label>
+        )}
         <p className="muted small">Once it runs, the Site's admins add cameras on its console; their addresses open on its firewall by themselves. More networks: "Site networks…" in its row's ⋯ menu.</p>
         <div className="row">
           <button type="submit" disabled={busy || !!err}>Allocate</button>
@@ -347,6 +358,10 @@ function Bars({ h }: { h: Host }) {
       {(h.gpu_room ?? []).map((r) => (
         <p key={`room-${r.index}`} className={`small ${r.slots === 0 ? "warn-text" : "muted"}`} style={{ margin: "2px 0 0" }}>{gpuRoomText(r)}</p>
       ))}
+      {/* agent 0.4.0+: Sites on each card's shared AI service (placement's limit on Sites and on how busy it was lately) */}
+      {(h.infer_room ?? []).filter((r) => r.service || r.sites || h.inference === "shared").map((r) => (
+        <p key={`infer-${r.index}`} className={`small ${r.ok ? "muted" : "warn-text"}`} style={{ margin: "2px 0 0" }}>{inferRoomText(r)}</p>
+      ))}
     </div>
   );
 }
@@ -372,6 +387,15 @@ function Spark({ values, label }: { values: (number | null)[]; label: string }) 
 function Work({ h }: { h: Host }) {
   const rows = workRows(h.capacity, h.work_trend);
   const qwen = h.qwen ? <QwenDaysRow q={h.qwen} /> : null;
+  const infer = (h.infer ?? []).map((s) => {
+    const l = inferLine(s);
+    return (
+      <div key={`infer-${s.gpu}`}>
+        <div className={`work-row small ${l.state}`} title={l.title}><span className="cap-label muted">GPU {s.gpu} AI</span><span>{l.text}</span></div>
+        {l.top && <div className="work-row small" title="GPU time on this service over the hub's last ~30 minutes"><span className="cap-label muted">Busiest Sites</span><span>{l.top}</span></div>}
+      </div>
+    );
+  });
   if (!rows) return <>{qwen && <div className="work">{qwen}</div>}<p className="muted small work-none">Work: no data{h.online ? " (its agent is older than 0.2.0, or just started)" : ""}</p></>;
   const hist = h.work_history ?? [];
   return (
@@ -381,11 +405,13 @@ function Work({ h }: { h: Host }) {
         <div key={r.key} className={`work-row small ${r.state}`} title={r.title}>
           <span className="cap-label muted">{r.label}</span><span>{r.text}</span>
         </div>))}
+      {infer}
       {qwen}
       {hist.length > 1 && (
         <div className="sparks">
           <Spark label="Qwen waiting" values={hist.map((s) => s.vllm_waiting)} />
           <Spark label="YOLO queue" values={hist.map((s) => s.verify_q)} />
+          {hist.some((s) => s.infer_busy != null) && <Spark label="AI busy %" values={hist.map((s) => s.infer_busy ?? null)} />}
         </div>)}
     </div>
   );
@@ -436,6 +462,17 @@ function HostCard({ h, onChanged, onRemoved, onToken, onAllocate }: {
         <button className="ghost small" onClick={() => edit("name", "Host name")}>Rename</button>
         <button className="ghost small" onClick={() => edit("fusionhub", "FusionHub address")}>FusionHub…</button>
         <button className="ghost small" onClick={() => edit("notes", "Notes")}>Notes…</button>
+        {(h.infer ?? []).length > 0 && (
+          <button className="ghost small" disabled={!h.online} title="Recreate its AI services, optionally on a new image (upgrades)" onClick={async () => {
+            const image = await promptDialog(`Restart ${h.name}'s AI services`, { initial: "", label: "Image (blank = the one they run)",
+              message: "Every Site on them waits about a minute for its events to be verified while the models load; recording, live view and playback carry on. A new image (e.g. axiom/instance:f575d27) stays theirs from now on." });
+            if (image == null) return;
+            try {
+              const r = await api.restartInfer(h.id, image.trim() ? { image: image.trim() } : {});
+              toast.success(r.detail ?? "AI services restarted"); onChanged();
+            } catch (e) { toast.error(e); }
+          }}>Restart AI services…</button>
+        )}
         <button className="ghost small" title="A new token; the agent disconnects until it runs with the new token file" onClick={async () => {
           if (!(await confirmDialog(`Rotate ${h.name}'s token?`, { message: "The host disconnects at once and stays offline until its agent runs with the new token. Its instances keep recording.", confirmLabel: "Rotate" }))) return;
           try { onToken(await api.rotateHost(h.id)); onChanged(); } catch (e) { toast.error(e); }

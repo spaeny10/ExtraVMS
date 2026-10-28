@@ -1820,6 +1820,7 @@ class CentralIn(BaseModel):
     name: str | None = Field(None, max_length=120)       # the server's name in the Site; default "Central"
     camera_limit: int | None = Field(None, ge=1, le=hosts.MAX_CAMERA_LIMIT)   # None = no limit (central_cameras.py)
     gpu_mem_mb: int | None = Field(None, ge=0, le=hosts.GPU_MEM_MB_RANGE[1])   # its GPU share; None = the default, 0 = no cap
+    inference: Literal["per_instance", "shared"] | None = None   # its models: own / the card's AI service; None = the host's default
 
 
 class CentralPatch(BaseModel):
@@ -1834,6 +1835,17 @@ class CentralResources(BaseModel):
     cpus: float | None = Field(None, ge=hosts.CPUS_RANGE[0], le=hosts.CPUS_RANGE[1])
     mem_gb: float | None = Field(None, ge=hosts.MEM_GB_RANGE[0], le=hosts.MEM_GB_RANGE[1])
     gpu_mem_mb: int | None = Field(None, ge=0, le=hosts.GPU_MEM_MB_RANGE[1])
+
+
+class CentralInference(BaseModel):
+    """Where the instance's models run: its own (per_instance, with its GPU share) or its card's shared AI service."""
+    inference: Literal["per_instance", "shared"]
+
+
+class InferRestart(BaseModel):
+    """The host's AI services to recreate: one card's (gpu) or all, on `image` from now on when given."""
+    gpu: int | None = Field(None, ge=0, le=64)
+    image: str | None = Field(None, min_length=1, max_length=200)
 
 
 class CentralDataQuota(BaseModel):
@@ -1882,7 +1894,8 @@ async def location_central_create(location_id: str, body: CentralIn, u: dict = D
     auth.location_access(u, location_id)
     try:
         ci = await hosts.provision(location_id, body.host_id or None, body.mode, body.subnet, body.public_ip, body.quota_gb, u,
-                                   name=body.name, gpu=body.gpu, camera_limit=body.camera_limit, gpu_mem_mb=body.gpu_mem_mb)
+                                   name=body.name, gpu=body.gpu, camera_limit=body.camera_limit, gpu_mem_mb=body.gpu_mem_mb,
+                                   inference=body.inference)
     except LookupError as e:
         raise HTTPException(404, str(e))
     except ValueError as e:
@@ -1933,6 +1946,41 @@ async def location_central_resources(location_id: str, ci_id: str, body: Central
     except hosts.HostError as e:
         raise HTTPException(502, f"{e}: nothing was changed")
     return hosts.instances(db.central_instances.c.id == ci_id)[0]
+
+
+@app.put("/api/locations/{location_id}/central/{ci_id}/inference")
+async def location_central_inference(location_id: str, ci_id: str, body: CentralInference, u: dict = Depends(user)):
+    """Move the instance onto its card's shared AI service or back to its own models (a set_inference round trip: the
+    host recreates it, ~30 s without recording, and waits for the service first). Hub administrators only; audited."""
+    auth.require_super(u)
+    _central_of(location_id, ci_id)
+    try:
+        await hosts.set_inference(ci_id, body.inference, u)
+    except LookupError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except hosts.Conflict as e:
+        raise HTTPException(409, str(e))
+    except hosts.HostError as e:
+        raise HTTPException(502, f"{e}: nothing was changed")
+    return hosts.instances(db.central_instances.c.id == ci_id)[0]
+
+
+@app.post("/api/hub/hosts/{host_id}/restart-infer")
+async def host_restart_infer(host_id: str, body: InferRestart, u: dict = Depends(user)):
+    """Recreate the host's AI services (upgrades: `image`); their Sites' events wait while the models load. Audited."""
+    auth.require_super(u)
+    _host_or_404(host_id)
+    try:
+        res = await hosts.restart_infer(host_id, body.gpu, body.image, u)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except hosts.Conflict as e:
+        raise HTTPException(409, str(e))
+    except hosts.HostError as e:
+        raise HTTPException(502, str(e))
+    return {"ok": True, "detail": res.get("detail")}
 
 
 @app.put("/api/locations/{location_id}/central/{ci_id}/data-quota")

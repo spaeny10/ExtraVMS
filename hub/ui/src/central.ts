@@ -3,7 +3,7 @@
  * the bandwidth / storage numbers shown on Site → Servers and Customer → Servers, and the instance's lines on its own
  * server card (Site → Servers). Kept apart from the components so they are unit-tested (central.test.ts).
  */
-import type { CentralInstance, CentralMode, GpuRoom, Host, HostCapacity, HubSitesOrg, InstanceWork, Peplink, Server, VllmWork, WorkTrend } from "./api";
+import type { CentralInstance, CentralMode, GpuRoom, Host, HostCapacity, HubSitesOrg, InferRoom, InferService, InstanceWork, Peplink, Server, VllmWork, WorkTrend } from "./api";
 
 /** provisioning (the host is creating it) → waiting_enroll (created, not dialed in yet) → running. */
 export const PHASE_LABEL: Record<string, string> = {
@@ -522,9 +522,45 @@ export function gpuRoomText(r: GpuRoom): string {
   return `GPU ${r.index} · ${shortGpu(r.name)}: ${gb(r.reserved_mb)} of ${gb(Math.max(usable, r.reserved_mb))} in Site shares · ${more}`;
 }
 
-/** An instance's GPU memory: "4 GB share · peak 2.9 GB" (peak = torch's, from its own report); "" on a CPU instance. */
-export function gpuShareText(c: Pick<CentralInstance, "gpu" | "gpu_mem_mb" | "gpu_share_mb" | "work">): string {
+/** A card's line for Sites on its AI service: "GPU 1 · A10G: AI service, 3 of 30 Sites · busiest 12% lately"; why it takes no more. */
+export function inferRoomText(r: InferRoom): string {
+  const busy = r.busy_peak != null ? ` · busiest ${fmtNum(Math.round(r.busy_peak))}% lately` : "";
+  const what = r.service || r.sites ? `AI service, ${r.sites} of ${plural(r.max_sites, "Site")}` : "no AI service yet";
+  return `GPU ${r.index} · ${shortGpu(r.name)}: ${what}${busy}${r.ok ? "" : ` · takes no more Sites (${r.why})`}`;
+}
+
+const ms = (x: number | null | undefined) => (x == null ? "—" : x >= 1000 ? `${fmtNum(Math.round(x / 100) / 10)} s` : `${fmtNum(Math.round(x))} ms`);
+
+/** "GPU-seconds": 0.4 s, 12 s, 3.5 min. */
+export const gpuTime = (s: number) => (s >= 120 ? `${fmtNum(Math.round(s / 6) / 10)} min` : `${fmtNum(s >= 10 ? Math.round(s) : Math.round(s * 10) / 10)} s`);
+
+/**
+ * A card's AI service on the host card: the line ("busy 4% · verify 15 ms, p95 31 ms · 1.2 GB · 3 Sites"), how bad it
+ * is (a service that isn't running or answering is bad, one queuing verify requests or above 60 % busy is a warning),
+ * and its busiest Sites over the hub's history ("Yard A 42 s · Yard B 7 s").
+ */
+export function inferLine(s: InferService): { text: string; title: string; state: "ok" | "warn" | "bad"; top: string } {
+  const label = s.state && s.state !== "running" ? s.state : !s.ok ? "not answering" : null;
+  const sites = s.sites != null ? ` · ${plural(s.sites, "Site")}` : "";
+  const text = label ? `AI service ${label}${s.error ? `: ${clip(s.error)}` : ""}${sites}`
+    : `AI service · busy ${fmtNum(Math.round(s.busy_pct ?? 0))}% · verify ${ms(s.verify_p50_ms)}, p95 ${ms(s.verify_p95_ms)}`
+      + `${s.reserved_mb != null ? ` · ${gb(s.reserved_mb)}` : ""}${sites}`;
+  const waiting = s.queues?.verify ?? 0;
+  const state = label ? "bad" : waiting > 0 || (s.busy_pct ?? 0) >= 60 ? "warn" : "ok";
+  const parts = [`queues: verify ${s.queues?.verify ?? "—"}, background ${s.queues?.background ?? "—"}, index ${s.queues?.index ?? "—"}`];
+  if (s.verify_wait_p50_ms != null) parts.push(`verify waits ${ms(s.verify_wait_p50_ms)} in its queue (median)`);
+  if (s.busy_peak != null) parts.push(`busiest ${fmtNum(Math.round(s.busy_peak))}% in the last ${fmtNum(Math.round((s.window_s ?? 0) / 60))} min`);
+  if (s.peak_mb != null) parts.push(`memory peak ${gb(s.peak_mb)}`);
+  if (s.oom) parts.push(plural(s.oom, "out-of-memory batch") + " (split and retried)");
+  const top = s.top.map((t) => `${t.site} ${gpuTime(t.gpu_s)}`).join(" · ");
+  return { text, title: parts.join(" · "), state, top };
+}
+
+/** An instance's GPU memory: "4 GB share · peak 2.9 GB" (peak = torch's, from its own report); "" on a CPU instance; on
+ *  its card's AI service, "shared AI service · 12 s GPU in 30 min". */
+export function gpuShareText(c: Pick<CentralInstance, "gpu" | "gpu_mem_mb" | "gpu_share_mb" | "work" | "inference" | "infer_gpu_s">): string {
   if (c.gpu == null) return "";
+  if (c.inference === "shared") return `shared AI service${c.infer_gpu_s != null ? ` · ${gpuTime(c.infer_gpu_s)} GPU lately` : ""}`;
   const peak = c.work?.gpu_mem?.peak_mb;
   const share = c.gpu_mem_mb ? `${gb(c.gpu_mem_mb)} share` : `no cap (counted as ${gb(c.gpu_share_mb ?? 0)})`;
   const oom = c.work?.gpu_mem?.oom ? ` · ${plural(c.work.gpu_mem.oom, "out-of-memory error")}` : "";

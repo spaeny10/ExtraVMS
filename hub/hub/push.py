@@ -16,7 +16,7 @@ from .config import settings
 
 log = logging.getLogger("hub.push")
 DEFAULT_KINDS = ["offline", "event_policy", "event_watched", "event_high", "site_link_down", "storage_failing", "db_errors", "bridge_offline",
-                 "host_offline", "coverage_budget", "host_queue_growing", "instance_data_full"]   # the last four only ever reach hub administrators (alerts.HUB_KINDS)
+                 "host_offline", "coverage_budget", "host_queue_growing", "instance_data_full", "inference_slow"]   # the last five only ever reach hub administrators (alerts.HUB_KINDS)
 _sender: Callable | None = None   # tests inject a fake
 
 
@@ -140,6 +140,9 @@ async def notify_alert(org_id: str, site: dict, kind: str, detail: dict) -> int:
         elif kind == "host_queue_growing":
             payload = {"title": f"Host {site.get('name') or site['id']}: work queue growing", "body": str(detail.get("text") or "")[:180],
                        "url": "/hub/hosts", "kind": kind, "host_id": site["id"]}
+        elif kind == "inference_slow":
+            payload = {"title": f"Host {site.get('name') or site['id']}: AI service {'down' if detail.get('down') else 'slow'}",
+                       "body": str(detail.get("text") or "")[:180], "url": f"/hub/hosts/{site['id']}", "kind": kind, "host_id": site["id"]}
         else:
             payload = {"title": f"Host {site.get('name') or site['id']} is offline", "body": "Central recording host: its instances may be down too",
                        "url": "/hub/hosts", "kind": kind, "host_id": site["id"]}
@@ -159,6 +162,7 @@ async def notify_alert(org_id: str, site: dict, kind: str, detail: dict) -> int:
              "site_link_down": f"{name}: link to the site down",
              "storage_failing": f"{name}: events not being stored (disk failing)",
              "db_errors": f"{name}: database write errors",
+             "inference_unavailable": f"{name}: event verification waiting (AI service down)",
              "bridge_offline": f"{name}: Axiom Bridge offline"}.get(kind, f"{name}: {kind}")
     body = detail.get("text") or detail.get("synopsis") or detail.get("name") or ", ".join(detail.get("problems") or []) or ""
     url = f"/s/{site['id']}/#timeline?cam={detail.get('camera_id')}&event={detail.get('id')}" if detail.get("id") and detail.get("camera_id") else f"/s/{site['id']}/"

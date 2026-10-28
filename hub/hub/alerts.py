@@ -10,7 +10,7 @@ from . import cameras, db
 
 KINDS = ("offline", "camera_down", "disk", "clock", "detector_fallback", "detector_stalled", "vlm_fallback_active", "event_high", "event_policy", "event_watched",
          "site_link_down", "host_offline", "coverage_budget", "host_queue_growing", "storage_failing", "bridge_offline",
-         "instance_data_full", "db_errors", "gpu_memory_full")
+         "instance_data_full", "db_errors", "gpu_memory_full", "inference_unavailable", "inference_slow")
 # site_link_down  the server's heartbeat says every camera is unreachable at once (summary.site_link_down): the link to
 #                 the Site (SpeedFusion tunnel, port forwards, the BR1's cellular uplink) is probably down. One alert for
 #                 the server instead of one camera_down per camera; cameras flagged link_down raise no camera_down.
@@ -32,7 +32,11 @@ KINDS = ("offline", "camera_down", "disk", "clock", "detector_fallback", "detect
 #                 "database or disk is full", ...) in the last 15 minutes (summary.db_errors): open while that is above 0.
 #                 Catches transient write failures that storage_failing (a minute or more without a write) misses.
 #                 Servers that don't send db_errors never open it.
-HUB_KINDS = ("host_offline", "coverage_budget", "host_queue_growing", "instance_data_full")
+# inference_slow  a central host's shared inference service (host agent 0.4.0+, hosts.check_infer_alerts): its verify
+#                 requests' p95 above HUB_CENTRAL_INFER_SLOW_MS for 5 minutes while they come in (key gpu<N>: add a card
+#                 or move Sites), or the service not answering for 2 minutes while Sites use it. Hub-level like
+#                 host_offline; closes once it answers below half that, sits idle for 10 minutes, or is gone.
+HUB_KINDS = ("host_offline", "coverage_budget", "host_queue_growing", "instance_data_full", "inference_slow")
 # Server detector health, from the heartbeat's `health_alerts` list (backend nvr/detector.py): open while listed.
 #   detector_fallback  the Hailo accelerator is missing or failing; YOLO runs on the CPU (or nothing can detect)
 #   vlm_fallback_active  the main local Qwen (e.g. the 27B) is down and the fallback model (the 9B) is answering
@@ -42,7 +46,10 @@ HUB_KINDS = ("host_offline", "coverage_budget", "host_queue_growing", "instance_
 #                      while its database is dead (a minimal summary), so this reaches the hub.
 #   gpu_memory_full    a central instance ran out of its share of the shared GPU in the last 15 min (backend
 #                      nvr/gpumem.py): events may fail to verify; a larger share (Hosts) or fewer cameras fixes it
-HEALTH_KINDS = ("detector_fallback", "detector_stalled", "vlm_fallback_active", "storage_failing", "gpu_memory_full")
+#   inference_unavailable  a central instance on its host's shared inference service (backend nvr/inference.py) has
+#                      not reached it for 30 s: events wait in its queue and verify once it answers
+HEALTH_KINDS = ("detector_fallback", "detector_stalled", "vlm_fallback_active", "storage_failing", "gpu_memory_full",
+                "inference_unavailable")
 # Alerts about one site event. Unlike the condition kinds above (offline, disk...), which close when the condition
 # clears and must re-open when it returns, an event happens once: its key is the event id, and the same event is
 # re-published many times (heartbeat attention lists, synopsis, feedback, lock), so it dedupes on any row.

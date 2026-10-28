@@ -110,6 +110,15 @@ def test_detector_health_alerts_follow_the_heartbeat(client, superuser):
     assert [r["kind"] for r in rows] == ["gpu_memory_full"] and rows[0]["detail"]["share_mb"] == 4096
     alerts.on_heartbeat(s, {}, 0)
     assert [r for r in _rows(s) if r["closed_at"] is None] == []
+    # one on its host's shared AI service that can't reach it (nvr/inference.py) likewise
+    down = {"kind": "inference_unavailable", "text": "The recording host's AI service is not answering; events wait to be verified",
+            "since": 1300.0, "error": "connection refused"}
+    alerts.on_heartbeat(s, {"health_alerts": [down]}, 0)
+    rows = [r for r in _rows(s) if r["closed_at"] is None]
+    assert [r["kind"] for r in rows] == ["inference_unavailable"] and rows[0]["detail"]["error"] == "connection refused"
+    alerts.on_heartbeat(s, {}, 0)
+    assert [r for r in _rows(s) if r["closed_at"] is None] == []
+    assert "inference_slow" in alerts.HUB_KINDS and "inference_slow" not in alerts.HEALTH_KINDS
 
 
 def test_storage_failing_alert_follows_the_heartbeat(client, superuser):

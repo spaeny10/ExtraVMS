@@ -71,7 +71,9 @@ export type CentralMode = "vpn" | "forward" | "bridge";
 /** `instances`: central instances assigned to the GPU for YOLO; `verify_q`: their verify queues summed (agent 0.2.0+). */
 export type HostGpu = { index: number; name: string; mem_total_mb?: number; mem_used_mb?: number; util?: number; instances?: number; verify_q?: number | null;
   /** agent 0.3.3+: the instances' GPU shares on this card (MB) and how many run without one */
-  shares_mb?: number; unshared?: number };
+  shares_mb?: number; unshared?: number;
+  /** agent 0.4.0+: instances whose models run on this card's inference service, and that service's container state (null = none) */
+  shared?: number; infer?: string | null };
 /** A card instances are placed on (hub hosts.gpu_room): its Sites' shares and the room for another, MB; slots = default shares that fit. */
 export type GpuRoom = { index: number; name: string; total_mb: number; used_mb: number; reserved_mb: number; room_mb: number; slots: number };
 /** An instance's own GPU memory (its /api/system gpu_mem, nvr/gpumem.py), MB: its share, torch's cap, now and peak; out-of-memory errors. */
@@ -90,17 +92,33 @@ export type InstanceWork = {
   verify_q?: number | null; synopsis_q?: number | null; yolo_ready?: boolean | null; vlm_ready?: boolean | null; vlm_state?: string | null;
   yolo_frame_ms?: number | null; verify_rate_per_min?: number | null; gpu_mem?: GpuMemWork | null;
 };
-export type HostWork = { at: number; vllm?: VllmWork; instances?: Record<string, InstanceWork> };
-export type HostCapacity = { cpus?: number; load?: number | number[]; ram_gb?: { total: number; free: number }; gpus?: HostGpu[]; disks?: { path: string; total_gb?: number; free_gb?: number }[]; instances?: number; work?: HostWork };
-/** One heartbeat's totals in the hub's short history (~30 min): vLLM requests, the verify queues of every instance. */
-export type WorkSample = { t: number; vllm_waiting: number | null; vllm_running: number | null; verify_q: number | null };
+/** A card's inference service (agent 0.4.0+, capacity.work.infer by GPU index): GPU busy % over the last minute, verify latency, queues, memory. */
+export type InferWork = {
+  ok: boolean; error?: string | null; at?: number | null; uptime_s?: number | null; busy_pct?: number | null; queues?: Record<string, number | null>;
+  verify_p50_ms?: number | null; verify_p95_ms?: number | null; verify_wait_p50_ms?: number | null; oom?: number | null;
+  reserved_mb?: number | null; peak_mb?: number | null;
+};
+export type HostWork = { at: number; vllm?: VllmWork; instances?: Record<string, InstanceWork>; infer?: Record<string, InferWork> };
+/** How the instances' models run on new GPU Sites (host.json inference; agent 0.4.0+), the cards with a service and its image. */
+export type InferMode = "per_instance" | "shared";
+export type HostCapacity = { cpus?: number; load?: number | number[]; ram_gb?: { total: number; free: number }; gpus?: HostGpu[]; disks?: { path: string; total_gb?: number; free_gb?: number }[]; instances?: number; work?: HostWork;
+  inference?: { mode: InferMode; gpus: number[]; image?: string | null } };
+/** One heartbeat's totals in the hub's short history (~30 min): vLLM requests, the verify queues of every instance, the busiest AI service's GPU %. */
+export type WorkSample = { t: number; vllm_waiting: number | null; vllm_running: number | null; verify_q: number | null; infer_busy?: number | null };
+/** A card's room for another Site on its AI service (hub hosts.infer_room): why = why it takes none (null = it does). */
+export type InferRoom = { index: number; name: string; service: string | null; sites: number; max_sites: number; busy_peak: number | null; ok: boolean; why: string | null; slots: number };
+/** A card's AI service on the host card (hub hosts.infer_panel): its load now, the busiest it was in the hub's ~30 min, and the Sites with the most GPU time. */
+export type InferService = InferWork & {
+  gpu: number; name: string; state: string | null; busy_peak: number | null; window_s: number | null; sites: number | null; max_sites: number | null;
+  top: { instance_id: string; site: string; gpu_s: number }[];
+};
 /** growing: verify queue above 20 and higher than 15 minutes ago (the host_queue_growing alert's rule). */
 export type WorkTrend = {
   instances: Record<string, { verify_q: number | null; verify_q_before: number | null; growing: boolean; recovered: boolean }>;
   vllm_waiting?: number | null; vllm_waiting_for_s: number | null;
 };
 /** An open host_queue_growing alert (key verify:<instance id> or vllm); `text` says which queue, where. */
-export type QueueAlert = { key: string; opened_at: number; text?: string; queue?: string; instance_id?: string; site?: string };
+export type QueueAlert = { key: string; opened_at: number; text?: string; queue?: string; instance_id?: string; site?: string; kind?: string };
 /** What needs attention on a host (hub hostlist.py): its agent is not connected, older than the fleet's newest, or a queue alert is open. */
 export type HostProblem = "offline" | "agent" | "queue";
 /**
@@ -118,6 +136,8 @@ export type Host = {
   room_gb?: number;
   /** newer hubs: the cards instances go on, with their Sites' GPU shares and the room for more; gpu_slots = default shares that still fit */
   gpu_room?: GpuRoom[]; gpu_slots?: number;
+  /** newer hubs, agent 0.4.0+: its default for new GPU Sites (null = an older agent), each card's room on its AI service, its services */
+  inference?: InferMode | null; infer_room?: InferRoom[]; infer_slots?: number; infer?: InferService[];
   work_history?: WorkSample[]; work_trend?: WorkTrend; queue_alerts?: QueueAlert[];
   /** newer hubs */
   problems?: HostProblem[];
@@ -163,6 +183,8 @@ export type CentralInstance = {
   cpus?: number | null; mem_gb?: number | null;
   /** Its GPU share as set (MB; null = no cap or an older agent) and what placement counts for it (its share, else the default or its peak). */
   gpu_mem_mb?: number | null; gpu_share_mb?: number | null;
+  /** agent 0.4.0+: shared = its models run on its card's AI service (it holds no share); its GPU-seconds there over the hub's ~30 min */
+  inference?: InferMode | null; infer_gpu_s?: number | null;
   /** Its data area (/data: the database and event media; host agent 0.3.2+, null until reported). instance_quota_gb null:
    *  no quota of its own (XFS / no quota hosts: it shares the recordings' quota), so Change data storage doesn't apply. */
   instance_used_gb?: number | null; instance_quota_gb?: number | null; instance_free_gb?: number | null;
@@ -208,7 +230,9 @@ export type BridgeApplied = { camera_id: string; public_host: string; public_rts
 export type BridgeTargetBody = { name?: string; host?: string; ports?: number[]; camera_id?: string | null; enabled?: boolean };
 /** the one-step Add: the camera's login for the instance (passed through by the hub, never stored there) */
 export type CameraLogin = { username: string; password: string; main_path?: string; sub_path?: string };
-export type CentralBody = { host_id?: string | null; mode: CentralMode; subnet?: string | null; public_ip?: string | null; quota_gb: number; gpu?: number | null; name?: string | null; camera_limit?: number | null };
+export type CentralBody = { host_id?: string | null; mode: CentralMode; subnet?: string | null; public_ip?: string | null; quota_gb: number; gpu?: number | null; name?: string | null; camera_limit?: number | null;
+  /** its models: own (per_instance) or its card's shared AI service; omitted = the host's default (agent 0.4.0+) */
+  inference?: InferMode };
 /**
  * `urls`: candidate base URLs of the server itself (`local` = only works from a browser on that machine, e.g.
  * http://localhost:8080); `fingerprint`: its self-signed certificate's SHA-256, for the "accept the certificate" prompt.
@@ -603,6 +627,8 @@ export const api = {
   setCentralResources: (loc: string, ci: string, b: { cpus?: number; mem_gb?: number; gpu_mem_mb?: number }) => req<CentralInstance>(`/api/locations/${loc}/central/${ci}/resources`, json("PUT", b)),
   /** The quota of the instance's data dataset (database, event media; ZFS hosts, agent 0.3.2+); force = below its use. Hub administrators. */
   setCentralDataQuota: (loc: string, ci: string, b: { quota_gb: number; force?: boolean }) => req<CentralInstance>(`/api/locations/${loc}/central/${ci}/data-quota`, json("PUT", b)),
+  setCentralInference: (loc: string, ci: string, inference: InferMode) => req<CentralInstance>(`/api/locations/${loc}/central/${ci}/inference`, json("PUT", { inference })),
+  restartInfer: (id: string, b: { gpu?: number; image?: string }) => req<{ ok: boolean; detail?: string }>(`/api/hub/hosts/${encodeURIComponent(id)}/restart-infer`, json("POST", b)),
   /** Replaces the instance's Site networks; the host gets them plus its cameras' own addresses (hub administrators). */
   setCentralCameras: (loc: string, ci: string, b: CameraNetwork) => req<CentralInstance>(`/api/locations/${loc}/central/${ci}/cameras`, json("PUT", b)),
   /** purge also deletes the recordings on the host; force forgets the instance at the hub when its host can't. */

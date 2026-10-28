@@ -156,9 +156,9 @@ function Login({ onDone }: { onDone: () => void }) {
 
 function PushCard() {
   const [info, setInfo] = useState<PushInfo | null>(null);
-  // hub push.DEFAULT_KINDS (host_offline, coverage_budget, host_queue_growing and instance_data_full only ever reach hub administrators)
+  // hub push.DEFAULT_KINDS (host_offline, coverage_budget, host_queue_growing, instance_data_full and inference_slow only ever reach hub administrators)
   const [kinds, setKinds] = useState<string[]>(["offline", "event_policy", "event_watched", "event_high", "site_link_down", "db_errors", "bridge_offline", "host_offline",
-    "coverage_budget", "host_queue_growing", "instance_data_full"]);
+    "coverage_budget", "host_queue_growing", "instance_data_full", "inference_slow"]);
   const load = () => api.pushInfo().then(setInfo).catch(() => setInfo(null));
   useEffect(() => { load(); }, []);
   const supported = "serviceWorker" in navigator && "PushManager" in window && window.isSecureContext;

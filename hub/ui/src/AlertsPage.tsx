@@ -34,6 +34,7 @@ function describe(a: Alert): string {
     : a.kind === "clock" ? `${d.skew_s} s off` : a.kind === "disk" ? String(d.message ?? "low space")
     : a.kind === "detector_fallback" || a.kind === "detector_stalled" || a.kind === "vlm_fallback_active" ? `${d.text ?? ""}${d.error ? ` (${d.error})` : ""}`
     : a.kind === "storage_failing" || a.kind === "bridge_offline" || a.kind === "db_errors" || a.kind === "instance_data_full" || a.kind === "gpu_memory_full"
+      || a.kind === "inference_unavailable" || a.kind === "inference_slow"
       ? String(d.text ?? KIND_LABEL[a.kind])   // the text names it already
     : a.kind === "offline" ? `last seen ${ago(d.last_seen_at as number)}` : `${d.name ? `${d.name} · ` : ""}${d.text ?? d.synopsis ?? ""}`;
 }

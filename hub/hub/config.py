@@ -108,6 +108,11 @@ class Settings(BaseSettings):
     central_gpu_avoid: str = "A40"            # ... else the least used GPU that isn't this one (the A40 runs vLLM)
     central_gpu_mem_mb: int = 4096            # a new instance's share of its GPU, MB (it caps itself there); placement reserves it
     central_gpu_headroom_mb: int = 1024       # kept free on every card (driver, NVENC playback transcodes) beyond the shares
+    # shared inference (host agent 0.4.0+, docs/shared-inference-plan.md): one model service per card instead of a share each
+    central_infer_service_mb: int = 6144      # what a card's inference service is counted as holding (placement), MB
+    central_infer_max_sites: int = 30         # Sites per card on its service, until the load test (phase 5) sets the real number
+    central_infer_busy_max: float = 60.0      # no new Site on a card whose service was busier than this (% of the last minute) lately
+    central_infer_slow_ms: float = 2000.0     # inference_slow: the service's verify p95 above this for INFER_SLOW_S
     central_enroll_ttl_s: int = 86400         # how long an instance's single-use enrollment token stays valid
     host_create_timeout_s: float = 600.0      # create_instance may pull images and set up quotas: minutes
     host_command_timeout_s: float = 120.0     # every other host command

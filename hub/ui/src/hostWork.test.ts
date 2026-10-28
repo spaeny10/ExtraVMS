@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  fmtNum, fmtRate, gpuRoomText, gpuShareText, instanceWork, queueText, queueTitle, resourcesFormError, resourcesText, seriesMax, sparkPath, vllmLine, vllmTitle, workRows, yoloLine,
+  fmtNum, fmtRate, gpuRoomText, gpuShareText, gpuTime, inferLine, inferRoomText, instanceWork, queueText, queueTitle, resourcesFormError, resourcesText, seriesMax, sparkPath, vllmLine, vllmTitle, workRows, yoloLine,
 } from "./central";
 import type { HostCapacity, HostGpu, InstanceWork, VllmWork } from "./api";
 
@@ -151,5 +151,40 @@ describe("GPU shares", () => {
       .toBe("4 GB share · peak 2.9 GB · 3 out-of-memory errors");
     expect(gpuShareText({ gpu: 1, gpu_mem_mb: null, gpu_share_mb: 4608, work: null })).toBe("no cap (counted as 4.5 GB)");
     expect(gpuShareText({ gpu: null, gpu_mem_mb: null, gpu_share_mb: null, work: null })).toBe("");
+    expect(gpuShareText({ gpu: 1, gpu_mem_mb: null, gpu_share_mb: 0, work: null, inference: "shared", infer_gpu_s: 42.4 })).toBe("shared AI service · 42 s GPU lately");
+    expect(gpuShareText({ gpu: 1, gpu_mem_mb: null, gpu_share_mb: 0, work: null, inference: "shared", infer_gpu_s: null })).toBe("shared AI service");
+  });
+});
+
+describe("shared AI service lines", () => {
+  const svc = {
+    gpu: 1, name: "NVIDIA A10G", state: "running", ok: true, busy_pct: 4.2, verify_p50_ms: 15.2, verify_p95_ms: 1530, verify_wait_p50_ms: 0.1,
+    reserved_mb: 1248, peak_mb: 1300, oom: 0, queues: { verify: 0, background: 0, index: 3 }, busy_peak: 17.4, window_s: 1800, sites: 3, max_sites: 30,
+    top: [{ instance_id: "ci_a", site: "Yard A", gpu_s: 42.4 }, { instance_id: "ci_b", site: "Yard B", gpu_s: 300 }],
+  };
+  it("says how the service is doing and who used it", () => {
+    const l = inferLine(svc);
+    expect(l.text).toBe("AI service · busy 4% · verify 15 ms, p95 1.5 s · 1.2 GB · 3 Sites");
+    expect(l.state).toBe("ok");
+    expect(l.top).toBe("Yard A 42 s · Yard B 5 min");
+    expect(l.title).toContain("busiest 17% in the last 30 min");
+    expect(inferLine({ ...svc, queues: { verify: 4 } }).state).toBe("warn");
+    expect(inferLine({ ...svc, busy_pct: 75 }).state).toBe("warn");
+    const down = inferLine({ ...svc, ok: false, error: "timed out" });
+    expect(down.state).toBe("bad");
+    expect(down.text).toBe("AI service not answering: timed out · 3 Sites");
+    expect(inferLine({ ...svc, state: "restarting" }).text).toBe("AI service restarting · 3 Sites");
+  });
+  it("says whether a card's service takes another Site", () => {
+    const r = { index: 1, name: "NVIDIA A10G", service: "running", sites: 3, max_sites: 30, busy_peak: 12, ok: true, why: null, slots: 27 };
+    expect(inferRoomText(r)).toBe("GPU 1 · A10G: AI service, 3 of 30 Sites · busiest 12% lately");
+    expect(inferRoomText({ ...r, ok: false, why: "busy 70% lately (limit 60%)", slots: 0, busy_peak: 70 }))
+      .toBe("GPU 1 · A10G: AI service, 3 of 30 Sites · busiest 70% lately · takes no more Sites (busy 70% lately (limit 60%))");
+    expect(inferRoomText({ ...r, service: null, sites: 0, busy_peak: null })).toBe("GPU 1 · A10G: no AI service yet");
+  });
+  it("shows GPU time in seconds or minutes", () => {
+    expect(gpuTime(0.44)).toBe("0.4 s");
+    expect(gpuTime(42.4)).toBe("42 s");
+    expect(gpuTime(210)).toBe("3.5 min");
   });
 });

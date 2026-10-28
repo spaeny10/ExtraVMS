@@ -970,3 +970,230 @@ def test_set_instance_quota(world):
         fh.close()
         if ci:
             root.delete(f"/api/locations/{loc['id']}/central/{ci['id']}?force=true")
+
+
+# ---------------------------------------------------------------- shared inference services (agent 0.4.0+)
+
+def _infer(busy=1.0, p95=40.0, up=100.0, sites=None, ok=True):
+    """One service's work.infer entry as the agent sends it: sites = {instance id: (requests, gpu_s)}."""
+    return {"ok": ok, "uptime_s": up, "busy_pct": busy, "queues": {"verify": 0, "background": 0, "index": 0},
+            "verify_p50_ms": p95 / 2, "verify_p95_ms": p95, "verify_wait_p50_ms": 0.1, "oom": 0, "reserved_mb": 1248, "peak_mb": 1300,
+            "instances": {k: {"requests": r, "frames": r * 5, "gpu_s": g} for k, (r, g) in (sites or {}).items()},
+            **({} if ok else {"error": "timed out"})}
+
+
+def _shared_row(hid, org, loc, gpu=1, shared=True):
+    ci_id = db.new_id("ci_")
+    t0 = time.time()
+    db.insert(db.central_instances, {"id": ci_id, "host_id": hid, "location_id": loc["id"], "org_id": org["id"], "server_id": None,
+                                     "name": "Central", "mode": "vpn", "subnet": None, "public_ip": None, "site_number": None,
+                                     "quota_gb": 100, "gpu": gpu, "state": "running", "last_error": None, "created_at": t0,
+                                     "created_by": None, "updated_at": t0, "ready_at": t0,
+                                     "info": {"inference": "shared"} if shared else {"gpu_mem_mb": 4096}, "info_at": t0,
+                                     "camera_limit": None, "camera_network": None})
+    return ci_id
+
+
+SHARED_GPUS = [{"index": 0, "name": "NVIDIA A40", "mem_total_mb": 49140, "mem_used_mb": 42000, "infer": None},
+               {"index": 1, "name": "NVIDIA A10G", "mem_total_mb": 23028, "mem_used_mb": 2000, "infer": "running"}]
+
+
+def shared_capacity(mode="shared", gpus=SHARED_GPUS):
+    return {**capacity(gpus=gpus), "inference": {"mode": mode, "gpus": [g["index"] for g in gpus if g.get("infer")],
+                                                "image": "axiom/instance:f575d27"}}
+
+
+def test_infer_trend_room_and_shares(world):
+    """The hub's view of a host's services: GPU-seconds per Site over its history (a service restart starts its
+    counters again), the busiest it was, and whether a card's service takes another Site; a shared Site holds no GPU
+    share, the card's service is counted once."""
+    org = world["org"]
+    loc = world["root"].post(f"/api/orgs/{org['id']}/locations", json={"name": "Yard Infer"}).json()
+    row, _ = hosts.create_host("Inferhost", None, None)
+    hid = row["id"]
+    a, b = _shared_row(hid, org, loc), _shared_row(hid, org, loc)
+    own = _shared_row(hid, org, loc, shared=False)
+    t = 2_000_000.0
+    try:
+        for sites, busy, up in (({a: (10, 1.0)}, 2.0, 100), ({a: (20, 3.0), b: (5, 0.5)}, 30.0, 130),
+                                ({a: (25, 0.4), b: (6, 0.2)}, 4.0, 10)):    # the last: the service restarted
+            t += 30
+            hosts.record_work(hid, {"at": t, "instances": {}, "infer": {"1": _infer(busy=busy, up=up, sites=sites)}}, t)
+        tr = hosts.infer_trend(hid)["1"]
+        assert tr["gpu_s"] == {a: 2.0 + 0.4, b: 0.5 + 0.2} and tr["busy_peak"] == 30.0 and tr["busy"] == 4.0 and tr["window_s"] == 60
+        assert hosts.work_history(hid)[-1]["infer_busy"] == 4.0
+        cap = shared_capacity()
+        assert hosts.share_mb(hosts.get_instance(a)) == 0.0 and hosts.share_mb(hosts.get_instance(own)) == 4096
+        assert hosts.gpu_reserved(hid, cap) == {1: 4096 + settings.central_infer_service_mb}
+        rooms = hosts.infer_room(hid, cap)
+        assert [(r["index"], r["service"], r["sites"], r["ok"], r["slots"]) for r in rooms] == [
+            (1, "running", 2, True, settings.central_infer_max_sites - 2)]
+        assert hosts.pick_shared_gpu(rooms) == 1
+        assert hosts.infer_room(hid, capacity()) == []                     # an agent before 0.4.0: no services
+        old = settings.central_infer_busy_max
+        settings.central_infer_busy_max = 25.0                             # 30 % lately: no new Site there
+        try:
+            r = hosts.infer_room(hid, cap)[0]
+            assert not r["ok"] and r["why"] == "busy 30% lately (limit 25%)" and hosts.pick_shared_gpu([r]) is None
+            assert "busy 30% lately" in hosts.infer_room_text([r])
+        finally:
+            settings.central_infer_busy_max = old
+        old = settings.central_infer_max_sites
+        settings.central_infer_max_sites = 2
+        try:
+            assert hosts.infer_room(hid, cap)[0]["why"] == "2 of 2 Sites"
+        finally:
+            settings.central_infer_max_sites = old
+        # a card with no service and too little memory for one takes no shared Site; one with room starts one
+        two = [{"index": 0, "name": "NVIDIA A10", "mem_total_mb": 23028, "mem_used_mb": 20000, "infer": None},
+               {"index": 2, "name": "NVIDIA A10", "mem_total_mb": 23028, "mem_used_mb": 500, "infer": None}]
+        db.run(sa.update(db.central_instances).where(db.central_instances.c.host_id == hid).values(state="deleted"))
+        rooms = hosts.infer_room(hid, shared_capacity(gpus=two))
+        assert [r["ok"] for r in rooms] == [False, True] and "GB free for a" in rooms[0]["why"]
+        assert hosts.pick_shared_gpu(rooms) == 2
+    finally:
+        hosts._work.pop(hid, None)
+        db.run(sa.update(db.central_instances).where(db.central_instances.c.host_id == hid).values(state="deleted"))
+        asyncio.run(hosts.delete_host(hid))
+
+
+def test_inference_slow_alert(world, superuser, monkeypatch):
+    """inference_slow: verify p95 over the limit for 5 minutes while requests come in opens it (hub administrators
+    only); answering fast again closes it. Not answering for 2 minutes while Sites use it opens it too."""
+    monkeypatch.setattr(alerts, "on_open", None)
+    org = world["org"]
+    loc = world["root"].post(f"/api/orgs/{org['id']}/locations", json={"name": "Yard Slow"}).json()
+    row, _ = hosts.create_host("Slowhost", None, None)
+    hid = row["id"]
+    ci = _shared_row(hid, org, loc)
+    opened = lambda: {r["key"]: r for r in _open(hid, hosts.INFER_KIND)}  # noqa: E731
+    t, req = 3_000_000.0, 0
+
+    def beat(p95, more=1, ok=True):
+        nonlocal t, req
+        t += 30
+        req += more
+        w = _infer(busy=80.0, p95=p95, up=t, sites={ci: (req, req * 0.1)}, ok=ok)
+        hosts.record_work(hid, {"at": t, "instances": {}, "infer": {"1": w}}, t)
+        hosts.check_infer_alerts(row, t)
+
+    try:
+        for _ in range(10):                       # 4.5 minutes slow: not yet
+            beat(4000.0)
+        assert opened() == {}
+        beat(4000.0)
+        rows = opened()
+        assert list(rows) == ["gpu1"] and rows["gpu1"]["org_id"] == hosts.HUB_ORG
+        d = rows["gpu1"]["detail"]
+        assert d["down"] is False and d["p95_ms"] == 4000.0 and "taken 4.0 s to verify" in d["text"], d
+        assert next(h for h in hosts.list_hosts() if h["id"] == hid)["queue_alerts"][0]["kind"] == hosts.INFER_KIND
+        beat(1500.0)                              # better, not yet half the limit: stays open
+        assert list(opened()) == ["gpu1"]
+        beat(300.0)
+        assert opened() == {}
+        # slow but idle (the p95 is of old requests): never opens
+        for _ in range(15):
+            beat(4000.0, more=0)
+        assert opened() == {}
+        # not answering for 2 minutes while a Site uses it
+        for _ in range(4):
+            beat(0, ok=False)
+        assert opened() == {}
+        beat(0, ok=False)
+        d = opened()["gpu1"]["detail"]
+        assert d["down"] is True and "has not answered for 2 minutes" in d["text"] and "from 1 Site wait" in d["text"]
+        beat(50.0)                                # back
+        assert opened() == {}
+    finally:
+        hosts._work.pop(hid, None)
+        db.run(sa.update(db.central_instances).where(db.central_instances.c.host_id == hid).values(state="deleted"))
+        asyncio.run(hosts.delete_host(hid))
+
+
+def test_shared_placement_and_switch(world):
+    """On a host whose Sites use its AI service: a new Site goes on the card with a service, holds no GPU share and is
+    created shared; it can move back to its own models (set_inference) and has no share to change while shared; the
+    services restart on a new image from the Hosts page. An older agent can't take a shared Site."""
+    base, root, org = world["base"], world["root"], world["org"]
+    host = root.post("/api/hub/hosts", json={"name": "Sharedhost"}).json()
+    hid = host["host"]["id"]
+    old_host = root.post("/api/hub/hosts", json={"name": "Oldagent"}).json()
+
+    def answer(cmd):
+        a = cmd["args"]
+        if cmd["op"] == "create_instance":
+            return {"ok": True, "detail": "created", "instance": {"id": a["id"], "state": "running", "inference": a.get("inference"),
+                                                                    "gpu_mem_mb": None if a.get("inference") == "shared" else a.get("gpu_mem_mb")}}
+        if cmd["op"] == "set_inference":
+            return {"ok": True, "detail": "recreated", "instance": {"id": a["id"], "state": "running", "inference": a["inference"],
+                                                                    "gpu_mem_mb": 4096 if a["inference"] == "per_instance" else None}}
+        return {"ok": True, "detail": "1 inference service(s) restarted"}
+    fh = FakeHost(base, host["token"], shared_capacity(), answer, "sharedhost")
+    fo = FakeHost(base, old_host["token"], capacity(), answer, "oldagent")
+    made = []
+    try:
+        wait(lambda: hosts.registry.online(hid) and hosts.registry.online(old_host["host"]["id"]))
+        locs = [root.post(f"/api/orgs/{org['id']}/locations", json={"name": f"Shared {i}"}).json() for i in range(3)]
+        r = root.post(f"/api/locations/{locs[0]['id']}/central", json={"mode": "vpn", "quota_gb": 100, "host_id": hid})
+        assert r.status_code == 200, r.text
+        ci = r.json()
+        made.append((locs[0], ci))
+        args = fh.cmds[-1]["args"]
+        assert ci["gpu"] == 1 and args["inference"] == "shared" and args["gpu"] == 1
+        wait(lambda: hosts.get_instance(ci["id"])["ready_at"])
+        assert hosts.get_instance(ci["id"])["info"]["inference"] == "shared"
+        listed = next(h for h in root.get("/api/hub/hosts").json()["hosts"] if h["id"] == hid)
+        assert listed["inference"] == "shared" and listed["infer_room"][0]["sites"] == 1
+        assert listed["infer_slots"] == settings.central_infer_max_sites - 1
+        got = next(c for c in root.get("/api/hub/central").json() if c["id"] == ci["id"])
+        assert got["inference"] == "shared" and got["gpu_share_mb"] == 0.0
+        # its service's work on the host card, and the Site's GPU time over the hub's history
+        for n in (1, 2):
+            work = {"at": time.time(), "instances": {}, "infer": {"1": _infer(busy=5.0, up=100 + n, sites={ci["id"]: (n * 10, n * 2.5)})}}
+            fh.send({"t": "heartbeat", "capacity": {**shared_capacity(), "work": work}, "instances": []})
+        listed = wait(lambda: next((h for h in root.get("/api/hub/hosts").json()["hosts"]
+                                    if h["id"] == hid and len(h["work_history"]) >= 2), None))
+        panel = listed["infer"][0]
+        assert panel["gpu"] == 1 and panel["state"] == "running" and panel["ok"] and panel["verify_p95_ms"] == 40.0 and panel["sites"] == 1
+        assert panel["top"] == [{"instance_id": ci["id"], "site": "Shared 0", "gpu_s": 2.5}]
+        got = next(c for c in root.get("/api/hub/central").json() if c["id"] == ci["id"])
+        assert got["infer_gpu_s"] == 2.5
+        # no share to change while shared
+        url = f"/api/locations/{locs[0]['id']}/central/{ci['id']}"
+        r = root.put(f"{url}/resources", json={"gpu_mem_mb": 6144})
+        assert r.status_code == 400 and "shared AI service" in r.text
+        # back to its own models, and onto the service again
+        r = root.put(f"{url}/inference", json={"inference": "per_instance"})
+        assert r.status_code == 200, r.text
+        assert fh.cmds[-1]["op"] == "set_inference" and fh.cmds[-1]["args"] == {"id": ci["id"], "inference": "per_instance"}
+        assert r.json()["inference"] == "per_instance" and r.json()["gpu_mem_mb"] == 4096
+        sent = len(fh.cmds)
+        assert root.put(f"{url}/inference", json={"inference": "per_instance"}).status_code == 200 and len(fh.cmds) == sent   # unchanged
+        assert root.put(f"{url}/inference", json={"inference": "nope"}).status_code == 422
+        act = db.rows(sa.select(db.audit_log).where(db.audit_log.c.org_id == org["id"],
+                                                    db.audit_log.c.action.like("central recording AI: Shared 0%")))
+        assert act and act[-1]["action"].endswith("the shared AI service -> its own models")
+        r = root.put(f"{url}/inference", json={"inference": "shared"})
+        assert r.status_code == 200 and r.json()["inference"] == "shared"
+        # a per_instance Site asked for explicitly on the same host gets a share
+        r = root.post(f"/api/locations/{locs[1]['id']}/central",
+                      json={"mode": "vpn", "quota_gb": 100, "host_id": hid, "inference": "per_instance"})
+        assert r.status_code == 200, r.text
+        made.append((locs[1], r.json()))
+        assert fh.cmds[-1]["args"]["inference"] == "per_instance" and fh.cmds[-1]["args"]["gpu_mem_mb"] == 4096
+        # an agent before 0.4.0 runs no services: a shared Site is refused there
+        r = root.post(f"/api/locations/{locs[2]['id']}/central",
+                      json={"mode": "vpn", "quota_gb": 100, "host_id": old_host["host"]["id"], "inference": "shared"})
+        assert r.status_code == 409 and "older than 0.4.0" in r.text
+        # the services restart on a new image (upgrades); a bad image name never reaches the host
+        r = root.post(f"/api/hub/hosts/{hid}/restart-infer", json={"image": "axiom/instance:abc1234"})
+        assert r.status_code == 200 and fh.cmds[-1]["op"] == "restart_infer" and fh.cmds[-1]["args"] == {"image": "axiom/instance:abc1234"}
+        assert root.post(f"/api/hub/hosts/{hid}/restart-infer", json={"image": "bad image; rm"}).status_code == 400
+        assert root.post(f"/api/hub/hosts/{old_host['host']['id']}/restart-infer", json={}).status_code == 409
+        assert {"set_inference", "restart_infer", "infer_status"} <= set(hosts.OPS)
+    finally:
+        fh.close()
+        fo.close()
+        for loc, c in made:
+            root.delete(f"/api/locations/{loc['id']}/central/{c['id']}?force=true")
+        hosts._work.pop(hid, None)

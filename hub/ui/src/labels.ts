@@ -11,6 +11,8 @@ export const KIND_LABEL: Record<string, string> = {
   db_errors: "Database write errors",
   // a central instance ran out of its share of the shared GPU: events may fail to verify
   gpu_memory_full: "GPU memory full",
+  // a central instance can't reach its host's shared AI service: events wait and verify once it answers
+  inference_unavailable: "AI service unavailable",
   // an Axiom Bridge at the Site stopped heartbeating: the cameras behind it are not recorded
   bridge_offline: "Bridge offline",
   // hub administrators only: a central recording host stopped heartbeating
@@ -21,6 +23,8 @@ export const KIND_LABEL: Record<string, string> = {
   host_queue_growing: "Central host queue growing",
   // hub administrators only: a central instance's data area (database, event media) is 90 % full or more
   instance_data_full: "Central data storage full",
+  // hub administrators only: a central host's shared AI service answers slowly, or not at all, while Sites use it
+  inference_slow: "Central AI service slow",
 };
 
 /**

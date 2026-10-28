@@ -69,7 +69,7 @@ log = logging.getLogger("hub.hosts")
 
 PROTO = 1
 OPS = ("create_instance", "delete_instance", "set_quota", "set_instance_quota", "set_camera_network", "restart_instance", "set_resources",
-       "set_relay", "list")
+       "set_relay", "list", "set_inference", "restart_infer", "infer_status")
 STATES = ("provisioning", "running", "failed", "deleting", "deleted")
 LIVE_STATES = ("provisioning", "running", "failed", "deleting")   # everything but deleted: holds its site number
 MODES = ("vpn", "forward", "bridge")
@@ -214,6 +214,7 @@ class HostRegistry:
             try:
                 record_work(conn.host_id, work, now)
                 check_work_alerts(conn.host, now)
+                check_infer_alerts(conn.host, now)
             except Exception:   # a malformed work object must never cost the heartbeat
                 log.exception("host %s: work queues", conn.host_id)
         for inst in (frame.get("instances") or [])[:1000] if isinstance(frame.get("instances"), list) else []:
@@ -221,7 +222,7 @@ class HostRegistry:
                 continue
             info = {k: inst.get(k) for k in ("state", "used_gb", "quota_gb", "gpu", "gpu_mem_mb", "mode", "location_id", "name",
                                              "host_ips", "cpus", "mem_gb", "gateway", "relay", "image", "image_id",
-                                             "instance_used_gb", "instance_quota_gb", "instance_free_gb")}
+                                             "instance_used_gb", "instance_quota_gb", "instance_free_gb", "inference")}
             # only this host's own instances: a host can never report on (or overwrite) another host's rows
             db.run(sa.update(db.central_instances).where(db.central_instances.c.id == str(inst["id"])[:24],
                                                          db.central_instances.c.host_id == conn.host_id).values(info=info, info_at=now))
@@ -348,6 +349,10 @@ def host_out(h: dict, instances: list[dict] | None = None, open_alerts: dict | N
             # the cards instances go on: GPU shares on each and room for more (placement refuses a card without room)
             "gpu_room": [{k: (round(v) if isinstance(v, float) else v) for k, v in g.items()} for g in room["gpus"]],
             "gpu_slots": room["gpu_slots"],
+            # shared inference (agent 0.4.0+): how new GPU Sites run their models (None = an older agent), each card's
+            # room for Sites on its service, and each service's work with the Sites that used it most (infer_panel)
+            "inference": room["inference"], "infer_room": room["infer"], "infer_slots": room["infer_slots"],
+            "infer": infer_panel(h, room["infer"]),
             "offline_since": (open_alerts or {}).get(h["id"]),
             # capacity.work over time (the sparklines) and what is growing; queue_alerts: open host_queue_growing rows
             "work_history": work_history(h["id"]), "work_trend": work_trend(h["id"]),
@@ -361,12 +366,12 @@ def list_hosts() -> list[dict]:
     inst = db.rows(sa.select(db.central_instances).where(db.central_instances.c.state.in_(LIVE_STATES)))
     open_alerts: dict = {}
     queue_alerts: dict = {}
-    for r in db.rows(sa.select(db.alerts).where(db.alerts.c.org_id == HUB_ORG, db.alerts.c.kind.in_(("host_offline", QUEUE_KIND)),
+    for r in db.rows(sa.select(db.alerts).where(db.alerts.c.org_id == HUB_ORG, db.alerts.c.kind.in_(("host_offline", QUEUE_KIND, INFER_KIND)),
                                                 db.alerts.c.closed_at.is_(None)).order_by(db.alerts.c.opened_at)):
         if r["kind"] == "host_offline":
             open_alerts[r["site_id"]] = r["opened_at"]
         else:
-            queue_alerts.setdefault(r["site_id"], []).append({**(r["detail"] or {}), "key": r["key"], "opened_at": r["opened_at"]})
+            queue_alerts.setdefault(r["site_id"], []).append({**(r["detail"] or {}), "kind": r["kind"], "key": r["key"], "opened_at": r["opened_at"]})
     qwen = ai_schedule.server_days([i["server_id"] for i in inst if i.get("server_id")], QWEN_DAYS)
     return [host_out(h, inst, open_alerts, queue_alerts, qwen) for h in hosts]
 
@@ -406,14 +411,19 @@ def record_work(host_id: str, work: dict, now: float | None = None) -> dict:
     vok = v.get("ok") is True
     known = [x for x in q.values() if x is not None]
     sample = {"t": now, "vllm_waiting": _num(v.get("waiting")) if vok else None, "vllm_running": _num(v.get("running")) if vok else None,
-              "verify_q": sum(known) if known else None, "q": q}
+              "verify_q": sum(known) if known else None, "q": q, "infer": _infer_sample(work.get("infer"))}
     _work.setdefault(host_id, collections.deque(maxlen=WORK_HISTORY)).append(sample)
     return sample
 
 
 def work_history(host_id: str) -> list[dict]:
-    """[{t, vllm_waiting, vllm_running, verify_q}] oldest first (the Hosts page's sparklines)."""
-    return [{k: s[k] for k in ("t", "vllm_waiting", "vllm_running", "verify_q")} for s in _work.get(host_id, ())]
+    """[{t, vllm_waiting, vllm_running, verify_q, infer_busy}] oldest first (the Hosts page's sparklines); infer_busy =
+    the busiest inference service's GPU busy %, None without one."""
+    out = []
+    for s in _work.get(host_id, ()):
+        busy = [x["busy"] for x in (s.get("infer") or {}).values() if x["busy"] is not None]
+        out.append({**{k: s[k] for k in ("t", "vllm_waiting", "vllm_running", "verify_q")}, "infer_busy": max(busy) if busy else None})
+    return out
 
 
 def _ago(samples: list[dict], now: float, secs: float) -> dict | None:
@@ -493,6 +503,308 @@ def check_work_alerts(host: dict, now: float | None = None) -> None:
         alerts.open(subject, QUEUE_KIND, "vllm", {"text": text, "host": hname, "queue": "vllm", "value": tr["vllm_waiting"]})
     elif "vllm" in open_keys and tr["vllm_waiting"] == 0:
         alerts.close(subject, QUEUE_KIND, "vllm")
+
+
+# ---------------------------------------------------------------- shared inference services (host agent 0.4.0+)
+# A host can run one model service per card (axiom-infer-gpu<N>, backend nvr/inferd.py) that its "shared" instances
+# send frames to instead of loading YOLO, PPE, re-ID and CLIP each (docs/shared-inference-plan.md). capacity.inference
+# says the host's default for new GPU instances, gpus[].infer each service's container state, and work.infer each
+# service's load: GPU busy % over the last minute, verify latency, queues, memory, and per instance its GPU-seconds
+# since the service started (counters; the hub turns them into time over its own history).
+
+INFER_MODES = ("per_instance", "shared")
+INFER_KIND = "inference_slow"
+INFER_SLOW_S = 5 * 60        # verify p95 over central_infer_slow_ms for this long, with requests coming in: open
+INFER_DOWN_S = 2 * 60        # not answering this long while Sites use it: open (each Site raises inference_unavailable too)
+INFER_IDLE_S = 10 * 60       # no new requests this long: an open slow alert closes (its p95 is of old requests)
+INFER_TOP = 5                # the Sites with the most GPU time shown per service
+
+
+def host_inference(capacity: dict | None) -> str | None:
+    """How the host runs new GPU instances' models (host.json inference): per_instance or shared; None = an agent
+    before 0.4.0 (no inference services)."""
+    inf = (capacity or {}).get("inference")
+    mode = inf.get("mode") if isinstance(inf, dict) else None
+    return mode if mode in INFER_MODES else None
+
+
+def is_shared(ci: dict) -> bool:
+    """The instance's models run on its card's inference service (as last reported, or as placed)."""
+    return (ci.get("info") or {}).get("inference") == "shared"
+
+
+def _infer_sample(infer) -> dict:
+    """capacity.work.infer -> {gpu (str): {ok, busy, p95, up, req, gpu_s: {instance id: GPU-seconds}}} for one sample.
+    A service that did not answer keeps only ok False (its last good numbers are old)."""
+    out: dict[str, dict] = {}
+    for g, w in list(infer.items())[:16] if isinstance(infer, dict) else []:
+        if not isinstance(w, dict):
+            continue
+        ok = w.get("ok") is True
+        insts = w.get("instances") if ok and isinstance(w.get("instances"), dict) else {}
+        gs = {str(i)[:24]: _num(x.get("gpu_s")) or 0.0 for i, x in list(insts.items())[:1000] if isinstance(x, dict)}
+        req = [_num(x.get("requests")) for x in insts.values() if isinstance(x, dict)]
+        out[str(g)] = {"ok": ok, "busy": _num(w.get("busy_pct")) if ok else None, "p95": _num(w.get("verify_p95_ms")) if ok else None,
+                       "up": _num(w.get("uptime_s")) if ok else None, "req": sum(r for r in req if r is not None) if ok else None,
+                       "gpu_s": gs}
+    return out
+
+
+def infer_trend(host_id: str) -> dict[str, dict]:
+    """Per card (str) with a service in the hub's history: {ok, busy, busy_peak, p95, window_s, gpu_s: {instance id:
+    GPU-seconds over the window}, down_for_s, slow_for_s, idle_for_s}. busy_peak = the highest busy % in the window
+    (placement's check); gpu_s adds each heartbeat's increase (a service restart starts its counters at 0 again);
+    down_for_s / slow_for_s / idle_for_s: how long, up to the last heartbeat and without a gap, it has not answered /
+    answered verify slower than central_infer_slow_ms / had no new requests (0 = not now)."""
+    samples = list(_work.get(host_id, ()))
+    cards = sorted({g for s in samples for g in (s.get("infer") or {})})
+    out: dict[str, dict] = {}
+    slow = float(settings.central_infer_slow_ms)
+    for g in cards:
+        seq = [(s["t"], s["infer"][g]) for s in samples if g in (s.get("infer") or {})]
+        t_last, last = seq[-1]
+        busy = [x["busy"] for _, x in seq if x["busy"] is not None]
+        gpu_s: dict[str, float] = {}
+        for (_, a), (_, b) in zip(seq, seq[1:]):
+            if not (a["ok"] and b["ok"]):
+                continue
+            restarted = (b["up"] or 0) < (a["up"] or 0)
+            for iid, v in b["gpu_s"].items():
+                d = v if restarted else v - a["gpu_s"].get(iid, 0.0)
+                if d > 0:
+                    gpu_s[iid] = gpu_s.get(iid, 0.0) + d
+
+        def run(pred) -> float:
+            """How long pred has held, up to the last sample, without a gap of more than MAX_GAP_S."""
+            if not pred(last):
+                return 0.0
+            start = t_last
+            for t, x in reversed(seq[:-1]):
+                if not pred(x) or start - t > MAX_GAP_S:
+                    break
+                start = t
+            return t_last - start
+
+        idle_for = 0.0
+        if last["ok"] and last["req"] is not None:
+            start = t_last
+            for t, x in reversed(seq[:-1]):
+                if not x["ok"] or x["req"] != last["req"] or (x["up"] or 0) > (last["up"] or 0) or start - t > MAX_GAP_S:
+                    break
+                start = t
+            idle_for = t_last - start
+        out[g] = {"ok": last["ok"], "busy": last["busy"], "busy_peak": max(busy) if busy else None, "p95": last["p95"],
+                  "window_s": t_last - seq[0][0], "gpu_s": {k: round(v, 3) for k, v in gpu_s.items()},
+                  "down_for_s": run(lambda x: not x["ok"]),
+                  "slow_for_s": run(lambda x: x["ok"] and x["p95"] is not None and x["p95"] > slow), "idle_for_s": idle_for}
+    return out
+
+
+def _infer_gpu_s(trend: dict | None, ci: dict) -> float | None:
+    if not trend or ci.get("gpu") is None or not is_shared(ci):
+        return None
+    t = trend.get(str(ci["gpu"]))
+    return t["gpu_s"].get(ci["id"], 0.0) if t else None
+
+
+def _shared_on(insts: list[dict]) -> dict[int, int]:
+    """Shared instances per card."""
+    out: dict[int, int] = {}
+    for ci in insts:
+        if ci.get("gpu") is not None and is_shared(ci):
+            out[ci["gpu"]] = out.get(ci["gpu"], 0) + 1
+    return out
+
+
+def infer_room(host_id: str, capacity: dict | None, rooms: list[dict] | None = None, insts: list[dict] | None = None) -> list[dict]:
+    """Each card instances are placed on, for one more Site on its inference service: {index, name, service (its
+    container state, None = none yet), sites (its shared instances), max_sites, busy_peak (% over the hub's history),
+    ok, why, slots}. ok: fewer than central_infer_max_sites Sites, never busier than central_infer_busy_max lately, and
+    a service already there or GPU memory for one (central_infer_service_mb; gpu_room). An empty list on a host whose
+    agent runs no services."""
+    if host_inference(capacity) is None:
+        return []
+    if insts is None:
+        insts = db.rows(sa.select(db.central_instances).where(db.central_instances.c.host_id == host_id,
+                                                              db.central_instances.c.state.in_(LIVE_STATES)))
+    if rooms is None:
+        rooms = gpu_room(capacity, gpu_reserved(host_id, capacity))
+    by_card = {g["index"]: g for g in _gpus(capacity)}
+    n = _shared_on(insts)
+    trend = infer_trend(host_id)
+    cap_sites, busy_max = int(settings.central_infer_max_sites), float(settings.central_infer_busy_max)
+    out = []
+    for r in rooms:
+        g = by_card.get(r["index"]) or {}
+        state = g.get("infer") if isinstance(g.get("infer"), str) else None
+        sites = n.get(r["index"], 0)
+        peak = (trend.get(str(r["index"])) or {}).get("busy_peak")
+        if sites >= cap_sites:
+            why = f"{sites} of {cap_sites} Sites"
+        elif peak is not None and peak >= busy_max:
+            why = f"busy {peak:.0f}% lately (limit {busy_max:.0f}%)"
+        elif not state and not sites and r["room_mb"] < settings.central_infer_service_mb:
+            why = f"{r['room_mb'] / 1024:.1f} GB free for a {settings.central_infer_service_mb / 1024:g} GB service"
+        else:
+            why = None
+        out.append({"index": r["index"], "name": r.get("name"), "service": state, "sites": sites, "max_sites": cap_sites,
+                    "busy_peak": peak, "ok": why is None, "why": why, "slots": max(0, cap_sites - sites) if why is None else 0})
+    return out
+
+
+def pick_shared_gpu(rooms: list[dict]) -> int | None:
+    """The card a new shared Site goes on: one whose service has room (infer_room ok), a card already running one
+    first (no second service while one has room), then the fewest Sites, the least busy, the lowest index."""
+    pool = [r for r in rooms if r["ok"]]
+    if not pool:
+        return None
+    return min(pool, key=lambda r: (not (r["service"] or r["sites"]), r["sites"], r["busy_peak"] or 0.0, r["index"]))["index"]
+
+
+def infer_room_text(rooms: list[dict]) -> str:
+    """"GPU 1 NVIDIA A10G: 30 of 30 Sites" for each card: why its service takes no more Sites, or how many more."""
+    return "; ".join(f"GPU {r['index']} {r['name']}: {r['why'] or 'room for %d more' % r['slots']}" for r in rooms) or "no GPUs"
+
+
+def infer_panel(host: dict, rooms: list[dict] | None = None) -> list[dict]:
+    """The host card's AI service lines: per card with a service (in any state) or one in the work report, its state
+    and load now, the busiest it was in the hub's history, verify latency, memory, its Sites, and the INFER_TOP Sites
+    by GPU time over that history."""
+    cap = host.get("capacity") if isinstance(host.get("capacity"), dict) else {}
+    work = cap.get("work") if isinstance(cap.get("work"), dict) else {}
+    winfer = work.get("infer") if isinstance(work.get("infer"), dict) else {}
+    trend = infer_trend(host["id"])
+    room = {str(r["index"]): r for r in (rooms or [])}
+    out = []
+    for g in _gpus(cap):
+        k = str(g["index"])
+        w = winfer.get(k) if isinstance(winfer.get(k), dict) else None
+        if not g.get("infer") and w is None:
+            continue
+        t = trend.get(k) or {}
+        ok = bool(w and w.get("ok") is True)
+        queues = (w or {}).get("queues") if isinstance((w or {}).get("queues"), dict) else {}
+        top = sorted((t.get("gpu_s") or {}).items(), key=lambda kv: -kv[1])[:INFER_TOP]
+        out.append({"gpu": g["index"], "name": g.get("name"), "state": g.get("infer") if isinstance(g.get("infer"), str) else None,
+                    "ok": ok, "error": str((w or {}).get("error") or "")[:300] or None if not ok else None,
+                    **{f: _num((w or {}).get(f)) for f in ("busy_pct", "verify_p50_ms", "verify_p95_ms", "verify_wait_p50_ms",
+                                                           "reserved_mb", "peak_mb", "oom", "uptime_s")},
+                    "queues": {q: _num(v) for q, v in queues.items()}, "busy_peak": t.get("busy_peak"), "window_s": t.get("window_s"),
+                    "sites": (room.get(k) or {}).get("sites"), "max_sites": (room.get(k) or {}).get("max_sites"),
+                    "top": [{"instance_id": iid, "site": _site_label(iid)[0], "gpu_s": round(v, 1)} for iid, v in top if v > 0]})
+    return out
+
+
+def check_infer_alerts(host: dict, now: float | None = None) -> None:
+    """inference_slow (hub administrators only: alerts.HUB_KINDS), one row per (host, gpu<N>):
+      slow  the service's verify p95 above central_infer_slow_ms for INFER_SLOW_S with requests coming in: its card is
+            too busy for its Sites (add a card, or move Sites)
+      down  it has not answered for INFER_DOWN_S while Sites use it (each of them raises inference_unavailable too)
+    Closes once it answers with verify p95 at or below half the limit (or none yet), has been idle INFER_IDLE_S, is
+    down with no Sites left on it, or is no longer reported."""
+    tr = infer_trend(host["id"])
+    subject = _alert_subject(host)
+    hname = host.get("name") or host["id"]
+    slow = float(settings.central_infer_slow_ms)
+    open_keys = {r["key"] for r in db.rows(sa.select(db.alerts.c.key).where(
+        db.alerts.c.org_id == HUB_ORG, db.alerts.c.site_id == host["id"], db.alerts.c.kind == INFER_KIND, db.alerts.c.closed_at.is_(None)))}
+    users = _shared_on(db.rows(sa.select(db.central_instances).where(db.central_instances.c.host_id == host["id"],
+                                                                     db.central_instances.c.state.in_(LIVE_STATES))))
+    for g, t in tr.items():
+        key = f"gpu{g}"
+        n = users.get(int(g), 0) if g.isdigit() else 0
+        if key not in open_keys:
+            if t["down_for_s"] >= INFER_DOWN_S and n:
+                text = (f"{hname}: the AI service on GPU {g} has not answered for {int(t['down_for_s'] // 60)} minutes; "
+                        f"events from {n} Site{'' if n == 1 else 's'} wait to be verified")
+                alerts.open(subject, INFER_KIND, key, {"text": text, "host": hname, "gpu": g, "down": True, "sites": n})
+            elif t["slow_for_s"] >= INFER_SLOW_S and t["idle_for_s"] < t["slow_for_s"]:
+                text = (f"{hname}: the AI service on GPU {g} has taken {t['p95'] / 1000:.1f} s to verify (p95; limit {slow / 1000:g} s) "
+                        f"for {int(t['slow_for_s'] // 60)} minutes at {t['busy'] or 0:.0f}% busy: add a GPU or move Sites")
+                alerts.open(subject, INFER_KIND, key, {"text": text, "host": hname, "gpu": g, "down": False, "sites": n,
+                                                       "p95_ms": t["p95"], "busy_pct": t["busy"]})
+        elif t["ok"] and (t["p95"] is None or t["p95"] <= slow / 2 or t["idle_for_s"] >= INFER_IDLE_S):
+            alerts.close(subject, INFER_KIND, key)
+        elif not t["ok"] and not n:
+            alerts.close(subject, INFER_KIND, key)
+    for key in open_keys:
+        if key[len("gpu"):] not in tr:   # the service is gone from the reports
+            alerts.close(subject, INFER_KIND, key)
+
+
+async def set_inference(ci_id: str, mode: str, by_user: dict | None) -> dict:
+    """Move a Site's instance onto its card's shared inference service or back to its own models: a set_inference
+    round trip (the host recreates it, ~30 s without recording; to shared only once the service answers), then kept
+    in its info and audited. The card's service needs room for another Site; going back, the card needs room for a
+    GPU share. ValueError = bad input, Conflict = no room / an older agent, HostError = offline or refused (nothing
+    changed then)."""
+    ci = get_instance(ci_id)
+    if not ci or ci["state"] in ("deleting", "deleted"):
+        raise LookupError("unknown central instance")
+    if mode not in INFER_MODES:
+        raise ValueError("inference must be per_instance or shared")
+    if ci["gpu"] is None:
+        raise ValueError("this instance has no GPU: its models run on the CPU")
+    host = db.one(sa.select(db.hosts).where(db.hosts.c.id == ci["host_id"])) or {}
+    cap = host.get("capacity")
+    if host_inference(cap) is None:
+        raise Conflict(f"host {host.get('name') or ci['host_id']}'s agent is older than 0.4.0: it runs no shared AI service")
+    info = ci.get("info") or {}
+    before = "shared" if is_shared(ci) else "per_instance"
+    if mode == before:
+        return ci
+    if mode == "shared":
+        r = next((x for x in infer_room(ci["host_id"], cap) if x["index"] == ci["gpu"]), None)
+        if r is not None and not r["ok"]:
+            raise Conflict(f"GPU {ci['gpu']}'s AI service has no room for another Site ({r['why']})")
+    else:
+        need = float(settings.central_gpu_mem_mb)
+        r = next((x for x in gpu_room(cap, gpu_reserved(ci["host_id"], cap)) if x["index"] == ci["gpu"]), None)
+        if r is not None and r["room_mb"] < need:
+            raise Conflict(f"GPU {ci['gpu']} has {r['room_mb'] / 1024:.1f} GB left for shares: not enough for this Site's own "
+                           f"models ({need / 1024:g} GB)")
+    res = await registry.command(ci["host_id"], "set_inference", {"id": ci_id, "inference": mode}, settings.host_create_timeout_s)
+    if not res.get("ok"):
+        raise HostError(str(res.get("detail") or "the host refused"))
+    got = res.get("instance") if isinstance(res.get("instance"), dict) else {}
+    after = {"inference": got.get("inference") if got.get("inference") in INFER_MODES else mode}
+    for k in ("gpu_mem_mb", "state", "image", "image_id"):
+        if k in got:
+            after[k] = got[k]
+    _set(ci_id, info={**info, **after}, info_at=time.time())
+    loc = db.one(sa.select(db.locations.c.name).where(db.locations.c.id == ci["location_id"])) or {"name": ci["location_id"]}
+    say = {"shared": "the shared AI service", "per_instance": "its own models"}
+    _audit(by_user, ci["org_id"], ci["server_id"], f"central recording AI: {loc['name']} {say[before]} -> {say[after['inference']]}",
+           {"location_id": ci["location_id"], "instance_id": ci_id, "host_id": ci["host_id"], "gpu": ci["gpu"], "from": before,
+            "to": after["inference"], "detail": str(res.get("detail") or "")[:300]})
+    return get_instance(ci_id) or ci
+
+
+IMAGE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/:@-]{0,199}")
+
+
+async def restart_infer(host_id: str, gpu: int | None, image: str | None, by_user: dict | None) -> dict:
+    """Recreate the host's inference services (or `gpu`'s), on `image` from now on when given (upgrades): their Sites'
+    events wait while the models load (~30-60 s) and verify after. The host's answer ({ok, detail, ...}); LookupError
+    = unknown host, Conflict = an agent without services, HostError = offline or refused."""
+    host = db.one(sa.select(db.hosts).where(db.hosts.c.id == host_id))
+    if not host:
+        raise LookupError("unknown host")
+    if host_inference(host.get("capacity")) is None:
+        raise Conflict(f"host {host['name']}'s agent is older than 0.4.0: it runs no shared AI service")
+    if image is not None and not IMAGE_RE.fullmatch(image):
+        raise ValueError("the image must look like axiom/instance:2096ed5")
+    args: dict = {}
+    if gpu is not None:
+        args["gpu"] = gpu
+    if image:
+        args["image"] = image
+    res = await registry.command(host_id, "restart_infer", args, settings.host_create_timeout_s)
+    if not res.get("ok"):
+        raise HostError(str(res.get("detail") or "the host refused"))
+    _audit(by_user, None, None, f"AI service restarted: {host['name']}{f' GPU {gpu}' if gpu is not None else ''}{f' on {image}' if image else ''}",
+           {"host_id": host_id, "gpu": gpu, "image": image, "detail": str(res.get("detail") or "")[:300]})
+    return res
 
 
 # ---------------------------------------------------------------- the instances' data areas
@@ -579,7 +891,10 @@ GPU_CONTEXT_MB = 512   # the CUDA context outside an instance's torch count (nvr
 
 def share_mb(ci: dict, work: dict | None = None) -> float:
     """What an instance holds of its card for placement: its GPU share; one running without a share (created before
-    shares, or 0 = no cap) counts as the default share, or as its own peak if that was more."""
+    shares, or 0 = no cap) counts as the default share, or as its own peak if that was more. One on its card's shared
+    inference service holds none (the service is counted once per card: gpu_reserved)."""
+    if is_shared(ci):
+        return 0.0
     info = ci.get("info") or {}
     s = _num(info.get("gpu_mem_mb"))
     if s:
@@ -589,13 +904,19 @@ def share_mb(ci: dict, work: dict | None = None) -> float:
 
 
 def gpu_reserved(host_id: str, capacity: dict | None = None) -> dict[int, float]:
-    """MB of GPU shares on each of the host's cards: its live instances (share_mb)."""
+    """MB of GPU shares on each of the host's cards: its live instances (share_mb), plus central_infer_service_mb on a
+    card that runs an inference service or has Sites on one."""
     work = (capacity or {}).get("work") if isinstance((capacity or {}).get("work"), dict) else None
     out: dict[int, float] = {}
+    service = {g["index"] for g in _gpus(capacity) if g.get("infer")}
     for ci in db.rows(sa.select(db.central_instances).where(db.central_instances.c.host_id == host_id,
                                                            db.central_instances.c.state.in_(LIVE_STATES))):
         if ci["gpu"] is not None:
             out[ci["gpu"]] = out.get(ci["gpu"], 0.0) + share_mb(ci, work)
+            if is_shared(ci):
+                service.add(ci["gpu"])
+    for g in service:
+        out[g] = out.get(g, 0.0) + float(settings.central_infer_service_mb)
     return out
 
 
@@ -657,13 +978,17 @@ def host_room(host: dict) -> dict:
     for i in inst:
         used = float(((i.get("info") or {}).get("used_gb")) or 0)
         committed += max(0.0, float(i["quota_gb"] or 0) - used)
+    infer = infer_room(host["id"], cap, rooms, inst)
     return {"gpu_free_mb": gpu_free, "gpu_slots": sum(r["slots"] for r in rooms), "gpu_cards": len(rooms), "gpus": rooms,
-            "instances": len(inst), "disk_free_gb": disk_free, "room_gb": disk_free - committed}
+            "instances": len(inst), "disk_free_gb": disk_free, "room_gb": disk_free - committed,
+            "inference": host_inference(cap), "infer": infer, "infer_slots": sum(r["slots"] for r in infer)}
 
 
-def pick_host(quota_gb: int, need_mb: float | None = None) -> dict | None:
+def pick_host(quota_gb: int, need_mb: float | None = None, inference: str | None = None) -> dict | None:
     """Auto placement: among online hosts with disk room for the quota and (hosts with GPUs) a card with room for the
-    new instance's GPU share, the most room for more shares, then the most GPU room, then the fewest instances."""
+    new instance: its GPU share, or on a host whose Sites use its shared inference service (its own default, or
+    inference="shared"), a service with room for another Site (infer_room). Then the most room for more Sites, the
+    most GPU room, the fewest instances. inference="shared" passes over hosts whose agent has no services (< 0.4.0)."""
     need = float(need_mb if need_mb is not None else settings.central_gpu_mem_mb)
     best, best_key = None, None
     for h in db.rows(sa.select(db.hosts)):
@@ -672,9 +997,14 @@ def pick_host(quota_gb: int, need_mb: float | None = None) -> dict | None:
         r = host_room(h)
         if r["room_gb"] < quota_gb:
             continue
-        if r["gpu_cards"] and not any(g["room_mb"] >= need for g in r["gpus"]):
+        if inference == "shared" and r["inference"] is None:
             continue
-        k = (-r["gpu_slots"], -r["gpu_free_mb"], r["instances"], h["name"])
+        shared = r["gpu_cards"] > 0 and (inference or r["inference"]) == "shared"
+        if shared and not r["infer_slots"]:
+            continue
+        if r["gpu_cards"] and not shared and not any(g["room_mb"] >= need for g in r["gpus"]):
+            continue
+        k = (-(r["infer_slots"] if shared else r["gpu_slots"]), -r["gpu_free_mb"], r["instances"], h["name"])
         if best_key is None or k < best_key:
             best, best_key = h, k
     return best
@@ -936,11 +1266,13 @@ _tasks: set[asyncio.Task] = set()
 
 async def provision(location_id: str, host_id: str | None, mode: str, subnet: str | None, public_ip: str | None, quota_gb: int,
                     by_user: dict | None, *, name: str | None = None, gpu: int | None = None, camera_limit: int | None = None,
-                    gpu_mem_mb: int | None = None, wait: bool = False) -> dict:
+                    gpu_mem_mb: int | None = None, inference: str | None = None, wait: bool = False) -> dict:
     """Place a central instance for a Site and ask its host to create it. Returns the new row at once (state
     provisioning); the host's answer arrives in the background (wait=True: before returning). ValueError = bad input,
     LookupError = unknown Site or host, Conflict = cannot be placed now (no host, or no card with room for its GPU
-    share). camera_limit: None = no limit. gpu_mem_mb: its share of the GPU, None = central_gpu_mem_mb."""
+    share or on its service). camera_limit: None = no limit. gpu_mem_mb: its share of the GPU, None =
+    central_gpu_mem_mb (kept by the host for a switch back while it is shared). inference: how its models run
+    (per_instance / shared), None = its host's default (host.json inference; per_instance before agent 0.4.0)."""
     loc = db.one(sa.select(db.locations).where(db.locations.c.id == location_id))
     if not loc:
         raise LookupError("unknown site")
@@ -951,6 +1283,8 @@ async def provision(location_id: str, host_id: str | None, mode: str, subnet: st
     if not isinstance(quota_gb, int) or quota_gb < 10:   # axiom_host refuses less than 10 GB
         raise ValueError("the storage quota must be at least 1 GB")
     _check_limit(camera_limit)
+    if inference is not None and inference not in INFER_MODES:
+        raise ValueError("inference must be per_instance or shared")
     share = _check_share(gpu_mem_mb) or settings.central_gpu_mem_mb
     public = _check_public(public_ip) if public_ip and public_ip.strip() else None
     if mode == "forward" and not public:
@@ -967,18 +1301,34 @@ async def provision(location_id: str, host_id: str | None, mode: str, subnet: st
         if not registry.online(host_id):
             raise Conflict(f"host {host['name']} is offline")
     else:
-        host = pick_host(quota_gb, share)
+        host = pick_host(quota_gb, share, inference)
         if not host:
-            raise Conflict(f"no online host has room for that quota and a {share / 1024:g} GB GPU share")
+            what = "a Site on its AI service" if inference == "shared" else f"a {share / 1024:g} GB GPU share"
+            raise Conflict(f"no online host has room for that quota and {what}")
     cap = host.get("capacity")
+    host_mode = host_inference(cap)
+    if inference == "shared" and host_mode is None:
+        raise Conflict(f"host {host['name']}'s agent is older than 0.4.0: it runs no shared AI service")
+    if inference == "shared" and not _gpus(cap):
+        raise ValueError(f"host {host['name']} has no GPU: a shared AI service runs on one")
+    shared = bool(_gpus(cap)) and (inference or host_mode) == "shared"
     reserved = gpu_reserved(host["id"], cap)
-    if gpu is None:
+    if gpu is None and shared:
+        rooms = infer_room(host["id"], cap)
+        gpu = pick_shared_gpu(rooms)
+        if gpu is None:
+            raise Conflict(f"host {host['name']}: no GPU's AI service has room for another Site ({infer_room_text(rooms)})")
+    elif gpu is None:
         try:
             gpu = pick_gpu(cap, _assigned_gpus(host["id"]), reserved, share)
         except NoGpuRoom as e:
             raise Conflict(f"host {host['name']}: {e} ({gpu_room_text(cap, reserved)})") from None
     elif gpu not in {g["index"] for g in _gpus(cap)}:
         raise ValueError(f"host {host['name']} has no GPU {gpu}")
+    elif shared:
+        r = next((x for x in infer_room(host["id"], cap) if x["index"] == gpu), None)
+        if r is not None and not r["ok"]:
+            raise Conflict(f"GPU {gpu} on {host['name']}: its AI service has no room for another Site ({r['why']})")
     else:
         # a chosen card still needs room for the share (an A40 chosen by hand is not counted against vLLM's use)
         r = next((x for x in gpu_room(cap, reserved) if x["index"] == gpu), None)
@@ -1008,8 +1358,9 @@ async def provision(location_id: str, host_id: str | None, mode: str, subnet: st
                       "quota_gb": quota_gb, "gpu": gpu, "state": "provisioning", "last_error": None, "created_at": t,
                       "created_by": (by_user or {}).get("id"), "updated_at": t, "ready_at": None, "info": None, "info_at": None,
                       "camera_limit": camera_limit,
-                      # its GPU share until the host's heartbeat reports it (placement counts it from the start)
-                      **({"info": {"gpu_mem_mb": share}} if gpu is not None else {}),
+                      # its GPU share (or its place on the card's AI service) until the host's heartbeat reports it:
+                      # placement counts it from the start
+                      **({"info": {"inference": "shared"} if shared else {"gpu_mem_mb": share}} if gpu is not None else {}),
                       # the Site networks = what the host's create_instance allows: the subnet and the public address,
                       # whatever the mode; the cameras' own public addresses are added (auto) as they are set up
                       "camera_network": {**site_nets, "auto": {"public_ips": [], "hosts": []}, "applied": site_nets}}
@@ -1025,10 +1376,12 @@ async def provision(location_id: str, host_id: str | None, mode: str, subnet: st
             "quota_gb": quota_gb, "gpu": gpu, "enroll_token": token, "hub_url": hub_agent_url(), "vlm_url": settings.central_vlm_url}
     if gpu is not None:
         args["gpu_mem_mb"] = share
+    if host_mode is not None:   # agent 0.4.0+: say which, whatever its own default
+        args["inference"] = "shared" if shared else "per_instance"
     _audit(by_user, loc["org_id"], None, f"central recording provisioning: {loc['name']} on {host['name']}",
            {"location_id": location_id, "instance_id": ci["id"], "host_id": host["id"], "mode": mode, "subnet": ci["subnet"],
             "public_ip": public, "site_number": ci["site_number"], "quota_gb": quota_gb, "gpu": gpu, "camera_limit": camera_limit,
-            "gpu_mem_mb": share if gpu is not None else None})
+            "gpu_mem_mb": share if gpu is not None and not shared else None, "inference": args.get("inference")})
     task = asyncio.create_task(_create(ci, args, loc, host), name=f"central-create-{ci['id']}")
     _tasks.add(task)
     task.add_done_callback(_tasks.discard)
@@ -1050,8 +1403,9 @@ async def _create(ci: dict, args: dict, loc: dict, host: dict) -> None:
     if ok:
         vals: dict = {"ready_at": time.time()}
         if isinstance(res.get("instance"), dict):
-            # the GPU share placement counted stays unless the host says otherwise (an agent before 0.3.3 doesn't)
-            share = {"gpu_mem_mb": (cur.get("info") or {}).get("gpu_mem_mb")} if (cur.get("info") or {}).get("gpu_mem_mb") else {}
+            # the GPU share (or shared AI) placement counted stays unless the host says otherwise (an agent before
+            # 0.3.3 / 0.4.0 doesn't)
+            share = {k: (cur.get("info") or {})[k] for k in ("gpu_mem_mb", "inference") if (cur.get("info") or {}).get(k)}
             vals |= {"info": {**share, **res["instance"]}, "info_at": time.time()}
         _set(ci["id"], **vals)
         log.info("central instance %s created on %s", ci["id"], host["name"])
@@ -1184,6 +1538,8 @@ async def set_resources(ci_id: str, cpus: float | None, mem_gb: float | None, by
     _check_share(gpu_mem_mb)
     if gpu_mem_mb is not None and ci["gpu"] is None:
         raise ValueError("this instance has no GPU: a GPU share needs one")
+    if gpu_mem_mb is not None and is_shared(ci):
+        raise ValueError("this Site's models run on its host's shared AI service: it has no GPU share (move it back to its own models first)")
     if cpus is not None and not CPUS_RANGE[0] <= cpus <= CPUS_RANGE[1]:
         raise ValueError(f"CPUs must be {CPUS_RANGE[0]}-{CPUS_RANGE[1]}")
     if mem_gb is not None and not MEM_GB_RANGE[0] <= mem_gb <= MEM_GB_RANGE[1]:
@@ -1398,6 +1754,7 @@ def _names(rows: list[dict]) -> dict:
         "host": {r["id"]: r for r in db.rows(sa.select(db.hosts).where(db.hosts.c.id.in_(hosts)))} if hosts else {},
         "server": {r["id"]: r for r in db.rows(sa.select(db.sites.c.id, db.sites.c.online, db.sites.c.last_seen_at).where(db.sites.c.id.in_(servers)))} if servers else {},
         "trend": {h: work_trend(h) for h in hosts},   # the queues' 15-minute trend per host (in memory)
+        "infer": {h: infer_trend(h) for h in hosts},  # the inference services' load and GPU-seconds per host (in memory)
     }
 
 
@@ -1440,6 +1797,10 @@ def instance_out(ci: dict, names: dict, hub_admin: bool) -> dict:
                 "cpus": _num(info.get("cpus")), "mem_gb": _num(info.get("mem_gb")), "host_cpus": _num(cap.get("cpus")),
                 # its GPU share as set (None = no cap, or an agent before 0.3.3) and what placement counts for it (share_mb)
                 "gpu_mem_mb": _num(info.get("gpu_mem_mb")),
+                # agent 0.4.0+: shared = its models run on its card's inference service (no share); its GPU-seconds there
+                # over the hub's ~30 minutes of history (None = not on a service, or no history yet)
+                "inference": info.get("inference") if info.get("inference") in INFER_MODES else None,
+                "infer_gpu_s": _infer_gpu_s((names.get("infer") or {}).get(ci["host_id"]), ci),
                 "gpu_share_mb": share_mb(ci, cap.get("work") if isinstance(cap.get("work"), dict) else None) if ci["gpu"] is not None else None,
                 # its data area (/data: database, event media; agent 0.3.2+): quota None = none of its own (XFS / no quota)
                 "instance_used_gb": _num(info.get("instance_used_gb")), "instance_quota_gb": _num(info.get("instance_quota_gb")),
