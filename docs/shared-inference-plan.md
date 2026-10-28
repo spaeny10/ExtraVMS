@@ -189,8 +189,8 @@ YOLO in fp32: 85 vs 113 frames/s, still far beyond the load.
      p50/p95, memory, per-instance requests / frames / GPU-seconds). In the instance view, `inference`, and
      `gpu_mem_mb` null while shared.
    - **Tests:** 11 in test_axiom_host.py `SharedInference`. The real socket round trip runs on Linux only.
-3. **Hub**: shared-mode placement, Hosts page service panel, the two alerts, per-Site GPU-seconds. Built 2026-10-28, not
-   deployed:
+3. **Hub**: shared-mode placement, Hosts page service panel, the two alerts, per-Site GPU-seconds. Built 2026-10-28,
+   deployed to hub.axiomvision.ai the same day:
    - **Placement** (hosts.py `infer_room`, `pick_shared_gpu`): a host's own default (capacity.inference) or Allocate's
      choice decides. A card takes another shared Site below `HUB_CENTRAL_INFER_MAX_SITES` (30) Sites, if its service
      wasn't busier than `HUB_CENTRAL_INFER_BUSY_MAX` (60 %) in the hub's ~30 minutes of history, and if it runs a service
@@ -208,10 +208,12 @@ YOLO in fp32: 85 vs 113 frames/s, still far beyond the load.
    - **GPU-seconds per Site** are shown, not stored: the hub adds up the counters' increases over its in-memory history
      (open question 2: metering for pricing would need them kept per day, like the Qwen seconds).
 4. **Migrate fred**, one Site at a time, each with a day of watching verify latency and verdicts: Test-Site,
-   Jetstream, then Bingo. The per-instance models free up as each one moves.
+   Jetstream, then Bingo. The per-instance models free up as each one moves. Done 2026-10-28, all three the same day
+   at Shawn's request (each: `restart-instance --image axiom/instance:f575d27`, then `set-inference --mode shared`;
+   ~12-20 s without recording per step). GPU 1 went from ~11 GB to 1.6 GB used; fred's `latest` tag is f575d27.
 5. **Load test before the 120 Sites:** replay Bingo's worst hour (1,225 events) concurrently as if from 20 Sites
    and confirm verify latency stays under the alarm budget. This tells us how many Bingo-class Sites a card takes in
-   practice.
+   practice. Done 2026-10-28: see Phase 5 results below.
 
 ## Phase 0 results (fred, 2026-10-27)
 
@@ -265,12 +267,55 @@ its database. Nothing on the Sites changed. Scripts:
 
   The live servers' processes were 2.3, 4.9 and 3.4 GB. Across 122 Sites that is about 210 GB of RAM per server.
 
+## Phase 5 results (fred, 2026-10-28)
+
+A scratch service (`axiom-p5-infer`, same image f575d27, its own socket) on the A10G next to the live one, so the live
+service's numbers and alerts stayed apart; the two shared the card's compute. Simulated Sites ran in one container as
+Bingo's user, with its recording and a copy of its database read-only, no GPU and no network. Each Site replayed Bingo's
+worst hour (2026-10-21 17:00 UTC, 1,226 events) as dry-run verifies with frames decoded from the real recording, one
+event at a time like the pipeline's GPU thread, Site 0 as it happened and the others starting at random points in the
+hour (wrapping round). Latency is from the event's arrival to its verdict, queueing inside the Site included. 10 minutes
+per level, after a warm-up. A watchdog would have stopped the test had the live service's p95 passed 2 s. Scripts:
+`p5_site.py`, `p5_run.py`, `p5_go.sh`, `p5_ramp.sh`, `p5_local.sh` in the session scratchpad; results in
+`/srv/axiom/p5/out` on fred.
+
+| Sites | Events/hour | Verify latency p50 / p95 / max | Service per event p50 / p95 | Card busy mean / peak | Client CPU cores |
+|---|---|---|---|---|---|
+| 1, own models (fp32, today's setup) | 924 | 2.4 / 6.6 / 10.6 s | in process | | 1.0 |
+| 10 | 11,346 | 2.2 / 6.9 / 13 s | 54 / 89 ms | 13 % / 21 % | 12 |
+| 20 | 24,402 | 2.3 / 7.7 / 14 s | 58 / 164 ms | 27 % / 55 % | 24 |
+| 40 | 49,680 | 3.8 / 19 / 39 s | 139 / 502 ms | 63 % / 92 % | 52 |
+| 60 | 74,130 | 74 / 242 / 273 s (saturated) | 641 / 1,402 ms | 82 % / 100 % | 89 (72 cap) |
+| 20 + footage index worst case (550 crops/s) | 24,402 | 2.2 / 6.8 / 11 s | 71 / 153 ms | 74 % / 93 % | 24 |
+
+- **Per card:** ~20-30 Bingo-class Sites *all in their worst hour at once* stay under the proposed 10 s p95 (20: 7.7 s;
+  40: 19 s). Bingo's average hour is a tenth of its worst, so a card takes many more ordinary Sites. GPU time is
+  ~40 ms per event (busy 27 % at 24,400 events/h), close to the ~50 ms estimate: ~80,000 events/h flat out,
+  ~45,000/h at `HUB_CENTRAL_INFER_BUSY_MAX` (60 %). `HUB_CENTRAL_INFER_MAX_SITES` stays 30 until real Sites show a
+  quieter mix; the busy check covers the rest.
+- **Priorities work:** the footage index's worst case beside 20 Sites took the card to 74 % busy and left verify
+  latency where it was (p95 6.8 s vs 7.7 s); index requests still answered within 243 ms p95. The service never ran
+  out of memory (4.0 GB reserved at most).
+- **Same verdicts:** on the 154 events Site 0 replays, own models (fp32) and the service (fp16) agreed on 153 at every
+  load; the one (65403, a truck at 0.58 with 0 hits) is borderline, and the service matched its original verdict.
+  Load changes nothing: 20 Sites with and without the index gave identical verdicts. 24 of 154 differ from what Bingo
+  decided on Oct 21 with either setup: the rules and parked-vehicle memory changed since, as phase 0 found.
+- **The latency is mostly the Site's own work.** The service's share is ~55 ms of ~1.5 s per event; the rest is the
+  instance decoding ~10 frames from the 4 MP recording, and Bingo's bursts queue inside the Site (the same with own
+  models: p95 6.6 s at one Site).
+- **CPU, not the GPU, runs out first:** 3.5-4.3 CPU-seconds per event, nearly all decoding. 40 Sites at Bingo's peak
+  used 52 cores, past fred's 40 physical cores, which is much of why latency climbs past 20. Plan **~1.2 cores per
+  Bingo-class Site at its peak** (Bingo's average hour: ~0.12). The bigger lever for 120 Sites per server is cutting
+  the decode: NVDEC on the card, or verifying from the sub stream (follow-up, not built).
+- **The live Sites:** the live service's verify p95 went from 31 ms to 202 ms at worst (60 Sites), sharing the card.
+
 ## Sizing for the BOM
 
 GPU time per event in the service: YOLO on ~10 frames is ~42 ms in fp16, plus ~9 ms of PPE on PPE Sites, plus
 re-ID (well under 1 ms): **~50 ms**. One A10-class card therefore verifies ~70,000 events/hour flat out. Today's
 per-process setup measured ~0.24 s per event (~7,000/hour at half load), so batching and fp16 are worth ~5x on
-paper. Phase 5's load test confirms it. Until then, plan on **~20,000 events/hour per card**.
+paper. Phase 5's load test measured ~40 ms per event under load (above): plan on **~45,000 events/hour per card** at
+the 60 % busy ceiling, and on the CPU for decoding (~3.7 CPU-seconds per event).
 
 Per 3x L4 server (~122 Sites, ~550 cameras; the L4 is the A10's successor in the same class, measure one when it
 arrives):
