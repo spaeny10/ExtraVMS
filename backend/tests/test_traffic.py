@@ -460,8 +460,8 @@ def test_read_plate_on_demand():
     traffic.add_entry("407MFL", "watch", note="red Fiesta")
     asked = []
 
-    async def fake_ask(img, priority, question=plate_mod.QUESTION):
-        asked.append((len(img), priority, question))
+    async def fake_ask(img, priority, question=plate_mod.QUESTION, system=plate_mod.SYSTEM):
+        asked.append((len(img), priority, question, system))
         return {"legible": True, "plate": "407 MFL", "region": "Kansas", "confidence": "high", "_model": "fake"}
 
     class P:
@@ -478,6 +478,11 @@ def test_read_plate_on_demand():
         assert j["list"] == {"list": "watch", "match": "exact", "plate": "407MFL", "note": "red Fiesta"}
         # the camera's plate crop first, enlarged, asked as a plate close-up, at a person's priority; a high read stops there
         assert len(asked) == 1 and asked[0][1] == "chat" and asked[0][2] == plate_mod.PLATE_QUESTION
+        assert asked[0][3] == plate_mod.ON_REQUEST_SYSTEM   # a person asked: soft but readable plates are read
+        # Otso's state only when it is sure (on soft crops it named a wrong one every time)
+        kept = traffic.store_otso(rid, {"result": "read", "plate": "3416AFR", "region": "MA", "confidence": "medium"})
+        assert kept["otso"]["plate"] == "3416AFR" and "region" not in kept["otso"] and kept["otso_plate"] == "3416AFR"
+        traffic.store_otso(rid, {"result": "read", "plate": "407MFL", "plate_raw": "407 MFL", "region": "KS", "confidence": "high"})
         crops = traffic.otso_crops(rid)
         assert isinstance(crops[0], tuple) and cv2.imdecode(np.frombuffer(crops[0][0], np.uint8), cv2.IMREAD_COLOR).shape[1] == traffic.PLATE_LOOK_PX + 48
         assert crops[1] == traffic.image_path(rid, "vehicle").read_bytes()
@@ -668,6 +673,19 @@ def test_cuts_and_the_disk_check_have_their_own_threads():
         return ok, took
     ok, took = asyncio.run(go())
     assert ok and took < 2 and seen and seen[0].startswith("storage-probe")
+
+
+def test_new_reads_are_cut_before_the_backlog():
+    """Reads queued at start-up must not hold up new ones: due reads are taken newest first (TSS-DT 2026-10-29: 253
+    backfilled reads at 5 s each kept the morning's new reads waiting until they were too old for a wide search)."""
+    q = traffic.FromRecording()
+    now = time.time()
+    for rid in (5, 6, 7):
+        q.add(rid, now - 10, traffic.BACKFILL_TRIES)
+    q.add(900, now)
+    q.add(901, now + 60)   # not due yet
+    assert [x[1] for x in q.take(now)] == [900, 7, 6, 5]
+    assert [x[1] for x in q.due] == [901] and q.queued == {901}
 
 
 def test_backfill_queues_recent_reads_without_a_picture():

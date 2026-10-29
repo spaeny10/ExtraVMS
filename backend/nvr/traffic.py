@@ -32,7 +32,7 @@ statusReportInterval (300 s). The camera resends a missed push only when it has 
   queued at start-up (BACKFILL_DAYS). The recording disk is a shared HDD: a fresh read's moment is still in memory, an
   older one is read back from the disk (cam8's 4K segments; MediaMTX's listing timed out for every camera while
   older reads were cut), so a segment's learned offset is kept (recording_offsets) and an older read is cut only near
-  a known offset (its segment's, NARROW, or the nearest one learned, PRIOR_S: ~2-3 s of video), one every OLD_GAP_S,
+  a known offset (its segment's, NARROW, or the nearest one learned, PRIOR_S: ~2-3 s of video), paced (OLD_DUTY),
   never with a wide search.
 - Passes: reads of one camera less than PASS_GAP_S apart whose plates share PASS_COMMON characters in order are one
   pass (671AED / 3671AED / 387AED); `best` marks the most confident. A parked vehicle is one pass too: the camera
@@ -101,7 +101,8 @@ REC_RETRY_S = 60.0                 # there: a 10-minute segment has a few strong
 BACKFILL_DAYS = 3                  # at start-up, reads this recent still without a vehicle picture are queued
 BACKFILL_TRIES = REC_TRIES - 2     # ...with fewer tries (an old segment's offset may never be learned)
 FRESH_S = 600.0                    # a read this recent may be searched wide (its recording is still in memory)
-OLD_GAP_S = 5.0                    # an older read is cut at most this often (the recording disk is shared)
+OLD_DUTY = 2.0                     # after an older read's cut, idle this many times as long as it took (shared disk)
+OLD_GAP_S = 5.0                    # ...at most this long
 CUT_POOL = ThreadPoolExecutor(2, thread_name_prefix="traffic-cut")   # decode + match: off the shared pool
 STRONG_MATCH = 0.93                # plate crop vs recording: a match this strong places the read (right: 0.97-0.99)
 AGREE = 2                          # ...and a segment's offset is taken once this many strong matches agree
@@ -663,8 +664,10 @@ class FromRecording:
             return True
 
     def take(self, now: float) -> list[tuple[float, int, int]]:
+        """The reads due now, newest first: a fresh read may still be searched wide, an older one waits less well
+        (TSS-DT 2026-10-29: behind 253 reads queued at start-up the morning's new reads went stale)."""
         with self.lock:
-            ready = [x for x in self.due if x[0] <= now]
+            ready = sorted((x for x in self.due if x[0] <= now), key=lambda x: -x[1])
             self.due = deque(x for x in self.due if x[0] > now)
             self.queued -= {x[1] for x in ready}
             return ready
@@ -689,13 +692,16 @@ class FromRecording:
         while True:
             for _at, read_id, tries in self.take(time.time()):
                 r = db.one("SELECT received_at FROM vehicle_reads WHERE id=?", [read_id])
-                if r and time.time() - r["received_at"] > FRESH_S:
-                    await asyncio.sleep(OLD_GAP_S)   # read back from the recording disk: gently
+                started = time.monotonic()
                 try:
                     done = await loop.run_in_executor(CUT_POOL, cut_from_recording, read_id)
                 except Exception:  # noqa: BLE001 - one read's picture must not stop the rest
                     log.exception("traffic: vehicle picture from the recording for read %s failed", read_id)
                     done = True
+                if r and time.time() - r["received_at"] > FRESH_S:
+                    # read back from the recording disk: gently, idle OLD_DUTY times as long as the cut read (a read
+                    # with nothing to search near costs nothing and waits nothing)
+                    await asyncio.sleep(min(OLD_GAP_S, OLD_DUTY * (time.monotonic() - started)))
                 if done is None and tries + 1 < REC_TRIES:
                     self.add(read_id, time.time() + REC_RETRY_S, tries + 1)
             await asyncio.sleep(1)
@@ -736,9 +742,12 @@ def otso_crops(read_id: int) -> list:
 
 
 def store_otso(read_id: int, result: dict) -> dict | None:
-    """Keep Otso's answer on the read (a read plate, or why not), beside the camera's own."""
+    """Keep Otso's answer on the read (a read plate, or why not), beside the camera's own. Its state only when it is
+    sure: on a soft crop it named a wrong one every time (plate.ON_REQUEST_SYSTEM)."""
     info = {"at": round(time.time(), 1), **{k: result[k] for k in ("result", "plate", "plate_raw", "region", "confidence",
                                                                    "reason", "model", "crops") if result.get(k) not in (None, "")}}
+    if info.get("confidence") != "high":
+        info.pop("region", None)
     db.execute("UPDATE vehicle_reads SET otso=?, otso_plate=? WHERE id=?",
                [json.dumps(info), result.get("plate") if result.get("result") == "read" else None, read_id])
     return read(read_id)

@@ -159,7 +159,8 @@ describe("Otso's Read plate", () => {
     expect(knownPlate({ plate: null })).toBeNull();
   });
   it("says what Otso read, or that it couldn't", () => {
-    expect(otsoText({ at: 1, result: "read", plate: "407MFL", region: "KS", confidence: "high" })).toBe("Otso: 407 MFL · KS (high)");
+    expect(otsoText({ at: 1, result: "read", plate: "407MFL", region: "KS", confidence: "high" })).toBe("Otso: 407 MFL · KS");
+    expect(otsoText({ at: 1, result: "read", plate: "3416AFR", confidence: "medium" })).toBe("Otso: probably 3416 AFR");
     expect(otsoText({ at: 1, result: "unreadable", reason: "not legible" })).toBe("Otso couldn't read it");
     expect(otsoText(null)).toBe("");
   });

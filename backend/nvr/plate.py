@@ -88,6 +88,18 @@ SYSTEM = (
     "it is printed on the plate and readable; otherwise ''. confidence: high only when the plate is sharp and every "
     "character is unmistakable."
 )
+# Read plate on a traffic read (a person asked, the camera's crop and read beside the answer): SYSTEM refused every soft
+# but readable plate (cam8 2026-10-29: "3416AFR", "51121", "087 MAB" all legible=false, confidence low). This one read
+# 3416AFR and 51121 right and 087 MAB as "087 MAU" (its B half hidden), all at medium, and named a wrong state every
+# time; so a medium read is shown as "probably" and Otso's state is kept only when it is sure (traffic.store_otso).
+ON_REQUEST_SYSTEM = (
+    "You read vehicle license plates in close-ups from traffic and security cameras. Read the plate's characters as "
+    "printed. legible=false and plate='unreadable' only when there is no plate in view or its characters can't be made "
+    "out. Never invent characters you cannot see and never complete a plate that is cut off. Do not read dealer frames, "
+    "stickers, phone numbers or company names as a plate. region: the US state (or other region) only when it is "
+    "printed on the plate and readable; otherwise ''. confidence: high when every character is unmistakable, medium "
+    "when the picture is soft but each character can still be made out, low when any character is a guess."
+)
 QUESTION = ("This is a full-resolution close-up of one vehicle from a security camera. Read its license plate if, and "
             "only if, it is clearly legible. Answer as JSON.")
 # a traffic camera's own crop of the plate, enlarged (traffic.otso_crops): the plate fills the picture
@@ -283,18 +295,18 @@ def gather(e: dict, n: int, min_px: int | None = None, decode: Callable | None =
 
 # ---------------------------------------------------------------- asking and storing
 
-async def ask(image: bytes, priority: str, question: str = QUESTION) -> dict:
+async def ask(image: bytes, priority: str, question: str = QUESTION, system: str = SYSTEM) -> dict:
     from . import vlmroute
-    return await vlmroute.router.chat_json(TASK, SYSTEM, question, [image], SCHEMA, 80, 0.0, priority)
+    return await vlmroute.router.chat_json(TASK, system, question, [image], SCHEMA, 80, 0.0, priority)
 
 
-async def read(crops: list, priority: str = "background", stop_at: str = "high") -> dict:
+async def read(crops: list, priority: str = "background", stop_at: str = "high", system: str = SYSTEM) -> dict:
     """One question per crop (best crop first), stopping at the first `stop_at` read; the most confident kept. A crop is
     JPEG bytes (a vehicle close-up) or (bytes, question)."""
     results = []
     for c in crops:
         img, question = c if isinstance(c, tuple) else (c, QUESTION)
-        r = parse(await ask(img, priority, question))
+        r = parse(await ask(img, priority, question, system))
         results.append(r)
         if r["result"] == "read" and CONF_RANK[r["confidence"]] >= CONF_RANK[stop_at]:
             break

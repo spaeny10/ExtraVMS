@@ -97,10 +97,11 @@ export const plateText = (r: Pick<Read, "plate">): string => (r.plate ? formatPl
 /** The plate to show and act on: the camera's, else the one Otso read when a person asked (Read plate). */
 export const knownPlate = (r: Pick<Read, "plate" | "otso_plate">): string | null => r.plate ?? r.otso_plate ?? null;
 
-/** Otso's answer as one line: "Otso: 407 MFL · KS (high)" or why it couldn't ("Otso couldn't read it"). */
+/** Otso's answer as one line: "Otso: 407 MFL · KS", "Otso: probably 3416 AFR", or why it couldn't ("Otso couldn't read it"). */
 export function otsoText(o: OtsoRead | null | undefined): string {
   if (!o) return "";
-  if (o.result === "read" && o.plate) return `Otso: ${formatPlate(o.plate, o.region)}${o.confidence ? ` (${o.confidence})` : ""}`;
+  // medium: a soft crop read character by character, one may be off (087 MAB came back "087 MAU"): "probably"
+  if (o.result === "read" && o.plate) return o.confidence === "high" ? `Otso: ${formatPlate(o.plate, o.region)}` : `Otso: probably ${formatPlate(o.plate, o.region)}`;
   return "Otso couldn't read it";
 }
 

@@ -106,7 +106,14 @@ Decided while building:
   is matched, the frames streamed with only the best one kept. A segment not learned yet is searched first ±1.5 s
   around the nearest learned offset (within 6 hours), and only then wide (fresh reads only). "One moment" means the
   strong frames lie within 0.5 s, since a slow car can match on several frames in a row. The morning's reads: 24 of
-  25 placed at -2.14 to -2.26 s, about 1 s each.
+  25 placed at -2.14 to -2.26 s, about 1 s each. New reads are cut before the start-up backlog, and an older read
+  rests only in proportion to the video it read: behind 253 backfilled reads at 5 s each, new ones went stale.
+- **Read plate uses a less strict instruction.** The strict one (never guess) refused every soft but readable plate,
+  even with the camera's crop enlarged: 3416AFR, 51121 and 087 MAB all came back legible=false. Read plate is asked
+  for by a person, with the camera's crop and read beside the answer, so it uses `plate.ON_REQUEST_SYSTEM`. That reads
+  3416AFR and 51121 right and 087 MAB as "087 MAU" (its B half hidden), all at medium. A medium answer shows as
+  "Otso: probably ...". Otso's state is kept only at high, because it named a wrong state every time. Background plate
+  reads keep the strict instruction.
 - **Reads that aren't a vehicle are hidden.** At night cam8 read the car lot's sign as plates ("556BE", up to ~6 a
   minute). The rule: no vehicle type, and no plate or one under 0.7 (`traffic_noise_conf`). Those reads are kept but
   hidden from the reads list (unless "Show reads with no vehicle" is ticked, or in a plate search), from counts and

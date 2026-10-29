@@ -155,7 +155,7 @@ async def read_plate(read_id: int, request: Request):
     traffic.read_limiter.start(read_id)
     try:
         with aischedule.job(plate.KIND):
-            result = await asyncio.wait_for(plate.read(crops, "chat"), plate.TIMEOUT_S)
+            result = await asyncio.wait_for(plate.read(crops, "chat", system=plate.ON_REQUEST_SYSTEM), plate.TIMEOUT_S)
     except (asyncio.TimeoutError, httpx.TimeoutException):
         raise HTTPException(504, "Otso took too long to read the plate; try again in a moment")
     except Exception as ex:  # noqa: BLE001 - the model is down or misconfigured
