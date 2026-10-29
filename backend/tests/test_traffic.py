@@ -81,6 +81,7 @@ def reset():
     db.execute("DELETE FROM vehicle_reads")
     db.execute("DELETE FROM plate_lists")
     db.execute("DELETE FROM events")
+    db.execute("DELETE FROM recording_offsets")
     traffic.passes.recent.clear()
 
 
@@ -454,12 +455,13 @@ def test_read_plate_on_demand():
     reset()
     c = cam()
     t0 = time.time()
-    rid = traffic.ingest(c, push_read("No Plates", "0.00", at=t0), t0 + 0.4)["read_id"]
+    # the camera sent its plate crop but read no plate (cam8: a Kansas "51121" specialty plate)
+    rid = traffic.ingest(c, push_read("No Plates", "0.00", at=t0, license_plate_snapshot=jpg(90, 40)), t0 + 0.4)["read_id"]
     traffic.add_entry("407MFL", "watch", note="red Fiesta")
     asked = []
 
-    async def fake_ask(img, priority):
-        asked.append((len(img), priority))
+    async def fake_ask(img, priority, question=plate_mod.QUESTION):
+        asked.append((len(img), priority, question))
         return {"legible": True, "plate": "407 MFL", "region": "Kansas", "confidence": "high", "_model": "fake"}
 
     class P:
@@ -474,7 +476,11 @@ def test_read_plate_on_demand():
         assert j["result"] == "read" and j["plate"] == "407MFL" and j["confidence"] == "high" and j["region"] == "KS"
         assert j["read"]["plate"] is None and j["read"]["otso"]["plate"] == "407MFL" and j["read"]["otso_plate"] == "407MFL"
         assert j["list"] == {"list": "watch", "match": "exact", "plate": "407MFL", "note": "red Fiesta"}
-        assert asked and asked[0][1] == "chat"   # the vehicle crop, at a person's priority
+        # the camera's plate crop first, enlarged, asked as a plate close-up, at a person's priority; a high read stops there
+        assert len(asked) == 1 and asked[0][1] == "chat" and asked[0][2] == plate_mod.PLATE_QUESTION
+        crops = traffic.otso_crops(rid)
+        assert isinstance(crops[0], tuple) and cv2.imdecode(np.frombuffer(crops[0][0], np.uint8), cv2.IMREAD_COLOR).shape[1] == traffic.PLATE_LOOK_PX + 48
+        assert crops[1] == traffic.image_path(rid, "vehicle").read_bytes()
         assert call("POST", f"/api/traffic/reads/{rid}/plate", role="operator").status_code == 429
         found = call("GET", "/api/traffic/reads?q=407MFL").json()["reads"]
         assert [x["id"] for x in found] == [rid]
@@ -507,22 +513,25 @@ class FakeRecording:
         self.bg = np.random.default_rng(99).integers(0, 255, (1520, 2688, 3), dtype=np.uint8)
 
     def show(self, ts: float, tex: np.ndarray) -> None:
-        self.plates[round(ts + self.offset, 2)] = tex
+        self.plates[ts + self.offset] = tex
 
     still: np.ndarray | None = None   # a sign in the plate box all the time (the car lot's, read as a plate at night)
 
     def frame(self, t: float) -> np.ndarray:
+        # a passing plate is in its box for one frame (cam8: 0.98-1.00 at one frame, under 0.75 either side)
+        tex = next((v for k, v in self.plates.items() if abs(k - t) < 0.005), self.still)
+        if tex is None:
+            return self.bg   # read only
         f = self.bg.copy()
-        tex = next((v for k, v in self.plates.items() if abs(k - t) < 0.05), self.still)
-        if tex is not None:
-            l, tp, r, b = 0.5833, 0.5481, 0.6438, 0.6037   # the fixture's plate box (1120,592)-(1236,652) of 1920x1080
-            x1, y1, x2, y2 = int(l * 2688), int(tp * 1520), int(r * 2688), int(b * 1520)
-            f[y1:y2, x1:x2] = cv2.resize(tex, (x2 - x1, y2 - y1))
+        l, tp, r, b = 0.5833, 0.5481, 0.6438, 0.6037   # the fixture's plate box (1120,592)-(1236,652) of 1920x1080
+        x1, y1, x2, y2 = int(l * 2688), int(tp * 1520), int(r * 2688), int(b * 1520)
+        f[y1:y2, x1:x2] = cv2.resize(tex, (x2 - x1, y2 - y1))
         return f
 
-    def recording_frames(self, camera_id, targets, tol=0.6):
+    def iter_recording(self, camera_id, targets, tol=0.6):
         self.calls.append(len(targets))
-        return {t: self.frame(t) for t in targets}
+        for t in sorted(targets):
+            yield t, self.frame(t)
 
     def recorded_frame(self, camera_id, t):
         return self.frame(t)
@@ -537,8 +546,8 @@ def test_vehicle_picture_from_the_recording():
     c = cam()
     t0 = time.time()
     rec = FakeRecording(1.5)
-    real = frames.recording_frames, frames.recorded_frame, traffic.recording_segment
-    frames.recording_frames, frames.recorded_frame = rec.recording_frames, rec.recorded_frame
+    real = frames.iter_recording, frames.recorded_frame, traffic.recording_segment
+    frames.iter_recording, frames.recorded_frame = rec.iter_recording, rec.recorded_frame
     traffic.recording_segment = lambda camera_id, t: 1000.0   # one segment
     traffic.from_recording.due.clear()
     traffic.aligner.found.clear()
@@ -562,7 +571,7 @@ def test_vehicle_picture_from_the_recording():
         r = traffic.read(hidden)
         assert r["images"] == ["plate", "vehicle"] and r["vehicle_source"] == "recording"
         later = read("CCC4444", t0 + 60, _texture(3))
-        assert traffic.cut_from_recording(later) is True and rec.calls[-1] == len(traffic.NARROW)   # around the offset only
+        assert traffic.cut_from_recording(later) is True and rec.calls[-1] == len(traffic.window(1.5, traffic.NARROW_S))   # around the offset only
         # the crop is the vehicle box of the frame where the plate is: the plate's texture inside it
         crop = cv2.imread(str(traffic.image_path(later, "vehicle")))
         assert crop is not None and crop.shape[1] > crop.shape[0]
@@ -579,12 +588,13 @@ def test_vehicle_picture_from_the_recording():
         assert traffic.aligner.offset("cam8", 1500.0) is None
         rec.still = None
         traffic.recording_segment = lambda camera_id, t: 1000.0
-        # the next segment: its own offset, learned again
+        # the next segment: its own offset (searched first around the nearest learned one, then wide), learned again
         traffic.recording_segment = lambda camera_id, t: 2000.0
         rec.offset = -0.5
         n1 = read("NEW1111", t0 + 100, _texture(4))
         n2 = read("NEW2222", t0 + 120)
-        assert traffic.cut_from_recording(n1) is True and traffic.cut_from_recording(n2) is None
+        assert traffic.cut_from_recording(n1) is True and rec.calls[-2:] == [len(traffic.window(1.5, traffic.PRIOR_S)), len(traffic.WIDE)]
+        assert traffic.cut_from_recording(n2) is None
         # an older read asked for before it is cut: 404 at once, queued (once) for the cutter, which then cuts it
         n3 = read("NEW3333", t0 + 140, _texture(5))
         assert traffic.cut_from_recording(n3) is True and traffic.aligner.offset("cam8", 2000.0) == -0.5
@@ -605,7 +615,7 @@ def test_vehicle_picture_from_the_recording():
         none = read("NONE123", t0 + 180)
         assert traffic.cut_from_recording(none) is False and call("GET", f"/api/traffic/reads/{none}/image/vehicle").status_code == 404
     finally:
-        frames.recording_frames, frames.recorded_frame, traffic.recording_segment = real
+        frames.iter_recording, frames.recorded_frame, traffic.recording_segment = real
         traffic.from_recording.due.clear()
         traffic.aligner.found.clear()
 
@@ -679,15 +689,16 @@ def test_backfill_queues_recent_reads_without_a_picture():
 
 
 def test_offsets_kept_and_older_reads_gentle():
-    """A segment's offset survives a restart (recording_offsets); an older read is cut only at a known offset, never
-    with a wide search over the recording disk."""
+    """A segment's offset survives a restart (recording_offsets); an older read is cut only near a known offset (its
+    segment's, or the nearest learned: the camera's clock drifts slowly), never with a wide search over the recording
+    disk (TSS-DT 2026-10-29: the morning's reads, none placed on a 0.25 s grid, placed near the evening's offsets)."""
     from nvr import frames
     reset()
     db.execute("DELETE FROM recording_offsets")
     c = cam()
-    rec = FakeRecording(0.75)
-    real = frames.recording_frames, frames.recorded_frame, traffic.recording_segment
-    frames.recording_frames, frames.recorded_frame = rec.recording_frames, rec.recorded_frame
+    rec = FakeRecording(0.76)
+    real = frames.iter_recording, frames.recorded_frame, traffic.recording_segment
+    frames.iter_recording, frames.recorded_frame = rec.iter_recording, rec.recorded_frame
     traffic.recording_segment = lambda camera_id, t: 3000.0
     traffic.aligner.found.clear()
     try:
@@ -697,17 +708,32 @@ def test_offsets_kept_and_older_reads_gentle():
             rec.show(t0 + k * 20, tex)
             rid = traffic.ingest(c, push_read(f"KEP{k}111", "0.9", at=t0 + k * 20, vehicle_snapshot="-", license_plate_snapshot=_b64(tex)), t0 + k * 20 + 0.5)["read_id"]
             assert traffic.cut_from_recording(rid) is True
-        assert db.one("SELECT offset_s FROM recording_offsets WHERE camera_id='cam8' AND segment=3000.0")["offset_s"] == 0.75
+        assert db.one("SELECT offset_s FROM recording_offsets WHERE camera_id='cam8' AND segment=3000.0")["offset_s"] == 0.76
         traffic.aligner.found.clear()   # a restart
-        assert traffic.aligner.offset("cam8", 3000.0) == 0.75
-        # an older read in a segment with no known offset waits; it never searches wide
+        assert traffic.aligner.offset("cam8", 3000.0) == 0.76
+        # an older read in a segment with no known offset: searched near the nearest learned one only, never wide
         traffic.recording_segment = lambda camera_id, t: 4000.0
         old = traffic.ingest(c, push_read("OLD9999", "0.9", at=t0 - 3600, vehicle_snapshot="-"), t0 - 3600 + 0.5)["read_id"]
         db.execute("UPDATE vehicle_reads SET received_at=? WHERE id=?", [t0 - 3600, old])
         before = len(rec.calls)
-        assert traffic.cut_from_recording(old) is None and len(rec.calls) == before
+        assert traffic.cut_from_recording(old) is None and rec.calls[before:] == [len(traffic.window(0.76, traffic.PRIOR_S))]
+        # ...and found there when its plate is, the clock having drifted a little since
+        rec.offset = 1.26
+        tex = _texture(200)
+        rec.show(t0 - 3000, tex)
+        old2 = traffic.ingest(c, push_read("OLD8888", "0.9", at=t0 - 3000, vehicle_snapshot="-", license_plate_snapshot=_b64(tex)), t0 - 3000 + 0.5)["read_id"]
+        db.execute("UPDATE vehicle_reads SET received_at=? WHERE id=?", [t0 - 3000, old2])
+        before = len(rec.calls)
+        assert traffic.cut_from_recording(old2) is True and rec.calls[before:] == [len(traffic.window(0.76, traffic.PRIOR_S))]
+        assert traffic.aligner.offset("cam8", 4000.0) is None   # one match alone teaches no offset
+        # nothing learned within PRIOR_MAX_S: an older read waits, reading nothing
+        traffic.recording_segment = lambda camera_id, t: 3000.0 + traffic.PRIOR_MAX_S + 10
+        old3 = traffic.ingest(c, push_read("OLD7777", "0.9", at=t0 - 2400, vehicle_snapshot="-"), t0 - 2400 + 0.5)["read_id"]
+        db.execute("UPDATE vehicle_reads SET received_at=? WHERE id=?", [t0 - 2400, old3])
+        before = len(rec.calls)
+        assert traffic.cut_from_recording(old3) is None and len(rec.calls) == before
     finally:
-        frames.recording_frames, frames.recorded_frame, traffic.recording_segment = real
+        frames.iter_recording, frames.recorded_frame, traffic.recording_segment = real
         traffic.aligner.found.clear()
         traffic.from_recording.due.clear()
         traffic.from_recording.queued.clear()

@@ -99,6 +99,14 @@ Decided while building:
   0.97-0.99; one wrong frame scored 0.89, and on its own it would have set the whole run wrong. Reads wait until their
   run's offset is known instead of guessing. The read panel says the picture is from the recording and links to
   the Timeline at that moment.
+- **Every recorded frame is matched, starting near the last offset.** At dawn on 2026-10-29 only 2 of 40 vehicles got
+  a picture. A passing plate is in its box for one frame (0.98-1.00 there, under 0.75 a frame either side), and the
+  search looked every 0.25 s, so it found one only by luck; with little traffic no segment got its 2 matches. The
+  camera's clock also drifts, gaining ~0.13 s an hour (the offset -0.5 s at 18:00, -2.2 s by 07:30). Now every frame
+  is matched, the frames streamed with only the best one kept. A segment not learned yet is searched first ±1.5 s
+  around the nearest learned offset (within 6 hours), and only then wide (fresh reads only). "One moment" means the
+  strong frames lie within 0.5 s, since a slow car can match on several frames in a row. The morning's reads: 24 of
+  25 placed at -2.14 to -2.26 s, about 1 s each.
 - **Reads that aren't a vehicle are hidden.** At night cam8 read the car lot's sign as plates ("556BE", up to ~6 a
   minute). The rule: no vehicle type, and no plate or one under 0.7 (`traffic_noise_conf`). Those reads are kept but
   hidden from the reads list (unless "Show reads with no vehicle" is ticked, or in a plate search), from counts and

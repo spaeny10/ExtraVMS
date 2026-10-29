@@ -90,6 +90,9 @@ SYSTEM = (
 )
 QUESTION = ("This is a full-resolution close-up of one vehicle from a security camera. Read its license plate if, and "
             "only if, it is clearly legible. Answer as JSON.")
+# a traffic camera's own crop of the plate, enlarged (traffic.otso_crops): the plate fills the picture
+PLATE_QUESTION = ("This is a close-up of one vehicle's license plate, cut out and enlarged by a traffic camera's plate "
+                  "reader. Read the plate if, and only if, every character is clearly legible. Answer as JSON.")
 
 
 # ---------------------------------------------------------------- the answer
@@ -280,16 +283,18 @@ def gather(e: dict, n: int, min_px: int | None = None, decode: Callable | None =
 
 # ---------------------------------------------------------------- asking and storing
 
-async def ask(image: bytes, priority: str) -> dict:
+async def ask(image: bytes, priority: str, question: str = QUESTION) -> dict:
     from . import vlmroute
-    return await vlmroute.router.chat_json(TASK, SYSTEM, QUESTION, [image], SCHEMA, 80, 0.0, priority)
+    return await vlmroute.router.chat_json(TASK, SYSTEM, question, [image], SCHEMA, 80, 0.0, priority)
 
 
-async def read(crops: list[bytes], priority: str = "background", stop_at: str = "high") -> dict:
-    """One question per crop (best crop first), stopping at the first `stop_at` read; the most confident kept."""
+async def read(crops: list, priority: str = "background", stop_at: str = "high") -> dict:
+    """One question per crop (best crop first), stopping at the first `stop_at` read; the most confident kept. A crop is
+    JPEG bytes (a vehicle close-up) or (bytes, question)."""
     results = []
-    for img in crops:
-        r = parse(await ask(img, priority))
+    for c in crops:
+        img, question = c if isinstance(c, tuple) else (c, QUESTION)
+        r = parse(await ask(img, priority, question))
         results.append(r)
         if r["result"] == "read" and CONF_RANK[r["confidence"]] >= CONF_RANK[stop_at]:
             break

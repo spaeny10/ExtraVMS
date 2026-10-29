@@ -363,7 +363,8 @@ function ReadPanel({ a, id: initial, name, onClose, onEvent, onTimeline }: {
           <div className="plate-panel-body">
             <div className="plate-panel-picture">
               {fullInstead ? <img src={a.trafficImage(r.id, "full")} alt={`${vehicleText(r) || "Vehicle"} ${r.plate ?? ""}`} />
-                : pic.failed ? <div className="thumb-empty">No picture: nothing recorded at this moment</div>
+                // the page can't tell "not found in the recording yet" (it is tried again for a while) from "nothing recorded"
+                : pic.failed ? <div className="thumb-empty">No vehicle picture yet: the Timeline shows this moment</div>
                 : !pic.src ? <div className="thumb-empty">Getting the picture…</div>
                 : <img src={pic.src} alt={`${vehicleText(r) || "Vehicle"} ${r.plate ?? ""}`} onLoad={pic.onLoad} onError={pic.onError} />}
               {fromRecording && <p className="muted small">From the recording: the camera sent no picture of the vehicle. Check the moment in the Timeline.</p>}
