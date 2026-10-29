@@ -585,9 +585,16 @@ def test_vehicle_picture_from_the_recording():
         n1 = read("NEW1111", t0 + 100, _texture(4))
         n2 = read("NEW2222", t0 + 120)
         assert traffic.cut_from_recording(n1) is True and traffic.cut_from_recording(n2) is None
-        # an older read: cut when its picture is asked for (the run's offset is known by then)
+        # an older read asked for before it is cut: 404 at once, queued (once) for the cutter, which then cuts it
         n3 = read("NEW3333", t0 + 140, _texture(5))
         assert traffic.cut_from_recording(n3) is True and traffic.aligner.offset("cam8", 2000.0) == -0.5
+        traffic.from_recording.due.clear()
+        traffic.from_recording.queued.clear()
+        got = call("GET", f"/api/traffic/reads/{n2}/image/vehicle")
+        assert got.status_code == 404 and got.headers.get("retry-after") == "5" and "being cut" in got.json()["detail"]
+        assert call("GET", f"/api/traffic/reads/{n2}/image/vehicle").status_code == 404
+        assert [x[1] for x in traffic.from_recording.due] == [n2]   # queued once, however often it is asked for
+        assert traffic.cut_from_recording(n2) is True
         got = call("GET", f"/api/traffic/reads/{n2}/image/vehicle")
         assert got.status_code == 200 and got.content[:2] == b"\xff\xd8"
         # the camera's own picture stays "camera"
@@ -626,6 +633,49 @@ def test_reads_that_are_not_a_vehicle():
     assert traffic.ask_evidence("was 556BE here?", None, None) == []   # the sign, even when named
     assert [x["read_id"] for x in traffic.ask_evidence("was 8777AHN here?", None, None)] == [sure]
     traffic.from_recording.due.clear()
+
+
+def test_cuts_and_the_disk_check_have_their_own_threads():
+    """A page of reads asking for pictures must not stall the server: cuts run on traffic.CUT_POOL, the disk check on
+    its own thread, so a full shared pool never reads as a hung disk (TSS-DT 2026-10-28)."""
+    import concurrent.futures
+    import threading
+    from nvr import health
+    assert isinstance(traffic.CUT_POOL, concurrent.futures.ThreadPoolExecutor) and traffic.CUT_POOL._max_workers == 2
+    seen = []
+    w = health.StorageWatch(probe=lambda: seen.append(threading.current_thread().name))
+
+    async def go():
+        # fill the shared pool with slow work, as the pictures did; the probe still answers at once
+        loop = asyncio.get_running_loop()
+        stop = threading.Event()
+        blockers = [loop.run_in_executor(None, stop.wait, 5) for _ in range(64)]
+        t = time.time()
+        ok = await w.check()
+        took = time.time() - t
+        stop.set()
+        await asyncio.gather(*blockers)
+        return ok, took
+    ok, took = asyncio.run(go())
+    assert ok and took < 2 and seen and seen[0].startswith("storage-probe")
+
+
+def test_backfill_queues_recent_reads_without_a_picture():
+    reset()
+    c = cam()
+    t0 = time.time() - 600
+    traffic.from_recording.due.clear()
+    traffic.from_recording.queued.clear()
+    old = traffic.ingest(c, push_read("OLD1111", "0.9", at=t0, vehicle_snapshot="-"), t0 + 0.3)["read_id"]
+    has = traffic.ingest(c, push_read("HAS2222", "0.9", at=t0 + 30), t0 + 30.3)["read_id"]
+    sign = traffic.ingest(c, push_read("556BE", "0.4", at=t0 + 60, vehicle_type="-", vehicle_color="-", vehicle_snapshot="-"), t0 + 60.3)["read_id"]
+    traffic.from_recording.due.clear()
+    traffic.from_recording.queued.clear()
+    assert traffic.from_recording.backfill() == 1
+    assert [x[1] for x in traffic.from_recording.due] == [old] and has and sign
+    assert traffic.from_recording.backfill() == 0   # already queued
+    traffic.from_recording.due.clear()
+    traffic.from_recording.queued.clear()
 
 
 def test_hub_roles():

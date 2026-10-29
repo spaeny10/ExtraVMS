@@ -8,7 +8,8 @@ GET  /api/traffic/reads                    newest first: ?camera, since, until, 
                                            not just its best), noise (reads that aren't a vehicle too: hidden
                                            by default, except in a plate search), before_id, limit
 GET  /api/traffic/reads/{id}               one read
-GET  /api/traffic/reads/{id}/image/{kind}  plate | vehicle | full | violation
+GET  /api/traffic/reads/{id}/image/{kind}  plate | vehicle | full | violation; a vehicle picture not cut from the
+                                           recording yet: 404 at once (Retry-After), the read queued for it
 POST /api/traffic/reads/{id}/plate         Read plate: Otso reads the vehicle crop now (operator; metered "plate"; one
                                            run per read every plate_rate_s, 429 with Retry-After); kept beside the
                                            camera's read: {result, plate, plate_raw, region, confidence, reason, read, list}
@@ -124,9 +125,11 @@ async def one_read(read_id: int):
 @router.get("/api/traffic/reads/{read_id}/image/{kind}")
 async def read_image(read_id: int, kind: Literal["plate", "vehicle", "full", "violation"]):
     f = traffic.image_path(read_id, kind)
-    if f is None and kind == "vehicle" and traffic.read(read_id):   # sent without one: cut from the recording now
-        if await asyncio.to_thread(traffic.cut_from_recording, read_id):
-            f = traffic.image_path(read_id, kind)
+    if f is None and kind == "vehicle" and (r := traffic.read(read_id)) and not traffic.is_noise(r):
+        # sent without one: queued for a cut from the recording (one at a time, traffic.CUT_POOL), never cut here: a
+        # page of reads cutting their pictures at once filled the shared pool and stalled the whole server
+        traffic.from_recording.add(read_id, time.time())
+        raise HTTPException(404, "the picture is being cut from the recording", headers={"Retry-After": "5"})
     if f is None:
         raise HTTPException(404, "no such picture")
     return FileResponse(f, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=86400"})
@@ -144,7 +147,8 @@ async def read_plate(read_id: int, request: Request):
     wait = traffic.read_limiter.wait_s(read_id)
     if wait > 0:
         raise HTTPException(429, f"this plate was just read; try again in {wait:.0f} s", headers={"Retry-After": str(int(wait) + 1)})
-    await asyncio.to_thread(traffic.cut_from_recording, read_id)   # no vehicle picture yet: from the recording
+    # no vehicle picture yet: from the recording (on the cutters' own pool)
+    await asyncio.get_running_loop().run_in_executor(traffic.CUT_POOL, traffic.cut_from_recording, read_id)
     crops = await asyncio.to_thread(traffic.otso_crops, read_id)
     if not crops:
         raise HTTPException(400, "no picture of the vehicle was kept for this read")

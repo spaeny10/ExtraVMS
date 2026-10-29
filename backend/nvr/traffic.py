@@ -21,8 +21,11 @@ statusReportInterval (300 s). The camera resends a missed push only when it has 
   matches the recording strongly (>= STRONG_MATCH; right frames scored 0.97-1.00, wrong ones up to 0.89), and a read
   with no strong match of its own uses its segment's offset, taken once AGREE strong matches agree (a single 0.89 match
   was wrong). Only a moving vehicle's match teaches it: one peak in time (PEAK_MAX, PEAK_GAP) on a read with a vehicle
-  type; the dealership sign the camera reads as a plate at night matches at every offset. Until then a read waits (REC_TRIES x REC_RETRY_S, the life of a segment) rather than show a guess. An
-  older read without a picture is cut the first time it is asked for.
+  type; the dealership sign the camera reads as a plate at night matches at every offset. Until then a read waits
+  (REC_TRIES x REC_RETRY_S, the life of a segment) rather than show a guess. Cuts run one at a time on CUT_POOL, never
+  in the shared pool: there a page of reads asking for their pictures filled it (TSS-DT 2026-10-28: the disk check queued behind them and read as a hung disk, a Read plate timed
+  out). A picture asked for before it is cut answers 404 at once and the read is queued; older reads without one are
+  queued at start-up (BACKFILL_DAYS).
 - Passes: reads of one camera less than PASS_GAP_S apart whose plates share PASS_COMMON characters in order are one
   pass (671AED / 3671AED / 387AED); `best` marks the most confident. A parked vehicle is one pass too: the camera
   re-reads it every few seconds (cam8 aimed at a car lot, 2026-10-28: one blue car 56 times in a minute), so a read of
@@ -61,6 +64,7 @@ import logging
 import re
 import secrets
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 import socket
 import asyncio
 import threading
@@ -86,6 +90,9 @@ LIST_COOLDOWN_S = 600.0
 REC_DELAY_S = 8.0                  # after a read without a vehicle picture: recording_lag (3 s) and a margin
 REC_TRIES = 15                     # ...tried again REC_RETRY_S apart while the recording or its segment's offset isn't
 REC_RETRY_S = 60.0                 # there: a 10-minute segment has a few strong matches by then (fewer at night)
+BACKFILL_DAYS = 3                  # at start-up, reads this recent still without a vehicle picture are queued
+BACKFILL_TRIES = REC_TRIES - 2     # ...with fewer tries (an old segment's offset may never be learned)
+CUT_POOL = ThreadPoolExecutor(2, thread_name_prefix="traffic-cut")   # decode + match: off the shared pool
 STRONG_MATCH = 0.93                # plate crop vs recording: a match this strong places the read (right: 0.97-0.99)
 AGREE = 2                          # ...and a segment's offset is taken once this many strong matches agree
 AGREE_S = 0.5                      # ...within this
@@ -577,28 +584,51 @@ def cut_from_recording(read_id: int) -> bool | None:
 
 
 class FromRecording:
-    """Reads waiting for their vehicle picture from the recording: (due time, read id, tries)."""
+    """Reads waiting for their vehicle picture from the recording: (due time, read id, tries), each once; cut one at a
+    time on CUT_POOL."""
 
     def __init__(self) -> None:
         self.due: deque = deque()
+        self.queued: set[int] = set()
         self.lock = threading.Lock()
 
-    def add(self, read_id: int, at: float, tries: int = 0) -> None:
+    def add(self, read_id: int, at: float, tries: int = 0) -> bool:
+        """Queue a read (False: already queued, or the queue is full)."""
         with self.lock:
-            if len(self.due) < 5000:   # a camera flooding plate-only reads: the rest are cut when looked at
-                self.due.append((at, read_id, tries))
+            if read_id in self.queued or len(self.due) >= 5000:
+                return False
+            self.queued.add(read_id)
+            self.due.append((at, read_id, tries))
+            return True
 
     def take(self, now: float) -> list[tuple[float, int, int]]:
         with self.lock:
             ready = [x for x in self.due if x[0] <= now]
             self.due = deque(x for x in self.due if x[0] > now)
+            self.queued -= {x[1] for x in ready}
             return ready
 
+    def backfill(self, now: float | None = None) -> int:
+        """Queue the recent reads still without a vehicle picture (not the ones that aren't a vehicle)."""
+        now = now or time.time()
+        sql, p = noise_sql()
+        rows = db.all(f"SELECT id FROM vehicle_reads WHERE ts >= ? AND images NOT LIKE '%\"vehicle\"%' AND NOT {sql} "
+                      "ORDER BY id DESC LIMIT 2000", [now - BACKFILL_DAYS * 86400, *p])
+        n = sum(self.add(r["id"], now, BACKFILL_TRIES) for r in rows)
+        if n:
+            log.info("traffic: %d recent reads queued for a vehicle picture from the recording", n)
+        return n
+
     async def run(self) -> None:
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(CUT_POOL, self.backfill)
+        except Exception:  # noqa: BLE001 - new reads are still queued as they come
+            log.exception("traffic: queueing older reads for pictures failed")
         while True:
             for _at, read_id, tries in self.take(time.time()):
                 try:
-                    done = await asyncio.to_thread(cut_from_recording, read_id)
+                    done = await loop.run_in_executor(CUT_POOL, cut_from_recording, read_id)
                 except Exception:  # noqa: BLE001 - one read's picture must not stop the rest
                     log.exception("traffic: vehicle picture from the recording for read %s failed", read_id)
                     done = True

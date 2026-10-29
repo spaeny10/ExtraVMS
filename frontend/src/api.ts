@@ -626,14 +626,26 @@ export async function probeHealth(): Promise<boolean> {
  * dashboard builds one per site with makeApi("/s/<site>") so tiles and feeds can mix sites on one page.
  * `opts` (ApiOptions) is only used by the hub's direct client; without it every URL is exactly as before.
  */
+/** The hub's answer when a server's tunnel is full (hub/hub/proxy.py): nothing reached the server, so it can be sent again. */
+export const HUB_BUSY = /too many requests to this site at once/;
+const HUB_BUSY_TRIES = 3;
+
 export function makeApi(base: string, opts: ApiOptions = {}) {
   const u = (path: string) => withQuery(base + path, opts.query);
   const merged = (init?: RequestInit): RequestInit | undefined => (opts.fetchInit ? { ...opts.fetchInit, ...init } : init);
   const req = async <T,>(url: string, init?: RequestInit): Promise<T> => {
-    const r = await fetch(u(url), merged(init));
-    connection.data();
-    if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
-    return r.json();
+    for (let attempt = 0; ; attempt++) {
+      const r = await fetch(u(url), merged(init));
+      connection.data();
+      if (r.ok) return r.json();
+      const text = await r.text();
+      // the hub refused it before it reached the server (its 32 requests at a time were in use): safe to send again
+      if (r.status === 429 && HUB_BUSY.test(text) && attempt < HUB_BUSY_TRIES) {
+        await new Promise((ok) => setTimeout(ok, 1500 * (attempt + 1)));
+        continue;
+      }
+      throw new Error(`${r.status} ${text}`);
+    }
   };
   /** NDJSON stream: one parsed object per line to onChunk. */
   const stream = async <C,>(url: string, init: RequestInit, onChunk: (c: C) => void) => {

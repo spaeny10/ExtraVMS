@@ -19,6 +19,7 @@ import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { api as localSite, fmtTime, fmtWhen, type Camera, type SiteApi } from "./api";
 import { useNav } from "./nav";
 import { EventDetail } from "./EventDetail";
+import { useQueuedImage } from "./imageQueue";
 import { formatPlate, plateError } from "./plate";
 import {
   type Bar, type Direction, type ListEntry, type Period, type PlateList, type Read, type ReadDetail, type TrafficStatus, PERIODS, PLATE_LISTS,
@@ -255,7 +256,7 @@ function ReadRow({ r, a, camera, onOpen, onEvent }: { r: Read; a: SiteApi; camer
       <button className="plate-read-main" onClick={onOpen} title="Open this read">
         <span className="plate-read-thumbs">
           <VehicleThumb r={r} a={a} />
-          {r.images.includes("plate") && <img className="plate-crop" src={a.trafficImage(r.id, "plate")} alt="" loading="lazy" />}
+          {r.images.includes("plate") && <PlateThumb url={a.trafficImage(r.id, "plate")} />}
         </span>
         <span className="plate-read-body">
           <span className="plate-read-head">
@@ -283,17 +284,23 @@ function ReadRow({ r, a, camera, onOpen, onEvent }: { r: Read; a: SiteApi; camer
 /** The vehicle's picture in a row: the camera's, or (it sent none) the one the server cuts from the recording on
  *  first view; the vehicle type when there is neither. */
 function VehicleThumb({ r, a }: { r: Read; a: SiteApi }) {
-  const [failed, setFailed] = useState(false);
-  if (failed) return <span className="thumb-empty vehicle-crop">{r.vehicle_type ?? "vehicle"}</span>;
-  return <img className="vehicle-crop" src={a.trafficImage(r.id, "vehicle")} alt="" loading="lazy" onError={() => setFailed(true)}
+  // a few at a time (imageQueue.ts); one the server is still cutting from the recording is asked for again shortly
+  const { src, failed, onLoad, onError } = useQueuedImage(a.trafficImage(r.id, "vehicle"));
+  if (failed || !src) return <span className="thumb-empty vehicle-crop">{failed ? r.vehicle_type ?? "vehicle" : ""}</span>;
+  return <img className="vehicle-crop" src={src} alt="" onLoad={onLoad} onError={onError}
     title={r.vehicle_source === "camera" ? undefined : "From the recording: the camera sent no picture of the vehicle"} />;
+}
+
+/** A plate crop (~2 KB), also a few at a time. */
+function PlateThumb({ url }: { url: string }) {
+  const { src, failed, onLoad, onError } = useQueuedImage(url, 2);
+  return src && !failed ? <img className="plate-crop" src={src} alt="" onLoad={onLoad} onError={onError} /> : null;
 }
 
 function ReadPanel({ a, id: initial, name, onClose, onEvent, onTimeline }: {
   a: SiteApi; id: number; name: (id: string) => string; onClose: () => void; onEvent: (id: number) => void;
   onTimeline: (camera: string, ts: number) => void;
 }) {
-  const [noPicture, setNoPicture] = useState(false);
   const [id, setId] = useState(initial);
   const [r, setR] = useState<ReadDetail | null>(null);
   const [err, setErr] = useState("");
@@ -302,7 +309,7 @@ function ReadPanel({ a, id: initial, name, onClose, onEvent, onTimeline }: {
   useEffect(() => {
     let alive = true;
     setErr("");
-    a.trafficRead(id).then((x) => { if (alive) { setR(x); setFull(false); setNoPicture(false); } }).catch((e) => { if (alive) setErr(errorText(e)); });
+    a.trafficRead(id).then((x) => { if (alive) { setR(x); setFull(false); } }).catch((e) => { if (alive) setErr(errorText(e)); });
     return () => { alive = false; };
   }, [a, id]);
   useEffect(() => {
@@ -337,9 +344,12 @@ function ReadPanel({ a, id: initial, name, onClose, onEvent, onTimeline }: {
       toast.success(`${formatPlate(plate)} added to the ${list} list`);
     } catch (e) { toast.error(listError(e, errorText)); }
   };
-  // the vehicle picture is asked for even when the camera sent none: the server cuts it from the recording then
-  const shown = r && (full && r.images.includes("full") ? "full" : !noPicture ? "vehicle" : r.images.includes("full") ? "full" : null);
-  const fromRecording = !!r && shown === "vehicle" && r.vehicle_source !== "camera";
+  // the vehicle picture is asked for even when the camera sent none: the server cuts it from the recording (a few
+  // seconds; asked for again until then)
+  const want = r ? (full && r.images.includes("full") ? "full" : "vehicle") : null;
+  const pic = useQueuedImage(r && want ? a.trafficImage(r.id, want) : null);
+  const fullInstead = pic.failed && want === "vehicle" && !!r?.images.includes("full");
+  const fromRecording = !!r && want === "vehicle" && r.vehicle_source !== "camera" && !pic.failed;
   const pass = (r?.pass ?? []).filter((x) => x.id !== r?.id);
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -352,9 +362,10 @@ function ReadPanel({ a, id: initial, name, onClose, onEvent, onTimeline }: {
         {r && (
           <div className="plate-panel-body">
             <div className="plate-panel-picture">
-              {shown ? <img src={a.trafficImage(r.id, shown)} alt={`${vehicleText(r) || "Vehicle"} ${r.plate ?? ""}`}
-                  onError={() => { if (shown === "vehicle") setNoPicture(true); }} />
-                : <div className="thumb-empty">No picture: nothing recorded at this moment</div>}
+              {fullInstead ? <img src={a.trafficImage(r.id, "full")} alt={`${vehicleText(r) || "Vehicle"} ${r.plate ?? ""}`} />
+                : pic.failed ? <div className="thumb-empty">No picture: nothing recorded at this moment</div>
+                : !pic.src ? <div className="thumb-empty">Getting the picture…</div>
+                : <img src={pic.src} alt={`${vehicleText(r) || "Vehicle"} ${r.plate ?? ""}`} onLoad={pic.onLoad} onError={pic.onError} />}
               {fromRecording && <p className="muted small">From the recording: the camera sent no picture of the vehicle. Check the moment in the Timeline.</p>}
               <div className="row small">
                 {r.images.includes("plate") && <img className="plate-crop big" src={a.trafficImage(r.id, "plate")} alt={`Plate ${r.plate ?? ""}`} />}
@@ -404,7 +415,7 @@ function ReadPanel({ a, id: initial, name, onClose, onEvent, onTimeline }: {
                   {r.pass!.map((x) => (
                     <li key={x.id} className={x.id === r.id ? "current" : ""}>
                       <button className="linkish" disabled={x.id === r.id} onClick={() => setId(x.id)}>
-                        {x.images.includes("plate") && <img className="plate-crop" src={a.trafficImage(x.id, "plate")} alt="" loading="lazy" />}
+                        {x.images.includes("plate") && <PlateThumb url={a.trafficImage(x.id, "plate")} />}
                         <span className="plate-text">{plateText(x)}</span>
                       </button>
                       <span className="muted small">{confText(x.confidence)}{x.best ? " · best" : ""} · {new Date(x.ts * 1000).toLocaleTimeString()}</span>

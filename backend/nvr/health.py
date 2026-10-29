@@ -17,6 +17,7 @@ holding nvr.db failed: for 6 hours no event was stored and nothing said so. None
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import datetime as dt
 import logging
 import os
@@ -120,11 +121,15 @@ def probe_data_dir(path: Path | None = None) -> None:
 
 
 class StorageWatch:
-    """Every PROBE_S, probe_data_dir in a worker thread; failures (and a probe that hangs PROBE_TIMEOUT_S) feed db.storage
-    like a failing statement does, a success clears what an earlier probe found."""
+    """Every PROBE_S, probe_data_dir in a thread of its own; failures (and a probe that hangs PROBE_TIMEOUT_S) feed
+    db.storage like a failing statement does, a success clears what an earlier probe found. Its own thread: in the
+    shared pool (asyncio.to_thread) it queued behind other work, and a busy server read as a hung disk (TSS-DT
+    2026-10-28: plate pictures cut from the recording filled the pool, "a write has hung for 140 s", a false db_errors
+    alert on the hub)."""
 
     def __init__(self, probe=probe_data_dir) -> None:
         self.probe = probe
+        self._pool = ThreadPoolExecutor(1, thread_name_prefix="storage-probe")
         self._pending: asyncio.Future | None = None   # a probe stuck on a hung disk: never start a second one beside it
         self._pending_since = 0.0
 
@@ -134,7 +139,8 @@ class StorageWatch:
             db.storage_failed(f"data disk not responding: a write has hung for {time.time() - self._pending_since:.0f} s",
                               source="probe")
             return False
-        self._pending, self._pending_since = asyncio.ensure_future(asyncio.to_thread(self.probe)), time.time()
+        fut = asyncio.get_running_loop().run_in_executor(self._pool, self.probe)
+        self._pending, self._pending_since = fut, time.time()
         try:
             await asyncio.wait_for(asyncio.shield(self._pending), PROBE_TIMEOUT_S)
         except asyncio.TimeoutError:
