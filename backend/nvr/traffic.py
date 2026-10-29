@@ -13,12 +13,16 @@ statusReportInterval (300 s). The camera resends a missed push only when it has 
   unless settings.traffic_keep_full. Under data_dir/traffic/<camera>/<YYYY-MM-DD>/. A read pushed without a vehicle
   picture (cam8 with "optimal push" on leaves it out of ~1 in 8 reads, 2026-10-28) gets one from the recording: the
   camera records continuously, so REC_DELAY_S after the read (the recording has that moment by then) the vehicle box is
-  cut from the full-resolution recorded frame at the read's time + settings.traffic_rec_shift_s (`...-vehicle-rec.jpg`,
-  `vehicle_source` "recording"). The shift was measured on cam8: matching each plate-only read's plate crop against the
-  recording, the strong matches (0.97-0.99) were all at -0.4 s, and at the read's own time a highway car is already
-  ~10 m on (the box shows road). Matching itself was too noisy to choose the frame (right frames scored 0.38-0.97), so
-  the fixed shift is used and the UI says the picture is from the recording, with the moment in the Timeline beside it.
-  An older read without one is cut the first time its picture is asked for.
+  cut from the full-resolution recorded frame showing it (`...-vehicle-rec.jpg`, `vehicle_source` "recording").
+  Which frame: a read's time and the recording's timeline differ by an offset that is steady within one recording
+  segment and changes from one to the next (a segment's start time is the wall clock when MediaMTX opened it; the
+  camera's keyframes are 2 s apart). On cam8 2026-10-28 it was -0.4 s, then +1.5 s, then -0.5 s; a fixed shift showed
+  empty road or the vehicle two reads earlier. So the offset is learned per segment (Aligner) from reads whose plate crop
+  matches the recording strongly (>= STRONG_MATCH; right frames scored 0.97-1.00, wrong ones up to 0.89), and a read
+  with no strong match of its own uses its segment's offset, taken once AGREE strong matches agree (a single 0.89 match
+  was wrong). Only a moving vehicle's match teaches it: one peak in time (PEAK_MAX, PEAK_GAP) on a read with a vehicle
+  type; the dealership sign the camera reads as a plate at night matches at every offset. Until then a read waits (REC_TRIES x REC_RETRY_S, the life of a segment) rather than show a guess. An
+  older read without a picture is cut the first time it is asked for.
 - Passes: reads of one camera less than PASS_GAP_S apart whose plates share PASS_COMMON characters in order are one
   pass (671AED / 3671AED / 387AED); `best` marks the most confident. A parked vehicle is one pass too: the camera
   re-reads it every few seconds (cam8 aimed at a car lot, 2026-10-28: one blue car 56 times in a minute), so a read of
@@ -74,7 +78,16 @@ PARKED_IOU = 0.8
 RECENT_READS = 200                 # per camera, for both (a busy lot reads several vehicles a second)
 LIST_COOLDOWN_S = 600.0
 REC_DELAY_S = 8.0                  # after a read without a vehicle picture: recording_lag (3 s) and a margin
-REC_TRIES = 3                      # ...tried again 10 s apart when the recording isn't there yet
+REC_TRIES = 15                     # ...tried again REC_RETRY_S apart while the recording or its segment's offset isn't
+REC_RETRY_S = 60.0                 # there: a 10-minute segment has a few strong matches by then (fewer at night)
+STRONG_MATCH = 0.93                # plate crop vs recording: a match this strong places the read (right: 0.97-0.99)
+AGREE = 2                          # ...and a segment's offset is taken once this many strong matches agree
+AGREE_S = 0.5                      # ...within this
+PEAK_MAX = 2                       # a match teaches the offset only when it is one moment: at most this many strong
+PEAK_GAP = 0.3                     # frames, the best this far above the median (a still thing matches everywhere: the
+                                   # car lot's sign read as "656BE" at night scored >= 0.93 at 53-70 of 81 offsets)
+WIDE = [round(x * 0.25, 2) for x in range(-60, 21)]   # -15 .. +5 s: a segment's offset not known yet
+NARROW = [round(x * 0.25, 2) for x in range(-4, 5)]   # +-1 s around the segment's learned offset
 SKEW_MAX_S = 120.0                 # a fresh push this far from the receive time (after the zone) has a wrong clock
 RESEND_MAX_S = 7 * 86400           # a resent read (SD card) may be this old
 BODY_MAX = 8 * 1024 * 1024
@@ -443,28 +456,105 @@ def image_path(read_id: int, kind: str) -> Path | None:
 read_limiter = plate.Limiter()   # Read plate on a read: its own limiter (plate.limiter is keyed by event id)
 
 
-def cut_from_recording(read_id: int) -> bool:
-    """The vehicle picture of a read the camera sent without one, cut from the recorded frame at the read's time (the
-    camera's box, padded as plate.crop does; the whole frame without a box). True when the read has a vehicle picture
-    now; False when the recording has nothing there (yet)."""
+def recording_segment(camera_id: str, t: float) -> float | None:
+    """Start of the recording segment holding t, or None when nothing is recorded there. Each segment's start comes from
+    the wall clock when MediaMTX opened it, so where the camera's reads sit in it differs from segment to segment (cam8,
+    2026-10-28: +1.5 s in the 18:03:56 segment, -0.5 s in every one from 18:23:56 on, -0.4 s earlier that day)."""
     from . import frames
+    seg = frames.find_segment(camera_id, t)
+    return seg[1] if seg else None
+
+
+class Aligner:
+    """Per camera and recording segment: where the camera's reads sit in it (seconds to add to a read's time), learned
+    from reads whose plate crop matched the recording strongly. One strong match can still be wrong (cam8: a 0.89 at
+    +4.75 s while the segment's true offset was +1.5 s), so the offset is the median of the largest group of matches
+    agreeing within AGREE_S, once it has AGREE of them."""
+
+    def __init__(self) -> None:
+        self.found: dict[tuple[str, float], deque] = {}
+        self.lock = threading.Lock()
+
+    def offset(self, camera_id: str, seg: float) -> float | None:
+        with self.lock:
+            q = sorted(self.found.get((camera_id, seg)) or [])
+        group = max(([d for d in q if abs(d - c) <= AGREE_S] for c in q), key=len, default=[])
+        return float(group[len(group) // 2]) if len(group) >= AGREE else None
+
+    def learn(self, camera_id: str, seg: float, d: float) -> None:
+        with self.lock:
+            self.found.setdefault((camera_id, seg), deque(maxlen=15)).append(d)
+            if len(self.found) > 500:   # old segments
+                for k in sorted(self.found, key=lambda k: k[1])[:250]:
+                    del self.found[k]
+
+
+aligner = Aligner()
+
+
+def plate_match(frame, plate_img, plate_box: list[float]) -> float:
+    """How well the camera's plate crop matches the recorded frame around the plate's box (normalized cross-
+    correlation of the crop scaled to the box, searched inside the box padded by 60 %: a moving plate is near it)."""
+    import cv2
+    import numpy as np
+    h, w = frame.shape[:2]
+    l, t, r, b = plate_box
+    pw, ph = (r - l) * 0.6, (b - t) * 0.6
+    reg = frame[max(0, int((t - ph) * h)):int((b + ph) * h), max(0, int((l - pw) * w)):int((r + pw) * w)]
+    tw, th = int((r - l) * w), int((b - t) * h)
+    if reg.size == 0 or tw < 4 or th < 4 or reg.shape[0] < th or reg.shape[1] < tw:
+        return -1.0
+    gray = cv2.cvtColor(reg, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    tpl = cv2.resize(plate_img, (tw, th)).astype(np.float32)
+    return float(cv2.matchTemplate(gray, tpl, cv2.TM_CCOEFF_NORMED).max())
+
+
+def cut_from_recording(read_id: int) -> bool | None:
+    """The vehicle picture of a read the camera sent without one, cut from the recorded frame showing it (the camera's
+    box, padded as plate.crop does). The frame: the one whose plate region matches the read's plate crop strongly
+    (STRONG_MATCH; searched over WIDE until its segment's offset is known, then NARROW around it), else the frame at
+    the segment's learned offset. True: the read has a picture now. None: not yet (the recording isn't written, or the
+    segment's offset isn't known): try again later. False: nothing is recorded there."""
+    from . import frames
+    import cv2
     r = db.one("SELECT * FROM vehicle_reads WHERE id=?", [read_id])
     if not r:
         return True
     images = json.loads(r["images"]) if r["images"] else {}
     if images.get("vehicle"):
         return True
-    img = frames.recorded_frame(r["camera_id"], r["ts"] + settings.traffic_rec_shift_s)
-    if img is None:
+    cam, ts = r["camera_id"], r["ts"]
+    seg = recording_segment(cam, ts)
+    if seg is None:
         return False
-    import cv2
+    learned = aligner.offset(cam, seg)
+    frame, d = None, learned
+    pf = settings.data_dir / images["plate"] if images.get("plate") else None
+    pc = cv2.imread(str(pf), cv2.IMREAD_GRAYSCALE) if pf is not None and pf.is_file() and r["plate_box"] else None
+    if pc is not None:
+        offsets = WIDE if learned is None else [round(learned + x, 2) for x in NARROW]
+        got = frames.recording_frames(cam, [ts + x for x in offsets], tol=0.12)
+        scores = [(plate_match(got[ts + x], pc, json.loads(r["plate_box"])), x) for x in offsets if ts + x in got]
+        best = max(scores, default=(-1.0, None))
+        median = sorted(s for s, _ in scores)[len(scores) // 2] if scores else 0.0
+        one_moment = sum(s >= STRONG_MATCH for s, _ in scores) <= PEAK_MAX and best[0] - median >= PEAK_GAP
+        if best[0] >= STRONG_MATCH and one_moment:
+            if r["vehicle_type"]:
+                aligner.learn(cam, seg, best[1])
+            frame, d = got[ts + best[1]], best[1]
+    if frame is None:
+        if d is None:
+            return None
+        frame = frames.recorded_frame(cam, ts + d)
+        if frame is None:
+            return None
     box = json.loads(r["box"]) if r["box"] else [0.0, 0.0, 1.0, 1.0]
-    ok, buf = cv2.imencode(".jpg", plate.crop(img, box), [cv2.IMWRITE_JPEG_QUALITY, 90])
+    ok, buf = cv2.imencode(".jpg", plate.crop(frame, box), [cv2.IMWRITE_JPEG_QUALITY, 90])
     if not ok:
-        return False
-    d = media_root() / r["camera_id"] / dt.datetime.fromtimestamp(r["ts"]).strftime("%Y-%m-%d")
-    d.mkdir(parents=True, exist_ok=True)
-    f = d / f"{int(r['ts'] * 1000)}-{secrets.token_hex(3)}-vehicle-rec.jpg"
+        return None
+    day = media_root() / cam / dt.datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+    day.mkdir(parents=True, exist_ok=True)
+    f = day / f"{int(ts * 1000)}-{secrets.token_hex(3)}-vehicle-rec.jpg"
     f.write_bytes(buf.tobytes())
     images["vehicle"] = str(f.relative_to(settings.data_dir)).replace("\\", "/")
     db.execute("UPDATE vehicle_reads SET images=? WHERE id=?", [json.dumps(images), read_id])
@@ -497,8 +587,8 @@ class FromRecording:
                 except Exception:  # noqa: BLE001 - one read's picture must not stop the rest
                     log.exception("traffic: vehicle picture from the recording for read %s failed", read_id)
                     done = True
-                if not done and tries + 1 < REC_TRIES:
-                    self.add(read_id, time.time() + 10, tries + 1)
+                if done is None and tries + 1 < REC_TRIES:
+                    self.add(read_id, time.time() + REC_RETRY_S, tries + 1)
             await asyncio.sleep(1)
 
 

@@ -488,52 +488,119 @@ def test_read_plate_on_demand():
         traffic.read_limiter.last.clear()
 
 
+def _texture(seed: int, w: int = 116, h: int = 60) -> np.ndarray:
+    """A plate-like picture no other one resembles (blurred noise)."""
+    g = np.random.default_rng(int(seed)).integers(0, 255, (h, w), dtype=np.uint8)
+    return cv2.cvtColor(cv2.GaussianBlur(g, (5, 5), 0), cv2.COLOR_GRAY2BGR)
+
+
+def _b64(img: np.ndarray) -> str:
+    return base64.b64encode(cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 95])[1].tobytes()).decode()
+
+
+class FakeRecording:
+    """A recording of cam8 where each plate shows `offset` seconds after the camera's read time (the run's offset), in
+    the plate box of the fixture push, over a noisy road; anything else is background."""
+
+    def __init__(self, offset: float):
+        self.offset, self.plates, self.calls = offset, {}, []
+        self.bg = np.random.default_rng(99).integers(0, 255, (1520, 2688, 3), dtype=np.uint8)
+
+    def show(self, ts: float, tex: np.ndarray) -> None:
+        self.plates[round(ts + self.offset, 2)] = tex
+
+    still: np.ndarray | None = None   # a sign in the plate box all the time (the car lot's, read as a plate at night)
+
+    def frame(self, t: float) -> np.ndarray:
+        f = self.bg.copy()
+        tex = next((v for k, v in self.plates.items() if abs(k - t) < 0.05), self.still)
+        if tex is not None:
+            l, tp, r, b = 0.5833, 0.5481, 0.6438, 0.6037   # the fixture's plate box (1120,592)-(1236,652) of 1920x1080
+            x1, y1, x2, y2 = int(l * 2688), int(tp * 1520), int(r * 2688), int(b * 1520)
+            f[y1:y2, x1:x2] = cv2.resize(tex, (x2 - x1, y2 - y1))
+        return f
+
+    def recording_frames(self, camera_id, targets, tol=0.6):
+        self.calls.append(len(targets))
+        return {t: self.frame(t) for t in targets}
+
+    def recorded_frame(self, camera_id, t):
+        return self.frame(t)
+
+
 def test_vehicle_picture_from_the_recording():
-    """cam8 with optimal push: a read with only its plate crop. Its vehicle picture is cut from the recorded frame at the
-    read's time (the camera's box), queued after the push and on first view for an older read; nothing recorded: none."""
+    """cam8 with optimal push: reads with only their plate crop. Their vehicle picture is cut from the recording at the
+    segment's offset, learned from reads whose plate crop matches strongly (two agreeing); a read before that waits; one
+    strong-looking wrong match doesn't set the offset; the next segment learns its own; nothing recorded: none."""
     from nvr import frames
     reset()
     c = cam()
     t0 = time.time()
-    frame = np.zeros((1520, 2688, 3), np.uint8)
-    frame[400:1200, 1150:2600] = (40, 40, 200)   # the vehicle where the fixture's box is (0.43..0.97, 0.15..0.77)
-    asked = []
-
-    def fake_recorded(camera_id, t):
-        asked.append((camera_id, round(t, 3)))
-        return frame if camera_id == "cam8" else None
-    real = frames.recorded_frame
-    frames.recorded_frame = fake_recorded
+    rec = FakeRecording(1.5)
+    real = frames.recording_frames, frames.recorded_frame, traffic.recording_segment
+    frames.recording_frames, frames.recorded_frame = rec.recording_frames, rec.recorded_frame
+    traffic.recording_segment = lambda camera_id, t: 1000.0   # one segment
     traffic.from_recording.due.clear()
+    traffic.aligner.found.clear()
+
+    def read(plate, at, tex=None, **kw):
+        if tex is not None:
+            rec.show(at, tex)
+        snap = _b64(tex if tex is not None else _texture(at))
+        return traffic.ingest(c, push_read(plate, "0.9", at=at, vehicle_snapshot="-", full_snapshot="-", license_plate_snapshot=snap, **kw),
+                              at + 0.5)["read_id"]
     try:
-        out = traffic.ingest(c, push_read("ABB473", "0.87", at=t0, vehicle_snapshot="-", full_snapshot="-"), t0 + 0.5)
-        rid = out["read_id"]
-        r = traffic.read(rid)
-        assert r["images"] == ["plate"] and r["vehicle_source"] is None
-        due = list(traffic.from_recording.due)
-        assert due and due[0][1] == rid and abs(due[0][0] - (t0 + 0.5 + traffic.REC_DELAY_S)) < 0.01
-        assert traffic.cut_from_recording(rid) and asked[-1] == ("cam8", round(r["ts"] + settings.traffic_rec_shift_s, 3))
-        r = traffic.read(rid)
+        a = read("AAA1111", t0, _texture(1))
+        assert traffic.read(a)["images"] == ["plate"] and [x[1] for x in traffic.from_recording.due] == [a]
+        hidden = read("HID2222", t0 + 20)              # its plate isn't in the recording (seen badly): no match
+        assert traffic.cut_from_recording(hidden) is None   # nothing known yet: it waits
+        assert traffic.cut_from_recording(a) is True    # a strong match, but one alone sets no offset
+        assert traffic.aligner.offset("cam8", 1000.0) is None and rec.calls[-1] == len(traffic.WIDE)
+        b = read("BBB3333", t0 + 40, _texture(2))
+        assert traffic.cut_from_recording(b) is True and traffic.aligner.offset("cam8", 1000.0) == 1.5
+        assert traffic.cut_from_recording(hidden) is True   # now from the run's offset
+        r = traffic.read(hidden)
         assert r["images"] == ["plate", "vehicle"] and r["vehicle_source"] == "recording"
-        crop = cv2.imread(str(traffic.image_path(rid, "vehicle")))
-        assert crop is not None and crop[crop.shape[0] // 2, crop.shape[1] // 2].tolist() == [40, 40, 200]
-        assert traffic.cut_from_recording(rid)   # already has one: nothing decoded again
-        assert len(asked) == 1
-        # an older read without one: cut when its picture is asked for
-        old = traffic.ingest(c, push_read("OLD4567", "0.9", at=t0 + 30, vehicle_snapshot="-"), t0 + 30.5)["read_id"]
-        got = call("GET", f"/api/traffic/reads/{old}/image/vehicle")
+        later = read("CCC4444", t0 + 60, _texture(3))
+        assert traffic.cut_from_recording(later) is True and rec.calls[-1] == len(traffic.NARROW)   # around the offset only
+        # the crop is the vehicle box of the frame where the plate is: the plate's texture inside it
+        crop = cv2.imread(str(traffic.image_path(later, "vehicle")))
+        assert crop is not None and crop.shape[1] > crop.shape[0]
+        # a wrong strong-looking match elsewhere doesn't move an agreed offset
+        traffic.aligner.learn("cam8", 1000.0, 4.75)
+        assert traffic.aligner.offset("cam8", 1000.0) == 1.5
+        # a sign read as a plate matches at every offset: it teaches nothing (a fresh segment stays unknown)
+        traffic.recording_segment = lambda camera_id, t: 1500.0
+        sign = _texture(77)
+        rec.still = sign
+        for k in range(3):
+            sid = read("656BE", t0 + 70 + k * 5, sign, vehicle_type="-", vehicle_color="-")
+            traffic.cut_from_recording(sid)
+        assert traffic.aligner.offset("cam8", 1500.0) is None
+        rec.still = None
+        traffic.recording_segment = lambda camera_id, t: 1000.0
+        # the next segment: its own offset, learned again
+        traffic.recording_segment = lambda camera_id, t: 2000.0
+        rec.offset = -0.5
+        n1 = read("NEW1111", t0 + 100, _texture(4))
+        n2 = read("NEW2222", t0 + 120)
+        assert traffic.cut_from_recording(n1) is True and traffic.cut_from_recording(n2) is None
+        # an older read: cut when its picture is asked for (the run's offset is known by then)
+        n3 = read("NEW3333", t0 + 140, _texture(5))
+        assert traffic.cut_from_recording(n3) is True and traffic.aligner.offset("cam8", 2000.0) == -0.5
+        got = call("GET", f"/api/traffic/reads/{n2}/image/vehicle")
         assert got.status_code == 200 and got.content[:2] == b"\xff\xd8"
-        assert traffic.read(old)["vehicle_source"] == "recording"
-        # a camera's own picture stays "camera"
-        own = traffic.ingest(c, push_read("OWN1234", "0.9", at=t0 + 60), t0 + 60.5)["read_id"]
+        # the camera's own picture stays "camera"
+        own = traffic.ingest(c, push_read("OWN1234", "0.9", at=t0 + 160), t0 + 160.5)["read_id"]
         assert traffic.read(own)["vehicle_source"] == "camera"
-        # nothing recorded there: no picture, and the queue tries again later
-        frames.recorded_frame = lambda camera_id, t: None
-        none = traffic.ingest(c, push_read("NONE123", "0.9", at=t0 + 90, vehicle_snapshot="-"), t0 + 90.5)["read_id"]
-        assert not traffic.cut_from_recording(none) and call("GET", f"/api/traffic/reads/{none}/image/vehicle").status_code == 404
+        # nothing recorded there: no picture
+        traffic.recording_segment = lambda camera_id, t: None
+        none = read("NONE123", t0 + 180)
+        assert traffic.cut_from_recording(none) is False and call("GET", f"/api/traffic/reads/{none}/image/vehicle").status_code == 404
     finally:
-        frames.recorded_frame = real
+        frames.recording_frames, frames.recorded_frame, traffic.recording_segment = real
         traffic.from_recording.due.clear()
+        traffic.aligner.found.clear()
 
 
 def test_hub_roles():

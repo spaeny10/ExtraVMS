@@ -157,9 +157,6 @@ class Settings(BaseSettings):
     traffic_list_min_conf: float = 0.5
     traffic_push_base: str = ""
     traffic_silent_s: float = 900.0
-    # A read sent without a vehicle picture gets one from the recording, at the read's time plus this: the recorded frame
-    # showing what the camera read is earlier than its timestamp (cam8 2026-10-28: plate crops matched at -0.4 s)
-    traffic_rec_shift_s: float = -0.4
     # Back-to-back fragments of one visit on a camera merge into one event before Qwen describes it (merge.py)
     track_merge_gap: float = 10.0           # a fragment starting within this of the previous one may merge
     merge_max_seconds: float = 300.0        # never grow one event beyond this

@@ -90,10 +90,15 @@ Decided while building:
   one car 56 times a minute.
 - **Read plate on demand.** The camera's reader misses plates its own crops show (plates ~60 px wide in its 1080p
   frame). An operator can have Otso read the crop; the answer is kept beside the camera's and is searchable.
-- **Pictures from the recording.** With "optimal push" on, the camera leaves the vehicle picture out of about 1 read in
-  8. The server cuts it from the recording at the read's time - 0.4 s (`traffic_rec_shift_s`). Strong plate-crop
-  matches on cam8 were all at -0.4 s; at the read's own time a highway car has already left the box. The read panel says
-  the picture is from the recording and links to the Timeline at that moment.
+- **Pictures from the recording.** With "optimal push" on, the camera sent the vehicle picture with fewer reads, then
+  with none. The server cuts it from the recording. The offset between a read's time and the recording's timeline is
+  steady within a 10-minute recording segment but changes from one segment to the next: each segment's start time is
+  the wall clock when MediaMTX opened it. On cam8 it was -0.4 s, +1.5 s, then -0.5 s, and a fixed shift showed empty
+  road or the wrong car. So it is learned per segment from reads whose plate crop matches the recording strongly: 0.93
+  or more, and at least 2 such matches agreeing within 0.5 s. Right frames scored
+  0.97-0.99; one wrong frame scored 0.89, and on its own it would have set the whole run wrong. Reads wait until their
+  run's offset is known instead of guessing. The read panel says the picture is from the recording and links to
+  the Timeline at that moment.
 
 ### Phase 1: plate reads in Axiom (site server)
 - Push receiver `POST /api/traffic/push/{camera}/{secret}`: per-camera secret, no login (the camera can't log in),
