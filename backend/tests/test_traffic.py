@@ -426,14 +426,27 @@ def test_ask_evidence():
     traffic.ingest(c, push_read("ABC1234", "0.88", at=t0, vehicle_color="White", vehicle_type="Truck"), t0 + 0.5)
     traffic.ingest(c, push_read("XYZ9876", "0.91", at=t0 + 30, vehicle_color="Black", vehicle_type="SUV"), t0 + 30.5)
     traffic.ingest(c, push_read("LOW0000", "0.30", at=t0 + 60, vehicle_color="White", vehicle_type="Truck"), t0 + 60.5)
-    named = traffic.ask_evidence("was ABC-1234 here at 10pm?", None, None)
+    reads = lambda ev: [x for x in ev if x["kind"] == "plate"]   # noqa: E731 - after the counted totals notes
+    named_all = traffic.ask_evidence("was ABC-1234 here at 10pm?", None, None)
+    named = reads(named_all)
     assert [x["plate"] for x in named] == ["ABC1234"] and named[0]["kind"] == "plate"
+    assert named_all[0]["kind"] == "note" and "plate reads matching ABC1234 since " in named_all[0]["text"]
+    assert named_all[0]["text"].endswith("counted: 1 vehicle passes")
     assert "license plate ABC 1234 read by the camera's plate reader (88 % sure; state reported KS)" in named[0]["text"]
     assert "going away (reported)" in named[0]["text"] and named[0]["camera_name"] == "Traffic Camera"
-    near = traffic.ask_evidence("plate ABC1284", None, None)
+    near = reads(traffic.ask_evidence("plate ABC1284", None, None))
     assert [x["plate"] for x in near] == ["ABC1234"]   # one character off: the near plate
-    white = traffic.ask_evidence("tag number of the white truck?", None, None)
+    white = reads(traffic.ask_evidence("tag number of the white truck?", None, None))
     assert [x["plate"] for x in white] == ["ABC1234"]   # confident reads of white trucks only
+    # "how many plates today?": the reads listed are a sample, so the real totals come first, counted (a model counting
+    # the 15 listed reads answered "16 plates today" when there were 1,079)
+    for k in range(20):   # passing cars, further apart than a parked car's re-reads (PARKED_GAP_S)
+        at = t0 - 2000 + k * 40
+        traffic.ingest(c, push_read(f"MNY{k:04d}", "0.9", at=at), at + 0.5)
+    many = traffic.ask_evidence("how many license plates were recorded today?", t0 - 2100, None)
+    assert many[0]["kind"] == "note" and many[0]["camera_name"] == "Traffic Camera"
+    assert "23 vehicles passed, 23 of them with a license plate read, 23 different plates" in many[0]["text"]
+    assert "only the latest 15, a sample" in many[0]["text"] and len(reads(many)) == traffic.ASK_LIMIT
     assert traffic.ask_evidence("how many people came in today?", None, None) == []
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "hub"))
     from hub import site_ask
@@ -650,7 +663,7 @@ def test_reads_that_are_not_a_vehicle():
     st = call("GET", "/api/traffic/status").json()["cameras"][0]
     assert st["reads_today"] == 2 and st["plates_today"] == 2
     assert traffic.ask_evidence("was 556BE here?", None, None) == []   # the sign, even when named
-    assert [x["read_id"] for x in traffic.ask_evidence("was 8777AHN here?", None, None)] == [sure]
+    assert [x["read_id"] for x in traffic.ask_evidence("was 8777AHN here?", None, None) if x["kind"] == "plate"] == [sure]
     traffic.from_recording.due.clear()
 
 

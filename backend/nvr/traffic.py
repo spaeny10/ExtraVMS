@@ -1143,10 +1143,50 @@ def read_line(r: dict, names: dict[str, str] | None = None) -> str:
     return ", ".join(bits)
 
 
+def period_text(since: float, until: float | None, now: float) -> str:
+    """"since today at 12:00 AM", "from Oct 27 at 6:00 AM to yesterday at 9:00 PM"."""
+    today = dt.date.fromtimestamp(now)
+
+    def at(t: float) -> str:
+        d = dt.datetime.fromtimestamp(t)
+        return f"{day_text(d.date(), today)} at {clock(d.hour * 60 + d.minute)}"
+    return f"since {at(since)}" if until is None or until >= now - 60 else f"from {at(since)} to {at(until)}"
+
+
+def ask_totals(since: float, until: float | None, now: float, names: dict[str, str], listed: int,
+               tokens: list[str] | None = None) -> list[dict]:
+    """Counted totals for Ask, one note per camera: the reads listed are a sample (ASK_LIMIT, the latest), and a model
+    counting them answered "16 plates today" when there were hundreds (TSS-DT 2026-10-29)."""
+    sql, p = noise_sql()
+    end = until if until is not None else now + 1
+    period = period_text(since, until, now)
+    out = []
+    if tokens:
+        for t in tokens[:3]:
+            for r in db.all(f"SELECT camera_id, COUNT(DISTINCT COALESCE(pass_id, id)) AS n FROM vehicle_reads WHERE ts >= ? "
+                            f"AND ts < ? AND (plate LIKE ? OR otso_plate LIKE ?) AND NOT {sql} GROUP BY camera_id",
+                            [since, end, f"%{t}%", f"%{t}%", *p]):
+                out.append({"kind": "note", "camera_id": r["camera_id"], "camera_name": names.get(r["camera_id"], r["camera_id"]),
+                            "text": f"plate reads matching {t} {period}, counted: {r['n']} vehicle passes"
+                                    + (f" (only the latest {listed} plate reads are listed)" if r["n"] > listed else "")})
+        return out
+    for r in db.all(f"SELECT camera_id, COUNT(DISTINCT COALESCE(pass_id, id)) AS passes, "
+                    f"COUNT(DISTINCT CASE WHEN plate IS NOT NULL THEN COALESCE(pass_id, id) END) AS with_plate, "
+                    f"COUNT(DISTINCT plate) AS plates FROM vehicle_reads WHERE ts >= ? AND ts < ? AND NOT {sql} "
+                    f"GROUP BY camera_id", [since, end, *p]):
+        out.append({"kind": "note", "camera_id": r["camera_id"], "camera_name": names.get(r["camera_id"], r["camera_id"]),
+                    "text": f"traffic camera totals {period}, counted from all its reads (use these for how many): "
+                            f"{r['passes']} vehicles passed, {r['with_plate']} of them with a license plate read, "
+                            f"{r['plates']} different plates. The plate reads listed are only the latest {listed}, "
+                            f"a sample, not all of them"})
+    return out
+
+
 def ask_evidence(question: str, since: float | None, until: float | None, now: float | None = None) -> list[dict]:
     """Plate reads for an Ask question: the plates it names (and near ones), or, when it asks about plates without
     naming one ("tag of the white truck?"), the latest confident reads matching its colour and type words. Items:
-    {kind: "plate", read_id, ts, camera_id, camera_name, plate, confidence, event_id, text}. Nothing without reads."""
+    {kind: "plate", read_id, ts, camera_id, camera_name, plate, confidence, event_id, text}, after a counted totals note
+    per camera ({kind: "note", camera_id, text}: ask_totals). Nothing without reads."""
     if not db.one("SELECT 1 AS x FROM vehicle_reads LIMIT 1"):
         return []
     from .assistant import PLATE_WORDS
@@ -1175,7 +1215,8 @@ def ask_evidence(question: str, since: float | None, until: float | None, now: f
         out.append({"kind": "plate", "read_id": r["id"], "ts": r["ts"], "camera_id": r["camera_id"],
                     "camera_name": names.get(r["camera_id"], r["camera_id"]), "plate": r["plate"],
                     "confidence": r["confidence"], "event_id": r["event_id"], "text": read_line(r)})
-    return out[:ASK_LIMIT]
+    out = out[:ASK_LIMIT]
+    return ask_totals(since, until, now, names, len(out), tokens) + out
 
 
 # ---------------------------------------------------------------- retention

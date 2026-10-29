@@ -1113,7 +1113,8 @@ async def _plate_lines(question: str, now: float) -> str:
     if not found:
         return ""
     return "\nPlate reads (traffic cameras' own plate readers):\n" + "\n".join(
-        f"- {_cam_name(x['camera_id'])}, {_when(x['ts'], now)}: {x['text']}" for x in found)
+        f"- {_cam_name(x['camera_id'])}: {x['text']}" if x["kind"] == "note"   # counted totals (traffic.ask_totals)
+        else f"- {_cam_name(x['camera_id'])}, {_when(x['ts'], now)}: {x['text']}" for x in found)
 
 
 async def ask(thread_id: int | None, question: str) -> AsyncIterator[dict]:

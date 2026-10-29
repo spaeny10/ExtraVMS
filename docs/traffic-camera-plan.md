@@ -122,6 +122,10 @@ Decided while building:
   - **Counted, not written by the model** (`traffic.plate_notes`): a model asked for counts makes them up. One sighting
     is one pass.
   - **Habits are not claimed from too little.** A habit needs sightings on 2 or more days, and "on weekdays" needs 5.
+  - **Ask gets counted totals for plate questions.** Ask's plate evidence is a sample: the latest 15 reads. Asked "how
+    many plates today?", Otso counted the sample and said 16 when there were 1,079. Now every plate question gets a
+    counted totals note per camera first (`traffic.ask_totals`: vehicles, those with a plate, different plates, noise
+    left out), and a named plate gets its count of passes.
   - **Year totals outlive the 30-day reads.** Before reads are pruned, each sighting's time of day, direction and
     vehicle type is kept per plate and day in `plate_days`, without pictures, for `traffic_history_days` (400).
 - **Reads that aren't a vehicle are hidden.** At night cam8 read the car lot's sign as plates ("556BE", up to ~6 a
