@@ -1025,9 +1025,53 @@ def test_search_by_description():
     assert traffic.ask_evidence("did anyone carry a ladder?", None, None) == []   # a ladder, but no vehicle
 
 
+def test_vehicles_around_an_incident():
+    """The SOC incident card's window: one row per pass (the camera's plate, else Otso's; Otso's description over the
+    camera's guess), the plate's counted notes, no reads that aren't a vehicle, a plate read from another camera's
+    footage (not one a traffic read put on its event), at most 6 hours."""
+    reset()
+    c = cam()
+    t0 = time.time() - 900
+    a = traffic.ingest(c, push_read("ARV1234", "0.9", at=t0, direction="approach"), t0 + 0.5)["read_id"]
+    traffic.ingest(c, push_read("ARV1234", "0.7", at=t0 + 2, direction="approach"), t0 + 2.5)   # the same pass
+    b = traffic.ingest(c, push_read("No Plates", "0.00", at=t0 + 120), t0 + 120.5)["read_id"]
+    db.execute("UPDATE vehicle_reads SET otso_plate='27654', otso_look='red Dodge Ram pickup truck, chrome rear bumper' WHERE id=?", [b])
+    traffic.ingest(c, push_read("SIGN56", "0.4", at=t0 + 200, vehicle_type="-"), t0 + 200.5)   # the lot's sign: not a vehicle
+    db.upsert_camera({"id": "cam2", "name": "Gate", "host": "192.0.2.2", "onvif_port": 80, "rtsp_port": 554, "username": "u",
+                      "password": "p", "main_path": "/m", "sub_path": "/s", "enabled": 1, "zones": []})
+    gate = db.create_event(camera_id="cam2", track_id="g1", camera_class="vehicle", camera_conf=0.9, start_ts=t0 + 300,
+                           end_ts=t0 + 310, path=[], rules=[], status="verified", plate="FTG4321", plate_conf="high",
+                           synopsis="A white van stops at the gate. The driver gets out.")
+    vehicle_event(t0 + 1, plate="ARV1234")   # a traffic read's plate on its own event: listed once, as the read
+    got = traffic.around(t0 - 600, t0 + 600)
+    v = got["vehicles"]
+    assert got["total"] == 3
+    assert [(x["source"], x["plate"]) for x in v] == [("traffic", "ARV1234"), ("traffic", "27654"), ("footage", "FTG4321")]
+    assert v[0]["read_id"] == a and v[0]["plate_by"] == "camera" and v[0]["direction"] == "approach"
+    assert v[0]["vehicle"] == "white GMC truck" and v[0]["vehicle_by"] == "camera" and v[0]["images"] == ["plate", "vehicle"]
+    assert v[0]["notes"] == ["Seen once today."] or v[0]["notes"][0].startswith("The first time")
+    assert v[1]["plate_by"] == "otso" and v[1]["vehicle"] == "red Dodge Ram pickup truck, chrome rear bumper" and v[1]["vehicle_by"] == "otso"
+    assert v[2]["event_id"] == gate and v[2]["camera_name"] == "Gate" and v[2]["vehicle"] == "A white van stops at the gate."
+    assert v[2]["notes"] == ["No other event with this plate in the last 30 days."]
+    r = call("GET", f"/api/traffic/around?since={t0 - 600}&until={t0 + 600}", role="viewer")
+    assert r.status_code == 200 and len(r.json()["vehicles"]) == 3
+    # more than fit (a highway): those with a plate, then the nearest to the incident; the total says how many there were
+    limit = traffic.AROUND_LIMIT
+    traffic.AROUND_LIMIT = 2
+    try:
+        near = traffic.around(t0 - 600, t0 + 600, at=t0 + 300)
+        assert [x["plate"] for x in near["vehicles"]] == ["27654", "FTG4321"] and near["total"] == 3
+    finally:
+        traffic.AROUND_LIMIT = limit
+    assert call("GET", f"/api/traffic/around?since={t0}&until={t0 + 7 * 3600}").status_code == 422
+    db.execute("DELETE FROM events WHERE camera_id='cam2'")
+    db.execute("DELETE FROM cameras WHERE id='cam2'")
+
+
 def test_hub_roles():
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "hub"))
     from hub import roles
+    assert roles.required_role("GET", "/api/traffic/around") == "viewer"
     assert roles.required_role("PUT", "/api/cameras/cam8/traffic/alerts") == "admin"
     assert roles.required_role("GET", "/api/traffic/reads") == "viewer"
     assert roles.required_role("GET", "/api/traffic/reads/5/image/plate") == "viewer"

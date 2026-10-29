@@ -1618,6 +1618,75 @@ def ask_evidence(question: str, since: float | None, until: float | None, now: f
     return notes + out[:ASK_LIMIT]
 
 
+# ---------------------------------------------------------------- vehicles around an SOC incident
+
+AROUND_MAX_S = 6 * 3600      # the longest window asked for
+AROUND_LIMIT = 20            # vehicles, those with a plate first
+AROUND_NOTES = 3             # of a plate's notes (plate_notes), the first few
+FOOTAGE_DAYS = 30            # a footage plate's note counts its other events this far back
+
+
+def _first_sentence(text: str | None, n: int = 140) -> str | None:
+    s = re.split(r"(?<=[.!?])\s", (text or "").strip(), maxsplit=1)[0]
+    return (s[:n].rsplit(" ", 1)[0] + "…") if len(s) > n else s or None
+
+
+def around(since: float, until: float, at: float | None = None, now: float | None = None) -> dict:
+    """The vehicles seen between since and until, for the hub's SOC incident card (docs/soc-plan.md §1): the traffic
+    cameras' passes (one per pass: its plate, the camera's or Otso's, Otso's description or else the camera's guess,
+    direction, the plate's counted notes) and the plates Qwen read from event footage on other cameras (source
+    "footage"). Counted and worded in code, never by the model. {vehicles (oldest first), total}: at most AROUND_LIMIT,
+    those with a plate first, then the nearest to `at` (the incident's first event; a highway passes hundreds in the
+    window, cam8 ~360 in 15 minutes); total = all of them."""
+    now = now or time.time()
+    at = at if at is not None else since + (until - since) / 2
+    sql, p = noise_sql()
+    names = {c["id"]: c["name"] for c in db.cameras()}
+    rows = db.all(f"SELECT * FROM vehicle_reads WHERE ts >= ? AND ts <= ? AND NOT {sql} ORDER BY ts", [since, until, *p])
+    by: dict[int, list[dict]] = {}
+    for r in rows:
+        by.setdefault(r["pass_id"] or r["id"], []).append(r)
+    out = []
+    for reads in by.values():
+        best = next((r for r in reads if r["best"]), reads[-1])
+        looked = next((r for r in reads if r["otso_look"]), None)
+        otso_plate = next((r["otso_plate"] for r in reads if r["otso_plate"]), None)
+        plate_ = best["plate"] or otso_plate
+        dirs = [r["direction"] for r in reads if r["direction"]]
+        imgs = json.loads(best["images"]) if best["images"] else {}
+        out.append({
+            "source": "traffic", "ts": reads[0]["ts"], "camera_id": best["camera_id"],
+            "camera_name": names.get(best["camera_id"], best["camera_id"]), "read_id": best["id"], "event_id": best["event_id"],
+            "plate": plate_, "plate_by": ("camera" if best["plate"] else "otso") if plate_ else None,
+            "confidence": best["confidence"] if best["plate"] else None,
+            "vehicle": looked["otso_look"] if looked else " ".join(x for x in ((best["vehicle_color"] or "").lower(),
+                                                                         best["vehicle_brand"] or "", (best["vehicle_type"] or "").lower()) if x) or None,
+            "vehicle_by": "otso" if looked else "camera",
+            "direction": max(set(dirs), key=dirs.count) if dirs else None,
+            "list": best["list"], "images": sorted(k for k in ("plate", "vehicle") if k in imgs), "notes": []})
+    events = db.all("SELECT id, camera_id, start_ts, plate, plate_region, plate_conf, synopsis FROM events WHERE status='verified' "
+                    "AND plate IS NOT NULL AND start_ts >= ? AND start_ts <= ? AND id NOT IN "
+                    "(SELECT event_id FROM vehicle_reads WHERE event_id IS NOT NULL AND ts >= ? AND ts <= ?) ORDER BY start_ts",
+                    [since, until, since - 60, until + 60])
+    traffic_cams = {c["id"] for c in db.cameras() if (c.get("traffic") or {}).get("enabled")}
+    for e in events:
+        if e["camera_id"] in traffic_cams:   # its plate is a traffic read's (attach_read), listed as the read
+            continue
+        n = db.one("SELECT COUNT(*) AS n FROM events WHERE plate=? AND id != ? AND status='verified' AND start_ts >= ?",
+                   [e["plate"], e["id"], now - FOOTAGE_DAYS * 86400])["n"]
+        out.append({"source": "footage", "ts": e["start_ts"], "camera_id": e["camera_id"],
+                    "camera_name": names.get(e["camera_id"], e["camera_id"]), "read_id": None, "event_id": e["id"],
+                    "plate": e["plate"], "plate_by": "footage", "confidence": None, "region": e["plate_region"],
+                    "vehicle": _first_sentence(e["synopsis"]), "vehicle_by": "otso", "direction": None, "list": None,
+                    "images": [], "notes": [f"Read from footage on {times(n)} other events in the last {FOOTAGE_DAYS} days."
+                                            if n else f"No other event with this plate in the last {FOOTAGE_DAYS} days."]})
+    keep = sorted(out, key=lambda v: (v["plate"] is None, abs(v["ts"] - at)))[:AROUND_LIMIT]
+    for v in keep:
+        if v["source"] == "traffic" and v["plate"]:
+            v["notes"] = plate_notes(v["plate"], v["ts"], now)["notes"][:AROUND_NOTES]
+    return {"vehicles": sorted(keep, key=lambda v: v["ts"]), "total": len(out)}
+
+
 # ---------------------------------------------------------------- retention
 
 def prune(keep_days: int | None = None, now: float | None = None) -> int:

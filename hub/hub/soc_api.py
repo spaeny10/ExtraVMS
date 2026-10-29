@@ -29,7 +29,7 @@ import sqlalchemy as sa
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
-from . import ai_schedule, auth, db, geocode, soc, soc_reports
+from . import ai_schedule, auth, db, geocode, soc, soc_reports, soc_vehicles
 from .agents import registry
 from .roles import allows
 
@@ -486,6 +486,14 @@ async def incident_detail(iid: int, u: dict = Depends(user)):
     site = {"id": inc["location_id"], "name": loc.get("name"), "address": loc.get("address") or "", "timezone": loc.get("timezone"), **geocode.place_of(loc)}
     return {"incident": inc, "site": site, "events": soc.events_of(iid), "log": logs, "contacts": contacts_for(inc["location_id"]),
             "procedures": _procedures_with_progress(inc, logs), "calls": [r for r in logs if r["action"] == "call"]}
+
+
+@router.get("/api/soc/incidents/{iid}/vehicles")
+async def incident_vehicles(iid: int, u: dict = Depends(user)):
+    """The vehicles around the incident (soc_vehicles.py): asked of the Site's servers now; operators only."""
+    _staff(u)
+    inc = _soc(soc.get, iid)
+    return await soc_vehicles.fetch(inc, u["email"])
 
 
 class HandoffIn(BaseModel):

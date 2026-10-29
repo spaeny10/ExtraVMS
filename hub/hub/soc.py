@@ -443,7 +443,7 @@ def tag(rows: list[dict]) -> list[dict]:
     for r in rows:
         loc = locs.get(r["location_id"]) or {}
         servers, cams = per[r["id"]]
-        out.append({**r, "org_name": orgs.get(r["org_id"]), "location_name": loc.get("name"), "location_timezone": loc.get("timezone"),
+        out.append({**{k: v for k, v in r.items() if k != "vehicles"}, "org_name": orgs.get(r["org_id"]), "location_name": loc.get("name"), "location_timezone": loc.get("timezone"),
                     "servers": list(servers.values()), "cameras": list(cams.values()),
                     **{f"{k}_email": emails.get(r.get(k)) for k in USER_FIELDS}})
     return out

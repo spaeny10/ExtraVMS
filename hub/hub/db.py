@@ -203,7 +203,10 @@ incidents = Table("incidents", metadata,
                   Column("disposition", String(32), nullable=True), Column("disposition_notes", Text, nullable=True),
                   Column("resolved_by", String(24), nullable=True), Column("resolved_at", Float, nullable=True),
                   Column("four_eyes_by", String(24), nullable=True), Column("four_eyes_at", Float, nullable=True),
-                  Column("event_count", Integer, nullable=False, default=0), Column("title", String(200), nullable=True))
+                  Column("event_count", Integer, nullable=False, default=0), Column("title", String(200), nullable=True),
+                  # the vehicles around it, as the Site's servers last answered (soc_vehicles.fetch): {at, since, until,
+                  # vehicles}; kept so the card still shows them when the Site is offline later. Not in queue rows
+                  Column("vehicles", sa.JSON, nullable=True))
 incident_events = Table("incident_events", metadata,
                         Column("id", Integer, primary_key=True, autoincrement=True),
                         Column("incident_id", Integer, nullable=False, index=True),
@@ -441,7 +444,7 @@ ADDED_COLUMNS = [("sites", "retired_at"), ("sites", "location_id"), ("membership
                  ("locations", "lat"), ("locations", "lon"), ("locations", "address_parts"), ("locations", "geocoded_at"),
                  ("locations", "geocode_source"), ("users", "totp_last_step"), ("central_instances", "camera_network"),
                  ("central_instances", "camera_limit"), ("locations", "ai_mode"), ("locations", "ai_outside"),
-                 ("locations", "digest_ppe")]
+                 ("locations", "digest_ppe"), ("incidents", "vehicles")]
 
 
 def upgrade(eng: Engine) -> None:

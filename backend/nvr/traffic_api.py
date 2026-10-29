@@ -15,6 +15,9 @@ GET  /api/traffic/reads/{id}/image/{kind}  plate | vehicle | full | violation; a
 POST /api/traffic/reads/{id}/plate         Read plate: Otso reads the vehicle crop now (operator; metered "plate"; one
                                            run per read every plate_rate_s, 429 with Retry-After); kept beside the
                                            camera's read: {result, plate, plate_raw, region, confidence, reason, read, list}
+GET  /api/traffic/around                   the vehicles seen in a window (?since, until, at; at most 6 h): the traffic
+                                           cameras' passes and the plates read from event footage, with each plate's
+                                           counted notes (traffic.around; the hub's SOC incident card)
 GET  /api/traffic/counts                   vehicles per hour or day (?camera, since, until, bucket hour | day)
 GET  /api/traffic/status                   each traffic camera: set up, last push, reads and plates today
 GET  /api/traffic/lists                    the plate lists
@@ -179,6 +182,15 @@ async def read_plate(read_id: int, request: Request):
     out = {k: result.get(k) for k in ("result", "plate", "plate_raw", "region", "confidence", "reason", "model", "crops")}
     return {**out, "read": r, "list": {k: hit[k] for k in ("list", "match", "plate", "note")} if hit else None,
             "about": notes["plate"] if notes else None, "notes": notes["notes"] if notes else []}
+
+
+@router.get("/api/traffic/around")
+async def vehicles_around(since: float, until: float, at: float | None = None):
+    """The vehicles seen in a window (traffic.around): the hub's SOC incident card, 10 minutes before an incident to 5
+    after it; `at` (the incident's first event) picks which ones when there are more than fit. Viewer, like the reads."""
+    if until <= since or until - since > traffic.AROUND_MAX_S:
+        raise HTTPException(422, f"the window must be positive and at most {traffic.AROUND_MAX_S // 3600} hours")
+    return {"since": since, "until": until, **await asyncio.to_thread(traffic.around, since, until, at)}
 
 
 @router.get("/api/traffic/counts")

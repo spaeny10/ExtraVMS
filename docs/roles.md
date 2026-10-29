@@ -64,7 +64,7 @@ The Security Operations Center is one internal team. A Customer opts a Site into
 
 | SOC role | In the SOC workstation | In monitored Customers |
 |---|---|---|
-| **SOC operator** | queue, claim, release, hand off, respond (contacts, procedures, relay, notes), resolve with a disposition, sweep the quiet lane, arm or disarm a Site | acts as an **operator** on every Site |
+| **SOC operator** | queue, claim, release, hand off, respond (contacts, procedures, relay, notes, the vehicles seen around an incident), resolve with a disposition, sweep the quiet lane, arm or disarm a Site | acts as an **operator** on every Site |
 | **SOC supervisor** | everything an operator can, plus take over and reassign incidents, verify or reject resolutions (four-eyes), set SLA targets, run and read reports | acts as an **admin** on every Site: can configure monitoring schedules, contacts, procedures and servers |
 
 Two limits protect customers from the SOC widening: SOC staff can never manage a Customer's members, invites or audit log unless they also hold a real membership with that role, and the widening disappears the moment a Customer has no monitored Site left. A SOC supervisor cannot verify an incident they resolved themselves.

@@ -258,3 +258,12 @@ tr.muted td { color: var(--muted); }
 .soc-dispatch.compact { padding: 8px 10px; margin-bottom: 10px; }
 .soc-dispatch.compact .soc-dispatch-addr { font-size: 14px; }
 @media (max-width: 767px) { .soc-dispatch.with-map { grid-template-columns: 1fr; } }
+
+/* Vehicles around this (IncidentView VehiclesCard) */
+.soc-vehicles-list { display: grid; gap: 6px; margin: 6px 0 0; }
+.soc-vehicle { display: grid; grid-template-columns: 96px 1fr auto; gap: 10px; align-items: start; padding: 6px; border-radius: 6px; background: var(--panel-2); }
+.soc-vehicle img, .soc-vehicle .thumb-empty { width: 96px; max-height: 64px; object-fit: contain; border-radius: 4px; }
+.soc-vehicle.on-deny { box-shadow: inset 3px 0 0 var(--bad); }
+.soc-vehicle.on-watch { box-shadow: inset 3px 0 0 var(--vehicle); }
+.soc-vehicle-body { min-width: 0; }
+.soc-vehicle-alarm { margin: 4px 0; color: var(--t-medium); }

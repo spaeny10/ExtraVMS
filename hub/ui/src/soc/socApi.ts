@@ -2,7 +2,7 @@
 import { json, qs, req } from "../api";
 import { normFalseAlarms, normOperators } from "./reports/normalize";
 import type {
-  CallOutcome, CustomerSummary, Dispositions, Incident, IncidentDetail, Overview, Presence, PresenceStatus, Priority,
+  CallOutcome, CustomerSummary, Dispositions, Incident, IncidentDetail, IncidentVehicles, Overview, Presence, PresenceStatus, Priority,
   ShiftReport, SlaPolicy, SlaRule, SocMessage, SocSite,
 } from "./types";
 
@@ -16,6 +16,8 @@ export type IncidentQuery = { state?: string; lane?: string; org?: string; locat
 export const socApi = {
   incidents: (q: IncidentQuery = {}) => req<Incident[]>(`/api/soc/incidents?${qs(q)}`),
   incident: (id: number | string) => req<IncidentDetail>(`/api/soc/incidents/${encodeURIComponent(String(id))}`),
+  /** The vehicles around it: asked of the Site's servers now (soc_vehicles.py), the kept answer when none answers. */
+  vehicles: (id: number) => req<IncidentVehicles>(inc(id, "vehicles")),
   claim: (id: number) => post(inc(id, "claim")),
   release: (id: number) => post(inc(id, "release")),
   takeover: (id: number) => post(inc(id, "takeover")),

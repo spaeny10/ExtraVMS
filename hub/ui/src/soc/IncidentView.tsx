@@ -1,7 +1,8 @@
 /**
  * The center of the workstation: one incident. Header (customer › Site, priority, SLA timer, state, escalation,
  * claimer), the claim bar, the triggering clip and snapshot with a strip of every event in the incident, the event's
- * synopsis and why it matters, live video of the Site with the incident's cameras first, the Site's Timeline
+ * synopsis and why it matters, the vehicles around it (VehiclesCard: plates, Otso's descriptions, counted notes, from
+ * 10 minutes before to 5 after; operators only), live video of the Site with the incident's cameras first, the Site's Timeline
  * deep-linked to the selected event, deterrence (relay), and the log.
  *
  * Everything per camera goes to that camera's server through the hub tunnel (siteApi(server)), as on Site pages;
@@ -34,7 +35,8 @@ import { priorityClass, priorityLabel, slaFor } from "./sla";
 import { socApi } from "./socApi";
 import { claimedByMe, incidentOrg, useCommand } from "./useIncident";
 import { useSoc } from "./useSocStream";
-import type { Incident, IncidentDetail, IncidentEvent, Presence } from "./types";
+import type { AroundVehicle, Incident, IncidentDetail, IncidentEvent, IncidentVehicles, Presence } from "./types";
+import { plateAlarms, plateLabel, serversNote, vehicleLabel, vehiclesSummary } from "./vehicles";
 
 /** A command from the page's keyboard handler (nonce makes the same key twice count twice). */
 export type ViewCmd = { type: string; nonce: number; index?: number; code?: string };
@@ -103,6 +105,8 @@ export function IncidentView({ me, detail, incident, now, actions, cmd, popout =
           </div>
         )}
       </section>
+
+      <VehiclesCard incident={incident} events={events} />
 
       <section ref={liveRef} className="soc-live" aria-label="Live video">
         <div className="row soc-section-head">
@@ -288,6 +292,85 @@ export function IncidentSynopsis({ ev, e, onDetails }: { ev: IncidentEvent; e: N
       </dl>
       {onDetails && <button className="ghost small" onClick={onDetails} aria-keyshortcuts="G D">Full details</button>}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------- vehicles around it
+
+const VEHICLES_REFRESH_MS = 60000;
+
+/** A time in the Site's zone ("11:02 PM"), the browser's when the Site has none or an unknown one. */
+function siteClock(tz: string | null | undefined): (ts: number) => string {
+  return (ts) => {
+    const d = new Date(ts * 1000);
+    try { return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", timeZone: tz || undefined }); } catch { return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }); }
+  };
+}
+
+/**
+ * The vehicles seen from 10 minutes before the incident to 5 after (hub soc_vehicles.py, asked of the Site's servers
+ * now): each with its plate (the camera's, Otso's, or read from footage), Otso's description, the way it went and the
+ * plate's counted notes; the incident's plate alarms first. Asked again every minute while the incident is open (a
+ * vehicle leaving afterwards still shows) and when an event joins. Operators only: never shown to customers.
+ */
+function VehiclesCard({ incident: i, events }: { incident: Incident; events: IncidentEvent[] }) {
+  const [d, setD] = useState<IncidentVehicles | null>(null);
+  const [err, setErr] = useState("");
+  const open = i.state !== "closed";
+  useEffect(() => {
+    let alive = true;
+    const pull = () => socApi.vehicles(i.id).then((x) => { if (alive) { setD(x); setErr(""); } })
+      .catch((e: Error) => { if (alive) setErr(e.message); });
+    pull();
+    const t = open ? setInterval(pull, VEHICLES_REFRESH_MS) : null;
+    return () => { alive = false; if (t) clearInterval(t); };
+  }, [i.id, i.event_count, open]);
+  useEffect(() => { setD(null); setErr(""); }, [i.id]);
+  const time = useMemo(() => siteClock(i.location_timezone), [i.location_timezone]);
+  const alarms = plateAlarms(events);
+  const note = d ? serversNote(d) : "";
+  return (
+    <section className="card soc-vehicles" aria-label="Vehicles around this">
+      <div className="row soc-section-head">
+        <h3>Vehicles around this</h3>
+        <span className="spacer" />
+        <a className="small" href={siteHref(i.location_id, "plates")} target="_blank" rel="noreferrer">Open the Site's Plates</a>
+      </div>
+      {alarms.map((a) => <p key={a} className="soc-vehicle-alarm small">⚠ {a}</p>)}
+      {!d && !err && <p className="muted small">Asking the Site's servers…</p>}
+      {err && !d && <p className="error small">{err}</p>}
+      {d && <p className="muted small">{vehiclesSummary(d, time)}{d.stale && d.at ? ` As of ${time(d.at)}: the Site isn't answering now.` : ""}</p>}
+      {note && <p className="muted small">{note}</p>}
+      {d && d.vehicles.length > 0 && (
+        <ul className="plain soc-vehicles-list">
+          {d.vehicles.map((v) => <VehicleRow key={`${v.server_id}:${v.source}:${v.read_id ?? v.event_id}:${v.ts}`} v={v} locationId={i.location_id} time={time} />)}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function VehicleRow({ v, locationId, time }: { v: AroundVehicle; locationId: string; time: (ts: number) => string }) {
+  const m = mediaApi(v.server_id);
+  const pic = v.source === "footage" && v.event_id ? m.media({ id: v.event_id }, "snapshot.jpg", 320)
+    : v.read_id && v.images.length ? m.trafficImage(v.read_id, v.images.includes("plate") ? "plate" : "vehicle") : null;
+  const what = vehicleLabel(v);
+  return (
+    <li className={`soc-vehicle${v.list ? ` on-${v.list}` : ""}`}>
+      {pic ? <img className={v.images.includes("plate") && v.source === "traffic" ? "plate-crop" : "vehicle-crop"} src={pic} alt="" loading="lazy"
+        onError={(x) => { (x.target as HTMLImageElement).style.visibility = "hidden"; }} /> : <span className="thumb-empty vehicle-crop" />}
+      <div className="soc-vehicle-body">
+        <div>
+          <span className="muted small">{time(v.ts)}</span>{" "}
+          <strong className={`plate-text${v.plate ? "" : " muted"}`}>{plateLabel(v)}</strong>
+          {v.list && v.list !== "allow" && <span className={`badge list-${v.list}`}> {v.list} list</span>}
+          <span className="muted small"> · {v.camera_name}</span>
+        </div>
+        {what && <div className="small">{what}</div>}
+        {v.notes.map((n) => <div key={n} className="muted small">{n}</div>)}
+      </div>
+      <a className="small" href={siteTimelineHref(locationId, v.server_id, v.camera_id, v.event_id ?? null, v.event_id ? null : v.ts)} target="_blank" rel="noreferrer">Timeline</a>
+    </li>
   );
 }
 

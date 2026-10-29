@@ -4,59 +4,59 @@ The SOC layer (overnight alarm monitoring on the hub: `hub/hub/soc.py`, `soc_api
 workstation) shipped in stages 1–5 on 2026-10-04. This file holds what is planned next. The first item is new; the
 rest is stage 6 as it was left.
 
-## 1. Vehicles at an incident (planned 2026-10-29)
+## 1. Vehicles at an incident (built 2026-10-29)
 
 **Goal.** When an operator opens an incident, they see which vehicles came and went around it, with what we already
-know about each one. For example:
+know about each one: "11:02 PM, ABC 1234, silver Chevrolet Silverado pickup truck, toward the camera (reported). Seen
+4 times since Oct 3." Before this, an operator had to open the Site's Plates tab and line up times by hand.
 
-> Arrived 11:02 PM in a silver Chevrolet Silverado, ABC 1234, coming toward the camera. Seen here 4 times this month,
-> always after 10 PM. Left 11:19 PM.
+**How it works**
+- **Server** (`traffic.around`, `GET /api/traffic/around?since=&until=&at=`, viewer, at most 6 hours). Two kinds of
+  rows, shown oldest first. At most 20: those with a plate first, then the nearest to `at` (the incident's first event).
+  The answer's `total` says how many there were. On cam8's highway that is ~360 in 15 minutes, and the card says
+  "20 of 362". Two kinds:
+  - **Traffic cameras:** one row per pass. The plate is the camera's, or Otso's when it is sure. The description is
+    Otso's, or else the camera's colour, type and make, marked as the camera's guess. Also the direction and the first
+    3 of the plate's counted notes (`plate_notes`). Reads that aren't a vehicle are left out.
+  - **Plates read from footage:** verified events on other cameras whose plate Qwen read from the footage, marked
+    "from footage", with the first sentence of the description and a count of other events with that plate in 30 days.
+    Events on traffic cameras are left out: their plate is a traffic read's, already listed. A Site with only regular
+    cameras still gets the card.
+- **Hub** (`soc_vehicles.py`, `GET /api/soc/incidents/{id}/vehicles`, SOC staff only).
+  - **When it asks.** When the card is shown, not when the incident opens, so a vehicle leaving in the 5 minutes after
+    still appears. The card asks again every minute while the incident is open, and when an event joins.
+  - **Who it asks.** Every server of the Site, through the tunnel. A server that doesn't answer in 10 s, is offline or
+    is too old is named on the card.
+  - **What it keeps.** The last answer goes on the incident (`incidents.vehicles`, not in queue rows). When no server
+    answers, the card shows that answer, marked "as of".
+- **Workstation.** The "Vehicles around this" card under the triggering event:
+  - the incident's plate alarms first (a list hit, or circling / new plate / unusual time);
+  - a summary line ("3 vehicles, 2 with a plate, from 10:52 PM to 11:19 PM", in the Site's time zone);
+  - one row per vehicle: its plate crop (or the vehicle, or the event's snapshot), the time, the plate and who read it,
+    the description and direction, the notes, and a Timeline link at that moment.
 
-Today an operator has to open the Site's Plates tab and line up times by hand.
+  "Add to watch list" and "Ask Otso" stay on the read, in the Site's Plates tab.
+- **Who sees it.** Operators only. It is not in customer-facing reports or pushes. Viewing isn't logged separately,
+  because opening the incident already is.
 
-**What's already there.** Since 2026-10-29, the traffic camera side of a server has:
-- each vehicle's plate (the camera's, or Otso's when it is sure) and Otso's own description (`otso_look`);
-- counted notes about a plate (`traffic.plate_notes`);
-- plate pattern alarms (circling, new plate, a regular at an unusual time) that already reach the SOC queue as events.
+**Changed from the design**
+- **Fetched on view, not at open.** The hub asks when the card is shown and keeps the last answer, instead of fetching
+  when the incident opens. This is simpler, and the "5 minutes after" window fills in on its own.
+- **No change to the incident title.** It was to take the arriving vehicle. Instead the card's summary line says what
+  came. Directions say "toward the camera" or "going away" (reported), not "arrived" or "left": a camera can face
+  either way.
 
-What's missing is linking those to an incident's time window.
+**Decided with Shawn (2026-10-29)**
+- **Window:** 10 minutes before the incident's first event, 5 minutes after its last.
+- **Who sees it:** SOC operators and supervisors only, never in customer-facing reports.
+- **No traffic camera:** show plates Qwen read from event footage, marked as such.
 
-**Design**
-- **Server.** A new `GET /api/traffic/around?ts=&before_s=600&after_s=300` (viewer). It returns the passes in that
-  window on the server's traffic cameras, one per pass, with:
-  - the plate (camera's or Otso's) and Otso's description, or else the camera's colour, type and make;
-  - direction, camera, read id, time;
-  - `plate_notes(...)["notes"]`.
-
-  Counted in code, never by the model, like Ask Otso's notes. Reads that aren't a vehicle are left out. At most 20
-  passes, plates first.
-- **Sites without a traffic camera.** The same route also returns the window's verified vehicle events that carry a
-  plate (`events.plate`, read by Qwen from the footage, plate.py), so a Site with only regular cameras gets what it can.
-- **Hub.** When an incident opens (and again when an event is added more than 5 minutes after the last fetch), the hub
-  asks every server of the Site through the tunnel. Like Site Ask, it drops a server that hasn't answered within the
-  time limit. It keeps the answer on the incident (`incidents.vehicles` JSON, with the time fetched). The workstation
-  doesn't wait for this: the card fills in when the answer arrives (an `incident_updated` frame).
-- **Workstation.** An incident pane card, "Vehicles around this":
-  - one line per vehicle: time, arrived or left (from the direction), plate and description, and the first note;
-  - a vehicle's plate and crop pictures through the existing `/api/traffic/reads/{id}/image/{kind}` route on that server;
-  - a click opens the read on the Site's Plates tab;
-  - "Add to watch list" (operator) and "Ask Otso" stay where they are, on the read.
-
-  A plate pattern alarm in the incident is shown at the top of the card.
-- **Otso's one-liner.** The incident's title for operators can take the arriving vehicle when there is exactly one
-  ("Person at Gate 2, arrived in a silver Silverado ABC 1234"). The workstation does this in code, not the model.
-- **Reports.** A true-alarm incident's report lists the vehicles, the evidence a customer or the police asks for first.
-- **Audit.** Viewing the card isn't logged separately: opening the incident already is. Adding a plate to a list is
-  audited on the server as today.
-
-**Open questions for Shawn**
-- **Window size:** 10 minutes before, 5 after?
-- **Customer reports:** should the vehicle list go into customer-facing reports, or stay with operators only?
-- **Without a traffic camera:** at a Site with none, is a plate Qwen read from event footage enough to show, or should
-  the card stay hidden?
-
-**Tests.** Server: the window, one row per pass, noise left out, notes, the event fallback. Hub: fetch on open and on a
-late event, a slow server dropped, the card's data on the incident, roles. UI: the card's lines (pure function, vitest).
+**Tests.**
+- **Server** (`test_traffic.test_vehicles_around_an_incident`): one row per pass, the camera's or Otso's plate and
+  description, notes, noise left out, a footage plate (not a traffic read's own event), the 6-hour limit.
+- **Hub** (`test_soc_vehicles.py`): the window, the tunnel call, camera names, the kept answer and stale, offline, old
+  and slow servers, kept out of queue rows, operators only.
+- **UI** (`soc/vehicles.test.ts`): the card's words.
 
 ## 2. Stage 6 (left from the first plan)
 - Speaker / talk-down from the workstation (site-side talk-down shipped separately, see docs/roles.md *Act*).

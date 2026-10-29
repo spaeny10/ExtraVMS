@@ -156,3 +156,20 @@ export type CustomerSummary = {
   id?: number; org_id?: string; period_start?: number; period_end?: number; created_at?: number; model?: string | null; text: string | null;
   data: (Record<string, unknown> & { year?: number; month?: number; sites?: CustomerSummarySite[]; totals?: Record<string, unknown> }) | null;
 };
+
+/** One vehicle around an incident (hub soc_vehicles.py over the servers' GET /api/traffic/around): a traffic
+ *  camera's pass (its plate, the camera's or Otso's; Otso's description or the camera's guess; counted notes), or a
+ *  plate Qwen read from an event's footage. */
+export type AroundVehicle = {
+  source: "traffic" | "footage"; ts: number; server_id: string; server_name: string; camera_id: string; camera_name: string;
+  read_id?: number | null; event_id?: number | null; plate: string | null; plate_by: "camera" | "otso" | "footage" | null;
+  confidence?: number | null; region?: string | null; vehicle: string | null; vehicle_by: "otso" | "camera";
+  direction: "approach" | "away" | null; list?: "allow" | "deny" | "watch" | null; images: ("plate" | "vehicle")[]; notes: string[];
+};
+/** GET /api/soc/incidents/{id}/vehicles. stale: no server answered now; the last answer kept on the incident. */
+export type IncidentVehicles = {
+  since: number; until: number; at: number | null; stale: boolean; vehicles: AroundVehicle[];
+  /** every vehicle in the window (each server sends at most 20: those with a plate, then the nearest to the incident) */
+  total?: number;
+  servers: { server_id: string; server_name: string; status: "ok" | "offline" | "timeout" | "error"; error?: string }[];
+};
