@@ -157,6 +157,11 @@ class Settings(BaseSettings):
     traffic_list_min_conf: float = 0.5
     traffic_push_base: str = ""
     traffic_silent_s: float = 900.0
+    # A read with no vehicle (the camera gave no vehicle type) and no plate or one under traffic_noise_conf is not a
+    # vehicle: cam8 at night read the car lot's sign as "556BE" up to ~6 times a minute (never a vehicle type; conf
+    # 0.3-0.6, so 0.5 let ~1 in 6 through), while real plates without a vehicle type that day scored 0.88 and 0.99. Hidden
+    # from the reads list (unless asked for, or a plate search), counts, today's totals and Ask; no picture is cut for it.
+    traffic_noise_conf: float = 0.7
     # Back-to-back fragments of one visit on a camera merge into one event before Qwen describes it (merge.py)
     track_merge_gap: float = 10.0           # a fragment starting within this of the previous one may merge
     merge_max_seconds: float = 300.0        # never grow one event beyond this

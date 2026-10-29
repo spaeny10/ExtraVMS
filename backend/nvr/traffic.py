@@ -41,6 +41,12 @@ statusReportInterval (300 s). The camera resends a missed push only when it has 
 - Setup (camera_state / configure): Milesight's own API (milesight.py): plate reading on, one push slot pointed at
   /api/traffic/push/<camera>/<secret> with every event type and a status report.
 - Health: a camera set up but silent for settings.traffic_silent_s raises traffic_push_silent.
+- No vehicle: a read without a vehicle type and with no plate or one under settings.traffic_noise_conf is something the
+  camera mistook for a plate (cam8 at night: the car lot's sign, "556BE" / "56RE" up to ~6 a minute, conf 0.3-0.6, at
+  one spot; the only real plates without a vehicle type that day scored 0.88 and 0.99). It is stored but hidden from the reads list (unless `noise`, or a plate search), counts, today's totals and
+  Ask, and no picture is cut for it. The camera's own region didn't stop it: its polygon already left the sign's plate
+  box out (2 of 554 inside), and raising its edge would have cost 96-386 of 528 real plates; its confidence level
+  would have too, as real plates at night score 0.34-0.48 like the sign.
 
 Blocking (sqlite, files, the camera's API): call from a worker thread.
 """
@@ -188,6 +194,15 @@ def parse(p: dict, received: float, zone_offset_s: int | None = None, resend: bo
         "plate_box": _box(p, "coordinate_x1", "coordinate_y1", "coordinate_x2", "coordinate_y2", w, h),
         "extra": keep,
     }
+
+
+def noise_sql() -> tuple[str, list]:
+    """SQL (and its parameter) for a read that is not a vehicle (see "No vehicle" above)."""
+    return "(vehicle_type IS NULL AND (plate IS NULL OR COALESCE(confidence, 0) < ?))", [settings.traffic_noise_conf]
+
+
+def is_noise(r: dict) -> bool:
+    return not r.get("vehicle_type") and (not r.get("plate") or (r.get("confidence") or 0) < settings.traffic_noise_conf)
 
 
 def is_status(p) -> bool:
@@ -419,7 +434,7 @@ def ingest(cam: dict, p: dict, received: float | None = None) -> dict:
                                  ((r["vehicle_type"] or "").lower() or None, (r["vehicle_color"] or "").lower() or None))
     db.execute("UPDATE vehicle_reads SET pass_id=?, best=? WHERE id=?", [pass_id, int(best), read_id])
     health.heard(cam["id"], "read", received)
-    if "vehicle" not in images:
+    if "vehicle" not in images and not is_noise(r):
         from_recording.add(read_id, received + REC_DELAY_S)
     out = {"read_id": read_id, "event_id": None, "alarm_id": None, "list": hit["list"] if hit else None}
     if alarm:
@@ -716,10 +731,14 @@ def open_alarm(cam: dict, read_id: int, hit: dict) -> int:
 def search(camera: str | None = None, since: float | None = None, until: float | None = None, q: str | None = None,
            vehicle_type: str | None = None, color: str | None = None, direction: str | None = None, list_: str | None = None,
            min_conf: float = 0.0, plates_only: bool = False, all_reads: bool = False, before_id: int | None = None,
-           limit: int = 100) -> dict:
+           limit: int = 100, noise: bool = False) -> dict:
     """Reads newest first. q: a plate or part of one (letters and digits; 3+ finds it inside plates), with near plates
-    (one character off) as `near`. Without all_reads only each pass's best read."""
+    (one character off) as `near`. Without all_reads only each pass's best read. Reads that aren't a vehicle are left
+    out unless `noise` or a plate search (q)."""
     where, params = [], []
+    if not noise and not q:
+        sql, p = noise_sql()
+        where.append(f"NOT {sql}"); params += p
     if camera:
         where.append("camera_id=?"); params.append(camera)
     if since:
@@ -766,7 +785,8 @@ def counts(camera: str | None = None, since: float | None = None, until: float |
     since = since or now - 86400
     until = until or now
     size = 86400 if bucket == "day" else 3600
-    where, params = ["ts>=?", "ts<?", "best=1"], [since, until]
+    sql, p = noise_sql()
+    where, params = ["ts>=?", "ts<?", "best=1", f"NOT {sql}"], [since, until, *p]
     if camera:
         where.append("camera_id=?"); params.append(camera)
     rows = db.all(f"SELECT ts, plate, direction, vehicle_type FROM vehicle_reads WHERE {' AND '.join(where)}", params)
@@ -841,7 +861,7 @@ def ask_evidence(question: str, since: float | None, until: float | None, now: f
     rows: list[dict] = []
     if tokens:
         for t in tokens[:3]:
-            rows += search(since=since, until=until, q=t, limit=ASK_LIMIT)["reads"]
+            rows += [r for r in search(since=since, until=until, q=t, limit=ASK_LIMIT)["reads"] if not is_noise(r)]
     else:
         color = next((c for c in words & COLORS), None)
         kind = next((TYPES[w] for w in words if w in TYPES), None)

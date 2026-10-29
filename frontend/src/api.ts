@@ -830,7 +830,7 @@ export function makeApi(base: string, opts: ApiOptions = {}) {
     req<MilesightExtras & { written: Record<string, unknown> }>(`/api/cameras/${camera}/device/milesight`, json("PUT", body)),
   // traffic cameras (traffic_api.py): the plate reads they push, counts, plate lists (changes: operator), a camera's
   // traffic setup (read: operator, set up / stop: admin)
-  trafficReads: (p: ReadsQuery = {}) => req<ReadsPage>(`/api/traffic/reads?${qs({ ...p, plates: p.plates ? "true" : undefined, all: p.all ? "true" : undefined })}`),
+  trafficReads: (p: ReadsQuery = {}) => req<ReadsPage>(`/api/traffic/reads?${qs({ ...p, plates: p.plates ? "true" : undefined, all: p.all ? "true" : undefined, noise: p.noise ? "true" : undefined })}`),
   trafficRead: (id: number) => req<ReadDetail>(`/api/traffic/reads/${id}`),
   /** a read's picture (JPEG): kinds the read lists in `images` */
   trafficImage: (id: number, kind: ImageKind) => u(`/api/traffic/reads/${id}/image/${kind}`),

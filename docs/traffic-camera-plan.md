@@ -99,6 +99,12 @@ Decided while building:
   0.97-0.99; one wrong frame scored 0.89, and on its own it would have set the whole run wrong. Reads wait until their
   run's offset is known instead of guessing. The read panel says the picture is from the recording and links to
   the Timeline at that moment.
+- **Reads that aren't a vehicle are hidden.** At night cam8 read the car lot's sign as plates ("556BE", up to ~6 a
+  minute). The rule: no vehicle type, and no plate or one under 0.7 (`traffic_noise_conf`). Those reads are kept but
+  hidden from the reads list (unless "Show reads with no vehicle" is ticked, or in a plate search), from counts and
+  totals, and from Ask, and no picture is cut for them. The sign scored 0.3-0.6; the only real plates without a vehicle
+  type scored 0.88 and 0.99. The camera couldn't fix this itself: its region already left the sign's plate box out, and
+  its confidence level would also drop real night plates, which score 0.34-0.48.
 
 ### Phase 1: plate reads in Axiom (site server)
 - Push receiver `POST /api/traffic/push/{camera}/{secret}`: per-camera secret, no login (the camera can't log in),

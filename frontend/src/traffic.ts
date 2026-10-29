@@ -46,6 +46,8 @@ export type ReadsPage = { reads: Read[]; near: string[] };
 export type ReadsQuery = {
   camera?: string; since?: number; until?: number; q?: string; type?: string; color?: string; direction?: Direction;
   list?: PlateList | "any"; min_conf?: number; plates?: boolean; all?: boolean; before_id?: number; limit?: number;
+  /** also reads that aren't a vehicle (no vehicle type and no or a weak plate: a sign read at night); a search shows them anyway */
+  noise?: boolean;
 };
 
 export type CountBucket = {

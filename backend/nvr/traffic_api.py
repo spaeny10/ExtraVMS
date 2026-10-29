@@ -5,7 +5,8 @@ POST /api/traffic/push/{camera}/{secret}   the camera's push (a read or a status
 GET  /api/traffic/reads                    newest first: ?camera, since, until, q (a plate or part of one; near plates
                                            come back as `near`), type, color, direction, list (allow | deny | watch |
                                            any), min_conf, plates (only reads with a plate), all (every read of a pass,
-                                           not just its best), before_id, limit
+                                           not just its best), noise (reads that aren't a vehicle too: hidden
+                                           by default, except in a plate search), before_id, limit
 GET  /api/traffic/reads/{id}               one read
 GET  /api/traffic/reads/{id}/image/{kind}  plate | vehicle | full | violation
 POST /api/traffic/reads/{id}/plate         Read plate: Otso reads the vehicle crop now (operator; metered "plate"; one
@@ -104,9 +105,10 @@ async def reads(camera: str | None = None, since: float | None = None, until: fl
                 q: str | None = Query(None, max_length=20), type: str | None = Query(None, max_length=30),
                 color: str | None = Query(None, max_length=30), direction: Literal["approach", "away"] | None = None,
                 list: Literal["allow", "deny", "watch", "any"] | None = None, min_conf: float = Query(0, ge=0, le=1),
-                plates: bool = False, all: bool = False, before_id: int | None = None, limit: int = Query(100, ge=1, le=500)):
+                plates: bool = False, all: bool = False, before_id: int | None = None, limit: int = Query(100, ge=1, le=500),
+                noise: bool = False):
     return await asyncio.to_thread(traffic.search, camera, since, until, q, type, color, direction, list, min_conf,
-                                   plates, all, before_id, limit)
+                                   plates, all, before_id, limit, noise)
 
 
 @router.get("/api/traffic/reads/{read_id}")
@@ -177,8 +179,9 @@ async def status():
         t = c.get("traffic") or {}
         if not t:
             continue
+        sql, p = traffic.noise_sql()
         n = db.one("SELECT COUNT(*) AS reads, SUM(plate IS NOT NULL) AS plates FROM vehicle_reads "
-                   "WHERE camera_id=? AND ts>=? AND best=1", [c["id"], day]) or {}
+                   f"WHERE camera_id=? AND ts>=? AND best=1 AND NOT {sql}", [c["id"], day, *p]) or {}
         h = traffic.health.camera(c["id"])
         out.append({"camera_id": c["id"], "name": c["name"], "enabled": bool(t.get("enabled")), "last_push": h.get("push"),
                     "last_read": h.get("read"), "last_status": h.get("status"), "reads_today": n.get("reads") or 0,

@@ -603,6 +603,31 @@ def test_vehicle_picture_from_the_recording():
         traffic.aligner.found.clear()
 
 
+def test_reads_that_are_not_a_vehicle():
+    """cam8 at night: the car lot's sign read as "556BE" (no vehicle type, conf ~0.4). Hidden from the list, counts,
+    today's totals and Ask; found by a plate search and with noise=true; no picture is cut for it."""
+    reset()
+    c = cam()
+    t0 = time.time() - 300
+    traffic.from_recording.due.clear()
+    sign = traffic.ingest(c, push_read("556BE", "0.40", at=t0, vehicle_type="-", vehicle_color="-", vehicle_snapshot="-"), t0 + 0.3)["read_id"]
+    junk = traffic.ingest(c, push_read("No Plates", "0", at=t0 + 40, vehicle_type="-", vehicle_color="-"), t0 + 40.3)["read_id"]
+    sure = traffic.ingest(c, push_read("8777AHN", "0.88", at=t0 + 80, vehicle_type="-", vehicle_color="-"), t0 + 80.3)["read_id"]
+    bright = traffic.ingest(c, push_read("656BE", "0.60", at=t0 + 100, vehicle_type="-", vehicle_color="-"), t0 + 100.3)["read_id"]
+    car = traffic.ingest(c, push_read("ABC1234", "0.40", at=t0 + 120), t0 + 120.3)["read_id"]   # a real truck, low confidence
+    assert [x[1] for x in traffic.from_recording.due] == []   # no picture cut for the sign
+    shown = {r["id"] for r in call("GET", "/api/traffic/reads").json()["reads"]}
+    assert shown == {sure, car}
+    assert {r["id"] for r in call("GET", "/api/traffic/reads?noise=true").json()["reads"]} == {sign, junk, sure, bright, car}
+    assert sign in {r["id"] for r in call("GET", "/api/traffic/reads?q=556BE").json()["reads"]}
+    assert sum(b["total"] for b in traffic.counts(camera="cam8", since=t0 - 10)["buckets"]) == 2
+    st = call("GET", "/api/traffic/status").json()["cameras"][0]
+    assert st["reads_today"] == 2 and st["plates_today"] == 2
+    assert traffic.ask_evidence("was 556BE here?", None, None) == []   # the sign, even when named
+    assert [x["read_id"] for x in traffic.ask_evidence("was 8777AHN here?", None, None)] == [sure]
+    traffic.from_recording.due.clear()
+
+
 def test_hub_roles():
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "hub"))
     from hub import roles

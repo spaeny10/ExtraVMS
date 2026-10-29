@@ -112,9 +112,9 @@ function PlatesBody({ a, section, source, renderEvent, openTimeline }: {
 
 type Filters = {
   q: string; camera: string; period: Period; type: string; color: string; direction: "" | Direction; list: "" | PlateList | "any";
-  plates: boolean; min_conf: number;
+  plates: boolean; min_conf: number; noise: boolean;
 };
-const NO_FILTERS: Filters = { q: "", camera: "", period: "24h", type: "", color: "", direction: "", list: "", plates: false, min_conf: 0 };
+const NO_FILTERS: Filters = { q: "", camera: "", period: "24h", type: "", color: "", direction: "", list: "", plates: false, min_conf: 0, noise: false };
 
 function ReadsSection({ a, status, name, onEvent, onTimeline }: {
   a: SiteApi; status: TrafficStatus | null; name: (id: string) => string; onEvent: (id: number) => void;
@@ -146,7 +146,7 @@ function ReadsSection({ a, status, name, onEvent, onTimeline }: {
       const r = await a.trafficReads({
         q: f.q || undefined, camera: f.camera || undefined, since: periodSince(f.period), type: f.type || undefined, color: f.color || undefined,
         direction: f.direction || undefined, list: f.list || undefined, plates: f.plates, min_conf: f.min_conf || undefined,
-        before_id: before, limit: PAGE,
+        noise: f.noise, before_id: before, limit: PAGE,
       });
       if (n !== seq.current) return;
       setReads((cur) => (before && cur ? [...cur, ...r.reads] : r.reads));
@@ -165,7 +165,7 @@ function ReadsSection({ a, status, name, onEvent, onTimeline }: {
   const types = useMemo(() => filterOptions(VEHICLE_TYPES, (reads ?? []).map((r) => r.vehicle_type)), [reads]);
   const colors = useMemo(() => filterOptions(VEHICLE_COLORS, (reads ?? []).map((r) => r.vehicle_color)), [reads]);
   const cams = status?.cameras ?? [];
-  const filtered = f.camera || f.type || f.color || f.direction || f.list || f.plates || f.min_conf || f.period !== NO_FILTERS.period;
+  const filtered = f.camera || f.type || f.color || f.direction || f.list || f.plates || f.min_conf || f.noise || f.period !== NO_FILTERS.period;
 
   return (
     <section className="plates-reads">
@@ -218,6 +218,9 @@ function ReadsSection({ a, status, name, onEvent, onTimeline }: {
         </select>
         <label className="row small" title="Only vehicles whose plate the camera read (a search shows plates anyway)">
           <input type="checkbox" checked={f.plates} onChange={(e) => set({ plates: e.target.checked })} /> Plates only
+        </label>
+        <label className="row small" title="Reads with no vehicle and no or a weak plate: something the camera mistook for a plate, like a sign at night. Hidden unless ticked (a plate search shows them anyway)">
+          <input type="checkbox" checked={f.noise} onChange={(e) => set({ noise: e.target.checked })} /> Show reads with no vehicle
         </label>
         {filtered ? <button type="button" className="linkish" onClick={() => setF({ ...NO_FILTERS, q: f.q })}>Clear filters</button> : null}
       </div>
