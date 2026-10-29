@@ -106,6 +106,38 @@ QUESTION = ("This is a full-resolution close-up of one vehicle from a security c
 PLATE_QUESTION = ("This is a close-up of one vehicle's license plate, cut out and enlarged by a traffic camera's plate "
                   "reader. Read the plate if, and only if, every character is clearly legible. Answer as JSON.")
 
+# A traffic camera's vehicle, looked at by Otso on its own (traffic.Looker): the plate (the strict rule: nobody is there
+# to check a guess) and what the vehicle is, for search by description ("white pickup with a ladder rack"). One
+# question with the camera's plate crop (enlarged) and the vehicle picture. The camera's own make is often wrong (a red
+# Toyota Tundra came through as a "Mercury car", cam8 2026-10-28), so Otso's is kept beside it.
+LOOK_SCHEMA = {
+    "type": "object",
+    "properties": {
+        **SCHEMA["properties"],
+        "vehicle_type": {"type": "string", "description": "car, suv, pickup truck, van, box truck, semi truck, bus, "
+                                                         "motorcycle, trailer or other"},
+        "color": {"type": "string", "description": "the main body colour in one or two words"},
+        "make": {"type": "string", "description": "the manufacturer when the badge or shape makes it clear, else ''"},
+        "model": {"type": "string", "description": "the model when clear, else ''"},
+        "details": {"type": "string", "description": "2 to 6 words on what would pick this vehicle out, not its "
+                                                    "type, colour or make again (ladder rack, black bed cover, company "
+                                                    "wrap, trailer, dented door), or ''"},
+    },
+    "required": [*SCHEMA["required"], "vehicle_type", "color", "make", "model", "details"],
+}
+LOOK_SYSTEM = SYSTEM + (
+    " Also describe the vehicle in the vehicle picture: its type, main body colour, make and model only when the badge "
+    "or shape makes them clear (otherwise ''), and in details 2 to 6 words on anything that would pick it out from "
+    "similar vehicles, without repeating its type, colour or make. Never invent company names or lettering you cannot "
+    "read.")
+LOOK_QUESTION_PLATE = ("Picture 1 is a traffic camera's close-up of the vehicle's license plate, enlarged; picture 2 is "
+                       "the vehicle. Read the plate if, and only if, every character is clearly legible, and describe "
+                       "the vehicle. Answer as JSON.")
+LOOK_QUESTION = ("This is one vehicle from a traffic camera. Read its license plate if, and only if, every character is "
+                 "clearly legible, and describe the vehicle. Answer as JSON.")
+VEHICLE_KEYS = ("vehicle_type", "color", "make", "model", "details")
+EMPTY_WORDS = {"", "unknown", "none", "n/a", "na", "-", "unclear", "not visible", "unreadable", "other"}
+
 
 # ---------------------------------------------------------------- the answer
 
@@ -142,6 +174,37 @@ def parse(ans: dict | None) -> dict:
         return {"result": "unreadable", "reason": "not sure of every character", "model": model}
     return {"result": "read", "plate": plate, "plate_raw": raw.upper()[:20], "region": region_of(ans.get("region")),
             "confidence": conf, "model": model}
+
+
+def parse_vehicle(ans: dict | None) -> dict | None:
+    """The vehicle part of a look: {vehicle_type, color, make, model, details}, lowercase but the make and model; empty
+    fields left out; None when nothing was said."""
+    ans = ans if isinstance(ans, dict) else {}
+    out = {}
+    for k in VEHICLE_KEYS:
+        v = re.sub(r"\s+", " ", str(ans.get(k) or "")).strip().strip(".")
+        if v.lower() in EMPTY_WORDS:
+            continue
+        out[k] = _words(v if k in ("make", "model") else v.lower(), 60 if k == "details" else 30)
+    return out or None
+
+
+def _words(s: str, n: int) -> str:
+    """At most n characters, cut at a word, no dangling "and" ("white with black and lime-green" -> "white with black")."""
+    if len(s) <= n:
+        return s
+    words = s[:n].rsplit(" ", 1)[0].rstrip(",;:-").split(" ")
+    while len(words) > 1 and words[-1].lower() in ("and", "with", "on", "of", "the", "a", "an", "in", "reading", "for"):
+        words.pop()
+    return " ".join(words).rstrip(",;:-") or s[:n]
+
+
+def vehicle_words(v: dict | None) -> str:
+    """"white Ford F-150 pickup truck, ladder rack": for the read's row and for search."""
+    if not v:
+        return ""
+    head = " ".join(v[k] for k in ("color", "make", "model", "vehicle_type") if v.get(k))
+    return f"{head}, {v['details']}" if head and v.get("details") else head or v.get("details", "")
 
 
 def best(results: list[dict]) -> dict:
@@ -312,6 +375,19 @@ async def read(crops: list, priority: str = "background", stop_at: str = "high",
             break
     out = best(results)
     out["crops"] = len(results)
+    return out
+
+
+async def look(plate_img: bytes | None, vehicle_img: bytes, priority: str = "background") -> dict:
+    """Otso on a traffic camera's vehicle (traffic.Looker): the plate (strict: parse) and the vehicle (parse_vehicle),
+    one question with the enlarged plate crop first when there is one."""
+    from . import vlmroute
+    images = [plate_img, vehicle_img] if plate_img else [vehicle_img]
+    ans = await vlmroute.router.chat_json(TASK, LOOK_SYSTEM, LOOK_QUESTION_PLATE if plate_img else LOOK_QUESTION, images,
+                                          LOOK_SCHEMA, 160, 0.0, priority)
+    out = parse(ans)
+    out["vehicle"] = parse_vehicle(ans)
+    out["crops"] = len(images)
     return out
 
 

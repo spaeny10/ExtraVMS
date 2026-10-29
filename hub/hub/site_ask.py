@@ -512,6 +512,9 @@ VOICE = (
     "Lines marked COUNTED are exact counts made from all of a traffic camera's plate reads: use them for how many, how "
     "often and which plates came back. The single plate read lines are only the most recent few, as examples: never "
     "count them and never mention how many of them there are. "
+    # traffic.Looker / ask_looks: Otso's own look at a vehicle beside the camera's guess
+    "On a traffic camera read, 'Otso saw ...' is your own look at that vehicle's picture: trust it over the camera's "
+    "colour, type and make. Not every vehicle has been looked at yet; a COUNTED line says how many were. "
 )
 
 ANSWER_SYSTEM = (

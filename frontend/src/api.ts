@@ -7,7 +7,7 @@ import type { AnalyticsRule, AudioEncoder, CameraDevice, CameraTime, ClockResult
 import type { CatalogVoice, Spoken, VoiceEngines, VoiceSetting } from "./talkdownVoice";
 import type { LiveCodecs } from "./codecs";
 import type { DeterConfig, DeterRequest, DeterRule, DeterRules, Deterrence, DeterrenceBrief, MilesightExtras, MilesightWrite } from "./deterrence";
-import type { CameraTraffic, Counts, CountsQuery, ImageKind, ListEntry, ListEntryEdit, ListEntryIn, ReadDetail, ReadPlateResult, ReadsPage, ReadsQuery, TrafficStatus } from "./traffic";
+import type { CameraTraffic, CameraTrafficServer, Counts, CountsQuery, ImageKind, ListEntry, ListEntryEdit, ListEntryIn, ReadDetail, ReadPlateResult, ReadsPage, ReadsQuery, TrafficAlerts, TrafficStatus } from "./traffic";
 /** include = detect only here; exclude = mask out; area = just a name for a place (never filters);
  * ppe = people who stay in it must wear the required items (backend/nvr/ppe.py; never filters) */
 export type ZoneType = "include" | "exclude" | "area" | "ppe";
@@ -856,6 +856,8 @@ export function makeApi(base: string, opts: ApiOptions = {}) {
   deletePlateEntry: (id: number) => req<{ ok: boolean }>(`/api/traffic/lists/${id}`, { method: "DELETE" }),
   cameraTraffic: (camera: string) => req<CameraTraffic>(`/api/cameras/${camera}/traffic`),
   setCameraTraffic: (camera: string, b: { enabled: boolean; plate_reading?: boolean }) => req<CameraTraffic>(`/api/cameras/${camera}/traffic`, json("PUT", b)),
+  // the camera's plate pattern alerts (traffic.check_patterns: circling, new plates, regulars at unusual times; admin)
+  setTrafficAlerts: (camera: string, b: Partial<TrafficAlerts>) => req<CameraTrafficServer>(`/api/cameras/${camera}/traffic/alerts`, json("PUT", b)),
   rebootCamera: (camera: string) => req<{ ok: boolean; message: string }>(`/api/cameras/${camera}/device/reboot`, { method: "POST" }),
   cameraSd: (camera: string, refresh = false) => req<SdStatus & { camera_id: string }>(`/api/cameras/${camera}/sd${refresh ? "?refresh=true" : ""}`),
   sdGaps: (camera?: string, hours?: number) => req<SdGaps>(`/api/sd/gaps?${qs({ camera, hours })}`),

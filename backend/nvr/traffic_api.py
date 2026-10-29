@@ -6,7 +6,9 @@ GET  /api/traffic/reads                    newest first: ?camera, since, until, 
                                            come back as `near`), type, color, direction, list (allow | deny | watch |
                                            any), min_conf, plates (only reads with a plate), all (every read of a pass,
                                            not just its best), noise (reads that aren't a vehicle too: hidden
-                                           by default, except in a plate search), before_id, limit
+                                           by default, except in a plate search), look (a description: "white pickup
+                                           ladder rack", every word in Otso's or the camera's description), before_id,
+                                           limit
 GET  /api/traffic/reads/{id}               one read
 GET  /api/traffic/reads/{id}/image/{kind}  plate | vehicle | full | violation; a vehicle picture not cut from the
                                            recording yet: 404 at once (Retry-After), the read queued for it
@@ -22,6 +24,8 @@ DELETE /api/traffic/lists/{id}             (operator)
 GET  /api/cameras/{id}/traffic             what the camera says (model, licence, plate reading, push slots, SD card),
                                            this server's setup and the camera's push health (operator)
 PUT  /api/cameras/{id}/traffic             {enabled, plate_reading?}: set the camera up / stop its push (admin)
+PUT  /api/cameras/{id}/traffic/alerts      {circling?, new?, unusual_time?, when?: armed | always}: the camera's plate
+                                           pattern alerts (admin); GET /api/cameras/{id}/traffic shows them (server.alerts)
 
 Roles through the hub (hub/hub/roles.py): reads, images, counts and lists are a viewer's (like events and their
 plates); list changes an operator's (like watching a vehicle); a camera's traffic settings operator to read, admin to
@@ -65,7 +69,7 @@ async def _after(out: dict) -> None:
             p.publish(eid)
             if not p.plan_synopsis(eid):
                 await p.reindex(eid)
-        elif out.get("event_id"):
+        if out.get("event_id") and out["event_id"] != out.get("alarm_id"):
             e = db.event(out["event_id"])
             if e and e["status"] == "verified":
                 await p.reindex(out["event_id"])
@@ -107,9 +111,9 @@ async def reads(camera: str | None = None, since: float | None = None, until: fl
                 color: str | None = Query(None, max_length=30), direction: Literal["approach", "away"] | None = None,
                 list: Literal["allow", "deny", "watch", "any"] | None = None, min_conf: float = Query(0, ge=0, le=1),
                 plates: bool = False, all: bool = False, before_id: int | None = None, limit: int = Query(100, ge=1, le=500),
-                noise: bool = False):
+                noise: bool = False, look: str | None = Query(None, max_length=80)):
     return await asyncio.to_thread(traffic.search, camera, since, until, q, type, color, direction, list, min_conf,
-                                   plates, all, before_id, limit, noise)
+                                   plates, all, before_id, limit, noise, look)
 
 
 @router.get("/api/traffic/reads/{read_id}")
@@ -266,7 +270,9 @@ def _ours(cam: dict) -> dict:
     h = traffic.health.camera(cam["id"])
     return {"enabled": bool(t.get("enabled")), "set_at": t.get("set_at"), "last_push": h.get("push"),
             "last_read": h.get("read"), "last_status": h.get("status"), "zone_offset_s": t.get("zone_offset_s"),
-            "silent_after_s": settings.traffic_silent_s}
+            "silent_after_s": settings.traffic_silent_s, "alerts": traffic.alerts_config(cam),
+            "learn_days": settings.traffic_learn_days, "circling": {"passes": settings.traffic_circling_passes,
+                                                                    "minutes": round(settings.traffic_circling_s / 60)}}
 
 
 @router.get("/api/cameras/{camera_id}/traffic")
@@ -283,6 +289,24 @@ async def camera_traffic(camera_id: str, request: Request):
 class SetupIn(BaseModel):
     enabled: bool
     plate_reading: bool | None = None
+
+
+class AlertsIn(BaseModel):
+    circling: bool | None = None
+    new: bool | None = None
+    unusual_time: bool | None = None
+    when: Literal["armed", "always"] | None = None
+
+
+@router.put("/api/cameras/{camera_id}/traffic/alerts")
+async def set_traffic_alerts(camera_id: str, body: AlertsIn, request: Request):
+    """The camera's plate pattern alerts (traffic.check_patterns): circling, new plates, regulars at unusual times, and
+    whether new / unusual alert only while the Site's SOC monitoring is armed (admin: the camera's configuration)."""
+    who = require(request, "admin")
+    _cam(camera_id)
+    alerts = await asyncio.to_thread(traffic.set_alerts, camera_id, **body.model_dump())
+    log.info("[%s] plate pattern alerts %s by %s", camera_id, alerts, who)
+    return _ours(_cam(camera_id))
 
 
 @router.put("/api/cameras/{camera_id}/traffic")

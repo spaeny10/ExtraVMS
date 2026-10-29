@@ -850,9 +850,185 @@ def test_plate_notes_say_little_from_little():
     assert traffic.plate_notes("NEW1", now.timestamp(), now.timestamp())["sightings"] == 1
 
 
+def test_circling_alert():
+    """The same plate 3 times in 20 minutes: one medium alarm (later passes join it); a car parked in view re-read now
+    and then is one sighting; an allowed plate and a camera with circling off raise nothing."""
+    reset()
+    c = cam()
+    t0 = time.time() - 1500
+    outs = [traffic.ingest(c, push_read("CRC1234", "0.9", at=t0 + k * 600, direction="away" if k % 2 else "approach"),
+                           t0 + k * 600 + 0.5) for k in range(4)]
+    assert [o["alarm_id"] is not None for o in outs] == [False, False, True, False]
+    e = db.event(outs[2]["alarm_id"])
+    assert e["status"] == "verified" and e["plate"] == "CRC1234" and e["priority"] == "medium"
+    assert e["policy"]["kind"] == "plate_pattern" and e["policy"]["pattern"] == "circling"
+    assert e["policy"]["text"].startswith("Plate CRC 1234 passed 3 times in 20 minutes (") and "heading away" in e["policy"]["text"]
+    assert e["policy"]["notes"][0] == "Seen 3 times today."
+    assert db.one("SELECT event_id FROM vehicle_reads WHERE id=?", [outs[3]["read_id"]])["event_id"] == e["id"]   # joined
+    assert policy.check(e["id"]) == e["policy"]   # the pattern is the rule, kept as it is
+    # parked in view: re-read every 40 s for 3 minutes (no pass joins them: plates differ in more than the pass allows)
+    for k in range(5):
+        traffic.ingest(c, push_read("PRK777" if k % 2 else "PRK7770", "0.9", at=t0 + k * 40), t0 + k * 40 + 0.5)
+    assert not db.one("SELECT id FROM events WHERE plate LIKE 'PRK%'")
+    traffic.add_entry("ALW1234", "allow")
+    assert not any(traffic.ingest(c, push_read("ALW1234", "0.9", at=t0 + k * 300), t0 + k * 300 + 0.5)["alarm_id"] for k in range(3))
+    traffic.set_alerts("cam8", circling=False)
+    c = traffic.camera("cam8")
+    assert not any(traffic.ingest(c, push_read("OFF1234", "0.9", at=t0 + k * 300), t0 + k * 300 + 0.5)["alarm_id"] for k in range(3))
+    traffic.set_alerts("cam8", circling=True)
+
+
+def test_new_plate_and_unusual_time_alerts():
+    """With 20 days of history: a plate never seen before, during SOC hours, is new (not one character off a known one,
+    not a weak read, not outside SOC hours unless "always"); a weekday 8:15 regular at 2:10 AM is unusual."""
+    reset()
+    c = cam()
+    traffic.set_alerts("cam8", new=True, unusual_time=True)
+    c = traffic.camera("cam8")
+    now = dt.datetime.now().replace(hour=2, minute=10, second=0, microsecond=0) - dt.timedelta(days=1)
+    _sighting("OLD1111", now - dt.timedelta(days=20))
+    for k in range(10):
+        d = (now - dt.timedelta(days=k + 1)).replace(hour=8, minute=12 + k % 5)
+        _sighting("REG4242", d)
+
+    def read_at(plate, when, conf=0.9):
+        _sighting(plate, when)
+        db.execute("UPDATE vehicle_reads SET confidence=? WHERE id=(SELECT MAX(id) FROM vehicle_reads)", [conf])
+        return db.one("SELECT MAX(id) AS id FROM vehicle_reads")["id"]
+
+    eid = traffic.check_patterns(c, read_at("NEW5555", now), armed=True)
+    e = db.event(eid)
+    assert e["policy"]["pattern"] == "new" and e["priority"] == "medium"
+    assert e["policy"]["text"] == "Plate NEW 5555 has never been seen here before during SOC hours (history of 20 days)"
+    assert traffic.check_patterns(c, read_at("NEW6666", now), armed=False) is None   # outside SOC hours
+    assert traffic.check_patterns(c, read_at("NEW7777", now, conf=0.7), armed=True) is None   # not a sure read
+    assert traffic.check_patterns(c, read_at("OLD1112", now), armed=True) is None   # one off OLD1111: a misread
+    unusual = db.event(traffic.check_patterns(c, read_at("REG4242", now), armed=True))
+    assert unusual["policy"]["pattern"] == "unusual_time" and unusual["priority"] == "low"
+    assert unusual["policy"]["text"] == "Plate REG 4242, seen 10 times before, usually around 8:15 AM, is here at 2:10 AM during SOC hours"
+    assert traffic.check_patterns(c, read_at("REG4242", now.replace(hour=8, minute=20) + dt.timedelta(hours=24)), armed=True) is None
+    traffic.set_alerts("cam8", when="always")
+    c = traffic.camera("cam8")
+    assert db.event(traffic.check_patterns(c, read_at("NEW8888", now), armed=False))["policy"]["pattern"] == "new"
+    # too little history: nothing is "new" yet
+    db.execute("DELETE FROM vehicle_reads WHERE plate='OLD1111'")
+    assert traffic.check_patterns(c, read_at("NEW9999", now), armed=True) is None
+    # the setting, through the API: admin to change, shown with the camera's traffic state
+    assert call("PUT", "/api/cameras/cam8/traffic/alerts", role="operator", json_body={"new": False}).status_code == 403
+    r = call("PUT", "/api/cameras/cam8/traffic/alerts", role="admin", json_body={"new": False, "when": "armed"})
+    assert r.status_code == 200 and r.json()["alerts"] == {"circling": True, "new": False, "unusual_time": True, "when": "armed"}
+    assert call("PUT", "/api/cameras/cam8/traffic/alerts", json_body={"when": "sometimes"}).status_code == 422
+    traffic.set_alerts("cam8", new=False, unusual_time=False)
+
+
+def _described(plate, when, look, **f):
+    _sighting(plate, when, vtype=f.get("vtype", "Truck"))
+    rid = db.one("SELECT MAX(id) AS id FROM vehicle_reads")["id"]
+    db.execute("UPDATE vehicle_reads SET otso_look=?, vehicle_color=?, pass_id=?, best=1 WHERE id=?",
+               [look, f.get("color"), f.get("pass_id", rid), rid])
+    return rid
+
+
+def test_otso_looks_on_its_own():
+    """Looker: the newest vehicle without a look, once per pass; the plate kept only when Otso is sure, the vehicle
+    always; an Otso plate on the watch list raises the alarm; a person's Ask Otso keeps the description; the hourly limit
+    and the AI schedule / busy Qwen gate."""
+    reset()
+    c = cam()
+    t0 = time.time() - 60
+    first = traffic.ingest(c, push_read("No Plates", "0.00", at=t0 - 60), t0 - 59.5)["read_id"]   # apart: not one parked car
+    rid = traffic.ingest(c, push_read("No Plates", "0.00", at=t0, license_plate_snapshot=jpg(90, 40)), t0 + 0.5)["read_id"]
+    old = traffic.ingest(c, push_read("No Plates", "0.00", at=t0 - 8 * 3600), t0 - 8 * 3600 + 0.5)["read_id"]
+    traffic.add_entry("407MFL", "watch", note="red Fiesta")
+    seen = []
+    answers = [{"result": "read", "plate": "407MFL", "plate_raw": "407 MFL", "region": "KS", "confidence": "high"},
+               {"result": "read", "plate": "3416AFR", "plate_raw": "3416 AFR", "confidence": "medium"}]
+
+    async def fake_look(plate_img, vehicle_img, priority="background"):
+        seen.append((plate_img is not None, len(vehicle_img)))
+        return {**answers[len(seen) - 1], "model": "fake",
+                "vehicle": {"vehicle_type": "pickup truck", "color": "white", "make": "Ford", "model": "F-150", "details": "ladder rack"}}
+    real = traffic.plate.look
+    traffic.plate.look = fake_look
+    try:
+        lk = traffic.Looker()
+        assert lk.next_read(time.time()) == rid   # newest first; the 8-hour-old one is past traffic_look_max_age_s
+        out = asyncio.run(lk.look(rid))
+        assert seen[0][0] and out["alarm"] is not None
+        r = traffic.read(rid)
+        assert r["otso_plate"] == "407MFL" and r["otso"]["by"] == "otso" and r["list"] == "watch"
+        assert r["otso_look"] == "white Ford F-150 pickup truck, ladder rack"
+        e = db.event(out["alarm"])
+        assert e["plate"] == "407MFL" and e["policy"]["text"].endswith("(red Fiesta) (read by Otso: the camera read no plate)")
+        assert e["detections"]["plate_read"]["source"] == "otso"
+        assert lk.next_read(time.time()) == first
+        asyncio.run(lk.look(first))
+        r = traffic.read(first)   # a medium plate in the background: not kept (nobody checks it), the vehicle is
+        assert r["otso"]["result"] == "unreadable" and r["otso_plate"] is None and r["otso_look"].startswith("white Ford")
+        assert lk.next_read(time.time()) is None and old
+        # a person asks later: Otso's answer replaces the plate, the description stays
+        kept = traffic.store_otso(first, {"result": "unreadable", "reason": "not legible"})
+        assert kept["otso"]["by"] == "person" and kept["otso"]["vehicle"]["make"] == "Ford" and kept["otso_look"].startswith("white Ford")
+        # the gate
+        class P:
+            free = True
+
+            async def catchup_ready(self):
+                return self.free
+        p = P()
+        assert asyncio.run(lk.ready(p, time.time()))
+        p.free = False
+        assert not asyncio.run(lk.ready(p, time.time()))   # Qwen busy here
+        p.free = True
+        real_out = traffic.aischedule.outside
+        real_full = traffic.aischedule.full
+        traffic.aischedule.full, traffic.aischedule.outside = (lambda now=None: False), (lambda: "skip")
+        try:
+            assert not asyncio.run(lk.ready(p, time.time()))   # outside AI hours, the Site skips catch-up work
+        finally:
+            traffic.aischedule.full, traffic.aischedule.outside = real_full, real_out
+        limit = settings.traffic_look_per_hour
+        settings.traffic_look_per_hour = 2
+        try:
+            lk.looked.extend([time.time() - 10, time.time() - 5])
+            assert not asyncio.run(lk.ready(p, time.time()))
+            assert asyncio.run(lk.ready(p, time.time() + 3600))
+        finally:
+            settings.traffic_look_per_hour = limit
+    finally:
+        traffic.plate.look = real
+
+
+def test_search_by_description():
+    """Find vehicles by what they look like: every word in Otso's description or the camera's colour, type or make; one
+    read per pass; through the API and in Ask, counted, with how many Otso has looked at."""
+    reset()
+    cam()
+    now = dt.datetime.now() - dt.timedelta(minutes=30)
+    a = _described("LDR1111", now, "white Ford F-150 pickup truck, ladder rack", color="White")
+    _described(None, now + dt.timedelta(minutes=1), "white Chevrolet Silverado pickup truck", color="White")
+    _described(None, now + dt.timedelta(minutes=2), "gray Toyota Tundra pickup truck, tonneau cover", color="Gray")
+    _sighting("CAM2222", now + dt.timedelta(minutes=3))   # the camera's guess only: a white truck, not looked at
+    db.execute("UPDATE vehicle_reads SET vehicle_color='White' WHERE plate='CAM2222'")
+    found = traffic.search(look="White pickups with ladder racks")
+    assert [r["id"] for r in found["reads"]] == [a] and found["look"] == ["white", "pickup", "ladder", "rack"]
+    assert len(traffic.search(look="white truck")["reads"]) == 3   # Otso's two and the camera's one
+    assert len(traffic.search(look="grey tundra")["reads"]) == 1
+    assert traffic.search(look="red")["reads"] == []
+    assert [r["id"] for r in call("GET", "/api/traffic/reads?look=ladder%20rack").json()["reads"]] == [a]
+    ev = traffic.ask_evidence("did a white pickup with a ladder rack come by today?", None, None)
+    assert ev[0]["kind"] == "note" and ev[0]["text"].startswith("COUNTED: 1 vehicle since ")
+    assert "match \"white pickup ladder rack\"" in ev[0]["text"] and "(Otso has described 3 of the 4 vehicles" in ev[0]["text"]
+    assert [x["read_id"] for x in ev[1:]] == [a]
+    assert "Otso saw a white Ford F-150 pickup truck, ladder rack" in ev[1]["text"] and "(the camera's guess)" in ev[1]["text"]
+    assert traffic.ask_evidence("any Tundras today?", None, None)[0]["text"].startswith("COUNTED: 1 vehicle ")
+    assert traffic.ask_evidence("did anyone carry a ladder?", None, None) == []   # a ladder, but no vehicle
+
+
 def test_hub_roles():
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "hub"))
     from hub import roles
+    assert roles.required_role("PUT", "/api/cameras/cam8/traffic/alerts") == "admin"
     assert roles.required_role("GET", "/api/traffic/reads") == "viewer"
     assert roles.required_role("GET", "/api/traffic/reads/5/image/plate") == "viewer"
     assert roles.required_role("POST", "/api/traffic/lists") == "operator"

@@ -236,8 +236,8 @@ def check(event_id: int, camera: dict | None = None) -> dict | None:
     e = db.event(event_id)
     if not e or e["status"] != "verified" or e["camera_class"] not in ("vehicle", "person") or e.get("ptz_preset"):
         return None  # (a PTZ camera turned away from home: its rules describe the home view)
-    if (e.get("policy") or {}).get("kind") == "plate_list":
-        return e["policy"]   # a traffic camera's plate-list alarm (traffic.py): the plate is the rule, kept as it is
+    if (e.get("policy") or {}).get("kind") in ("plate_list", "plate_pattern"):
+        return e["policy"]   # a traffic camera's plate alarm (traffic.py): a list hit or a plate's pattern, kept as it is
     camera = camera or db.one("SELECT * FROM cameras WHERE id=?", [e["camera_id"]])
     broken = None
     for r in rules(camera):

@@ -3,10 +3,12 @@
    that answers as a traffic camera; anything else renders nothing. "Set up plate reads" turns plate reading on and points
    a free push slot at this server (admin; a 409 says why it can't: no licence, every slot in use); "Stop push" empties
    our slot. Without an SD card the camera can't resend, so reads pushed while this server is down are lost: an amber
-   warning says so. Pure logic: traffic.ts. */
+   warning says so. Plate alerts: a plate circling (passing again and again), a plate never seen before and a regular at
+   an unusual time each raise an alarm that reaches the hub and the SOC (backend traffic.check_patterns); new and unusual
+   only during SOC hours unless "Any time" (admin; saved at once). Pure logic: traffic.ts. */
 import { useEffect, useState } from "react";
 import { api, type Camera } from "./api";
-import { type CameraTraffic, isSilent, ourSlot, pushText, slotText } from "./traffic";
+import { type CameraTraffic, type CameraTrafficServer, type TrafficAlerts, isSilent, ourSlot, pushText, slotText } from "./traffic";
 import { confirmDialog, errorText, toast } from "./ui";
 
 export function TrafficSetupSection({ camera }: { camera: Camera }) {
@@ -60,6 +62,44 @@ export function TrafficSetupSection({ camera }: { camera: Camera }) {
         <button className="ghost small" disabled={busy} onClick={read}>Read again</button>
         <span className="muted small">Changes the camera at once (admin).</span>
       </div>
+      {err && <p className="small error">{err}</p>}
+    </div>
+    {s.alerts && <PlateAlerts camera={camera} server={s} onSaved={(server) => setT({ ...t, server })} />}
+  </>;
+}
+
+const ALERTS: [keyof Omit<TrafficAlerts, "when">, string, (s: CameraTrafficServer) => string][] = [
+  ["circling", "Circling", (s) => `The same plate passes ${s.circling?.passes ?? 3} times within ${s.circling?.minutes ?? 30} minutes (medium priority)`],
+  ["new", "New plate", (s) => `A plate never seen here before, once the camera has ${s.learn_days ?? 14} days of plates (medium)`],
+  ["unusual_time", "Regular at an unusual time", () => "A plate seen often, mostly at set times, now hours away from any of them (low)"],
+];
+
+function PlateAlerts({ camera, server, onSaved }: { camera: Camera; server: CameraTrafficServer; onSaved: (s: CameraTrafficServer) => void }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const a = server.alerts!;
+  const save = async (change: Partial<TrafficAlerts>) => {
+    setBusy(true); setErr("");
+    try { onSaved(await api.setTrafficAlerts(camera.id, change)); } catch (e) { setErr(errorText(e)); }   // 403: admin only
+    setBusy(false);
+  };
+  return <>
+    <h3 className="spaced">Plate alerts</h3>
+    <div className="device-card">
+      <p className="small muted">Each raises an alarm with the plate's history, on the hub and in the SOC queue like a deny-list hit. Allowed plates never do.</p>
+      {ALERTS.map(([k, label, hint]) => (
+        <label key={k} className="row small" title={hint(server)}>
+          <input type="checkbox" checked={a[k]} disabled={busy} onChange={(e) => save({ [k]: e.target.checked })} />
+          <span><strong>{label}</strong> <span className="muted">· {hint(server)}</span></span>
+        </label>
+      ))}
+      <label className="row small">
+        New plates and unusual times:
+        <select value={a.when} disabled={busy || !(a.new || a.unusual_time)} onChange={(e) => save({ when: e.target.value as TrafficAlerts["when"] })}>
+          <option value="armed">Only during SOC hours</option>
+          <option value="always">Any time</option>
+        </select>
+      </label>
       {err && <p className="small error">{err}</p>}
     </div>
   </>;

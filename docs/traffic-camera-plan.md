@@ -143,6 +143,36 @@ Decided while building:
   totals, and from Ask, and no picture is cut for them. The sign scored 0.3-0.6; the only real plates without a vehicle
   type scored 0.88 and 0.99. The camera couldn't fix this itself: its region already left the sign's plate box out, and
   its confidence level would also drop real night plates, which score 0.34-0.48.
+- **Otso looks at each vehicle on its own** (`traffic.Looker`, 2026-10-29). Only 18 % of cam8's reads have a plate,
+  and its make is often wrong (a red Toyota Tundra came through as a "Mercury car").
+  - **What it asks.** For each vehicle's best read, newest first, Otso gets one question with the camera's plate crop
+    (enlarged) and the vehicle picture (`plate.look`). It asks for the plate under the strict instruction, plus the
+    vehicle's type, colour, make, model and details.
+  - **What's kept.** A plate only when Otso is sure (nobody checks a background guess). The description is always kept
+    (`otso_look`), and shown in place of the camera's guess.
+  - **When it runs.** Only while Qwen has nothing else to do here (`catchup_ready`) and the Site's AI schedule allows
+    catch-up work, at most `traffic_look_per_hour` (120: 3-12 s a look on TSS-DT), reads up to 6 hours old, metered as "plate".
+  - **Coverage.** On the highway (~1,450 vehicles an hour) it describes a share. At a gate or a lot it describes them all.
+  - **Lists.** An Otso plate on the deny or watch list raises the alarm, saying Otso read it.
+- **Plate pattern alerts** (`traffic.check_patterns`, per camera in Camera › Traffic, admin). Lists only catch plates
+  someone already knows about. Each pattern raises an alarm event (policy kind `plate_pattern`, with the plate's counted
+  notes) that reaches the hub and the SOC like a list hit. An allowed plate raises nothing, and later passes join the
+  open alarm for an hour.
+  - **Circling (on by default, medium).** The same plate 3 times in 30 minutes. Sightings less than 2 minutes apart are
+    one: a car parked in view is re-read now and then.
+  - **New plate (off by default, medium).** A plate never seen before, and not one character off a known plate (a
+    misread is always new). Only from a read at 80 % or more, and only once the camera has 14 days of history.
+  - **Regular at an unusual time (off by default, low).** A plate seen 8+ times on 5+ days, mostly at set times, now
+    2 hours or more from every earlier sighting.
+  - **When.** New and unusual alert only while the Site's SOC monitoring is armed, unless set to "Any time". On a
+    highway a new plate is every other car, so they stay off there.
+- **Search by description.** The Plates search box takes a plate or a description ("white pickup ladder rack";
+  `isDescription` tells them apart). Each word must start a word of Otso's description or the camera's colour, type or
+  make, one read per pass (`search(look=)`).
+  - **In Ask.** A question naming a make or model, or a detail with a vehicle word ("did a white box truck with a ladder
+    rack come by?"), gets a counted note. It says how many vehicles match and how many Otso has described so far,
+    followed by the latest matches with "Otso saw ..." (`ask_looks`).
+  - **The answer rules.** Both Asks trust Otso's look over the camera's guess.
 
 ### Phase 1: plate reads in Axiom (site server)
 - Push receiver `POST /api/traffic/push/{camera}/{secret}`: per-camera secret, no login (the camera can't log in),

@@ -165,6 +165,21 @@ class Settings(BaseSettings):
     # 0.3-0.6, so 0.5 let ~1 in 6 through), while real plates without a vehicle type that day scored 0.88 and 0.99. Hidden
     # from the reads list (unless asked for, or a plate search), counts, today's totals and Ask; no picture is cut for it.
     traffic_noise_conf: float = 0.7
+    # Otso looks at each vehicle on its own (traffic.Looker): the plate the camera missed (kept only when Otso is sure)
+    # and what the vehicle is (colour, make, model, details: "ladder rack"), so a vehicle can be found by description.
+    # Only while Qwen has nothing else to do and the Site's AI schedule allows catch-up work, at most
+    # traffic_look_per_hour, newest first, reads at most traffic_look_max_age_s old. Metered as "plate".
+    traffic_look: bool = True
+    traffic_look_per_hour: int = 120        # TSS-DT's local Qwen: 3-12 s a look
+    traffic_look_max_age_s: float = 6 * 3600.0
+    # Plate pattern alerts (traffic.check_patterns), switched on per camera (Camera › Traffic): the same plate
+    # traffic_circling_passes times within traffic_circling_s; a plate never seen before, or a regular far outside its
+    # usual times, once the camera has traffic_learn_days of history. One alarm per plate and pattern per
+    # traffic_pattern_cooldown_s (later passes join it).
+    traffic_circling_passes: int = 3
+    traffic_circling_s: float = 1800.0
+    traffic_learn_days: int = 14
+    traffic_pattern_cooldown_s: float = 3600.0
     # Back-to-back fragments of one visit on a camera merge into one event before Qwen describes it (merge.py)
     track_merge_gap: float = 10.0           # a fragment starting within this of the previous one may merge
     merge_max_seconds: float = 300.0        # never grow one event beyond this

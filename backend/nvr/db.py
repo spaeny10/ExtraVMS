@@ -443,6 +443,8 @@ MIGRATIONS = [
     ("cameras", "traffic", "TEXT"),                 # JSON {enabled, secret, slot, zone_offset_s}: a traffic camera's push (traffic.py)
     ("vehicle_reads", "otso", "TEXT"),              # JSON: Otso's own look at the read's crop on demand (traffic.read_plate)
     ("vehicle_reads", "otso_plate", "TEXT"),        # ...the plate it read (normalized), searchable beside the camera's
+    ("vehicle_reads", "otso_look", "TEXT"),         # ...what the vehicle is in Otso's words ("white Ford F-150 pickup
+                                                    # truck, ladder rack"), for search by description (traffic.Looker)
     ("deterrence_log", "via", "TEXT"),           # how it went: relay | aux | speaker (the siren through a talk-down speaker)
     # merged events (merge.py): the camera tracks folded into this one, JSON [{event, track, from, to, why}], and for a
     # group of people the most of them in view at once (>= 2; NULL = one person / never merged)
@@ -643,6 +645,10 @@ class Database:
             cols = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {definition}")
+        # on migrated columns: Otso's plates are counted with the camera's (traffic.sightings, plate pattern alerts on
+        # every read), and Otso looks once per pass (traffic.Looker)
+        self.conn.execute("CREATE INDEX IF NOT EXISTS vehicle_reads_otso_plate ON vehicle_reads(otso_plate)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS vehicle_reads_pass ON vehicle_reads(pass_id)")
 
     def _close_quietly(self) -> None:
         conn = getattr(self, "conn", None)

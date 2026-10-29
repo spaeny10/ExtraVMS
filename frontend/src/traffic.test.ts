@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   type PushSlot, confBand, confText, countBars, countsSummary, dateFromExpiry, directionText, expiryFromDate, expiryText, filterOptions,
   isSilent, listBadge, listError, nearChip, normPlate, onList, periodSince, plateProblem, plateText, pushText, slotText, stateText, timeAgo,
-  vehicleText, knownPlate, otsoText,
+  vehicleText, knownPlate, otsoText, otsoWhen, isDescription,
 } from "./traffic";
 
 describe("one read", () => {
@@ -164,5 +164,18 @@ describe("Otso's Read plate", () => {
     expect(otsoText({ at: 1, result: "unreadable", reason: "not legible" })).toBe("Otso couldn't read it");
     expect(otsoText({ at: 1, result: "skipped", reason: "no picture of the vehicle" })).toBe("Otso had no picture to read");
     expect(otsoText(null)).toBe("");
+  });
+  it("says whether a person asked or Otso looked on its own", () => {
+    const t = () => "3:04 PM";
+    expect(otsoWhen({ at: 1, result: "read", by: "otso" }, t)).toBe("on its own, 3:04 PM");
+    expect(otsoWhen({ at: 1, result: "read", by: "person" }, t)).toBe("asked, 3:04 PM");
+    expect(otsoWhen({ at: 1, result: "read" }, t)).toBe("asked, 3:04 PM");   // before Otso looked on its own
+  });
+});
+
+describe("search by description", () => {
+  it("tells a description from a plate", () => {
+    for (const d of ["white pickup ladder rack", "Ladder", "trucks", "red f150", "box truck with logo", "Ford"]) expect(isDescription(d), d).toBe(true);
+    for (const p of ["1691AJN", "1691", "ABC 123", "1691 AJN", "ABC-1234", "", "  ", "LADDER1"]) expect(isDescription(p), p).toBe(false);
   });
 });

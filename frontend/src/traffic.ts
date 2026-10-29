@@ -26,14 +26,19 @@ export type Read = {
   list: PlateList | null; list_match: "exact" | "near" | null; list_entry: number | null; event_id: number | null;
   /** where the vehicle picture came from: the camera's push, or cut from the recording (the camera sent none) */
   vehicle_source?: "camera" | "recording" | null;
-  /** Otso's own look at the vehicle crop, on demand (Ask Otso), kept beside the camera's read; otso_plate when it read one */
-  otso?: OtsoRead | null; otso_plate?: string | null;
+  /** Otso's own look at the vehicle crop (Ask Otso, or on its own in the background), kept beside the camera's read;
+   *  otso_plate when it read one; otso_look what the vehicle is in Otso's words ("white Ford F-150 pickup truck, ladder rack") */
+  otso?: OtsoRead | null; otso_plate?: string | null; otso_look?: string | null;
 };
 export type OtsoRead = {
   at: number; result: "read" | "unreadable" | "skipped"; plate?: string; plate_raw?: string; region?: string;
   confidence?: "medium" | "high"; reason?: string; model?: string;
   /** Ask Otso's notes on the plate's history (counted on the server, traffic.plate_notes), and the plate they are about */
   about?: string; notes?: string[];
+  /** who asked: a person (Ask Otso) or Otso on its own (it looks at each vehicle when it is free); older answers have none */
+  by?: "person" | "otso";
+  /** what the vehicle is, in Otso's words */
+  vehicle?: { vehicle_type?: string; color?: string; make?: string; model?: string; details?: string };
 };
 /** POST /api/traffic/reads/{id}/plate: Otso's answer, the read as now stored, and the list the plate is on (if any). */
 export type ReadPlateResult = {
@@ -45,12 +50,14 @@ export type ReadPlateResult = {
 /** GET /api/traffic/reads/{id}: the read and every read of its pass, oldest first. */
 export type ReadDetail = Read & { pass?: Read[] };
 /** GET /api/traffic/reads: newest first; `near` = plates one character off the search, seen in the same window. */
-export type ReadsPage = { reads: Read[]; near: string[] };
+export type ReadsPage = { reads: Read[]; near: string[]; /** a description search: the words matched */ look?: string[] };
 export type ReadsQuery = {
   camera?: string; since?: number; until?: number; q?: string; type?: string; color?: string; direction?: Direction;
   list?: PlateList | "any"; min_conf?: number; plates?: boolean; all?: boolean; before_id?: number; limit?: number;
   /** also reads that aren't a vehicle (no vehicle type and no or a weak plate: a sign read at night); a search shows them anyway */
   noise?: boolean;
+  /** a description ("white pickup ladder rack"): every word in Otso's description or the camera's colour, type or make */
+  look?: string;
 };
 
 export type CountBucket = {
@@ -81,7 +88,12 @@ export type PushSlot = { index: number; enabled: boolean; ours: boolean; url: st
 export type CameraTrafficServer = {
   enabled: boolean; set_at: number | null; last_push: number | null; last_read: number | null; last_status: number | null;
   zone_offset_s: number | null; silent_after_s: number;
+  /** plate pattern alerts (older servers: none) */
+  alerts?: TrafficAlerts; learn_days?: number; circling?: { passes: number; minutes: number };
 };
+/** A camera's plate pattern alerts (backend traffic.check_patterns): new and unusual_time only while the Site's SOC
+ *  monitoring is armed, unless `when` is "always". */
+export type TrafficAlerts = { circling: boolean; new: boolean; unusual_time: boolean; when: "armed" | "always" };
 /** GET / PUT /api/cameras/{id}/traffic. sd_card null = the camera didn't say. */
 export type CameraTraffic =
   | { supported: false; reason: string; server: CameraTrafficServer }
@@ -99,6 +111,31 @@ export const plateText = (r: Pick<Read, "plate">): string => (r.plate ? formatPl
 
 /** The plate to show and act on: the camera's, else the one Otso read when a person asked (Ask Otso). */
 export const knownPlate = (r: Pick<Read, "plate" | "otso_plate">): string | null => r.plate ?? r.otso_plate ?? null;
+
+/** When Otso answered, and who asked: "asked, 3:04 PM" or "on its own, 3:04 PM". */
+export function otsoWhen(o: OtsoRead, time = (t: number) => new Date(t * 1000).toLocaleTimeString()): string {
+  return `${o.by === "otso" ? "on its own" : "asked"}, ${time(o.at)}`;
+}
+
+// words that make a search a description, not a plate ("FORD" alone could be a vanity plate, so one word is a
+// description only when it is one of these)
+const DESCRIBE_WORDS = new Set([
+  "car", "suv", "truck", "van", "bus", "motorcycle", "pickup", "sedan", "semi", "trailer", "ladder", "rack", "toolbox", "logo",
+  "lettering", "flatbed", "white", "black", "gray", "grey", "silver", "red", "blue", "green", "brown", "yellow", "orange", "gold",
+  "beige", "tan", "ford", "chevy", "chevrolet", "toyota", "honda", "nissan", "dodge", "ram", "gmc", "jeep", "tesla", "hyundai",
+  "kia", "subaru",
+]);
+
+/** Is the search box text a vehicle description ("white pickup ladder rack", "red f150") rather than a plate ("1691AJN",
+ *  "ABC 123")? A known description word, or two or more words not like a plate typed with a space. */
+export function isDescription(text: string): boolean {
+  const words = text.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (words.some((w) => DESCRIBE_WORDS.has(w.replace(/s$/, "")))) return true;
+  if (words.length < 2) return false;
+  // "ABC 123" / "1691 AJN": short pieces of letters and digits, one with a digit
+  if (words.length === 2 && words.every((w) => /^[a-z0-9]{1,5}$/.test(w)) && words.some((w) => /\d/.test(w))) return false;
+  return words.some((w) => !/\d/.test(w));
+}
 
 /** Otso's answer as one line: "Otso: 407 MFL · KS", "Otso: probably 3416 AFR", or why it couldn't ("Otso couldn't read it"). */
 export function otsoText(o: OtsoRead | null | undefined): string {

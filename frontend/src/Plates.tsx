@@ -5,7 +5,10 @@
  *    a panel with the larger picture and the other reads of that vehicle's pass, and its event when it has one. The
  *    camera's reader misses plates its own crops show (cam8: plates ~60 px wide), so the panel has Ask Otso: Otso
  *    reads the plate from the camera's crops (operator), its answer shown and kept beside the camera's, and searchable,
- *    with notes on the plate's history (how often, when, which way; counted on the server). A read the camera
+ *    with notes on the plate's history (how often, when, which way; counted on the server). Otso also looks at each
+ *    vehicle on its own when it is free (the server's traffic.Looker): a plate the camera missed, when it is sure, and
+ *    what the vehicle is ("white Ford F-150 pickup truck, ladder rack"), shown under the camera's guess. The search box
+ *    takes a plate or a description ("white pickup ladder rack": isDescription), which searches those words. A read the camera
  *    sent without a vehicle picture shows one cut from the recording (the server does it, marked "From the recording"),
  *    and Timeline opens the recording at the read's moment to check it.
  *  - Lists: allow / deny / watch plates with a note and an optional expiry. Deny and watch hits raise an alarm event
@@ -25,7 +28,8 @@ import { formatPlate, plateError } from "./plate";
 import {
   type Bar, type Direction, type ListEntry, type Period, type PlateList, type Read, type ReadDetail, type TrafficStatus, PERIODS, PLATE_LISTS,
   VEHICLE_COLORS, VEHICLE_TYPES, confBand, confText, countBars, countsSummary, dateFromExpiry, directionText, expiryFromDate, expiryText,
-  filterOptions, isSilent, knownPlate, listBadge, listError, listName, nearChip, onList, otsoText, periodSince, plateProblem, plateText, pushText,
+  filterOptions, isDescription, isSilent, knownPlate, listBadge, listError, listName, nearChip, onList, otsoText, otsoWhen, periodSince, plateProblem,
+  plateText, pushText,
   stateText, timeAgo, vehicleText,
 } from "./traffic";
 import { Icon, confirmDialog, errorText, promptDialog, toast } from "./ui";
@@ -145,8 +149,9 @@ function ReadsSection({ a, status, name, onEvent, onTimeline }: {
     const n = ++seq.current;
     setBusy(true);
     try {
+      const desc = isDescription(f.q);   // "white pickup ladder rack": Otso's and the camera's descriptions, not plates
       const r = await a.trafficReads({
-        q: f.q || undefined, camera: f.camera || undefined, since: periodSince(f.period), type: f.type || undefined, color: f.color || undefined,
+        q: desc ? undefined : f.q || undefined, look: desc ? f.q : undefined, camera: f.camera || undefined, since: periodSince(f.period), type: f.type || undefined, color: f.color || undefined,
         direction: f.direction || undefined, list: f.list || undefined, plates: f.plates, min_conf: f.min_conf || undefined,
         noise: f.noise, before_id: before, limit: PAGE,
       });
@@ -172,8 +177,8 @@ function ReadsSection({ a, status, name, onEvent, onTimeline }: {
   return (
     <section className="plates-reads">
       <form className="search-bar row" onSubmit={(e) => { e.preventDefault(); const q = typed.trim(); setF((x) => (x.q === q ? x : { ...x, q })); }}>
-        <input type="search" value={typed} onChange={(e) => setTyped(e.target.value)} placeholder="Plate or part of one, e.g. 1691 or 1691AJN"
-          aria-label="Search plates" autoCapitalize="characters" autoComplete="off" spellCheck={false} />
+        <input type="search" value={typed} onChange={(e) => setTyped(e.target.value)} placeholder="Plate (1691AJN, or part: 1691) or vehicle (white pickup ladder rack)"
+          aria-label="Search plates or vehicles" autoCapitalize="off" autoComplete="off" spellCheck={false} />
         <button type="submit"><Icon name="find" size={16} /> Search</button>
       </form>
       {near.length > 0 && (
@@ -229,7 +234,9 @@ function ReadsSection({ a, status, name, onEvent, onTimeline }: {
       {err && <p className="error small">{err}</p>}
       {!reads && busy && <p className="muted small">Loading reads…</p>}
       {reads && reads.length === 0 && (
-        <div className="empty">{f.q ? `No plate like ${formatPlate(f.q) || f.q} in this period.` : "No reads in this period."}</div>
+        <div className="empty">{!f.q ? "No reads in this period."
+          : isDescription(f.q) ? `No vehicle described as "${f.q}" in this period. Otso describes vehicles as it gets to them, when it is free.`
+          : `No plate like ${formatPlate(f.q) || f.q} in this period.`}</div>
       )}
       <div className="plate-reads">
         {reads?.map((r) => <ReadRow key={r.id} r={r} a={a} camera={name(r.camera_id)} onOpen={() => setOpen(r.id)} onEvent={onEvent} />)}
@@ -262,12 +269,13 @@ function ReadRow({ r, a, camera, onOpen, onEvent }: { r: Read; a: SiteApi; camer
         <span className="plate-read-body">
           <span className="plate-read-head">
             {!r.plate && r.otso_plate
-              ? <><strong className="plate-text">{formatPlate(r.otso_plate)}</strong><span className="badge" title="Read by Otso when a person asked; the camera read no plate">Otso</span></>
+              ? <><strong className="plate-text">{formatPlate(r.otso_plate)}</strong><span className="badge" title="Read by Otso from the camera's picture; the camera read no plate">Otso</span></>
               : <strong className={`plate-text${r.plate ? "" : " muted"}`}>{plateText(r)}</strong>}
             {band && <span className={`badge conf-${band}`} title="The camera's confidence in the plate">{confText(r.confidence)}</span>}
             <ListBadge r={r} />
           </span>
-          <span className="small">{vehicleText(r) || <span className="muted">vehicle</span>}</span>
+          {r.otso_look ? <span className="small" title={`Otso's own look at the vehicle (the camera said: ${vehicleText(r) || "nothing"})`}>{r.otso_look}</span>
+            : <span className="small">{vehicleText(r) || <span className="muted">vehicle</span>}</span>}
           {hints && <span className="muted small">{hints}</span>}
           <span className="muted small" title={new Date(r.ts * 1000).toLocaleString()}>{fmtWhen(r.ts)} · {camera}</span>
         </span>
@@ -384,14 +392,15 @@ function ReadPanel({ a, id: initial, name, onClose, onEvent, onTimeline }: {
               </div>
               <dl className="plate-facts">
                 {r.plate_raw && r.plate_raw !== r.plate && <><dt>As read</dt><dd>{r.plate_raw}</dd></>}
-                {r.otso && <><dt>Otso</dt><dd>{otsoText(r.otso)} <span className="muted small">(asked, {new Date(r.otso.at * 1000).toLocaleTimeString()})</span>
+                {r.otso_look && <><dt>Otso saw</dt><dd>{r.otso_look}</dd></>}
+                {r.otso && <><dt>Otso</dt><dd>{otsoText(r.otso)} <span className="muted small">({otsoWhen(r.otso)})</span>
                   {!!r.otso.notes?.length && <ul className="otso-notes">
                     {r.otso.about && r.otso.about !== r.plate && <li className="muted">About {formatPlate(r.otso.about)}:</li>}
                     {r.otso.notes.map((n) => <li key={n}>{n}</li>)}
                   </ul>}
                 </dd></>}
                 {r.region && <><dt>State</dt><dd>{r.region} <span className="muted small">(reported by the camera: a hint)</span></dd></>}
-                <dt>Vehicle</dt><dd>{vehicleText(r) || <span className="muted">not given</span>}</dd>
+                <dt>Vehicle</dt><dd>{vehicleText(r) || <span className="muted">not given</span>}{r.otso_look && <span className="muted small"> (the camera's guess)</span>}</dd>
                 {r.direction && <><dt>Direction</dt><dd>{directionText(r.direction)}</dd></>}
                 {r.speed != null && <><dt>Speed</dt><dd>{r.speed}</dd></>}
                 {(r.plate_type || r.plate_color) && <><dt>Plate</dt><dd>{[r.plate_color, r.plate_type].filter(Boolean).join(" · ")}</dd></>}

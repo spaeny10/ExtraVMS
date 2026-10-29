@@ -49,6 +49,16 @@ statusReportInterval (300 s). The camera resends a missed push only when it has 
   in its 1080p frame, 18 % of reads with a plate); a person can have Otso read the vehicle crop (plate.read, metered
   "plate", one run per read every settings.plate_rate_s). Otso's answer is kept beside the camera's (`otso`,
   `otso_plate`), never over it, and search finds it.
+- Otso looks on its own (Looker): each vehicle's best read, newest first, while Qwen has nothing else to do and the
+  Site's AI schedule allows catch-up work, at most settings.traffic_look_per_hour: the plate the camera missed (the
+  strict instruction, kept only when Otso is sure) and what the vehicle is ("white Ford F-150 pickup truck, ladder
+  rack": otso_look), so it can be found by description (search `look`, Ask). An Otso plate on a deny / watch list
+  raises the alarm as a camera read does.
+- Pattern alerts (check_patterns), per camera (traffic.alerts): a plate passing settings.traffic_circling_passes times
+  within traffic_circling_s ("circling"), a plate never seen before ("new") or a regular far outside its usual times
+  ("unusual_time"); new and unusual only while the Site's SOC monitoring is armed unless set to "always", and only
+  once the camera has traffic_learn_days of history. An alarm event (policy kind "plate_pattern", with the plate's
+  counted notes) reaches the hub and the SOC like a list hit.
 - Setup (camera_state / configure): Milesight's own API (milesight.py): plate reading on, one push slot pointed at
   /api/traffic/push/<camera>/<secret> with every event type and a status report.
 - Health: a camera set up but silent for settings.traffic_silent_s raises traffic_push_silent.
@@ -80,7 +90,7 @@ import time
 from collections import deque
 from pathlib import Path
 
-from . import plate
+from . import aischedule, plate
 from .config import settings
 from .db import db
 
@@ -468,8 +478,14 @@ def ingest(cam: dict, p: dict, received: float | None = None) -> dict:
     out = {"read_id": read_id, "event_id": None, "alarm_id": None, "list": hit["list"] if hit else None}
     if alarm:
         out["alarm_id"] = open_alarm(cam, read_id, hit)
-    elif r["plate"] and (r["confidence"] or 0) >= settings.traffic_attach_min_conf:
+        return out
+    if r["plate"] and (r["confidence"] or 0) >= settings.traffic_attach_min_conf:
         out["event_id"] = attach_read(read_id)
+    if r["plate"] and not hit:   # an allowed plate raises nothing
+        try:
+            out["alarm_id"] = check_patterns(cam, read_id)
+        except Exception:  # noqa: BLE001 - the read is stored; a pattern check must not fail the camera's push
+            log.exception("[%s] traffic read %s: pattern check failed", cam["id"], read_id)
     return out
 
 
@@ -741,18 +757,117 @@ def otso_crops(read_id: int) -> list:
     return out
 
 
-def store_otso(read_id: int, result: dict, notes: dict | None = None) -> dict | None:
+def store_otso(read_id: int, result: dict, notes: dict | None = None, by: str = "person") -> dict | None:
     """Keep Otso's answer on the read (a read plate, or why not), beside the camera's own. Its state only when it is
-    sure: on a soft crop it named a wrong one every time (plate.ON_REQUEST_SYSTEM)."""
-    info = {"at": round(time.time(), 1), **{k: result[k] for k in ("result", "plate", "plate_raw", "region", "confidence",
-                                                                   "reason", "model", "crops") if result.get(k) not in (None, "")}}
+    sure: on a soft crop it named a wrong one every time (plate.ON_REQUEST_SYSTEM). by: "person" (Ask Otso) or "otso"
+    (Looker); a person's answer keeps the vehicle Otso described on its own."""
+    old = db.one("SELECT otso, otso_look FROM vehicle_reads WHERE id=?", [read_id]) or {}
+    prev = json.loads(old["otso"]) if old.get("otso") else {}
+    info = {"at": round(time.time(), 1), "by": by,
+            **{k: result[k] for k in ("result", "plate", "plate_raw", "region", "confidence", "reason", "model", "crops")
+               if result.get(k) not in (None, "")}}
     if info.get("confidence") != "high":
         info.pop("region", None)
+    vehicle = result.get("vehicle") or prev.get("vehicle")
+    if vehicle:
+        info["vehicle"] = vehicle
     if notes is not None:
         info["about"], info["notes"] = notes["plate"], notes["notes"]
-    db.execute("UPDATE vehicle_reads SET otso=?, otso_plate=? WHERE id=?",
-               [json.dumps(info), result.get("plate") if result.get("result") == "read" else None, read_id])
+    db.execute("UPDATE vehicle_reads SET otso=?, otso_plate=?, otso_look=? WHERE id=?",
+               [json.dumps(info), result.get("plate") if result.get("result") == "read" else None,
+                plate.vehicle_words(vehicle) or old.get("otso_look"), read_id])
     return read(read_id)
+
+
+# ---------------------------------------------------------------- Otso looks on its own
+
+LOOK_WAIT_S = 5.0        # between checks while there is nothing to look at, Qwen is busy or the hour's looks are used
+LOOK_TIMEOUT_S = 60.0
+
+
+class Looker:
+    """Otso looks at each vehicle's best read once (see "Otso looks on its own" above). In memory: when it looked, for
+    the hourly limit (a restart starts the hour again)."""
+
+    def __init__(self) -> None:
+        self.looked: deque = deque()
+
+    def room(self, now: float) -> bool:
+        while self.looked and self.looked[0] < now - 3600:
+            self.looked.popleft()
+        return len(self.looked) < settings.traffic_look_per_hour
+
+    def next_read(self, now: float) -> int | None:
+        """The newest best read with a vehicle picture that no read of its pass has had Otso look at."""
+        sql, p = noise_sql()
+        r = db.one(f"SELECT id FROM vehicle_reads v WHERE best=1 AND otso IS NULL AND ts >= ? AND images LIKE '%\"vehicle\"%' "
+                   f"AND NOT {sql} AND NOT EXISTS (SELECT 1 FROM vehicle_reads o WHERE o.pass_id = v.pass_id "
+                   f"AND o.otso IS NOT NULL) ORDER BY id DESC LIMIT 1", [now - settings.traffic_look_max_age_s, *p])
+        return r["id"] if r else None
+
+    async def look(self, read_id: int) -> dict:
+        """One look: the plate (kept only when Otso is sure) and the vehicle. Returns what was stored, with `alarm` (a list
+        hit's event id) when Otso's plate is on the deny or watch list and the camera had read no plate."""
+        r = db.one("SELECT * FROM vehicle_reads WHERE id=?", [read_id])
+        vehicle_f = image_path(read_id, "vehicle")
+        if not r or vehicle_f is None:
+            return {"result": "skipped"}
+        plate_f = image_path(read_id, "plate")
+        plate_img = await asyncio.to_thread(plate_look, plate_f) if plate_f is not None else None
+        try:
+            with aischedule.job(plate.KIND):
+                result = await asyncio.wait_for(plate.look(plate_img, vehicle_f.read_bytes()), LOOK_TIMEOUT_S)
+        except Exception as ex:  # noqa: BLE001 - marked as tried: one bad read must not hold up the rest
+            log.warning("traffic read %s: Otso's look failed: %s", read_id, ex)
+            result = {"result": "skipped", "reason": str(ex)[:120] or type(ex).__name__}
+        if result.get("result") == "read" and result.get("confidence") != "high":   # nobody checks a background guess
+            result = {**{k: v for k, v in result.items() if k not in ("plate", "plate_raw", "region", "confidence")},
+                      "result": "unreadable", "reason": "not sure of every character"}
+        await asyncio.to_thread(store_otso, read_id, result, None, "otso")
+        out = {**result, "alarm": None}
+        if result.get("result") == "read" and not r["plate"]:
+            hit = await asyncio.to_thread(match_list, result["plate"])
+            cam = camera(r["camera_id"])
+            if hit and hit["list"] in ALARM_LISTS and cam:
+                db.execute("UPDATE vehicle_reads SET list=?, list_match=?, list_entry=? WHERE id=?",
+                           [hit["list"], hit["match"], hit["id"], read_id])
+                out["alarm"] = await asyncio.to_thread(open_alarm, cam, read_id, hit, result["plate"])
+        return out
+
+    async def ready(self, pipeline, now: float) -> bool:
+        """May Otso look now: switched on, looks left this hour, the Site's AI schedule allows catch-up work (inside
+        its hours, or outside them unless it skips descriptions) and Qwen is free here (pipeline.catchup_ready)."""
+        if not settings.traffic_look or not self.room(now):
+            return False
+        if not (aischedule.full() or aischedule.outside() == "catchup"):
+            return False
+        return await pipeline.catchup_ready()
+
+    async def run(self, pipeline) -> None:
+        """Forever: look at the next vehicle whenever ready(). A new alarm is published and described like a camera
+        read's."""
+        while True:
+            await asyncio.sleep(LOOK_WAIT_S)
+            try:
+                now = time.time()
+                if not await self.ready(pipeline, now):
+                    continue
+                read_id = await asyncio.to_thread(self.next_read, now)
+                if read_id is None:
+                    continue
+                self.looked.append(now)
+                out = await self.look(read_id)
+                log.debug("traffic read %s: Otso looked: %s %s", read_id, out.get("plate") or out.get("result"),
+                          plate.vehicle_words(out.get("vehicle")))
+                if out.get("alarm"):
+                    pipeline.publish(out["alarm"])
+                    if not pipeline.plan_synopsis(out["alarm"]):
+                        await pipeline.reindex(out["alarm"])
+            except Exception:  # noqa: BLE001 - keep looking
+                log.exception("traffic: Otso's look failed")
+
+
+looker = Looker()
 
 
 # ---------------------------------------------------------------- a plate's history (Ask Otso's notes)
@@ -986,33 +1101,23 @@ def reads_plates(camera_id: str) -> bool:
     return bool(c and (c.get("traffic") or {}).get("enabled"))
 
 
-def open_alarm(cam: dict, read_id: int, hit: dict) -> int:
-    """A deny / watch hit: an alarm event (or the open one of the same plate, list and camera within LIST_COOLDOWN_S)."""
+def _plate_event(cam: dict, r: dict, policy: dict, topic: str, rule: str, plate_: str, by_otso: bool = False) -> int:
+    """An alarm event for a read (verified at once: the camera saw the vehicle) carrying the plate, the read's picture and
+    the site rule `policy`, so it reaches the hub's alerts and the SOC like any broken rule."""
     from . import baseline, verifier
-    r = db.one("SELECT * FROM vehicle_reads WHERE id=?", [read_id])
-    prev = db.one("SELECT event_id FROM vehicle_reads WHERE camera_id=? AND list=? AND list_entry=? AND event_id IS NOT NULL "
-                  "AND ts >= ? AND id != ? ORDER BY ts DESC LIMIT 1",
-                  [cam["id"], hit["list"], hit["id"], r["ts"] - LIST_COOLDOWN_S, read_id])
-    if prev and db.event(prev["event_id"]):
-        db.execute("UPDATE vehicle_reads SET event_id=? WHERE id=?", [prev["event_id"], read_id])
-        return prev["event_id"]
     box = json.loads(r["box"]) if r["box"] else [0.0, 0.0, 1.0, 1.0]
-    conf = r["confidence"] or 0.0
-    shown = plate.display(r["plate"])
-    words = {"deny": "on the deny list", "watch": "on the watch list"}[hit["list"]]
-    text = (f"Plate {shown} is {words}" if hit["match"] == "exact"
-            else f"Plate {shown} is one character off {plate.display(hit['plate'])}, {words}")
-    text += f" ({hit['note']})" if hit.get("note") else ""
-    policy = {"kind": "plate_list", "list": hit["list"], "match": hit["match"], "plate": r["plate"], "entry": hit["plate"],
-              "priority": ALARM_LISTS[hit["list"]], "text": text}
+    conf = (r["confidence"] or 0.0) if not by_otso else 0.9
+    otso = json.loads(r["otso"]) if by_otso and r.get("otso") else {}
     eid = db.create_event(
-        camera_id=cam["id"], track_id=f"lpr:{r['plate']}-{int(r['ts'] * 1000)}", camera_class="vehicle", camera_conf=conf,
+        camera_id=cam["id"], track_id=f"lpr:{plate_}-{int(r['ts'] * 1000)}", camera_class="vehicle", camera_conf=conf,
         start_ts=r["ts"] - 2, end_ts=r["ts"] + 2, path=[[round(r["ts"] - 2, 3), *box, conf], [round(r["ts"] + 2, 3), *box, conf]],
-        rules=[{"ts": round(r["ts"], 3), "topic": "traffic/plate_list", "rule": hit["list"]}], status="verified",
-        yolo_class="vehicle", yolo_hits=0, policy=policy, plate=r["plate"], plate_raw=r["plate_raw"], plate_region=r["region"],
-        plate_conf=conf_word(conf),
-        detections={"source": "lpr", "read_id": read_id, "plate_read": {"at": round(time.time(), 1), "source": "camera",
-                                                                           "result": "read", "read_id": read_id, "confidence": conf}})
+        rules=[{"ts": round(r["ts"], 3), "topic": topic, "rule": rule}], status="verified",
+        yolo_class="vehicle", yolo_hits=0, policy=policy, plate=plate_,
+        plate_raw=otso.get("plate_raw") if by_otso else r["plate_raw"], plate_region=otso.get("region") if by_otso else r["region"],
+        plate_conf="high" if by_otso else conf_word(conf),
+        detections={"source": "lpr", "read_id": r["id"], "plate_read": {
+            "at": round(time.time(), 1), "source": "otso" if by_otso else "camera", "result": "read", "read_id": r["id"],
+            "confidence": "high" if by_otso else conf}})
     images = json.loads(r["images"]) if r["images"] else {}
     src = images.get("full") or images.get("vehicle")
     if src and (settings.data_dir / src).is_file():
@@ -1020,20 +1125,216 @@ def open_alarm(cam: dict, read_id: int, hit: dict) -> int:
         shutil.copyfile(settings.data_dir / src, snap)
         db.update_event(eid, snapshot=str(snap.relative_to(settings.data_dir)).replace("\\", "/"))
     db.update_event(eid, priority=baseline.priority(db.event(eid), 0.0))
-    db.execute("UPDATE vehicle_reads SET event_id=? WHERE id=?", [eid, read_id])
-    log.info("[%s] plate %s %s (%s match, read %s): alarm event %s", cam["id"], r["plate"], words, hit["match"], read_id, eid)
+    db.execute("UPDATE vehicle_reads SET event_id=? WHERE id=?", [eid, r["id"]])
+    return eid
+
+
+def open_alarm(cam: dict, read_id: int, hit: dict, otso_plate: str | None = None) -> int:
+    """A deny / watch hit: an alarm event (or the open one of the same plate, list and camera within LIST_COOLDOWN_S).
+    otso_plate: the plate Otso read on a read the camera had none for (Looker)."""
+    r = db.one("SELECT * FROM vehicle_reads WHERE id=?", [read_id])
+    prev = db.one("SELECT event_id FROM vehicle_reads WHERE camera_id=? AND list=? AND list_entry=? AND event_id IS NOT NULL "
+                  "AND ts >= ? AND id != ? ORDER BY ts DESC LIMIT 1",
+                  [cam["id"], hit["list"], hit["id"], r["ts"] - LIST_COOLDOWN_S, read_id])
+    if prev and db.event(prev["event_id"]):
+        db.execute("UPDATE vehicle_reads SET event_id=? WHERE id=?", [prev["event_id"], read_id])
+        return prev["event_id"]
+    plate_ = otso_plate or r["plate"]
+    shown = plate.display(plate_)
+    words = {"deny": "on the deny list", "watch": "on the watch list"}[hit["list"]]
+    text = (f"Plate {shown} is {words}" if hit["match"] == "exact"
+            else f"Plate {shown} is one character off {plate.display(hit['plate'])}, {words}")
+    text += f" ({hit['note']})" if hit.get("note") else ""
+    text += " (read by Otso: the camera read no plate)" if otso_plate else ""
+    policy = {"kind": "plate_list", "list": hit["list"], "match": hit["match"], "plate": plate_, "entry": hit["plate"],
+              "priority": ALARM_LISTS[hit["list"]], "text": text}
+    eid = _plate_event(cam, r, policy, "traffic/plate_list", hit["list"], plate_, by_otso=bool(otso_plate))
+    log.info("[%s] plate %s %s (%s match, read %s%s): alarm event %s", cam["id"], plate_, words, hit["match"], read_id,
+             ", Otso's read" if otso_plate else "", eid)
+    return eid
+
+
+# ---------------------------------------------------------------- plate pattern alerts
+
+PATTERNS = ("circling", "new", "unusual_time")
+PATTERN_PRIORITY = {"circling": "medium", "new": "medium", "unusual_time": "low"}
+DEFAULT_ALERTS = {"circling": True, "new": False, "unusual_time": False, "when": "armed"}
+CIRCLE_APART_S = 120.0   # sightings closer than this are one (a car parked in view, re-read now and then)
+PATTERN_MIN_CONF = 0.8   # "new" and "unusual time" need a sure read: a misread plate is always new
+UNUSUAL_MIN = 120        # minutes of the day from every earlier sighting
+UNUSUAL_SEEN = 8         # ...of a plate seen at least this often, on UNUSUAL_DAYS days, mostly at its usual times
+UNUSUAL_DAYS = 5
+UNUSUAL_HABIT_SHARE = 0.6
+
+
+def alerts_config(cam: dict | None) -> dict:
+    """The camera's pattern alerts: {circling, new, unusual_time: bool, when: armed | always}."""
+    a = ((cam or {}).get("traffic") or {}).get("alerts") or {}
+    out = {**DEFAULT_ALERTS, **{k: bool(a[k]) for k in PATTERNS if k in a}}
+    out["when"] = a.get("when") if a.get("when") in ("armed", "always") else DEFAULT_ALERTS["when"]
+    return out
+
+
+def set_alerts(camera_id: str, **changes) -> dict:
+    cur = alerts_config(camera(camera_id))
+    cur.update({k: v for k, v in changes.items() if v is not None and (k in PATTERNS or k == "when")})
+    set_traffic(camera_id, alerts=cur)
+    return cur
+
+
+def history_since(camera_id: str) -> float | None:
+    """When the camera's plate history starts: its oldest kept read or older day summary."""
+    r = db.one("SELECT MIN(ts) AS t FROM vehicle_reads WHERE camera_id=?", [camera_id])
+    d = db.one("SELECT MIN(day) AS d FROM plate_days WHERE camera_id=?", [camera_id])
+    ts = [x for x in ((r or {}).get("t"), dt.datetime.strptime(d["d"], "%Y-%m-%d").timestamp() if d and d["d"] else None) if x]
+    return min(ts) if ts else None
+
+
+def _apart(seen: list[dict], gap: float = CIRCLE_APART_S) -> list[dict]:
+    out: list[dict] = []
+    for s in seen:
+        if not out or s["ts"] - out[-1]["ts"] >= gap:
+            out.append(s)
+    return out
+
+
+def _minutes_apart(a: int, b: int) -> int:
+    d = abs(a - b) % 1440
+    return min(d, 1440 - d)
+
+
+def _sighting_text(s: dict, today: dt.date) -> str:
+    t = dt.datetime.fromtimestamp(s["ts"])
+    return ((f"{day_text(t.date(), today)} " if t.date() != today else "") + clock(t.hour * 60 + t.minute)
+            + (f" {DIRECTION_WORDS[s['direction']]}" if s.get("direction") in DIRECTION_WORDS else ""))
+
+
+def find_pattern(cam: dict, r: dict, cfg: dict, armed: bool | None) -> tuple[str, str] | None:
+    """(pattern, text) for a read's plate, or None. Pure over the database: no event made."""
+    p_ = r["plate"]
+    now_d = dt.date.fromtimestamp(r["ts"])
+    shown = plate.display(p_)
+    if cfg["circling"]:
+        rows = db.all("SELECT id, pass_id, ts, camera_id, direction, vehicle_type, plate, confidence FROM vehicle_reads "
+                      "WHERE plate=? AND ts >= ? AND ts <= ? ORDER BY ts", [p_, r["ts"] - settings.traffic_circling_s, r["ts"] + 1])
+        seen = _apart(sorted(_pass_sightings(rows), key=lambda s: s["ts"]))
+        if len(seen) >= settings.traffic_circling_passes:
+            mins = max(1, round((seen[-1]["ts"] - seen[0]["ts"]) / 60))
+            return "circling", (f"Plate {shown} passed {len(seen)} times in {mins} minutes ("
+                                + ", ".join(_sighting_text(s, now_d) for s in seen[-6:]) + ")")
+    if (r["confidence"] or 0) < PATTERN_MIN_CONF or not (cfg["when"] == "always" or armed):
+        return None
+    if not (cfg["new"] or cfg["unusual_time"]):
+        return None
+    start = history_since(cam["id"])
+    if start is None or r["ts"] - start < settings.traffic_learn_days * 86400:
+        return None
+    seen = sightings(p_)
+    before = [s for s in seen if s["ts"] < r["ts"] - CIRCLE_APART_S]
+    when = " during SOC hours" if armed else ""
+    if cfg["new"] and not before:
+        known = {x["plate"] for x in db.all("SELECT DISTINCT plate FROM vehicle_reads WHERE plate IS NOT NULL AND plate != ?", [p_])}
+        known |= {x["plate"] for x in db.all("SELECT DISTINCT plate FROM plate_days WHERE plate != ?", [p_])}
+        if not any(near(k, p_) for k in known):   # one character off a plate seen before: a misread, not a new car
+            days = round((r["ts"] - start) / 86400)
+            return "new", f"Plate {shown} has never been seen here before{when} (history of {days} days)"
+    if cfg["unusual_time"] and len(before) >= UNUSUAL_SEEN and len({dt.date.fromtimestamp(s["ts"]) for s in before}) >= UNUSUAL_DAYS:
+        t = dt.datetime.fromtimestamp(r["ts"])
+        minute = t.hour * 60 + t.minute
+        mins = [dt.datetime.fromtimestamp(s["ts"]) for s in before]
+        if all(_minutes_apart(minute, m.hour * 60 + m.minute) >= UNUSUAL_MIN for m in mins):
+            hs = habits(before)
+            if hs and sum(h["n"] for h in hs) >= UNUSUAL_HABIT_SHARE * len(before):
+                usual = " and ".join(f"around {clock(round(h['mid'] / 5) * 5)}" for h in hs[:2])
+                return "unusual_time", (f"Plate {shown}, seen {len(before)} times before, usually {usual}, "
+                                        f"is here at {clock(minute)}{when}")
+    return None
+
+
+def check_patterns(cam: dict, read_id: int, armed: bool | None = None) -> int | None:
+    """A read's plate against the camera's pattern alerts: a new alarm event's id, or None (no pattern, or the plate's
+    alarm for that pattern is still open: the read joins it)."""
+    cfg = alerts_config(cam)
+    if not any(cfg[k] for k in PATTERNS):
+        return None
+    r = db.one("SELECT * FROM vehicle_reads WHERE id=?", [read_id])
+    if not r or not r["plate"] or (r["confidence"] or 0) < settings.traffic_list_min_conf or is_noise(r):
+        return None
+    if armed is None and cfg["when"] == "armed" and (cfg["new"] or cfg["unusual_time"]):
+        from .deterrence import armed_now
+        armed = armed_now()
+    found = find_pattern(cam, r, cfg, armed)
+    if not found:
+        return None
+    kind, text = found
+    prev = db.one("SELECT id FROM events WHERE plate=? AND track_id LIKE 'lpr:%' AND rules LIKE ? AND start_ts >= ? "
+                  "ORDER BY start_ts DESC LIMIT 1",
+                  [r["plate"], f'%"rule": "{kind}"%', r["ts"] - settings.traffic_pattern_cooldown_s])
+    if prev:
+        db.execute("UPDATE vehicle_reads SET event_id=? WHERE id=?", [prev["id"], read_id])
+        return None
+    notes = plate_notes(r["plate"], r["ts"], r["ts"])["notes"]
+    policy = {"kind": "plate_pattern", "pattern": kind, "plate": r["plate"], "priority": PATTERN_PRIORITY[kind],
+              "text": text, "notes": notes}
+    eid = _plate_event(cam, r, policy, "traffic/plate_pattern", kind, r["plate"])
+    log.info("[%s] plate %s: %s (read %s): alarm event %s", cam["id"], r["plate"], kind, read_id, eid)
     return eid
 
 
 # ---------------------------------------------------------------- search and counts
 
+LOOK_STOP = {"a", "an", "the", "with", "and", "on", "in", "of", "its", "it", "that", "has", "having", "vehicle", "vehicles",
+             "any", "some", "color", "colour", "colored", "coloured"}
+LOOK_SAME = {"grey": "gray", "pick-up": "pickup", "lettered": "lettering", "logos": "logo", "racks": "rack"}
+LOOK_TEXT = ("(' ' || LOWER(COALESCE(otso_look, '') || ' ' || COALESCE(vehicle_color, '') || ' ' || COALESCE(vehicle_type, '') "
+             "|| ' ' || COALESCE(vehicle_brand, '')) || ' ')")
+
+
+def look_words(text: str) -> list[str]:
+    """The words of a description search ("white pickups with ladder racks" -> white, pickup, ladder, rack): each must
+    start a word of Otso's description or the camera's colour, type or make."""
+    out = []
+    for w in re.findall(r"[a-z0-9][a-z0-9-]*", (text or "").lower()):
+        if w in LOOK_STOP:
+            continue
+        w = LOOK_SAME.get(w, w)
+        if len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
+            w = w[:-1]
+        out.append(w)
+    return list(dict.fromkeys(out))[:8]
+
+
 def search(camera: str | None = None, since: float | None = None, until: float | None = None, q: str | None = None,
            vehicle_type: str | None = None, color: str | None = None, direction: str | None = None, list_: str | None = None,
            min_conf: float = 0.0, plates_only: bool = False, all_reads: bool = False, before_id: int | None = None,
-           limit: int = 100, noise: bool = False) -> dict:
+           limit: int = 100, noise: bool = False, look: str | None = None) -> dict:
     """Reads newest first. q: a plate or part of one (letters and digits; 3+ finds it inside plates), with near plates
-    (one character off) as `near`. Without all_reads only each pass's best read. Reads that aren't a vehicle are left
-    out unless `noise` or a plate search (q)."""
+    (one character off) as `near`. look: a description ("white pickup ladder rack"), every word in Otso's description
+    or the camera's colour, type or make (look_words); one read per pass, the described one. Without all_reads only each
+    pass's best read. Reads that aren't a vehicle are left out unless `noise` or a plate search (q)."""
+    words = look_words(look) if look else []
+    if words:
+        where, params = [f"{LOOK_TEXT} LIKE ?" for _ in words], [f"% {w}%" for w in words]
+        sql, p = noise_sql()
+        where.append(f"NOT {sql}"); params += p
+        for col, v in (("camera_id", camera), ("direction", direction)):
+            if v:
+                where.append(f"{col}=?"); params.append(v)
+        for op, v in ((">=", since), ("<=", until)):
+            if v:
+                where.append(f"ts{op}?"); params.append(v)
+        if before_id:
+            where.append("id<?"); params.append(before_id)
+        n = max(1, min(int(limit), 500))
+        rows = db.all(f"SELECT * FROM vehicle_reads WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT ?", [*params, n * 3])
+        out, passes_ = [], set()
+        for r in sorted(rows, key=lambda r: (r["otso_look"] is None, -r["id"])):   # a pass's described read first
+            k = r["pass_id"] or r["id"]
+            if k not in passes_:
+                passes_.add(k)
+                out.append(r)
+        out = sorted(out, key=lambda r: -r["id"])[:n]
+        return {"reads": [public(r) for r in out], "near": [], "look": words}
     where, params = [], []
     if not noise and not q:
         sql, p = noise_sql()
@@ -1133,11 +1434,19 @@ def plate_tokens(question: str, plate_words: bool) -> list[str]:
 
 def read_line(r: dict, names: dict[str, str] | None = None) -> str:
     """One read for Ask: what the camera's plate reader saw, its doubts said ("state reported", "going away (reported)")."""
-    bits = [f"license plate {plate.display(r['plate'])} read by the camera's plate reader"
-            f" ({round((r['confidence'] or 0) * 100)} % sure{'; state reported ' + r['region'] if r.get('region') else ''})"]
+    if r.get("plate"):
+        bits = [f"license plate {plate.display(r['plate'])} read by the camera's plate reader"
+                f" ({round((r['confidence'] or 0) * 100)} % sure{'; state reported ' + r['region'] if r.get('region') else ''})"]
+    elif r.get("otso_plate"):
+        bits = [f"license plate {plate.display(r['otso_plate'])} read by Otso from the camera's picture (the camera read none)"]
+    else:
+        bits = ["no license plate read"]
     what = " ".join(x for x in ((r.get("vehicle_color") or "").lower(), (r.get("vehicle_type") or "vehicle").lower()) if x)
     bits.append(f"a {what}" + (f" (looks like a {r['vehicle_brand']})" if r.get("vehicle_brand") else "")
+                + (" (the camera's guess)" if r.get("otso_look") else "")
                 + (f", going {r['direction'] if r['direction'] == 'away' else 'toward the camera'} (reported)" if r.get("direction") else ""))
+    if r.get("otso_look"):
+        bits.append(f"Otso saw a {r['otso_look']}")
     if r.get("list"):
         bits.append(f"{'possibly ' if r.get('list_match') == 'near' else ''}on the {r['list']} list")
     return ", ".join(bits)
@@ -1221,6 +1530,42 @@ def ask_repeats(since: float, until: float | None, now: float, names: dict[str, 
              "text": f"COUNTED: license plates seen more than once {period}, most often first: " + "; ".join(lines)}]
 
 
+# words that pick a vehicle out: with a make or model, they make a question a search of the vehicles' descriptions
+# ("did a white box truck with a ladder rack come by?"), not of plates
+DETAIL_WORDS = {"ladder", "ladders", "rack", "racks", "trailer", "toolbox", "logo", "logos", "lettering", "lettered",
+                "lifted", "roof", "box", "dent", "dented", "damage", "damaged", "bumper", "sticker", "stickers", "decal",
+                "flatbed", "dump", "utility", "tonneau", "topper", "camper", "kayak", "bike", "wrap", "wrapped", "tinted",
+                "chrome", "rims", "cargo", "semi", "tanker", "police", "taxi", "ambulance", "school", "company", "fleet",
+                "work", "delivery", "tow", "wrecker", "crane", "bucket", "mixer", "plow"}
+LOOK_DAYS = 7            # a description question with no period looks this far back
+LOOK_LIMIT = 10
+
+
+def ask_looks(used: list[str], since: float, until: float | None, now: float, names: dict[str, str]) -> list[dict]:
+    """A description question: the matching vehicles counted (with how many Otso has described, since the camera's own
+    colour, type and make are often wrong), and the latest few as items."""
+    sql, p = noise_sql()
+    end = until if until is not None else now + 1
+    words = look_words(" ".join(used))
+    conds = " AND ".join(f"{LOOK_TEXT} LIKE ?" for _ in words)
+    likes = [f"% {w}%" for w in words]
+    period = period_text(since, until, now)
+    n = db.one(f"SELECT COUNT(DISTINCT COALESCE(pass_id, id)) AS n FROM vehicle_reads WHERE ts >= ? AND ts < ? AND NOT {sql} "
+               f"AND {conds}", [since, end, *p, *likes])["n"]
+    tot = db.one(f"SELECT COUNT(DISTINCT COALESCE(pass_id, id)) AS n, COUNT(DISTINCT CASE WHEN otso_look IS NOT NULL "
+                 f"THEN COALESCE(pass_id, id) END) AS d FROM vehicle_reads WHERE ts >= ? AND ts < ? AND NOT {sql}",
+                 [since, end, *p])
+    out = [{"kind": "note", "camera_id": None,
+            "text": f"COUNTED: {n:,} vehicle{'' if n == 1 else 's'} {period} match \"{' '.join(words)}\" in Otso's or the camera's description "
+                    f"(Otso has described {tot['d']:,} of the {tot['n']:,} vehicles that passed; for the rest only the "
+                    f"camera's colour, type and make, which are often wrong)"}]
+    for r in search(since=since, until=until, look=" ".join(words), limit=LOOK_LIMIT)["reads"]:
+        out.append({"kind": "plate", "read_id": r["id"], "ts": r["ts"], "camera_id": r["camera_id"],
+                    "camera_name": names.get(r["camera_id"], r["camera_id"]), "plate": r["plate"] or r.get("otso_plate"),
+                    "confidence": r["confidence"], "event_id": r["event_id"], "text": read_line(r)})
+    return out
+
+
 def ask_evidence(question: str, since: float | None, until: float | None, now: float | None = None,
                  previous: str | None = None) -> list[dict]:
     """Plate reads for an Ask question: the plates it names (and near ones), or, when it asks about plates (or the
@@ -1231,12 +1576,21 @@ def ask_evidence(question: str, since: float | None, until: float | None, now: f
     without reads."""
     if not db.one("SELECT 1 AS x FROM vehicle_reads LIMIT 1"):
         return []
-    from .assistant import PLATE_WORDS
+    from .assistant import MAKE_WORDS, MODEL_WORDS, PLATE_WORDS
     now = now or time.time()
     words = set(re.findall(r"[a-z0-9]+", question.lower()))
     before = set(re.findall(r"[a-z0-9]+", (previous or "").lower()))
     plate_words = bool(words & PLATE_WORDS) or bool(words & VISIT_WORDS) or bool(before & PLATE_WORDS)
     tokens = plate_tokens(question, plate_words)
+    one = words | {w[:-1] for w in words if len(w) > 3 and w.endswith("s")}   # "Tundras", "ladders"
+    if not tokens and (one & (MAKE_WORDS | MODEL_WORDS)
+                       or one & DETAIL_WORDS and one & (set(TYPES) | {"vehicle", "vehicles"})):
+        # a vehicle described ("white box truck with a ladder rack", "a Tundra"): its description, plate or not
+        vocab = COLORS | set(TYPES) | MAKE_WORDS | MODEL_WORDS | DETAIL_WORDS
+        used = [w for w in dict.fromkeys(re.findall(r"[a-z0-9][a-z0-9-]*", question.lower()))
+                if w in vocab or (w.endswith("s") and w[:-1] in vocab)]
+        names = {c["id"]: c["name"] for c in db.cameras() if c.get("traffic")} or {c["id"]: c["name"] for c in db.cameras()}
+        return ask_looks(used, since if since is not None else now - LOOK_DAYS * 86400, until, now, names)
     if not tokens and not plate_words:
         return []
     since = since if since is not None else now - (30 if tokens else 1) * 86400
