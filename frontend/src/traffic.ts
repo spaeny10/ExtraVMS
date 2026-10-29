@@ -76,12 +76,39 @@ export type TrafficCameraStatus = {
 /** GET /api/traffic/status: each camera with a traffic setup; a set-up camera silent for silent_after_s raises an alert. */
 export type TrafficStatus = { cameras: TrafficCameraStatus[]; silent_after_s: number };
 
+export type Category = "employee" | "contractor" | "visitor" | "resident" | "delivery" | "trespass" | "police" | "other";
+/** When an entry applies: always (null), while the Site's SOC monitoring is armed, or set hours in the Site's zone
+ *  (days 0-6, Monday 0; `to` <= `from` runs past midnight). */
+export type EntrySchedule = { when: "soc" } | { when: "hours"; days: number[]; from: string; to: string };
+/** The vehicle a listed plate belongs on: another one raises the cloned-plate alarm. */
+export type ExpectedVehicle = { vehicle_type?: string; color?: string; make?: string; model?: string };
 export type ListEntry = {
   id: number; plate: string; list: PlateList; note: string; expires_at: number | null; created_at: number; by: string | null;
   expired: boolean; last_seen: number | null; last_camera: string | null;
+  /** options (older servers: absent) */
+  category?: Category | null; schedule?: EntrySchedule | null; action?: "alarm" | "mark" | null; priority?: "low" | "medium" | "high" | null;
+  cameras?: string[] | null; expect?: ExpectedVehicle | null; updated_at?: number | null; updated_by?: string | null;
+  /** what the page shows: a partial plate (? and *), the latest read, passes in 7 / 30 days, Otso's latest description,
+   *  other entries for the same plate and the list that applies instead of this one, in force now, what a hit does */
+  pattern?: boolean; last_read_id?: number | null; seen_7d?: number; seen_30d?: number; look?: string | null;
+  conflicts?: { id: number; list: PlateList; plate: string }[]; overridden_by?: PlateList | null; active?: boolean;
+  effect?: { alarm: boolean; priority: "low" | "medium" | "high" };
 };
-export type ListEntryIn = { plate: string; list: PlateList; note?: string; expires_at?: number | null };
-export type ListEntryEdit = { note?: string; expires_at?: number; clear_expiry?: boolean };
+/** GET /api/traffic/lists/{id}: one entry opened. */
+export type ListEntryDetail = ListEntry & {
+  sightings: Read[]; notes: string[];
+  alarms: { id: number; ts: number; priority: string | null; camera_id: string; text: string | null }[];
+  /** the vehicle Otso saw last on this plate (to save as the one it belongs on) */
+  vehicle: (ExpectedVehicle & { details?: string; read_id: number; ts: number }) | null;
+};
+type EntryOptions = {
+  category?: Category | null; schedule?: EntrySchedule | null; action?: "alarm" | "mark" | null;
+  priority?: "low" | "medium" | "high" | null; cameras?: string[] | null; expect?: ExpectedVehicle | null;
+};
+export type ListEntryIn = { plate: string; list: PlateList; note?: string; expires_at?: number | null } & EntryOptions;
+/** Only the keys sent change; null clears. */
+export type ListEntryEdit = { note?: string; expires_at?: number | null; clear_expiry?: boolean } & EntryOptions;
+export type ImportResult = { results: { line: number; plate: string; list: string; ok: boolean; error?: string }[]; added: number };
 
 /** A push slot on the camera (it has three); `ours` = pointed at this server. The URL's secret is hidden. */
 export type PushSlot = { index: number; enabled: boolean; ours: boolean; url: string; event_mask: number | null; status_report: boolean };
@@ -293,10 +320,17 @@ export function expiryText(e: Pick<ListEntry, "expires_at" | "expired">): string
   return e.expired ? `expired ${day}` : `until ${day}`;
 }
 
+/** A plate typed for a list, as the server keeps it: letters and digits, and ? (one character) and * (any run) for a
+ *  partial plate. */
+export const normEntryPlate = (s: string) => s.toUpperCase().replace(/[^A-Z0-9?*]/g, "").replace(/\*+/g, "*");
+export const isPartial = (s: string) => /[?*]/.test(s);
+
 /** What is wrong with a plate typed into the add form (the server says 422 for anything else that isn't a plate). */
 export function plateProblem(s: string): string | null {
-  const n = normPlate(s);
-  if (!n) return "Type a plate: letters and digits";
+  const n = normEntryPlate(s);
+  if (!n) return "Type a plate: letters and digits (? for one unknown character, * for any)";
+  const known = n.replace(/[?*]/g, "").length;
+  if (isPartial(n)) return known < 2 ? "A partial plate needs at least 2 known characters" : n.length > 12 ? "Too long" : null;
   if (n.length < 2) return "A plate has at least 2 characters";
   if (n.length > 10) return "A plate has at most 10 characters";
   return null;
@@ -304,7 +338,162 @@ export function plateProblem(s: string): string | null {
 
 /** Is this plate already on that list (the server keeps one entry per plate and list)? */
 export const onList = (entries: Pick<ListEntry, "plate" | "list">[], plate: string, list: PlateList) =>
-  entries.some((e) => e.plate === normPlate(plate) && e.list === list);
+  entries.some((e) => e.plate === normEntryPlate(plate) && e.list === list);
+
+export const CATEGORIES: readonly Category[] = ["employee", "contractor", "visitor", "resident", "delivery", "trespass", "police", "other"];
+const CATEGORY_NAME: Record<Category, string> = {
+  employee: "Employee", contractor: "Contractor", visitor: "Visitor", resident: "Resident", delivery: "Delivery",
+  trespass: "Trespass notice", police: "Police lookout", other: "Other",
+};
+export const categoryName = (c: Category) => CATEGORY_NAME[c] ?? c;
+export const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+/** "13:30" -> "1:30 PM". */
+export function clock12(hhmm: string): string {
+  const [h, m] = hhmm.split(":").map(Number);
+  return `${h % 12 || 12}:${String(m).padStart(2, "0")} ${h < 12 ? "AM" : "PM"}`;
+}
+
+/** "Mon-Fri", "Sat, Sun", "Every day", "Mon, Wed, Fri". */
+export function daysText(days: number[]): string {
+  const d = [...new Set(days)].filter((x) => x >= 0 && x <= 6).sort();
+  if (d.length === 7) return "Every day";
+  if (d.length >= 3 && d.every((x, i) => i === 0 || x === d[i - 1] + 1)) return `${DAY_NAMES[d[0]]}-${DAY_NAMES[d[d.length - 1]]}`;
+  return d.map((x) => DAY_NAMES[x]).join(", ");
+}
+
+/** "Always", "During SOC hours", "Mon-Fri, 10:00 PM-6:00 AM". */
+export function scheduleText(s: EntrySchedule | null | undefined): string {
+  if (!s) return "Always";
+  if (s.when === "soc") return "During SOC hours";
+  return `${daysText(s.days)}, ${clock12(s.from)}-${clock12(s.to)}`;
+}
+
+/** What a hit does: "High alarm", "Medium alarm", "Marks the read". */
+export function effectText(e: Pick<ListEntry, "list" | "action" | "priority">): string {
+  const alarm = (e.action ?? (e.list === "allow" ? "mark" : "alarm")) === "alarm";
+  if (!alarm) return "Marks the read";
+  const p = e.priority ?? (e.list === "deny" ? "high" : e.list === "watch" ? "medium" : "low");
+  return `${p[0].toUpperCase()}${p.slice(1)} alarm`;
+}
+
+/** "white Ford F-150 pickup truck". */
+export const expectText = (v: ExpectedVehicle | null | undefined) =>
+  v ? [v.color, v.make, v.model, v.vehicle_type].filter(Boolean).join(" ") : "";
+
+/** Why an entry may do nothing ("Does nothing: ... the watch list applies instead"), or that another list has it too. */
+export function conflictText(e: Pick<ListEntry, "overridden_by" | "conflicts" | "list">): string {
+  if (e.overridden_by) return `Does nothing: this plate is also on the ${e.overridden_by} list, which applies instead`;
+  const others = (e.conflicts ?? []).map((c) => c.list).filter((l) => l !== e.list);
+  return others.length ? `Also on the ${[...new Set(others)].join(" and ")} list (this entry applies)` : "";
+}
+
+/** Passes seen: "3 this week · 12 in 30 days", "not seen in 30 days". */
+export function seenText(e: Pick<ListEntry, "seen_7d" | "seen_30d">): string {
+  if (!e.seen_30d) return "not seen in 30 days";
+  return `${e.seen_7d ?? 0} this week · ${e.seen_30d} in 30 days`;
+}
+
+// ---- the entry form (add and edit)
+
+export type ExpiryChoice = "" | "24h" | "7d" | "30d" | "date";
+export type EntryDraft = {
+  plate: string; list: PlateList; note: string; category: "" | Category; expiry: ExpiryChoice; date: string;
+  when: "always" | "soc" | "hours"; days: number[]; from: string; to: string;
+  action: "" | "alarm" | "mark"; priority: "" | "low" | "medium" | "high"; cameras: string[]; expect: ExpectedVehicle;
+};
+export const NO_ENTRY_DRAFT: EntryDraft = {
+  plate: "", list: "deny", note: "", category: "", expiry: "", date: "", when: "always", days: [0, 1, 2, 3, 4], from: "22:00", to: "06:00",
+  action: "", priority: "", cameras: [], expect: {},
+};
+
+/** The expiry chosen: none, 24 hours / 7 / 30 days from now, or the end of a picked day. */
+export function expiryOf(d: Pick<EntryDraft, "expiry" | "date">, now = Date.now() / 1000): number | null {
+  if (d.expiry === "24h") return now + 86400;
+  if (d.expiry === "7d") return now + 7 * 86400;
+  if (d.expiry === "30d") return now + 30 * 86400;
+  if (d.expiry === "date") return expiryFromDate(d.date);
+  return null;
+}
+
+/** The form -> the request body (every option sent, null for the defaults, so an edit clears what was unset). */
+export function draftToBody(d: EntryDraft, now = Date.now() / 1000): ListEntryIn {
+  const expect = Object.fromEntries(Object.entries(d.expect).filter(([, v]) => v && String(v).trim())) as ExpectedVehicle;
+  return {
+    plate: normEntryPlate(d.plate), list: d.list, note: d.note.trim(), expires_at: expiryOf(d, now),
+    category: d.category || null,
+    schedule: d.when === "always" ? null : d.when === "soc" ? { when: "soc" } : { when: "hours", days: d.days, from: d.from, to: d.to },
+    action: d.action || null, priority: d.action === "mark" ? null : d.priority || null,
+    cameras: d.cameras.length ? d.cameras : null, expect: Object.keys(expect).length ? expect : null,
+  };
+}
+
+/** An entry -> the form, to edit it (a set expiry shows as its date). */
+export function entryToDraft(e: ListEntry): EntryDraft {
+  const s = e.schedule;
+  return {
+    plate: e.plate, list: e.list, note: e.note, category: e.category ?? "", expiry: e.expires_at ? "date" : "", date: dateFromExpiry(e.expires_at),
+    when: s ? s.when : "always", days: s?.when === "hours" ? s.days : NO_ENTRY_DRAFT.days,
+    from: s?.when === "hours" ? s.from : NO_ENTRY_DRAFT.from, to: s?.when === "hours" ? s.to : NO_ENTRY_DRAFT.to,
+    action: e.action ?? "", priority: e.priority ?? "", cameras: e.cameras ?? [], expect: e.expect ?? {},
+  };
+}
+
+/** Search the lists: plate (or part of it), note, category, list, Otso's description, the expected vehicle. */
+export function filterEntries<T extends ListEntry>(entries: T[], q: string): T[] {
+  const words = q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (!words.length) return entries;
+  return entries.filter((e) => {
+    const hay = [e.plate, e.note, e.category ? categoryName(e.category) : "", listName(e.list), e.look, expectText(e.expect)]
+      .filter(Boolean).join(" ").toLowerCase();
+    return words.every((w) => hay.includes(w) || (normPlate(w) !== "" && hay.includes(normPlate(w).toLowerCase())));
+  });
+}
+
+// ---- CSV (export and import): plate, list, category, note, expires (YYYY-MM-DD)
+
+const CSV_HEAD = ["plate", "list", "category", "note", "expires", "applies", "on_a_hit", "last_seen"];
+const csvCell = (v: string) => (/[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
+
+export function entriesToCsv(entries: ListEntry[]): string {
+  const day = (ts: number | null | undefined) => (ts ? dateFromExpiry(ts) : "");
+  const rows = entries.map((e) => [e.plate, e.list, e.category ?? "", e.note, day(e.expires_at), scheduleText(e.schedule), effectText(e), day(e.last_seen)]);
+  return [CSV_HEAD, ...rows].map((r) => r.map((c) => csvCell(String(c ?? ""))).join(",")).join("\n") + "\n";
+}
+
+/** One CSV line into cells (quotes and doubled quotes). */
+function csvCells(line: string): string[] {
+  const out: string[] = [];
+  let cur = "", q = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (q) {
+      if (c === '"' && line[i + 1] === '"') { cur += '"'; i++; } else if (c === '"') q = false; else cur += c;
+    } else if (c === '"') q = true;
+    else if (c === ",") { out.push(cur); cur = ""; } else cur += c;
+  }
+  out.push(cur);
+  return out.map((x) => x.trim());
+}
+
+/** A CSV file -> rows to import ({plate, list, category?, note?, expires_at?}): a header row is used when it names a
+ *  "plate" column (an export reads back), else the columns are plate, list, category, note, expires. */
+export function csvToRows(text: string): { plate: string; list: string; category?: string; note?: string; expires_at?: number | null }[] {
+  const lines = text.replace(/^﻿/, "").split(/\r?\n/).filter((l) => l.trim());
+  if (!lines.length) return [];
+  const first = csvCells(lines[0]).map((c) => c.toLowerCase());
+  const head = first.includes("plate") ? first : null;
+  const col = (name: string, fallback: number) => (head ? head.indexOf(name) : fallback);
+  const idx = { plate: col("plate", 0), list: col("list", 1), category: col("category", 2), note: col("note", 3), expires: col("expires", 4) };
+  return (head ? lines.slice(1) : lines).map((l) => {
+    const c = csvCells(l);
+    const get = (i: number) => (i >= 0 ? c[i] ?? "" : "");
+    return {
+      plate: get(idx.plate), list: get(idx.list).toLowerCase(), category: get(idx.category).toLowerCase() || undefined,
+      note: get(idx.note) || undefined, expires_at: expiryFromDate(get(idx.expires)),
+    };
+  });
+}
 
 /** A list change's error: a viewer's 403 says who may; anything else is the server's own words. */
 export function listError(e: unknown, detail: (e: unknown) => string): string {

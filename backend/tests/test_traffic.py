@@ -1068,11 +1068,155 @@ def test_vehicles_around_an_incident():
     db.execute("DELETE FROM cameras WHERE id='cam2'")
 
 
+def test_list_options():
+    """Partial plates, categories, when an entry applies (set hours, SOC hours), its cameras, what a hit does (only mark,
+    another priority), which list wins for one plate, and the Lists page's overview, details and CSV import."""
+    import pytest
+    reset()
+    c = cam()
+    t0 = time.time() - 600
+    # a partial plate (a police lookout) and a category in the alarm's words
+    assert call("POST", "/api/traffic/lists", json_body={"plate": "??", "list": "watch"}).status_code == 422
+    r = call("POST", "/api/traffic/lists", role="operator", json_body={"plate": "abc 12?", "list": "watch", "category": "police",
+                                                                        "note": "BOLO 10/29"})
+    assert r.status_code == 200 and r.json()["plate"] == "ABC12?"
+    out = traffic.ingest(c, push_read("ABC123", "0.9", at=t0), t0 + 0.5)
+    e = db.event(out["alarm_id"])
+    assert e["policy"]["text"] == "Plate ABC 123 matches ABC12? on the watch list (police: BOLO 10/29)" and e["priority"] == "medium"
+    assert traffic.match_list("ABC1234") is None and traffic.match_list("34X99") is None
+    traffic.add_entry("34*", "deny")
+    assert traffic.match_list("34X99")["match"] == "pattern"
+    # what a hit does: a deny entry that only marks; a watch entry at high priority
+    traffic.add_entry("MRK1234", "deny", action="mark")
+    out = traffic.ingest(c, push_read("MRK1234", "0.9", at=t0 + 60), t0 + 60.5)
+    assert out["alarm_id"] is None and traffic.read(out["read_id"])["list"] == "deny"
+    traffic.add_entry("HIG1234", "watch", priority="high", category="trespass", note="banned 10/12")
+    e = db.event(traffic.ingest(c, push_read("HIG1234", "0.9", at=t0 + 120), t0 + 120.5)["alarm_id"])
+    assert e["priority"] == "high" and e["policy"]["text"].endswith("(trespass: banned 10/12)") and e["policy"]["category"] == "trespass"
+    # only on some cameras; only at set hours (overnight); only during SOC hours
+    traffic.add_entry("CAM2222", "deny", cameras=["cam8"])
+    assert traffic.match_list("CAM2222", camera_id="cam8") and traffic.match_list("CAM2222", camera_id="cam9") is None
+    with pytest.raises(ValueError):
+        traffic.add_entry("CAM3333", "deny", cameras=["nope"])
+    night = {"when": "hours", "days": [0, 1, 2, 3, 4], "from": "22:00", "to": "06:00"}
+    mon = dt.datetime(2026, 10, 26)   # a Monday
+
+    def at(d, h, m=0):
+        return (mon + dt.timedelta(days=d, hours=h, minutes=m)).timestamp()
+    assert traffic.schedule_active(night, at(0, 23), None) and traffic.schedule_active(night, at(1, 5, 59), None)
+    assert not traffic.schedule_active(night, at(0, 12), None) and not traffic.schedule_active(night, at(5, 23), None)
+    assert traffic.schedule_active(night, at(5, 3), None)        # Saturday 3 AM: Friday night's window
+    assert not traffic.schedule_active(night, at(6, 3), None)    # Sunday 3 AM: Saturday has none
+    day = traffic.clean_schedule({"when": "hours", "days": [0], "from": "7:00", "to": "18:00"})
+    assert day == {"when": "hours", "days": [0], "from": "07:00", "to": "18:00"}
+    assert traffic.schedule_active(day, at(0, 9), None) and not traffic.schedule_active(day, at(1, 9), None)
+    traffic.add_entry("SOC1234", "watch", schedule={"when": "soc"})
+    assert traffic.match_list("SOC1234", armed=True) and traffic.match_list("SOC1234", armed=False) is None
+    # one plate on two lists: the watch entry applies, the allow entry is overridden (the page says so)
+    traffic.add_entry("PR700809", "allow", note="Shawn Spaeny")
+    traffic.add_entry("PR700809", "watch", note="Shawn")
+    rows = {(x["plate"], x["list"]): x for x in call("GET", "/api/traffic/lists").json()}
+    allow, watch = rows[("PR700809", "allow")], rows[("PR700809", "watch")]
+    assert allow["overridden_by"] == "watch" and watch["overridden_by"] is None and allow["conflicts"][0]["list"] == "watch"
+    assert rows[("ABC12?", "watch")]["pattern"] and rows[("ABC12?", "watch")]["seen_7d"] == 1
+    assert rows[("SOC1234", "watch")]["schedule"] == {"when": "soc"}
+    assert rows[("MRK1234", "deny")]["effect"] == {"alarm": False, "priority": "high"}
+    # one entry opened: its sightings, alarms and notes
+    hig = rows[("HIG1234", "watch")]
+    d = call("GET", f"/api/traffic/lists/{hig['id']}").json()
+    assert [x["plate"] for x in d["sightings"]] == ["HIG1234"] and len(d["alarms"]) == 1 and d["notes"]
+    assert call("GET", "/api/traffic/lists/999999").status_code == 404
+    # edit: set hours, then clear them with null; a bad schedule is a 422
+    r = call("PUT", f"/api/traffic/lists/{hig['id']}", role="operator",
+             json_body={"schedule": {"when": "hours", "days": [5, 6], "from": "08:00", "to": "12:00"}})
+    assert r.status_code == 200 and r.json()["schedule"]["days"] == [5, 6] and r.json()["note"] == "banned 10/12"
+    assert call("PUT", f"/api/traffic/lists/{hig['id']}", json_body={"schedule": None}).json()["schedule"] is None
+    assert call("PUT", f"/api/traffic/lists/{hig['id']}", json_body={"schedule": {"when": "hours", "from": "8"}}).status_code == 422
+    # CSV import: each row added or why not
+    r = call("POST", "/api/traffic/lists/import", role="operator", json_body={"entries": [
+        {"plate": "IMP1111", "list": "Allow", "note": "Dana (employee)", "category": "employee"},
+        {"plate": "?", "list": "deny"}, {"plate": "IMP2222", "list": "maybe"}]})
+    j = r.json()
+    assert j["added"] == 1 and [x["ok"] for x in j["results"]] == [True, False, False] and "list must be" in j["results"][2]["error"]
+    assert call("POST", "/api/traffic/lists/import", role="viewer", json_body={"entries": []}).status_code == 403
+
+
+def test_cloned_plate_alarm():
+    """A plate whose list entry says which vehicle it belongs on: Otso looks at once (not waiting for idle), and a
+    different kind of vehicle (or another make and colour) raises a high alarm; the same vehicle, or one detail off, not."""
+    reset()
+    c = cam()
+    exp = {"vehicle_type": "pickup truck", "color": "white", "make": "Ford", "model": "F-150"}
+    assert traffic.vehicle_mismatch(exp, {"vehicle_type": "sedan", "color": "red", "make": "Toyota"}) == [
+        "a car instead of a pickup", "a red Toyota instead of a white Ford"]
+    assert traffic.vehicle_mismatch(exp, {"vehicle_type": "pickup truck", "color": "silver", "make": "Chevrolet"}) == \
+        ["a gray Chevrolet instead of a white Ford"]
+    assert traffic.vehicle_mismatch(exp, {"vehicle_type": "pickup truck", "color": "white", "make": "Chevrolet"}) == []   # make alone
+    assert traffic.vehicle_mismatch(exp, {"vehicle_type": "truck", "color": "grey", "make": "Ford"}) == []
+    assert traffic.vehicle_mismatch({"make": "Ram", "color": "red"}, {"make": "Dodge", "color": "black"}) == []   # Ram = Dodge
+    traffic.add_entry("EMP1234", "allow", note="Dana's truck", category="employee", expect=exp)
+    t0 = time.time() - 60
+    rid = traffic.ingest(c, push_read("EMP1234", "0.9", at=t0), t0 + 0.5)["read_id"]
+    assert rid in traffic.looker.wanted and traffic.looker.next_urgent(time.time()) == rid
+
+    async def fake_look(plate_img, vehicle_img, priority="background"):
+        return {"result": "read", "plate": "EMP1234", "confidence": "high",
+                "vehicle": {"vehicle_type": "sedan", "color": "red", "make": "Toyota", "model": "Camry"}}
+    real = traffic.plate.look
+    traffic.plate.look = fake_look
+    try:
+        out = asyncio.run(traffic.looker.look(rid))
+        e = db.event(out["mismatch"])
+        assert e["priority"] == "high" and e["policy"]["pattern"] == "mismatch"
+        assert e["policy"]["text"] == ("Plate EMP 1234 belongs on a white Ford F-150 pickup truck (Dana's truck), but Otso saw a car "
+                                       "instead of a pickup (red Toyota Camry sedan): the plate may be stolen or on the wrong vehicle")
+        assert asyncio.run(traffic.looker.look(rid))["mismatch"] is None   # the open alarm, not another
+    finally:
+        traffic.plate.look = real
+        traffic.looker.wanted.clear()
+    assert traffic.check_expected(c, rid, {"vehicle_type": "pickup", "color": "white", "make": "Ford"}) is None
+
+
+def test_footage_plate_on_a_list():
+    """A plate Otso read from an ordinary camera's footage on the deny list breaks the rule on that event (policy.check),
+    a partial plate too; a near plate doesn't, nor a traffic camera's event, nor a list entry that only marks."""
+    reset()
+    cam()
+    db.upsert_camera({"id": "cam2", "name": "Gate", "host": "192.0.2.2", "onvif_port": 80, "rtsp_port": 554, "username": "u",
+                      "password": "p", "main_path": "/m", "sub_path": "/s", "enabled": 1, "zones": []})
+    traffic.add_entry("DNY1234", "deny", category="trespass", note="banned")
+    traffic.add_entry("WT5*", "watch")
+    traffic.add_entry("MRK9999", "deny", action="mark")
+    t = time.time() - 120
+
+    def footage(p, cam_id="cam2"):
+        return db.create_event(camera_id=cam_id, track_id=f"f{p}{cam_id}", camera_class="vehicle", camera_conf=0.9, start_ts=t,
+                               end_ts=t + 5, path=[], rules=[], status="verified", plate=p, plate_conf="high",
+                               detections={"plate_read": {"source": "synopsis", "result": "read"}})
+    try:
+        e = footage("DNY1234")
+        broken = policy.check(e)
+        assert broken["kind"] == "plate_list" and broken["priority"] == "high"
+        assert broken["text"] == "Plate DNY 1234 is on the deny list (trespass: banned) (read by Otso from the footage)"
+        assert db.event(e)["priority"] == "high"
+        assert policy.check(footage("WT5678"))["match"] == "pattern"
+        assert policy.check(footage("DNY1235")) is None    # one character off: not from footage
+        assert policy.check(footage("MRK9999")) is None    # only marks
+        assert policy.check(footage("DNY1234", "cam8")) is None   # a traffic camera's own event: its read decides
+        traffic.add_entry("DNY1234", "deny", cameras=["cam8"])   # the entry now only covers the traffic camera
+        assert policy.check(e) is None and db.event(e)["policy"] is None
+    finally:
+        db.execute("DELETE FROM events WHERE camera_id='cam2'")
+        db.execute("DELETE FROM cameras WHERE id='cam2'")
+
+
 def test_hub_roles():
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "hub"))
     from hub import roles
     assert roles.required_role("GET", "/api/traffic/around") == "viewer"
     assert roles.required_role("PUT", "/api/cameras/cam8/traffic/alerts") == "admin"
+    assert roles.required_role("GET", "/api/traffic/lists/4") == "viewer"
+    assert roles.required_role("POST", "/api/traffic/lists/import") == "operator"
     assert roles.required_role("GET", "/api/traffic/reads") == "viewer"
     assert roles.required_role("GET", "/api/traffic/reads/5/image/plate") == "viewer"
     assert roles.required_role("POST", "/api/traffic/lists") == "operator"

@@ -1428,6 +1428,8 @@ async def read_plate(event_id: int, request: Request):
         raise HTTPException(502, f"the plate could not be read: {str(ex)[:200]}")
     finally:
         plate.limiter.done(event_id)
+    if result.get("result") == "read":
+        await asyncio.to_thread(policy.check, event_id)   # the plate may be on a plate list (traffic.footage_list_rule)
     await state.pipeline.reindex(event_id)
     state.pipeline.publish(event_id)
     out = {k: result.get(k) for k in ("result", "plate", "plate_raw", "region", "confidence", "reason", "model", "crops")}

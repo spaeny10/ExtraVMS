@@ -445,6 +445,19 @@ MIGRATIONS = [
     ("vehicle_reads", "otso_plate", "TEXT"),        # ...the plate it read (normalized), searchable beside the camera's
     ("vehicle_reads", "otso_look", "TEXT"),         # ...what the vehicle is in Otso's words ("white Ford F-150 pickup
                                                     # truck, ladder rack"), for search by description (traffic.Looker)
+    # a plate list entry's options (traffic.py "Lists"): plate may hold ? / * (a partial plate); category (employee,
+    # contractor, visitor, resident, delivery, trespass, police, other); schedule JSON {when: soc | hours, days, from,
+    # to} (NULL = always); action alarm | mark and priority low | medium | high (NULL = the list's own: deny high,
+    # watch medium, allow marks); cameras JSON [id] (NULL = all); expect JSON {vehicle_type, color, make, model}: the
+    # vehicle the plate belongs on (another raises the cloned-plate alarm)
+    ("plate_lists", "category", "TEXT"),
+    ("plate_lists", "schedule", "TEXT"),
+    ("plate_lists", "action", "TEXT"),
+    ("plate_lists", "priority", "TEXT"),
+    ("plate_lists", "cameras", "TEXT"),
+    ("plate_lists", "expect", "TEXT"),
+    ("plate_lists", "updated_at", "REAL"),
+    ("plate_lists", "updated_by", "TEXT"),
     ("deterrence_log", "via", "TEXT"),           # how it went: relay | aux | speaker (the siren through a talk-down speaker)
     # merged events (merge.py): the camera tracks folded into this one, JSON [{event, track, from, to, why}], and for a
     # group of people the most of them in view at once (>= 2; NULL = one person / never merged)

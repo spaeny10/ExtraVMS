@@ -236,7 +236,7 @@ def check(event_id: int, camera: dict | None = None) -> dict | None:
     e = db.event(event_id)
     if not e or e["status"] != "verified" or e["camera_class"] not in ("vehicle", "person") or e.get("ptz_preset"):
         return None  # (a PTZ camera turned away from home: its rules describe the home view)
-    if (e.get("policy") or {}).get("kind") in ("plate_list", "plate_pattern"):
+    if (e.get("policy") or {}).get("kind") in ("plate_list", "plate_pattern") and (e.get("detections") or {}).get("source") == "lpr":
         return e["policy"]   # a traffic camera's plate alarm (traffic.py): a list hit or a plate's pattern, kept as it is
     camera = camera or db.one("SELECT * FROM cameras WHERE id=?", [e["camera_id"]])
     broken = None
@@ -265,6 +265,13 @@ def check(event_id: int, camera: dict | None = None) -> dict | None:
             break
     if broken is None and e["camera_class"] == "person":
         broken = ppe_rule(e, camera)
+    if e["camera_class"] == "vehicle" and e.get("plate"):
+        # a plate Otso read from the footage on a plate list (traffic.footage_list_rule), when it outranks a broken rule
+        from . import traffic
+        listed = traffic.footage_list_rule(e)
+        rank = {"low": 1, "medium": 2, "high": 3}
+        if listed and (broken is None or rank.get(listed["priority"], 0) >= rank.get(broken.get("priority") or "high", 3)):
+            broken = listed
     if (e.get("policy") or None) != broken:
         db.update_event(event_id, policy=broken)
         from . import baseline

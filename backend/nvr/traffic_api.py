@@ -20,9 +20,15 @@ GET  /api/traffic/around                   the vehicles seen in a window (?since
                                            counted notes (traffic.around; the hub's SOC incident card)
 GET  /api/traffic/counts                   vehicles per hour or day (?camera, since, until, bucket hour | day)
 GET  /api/traffic/status                   each traffic camera: set up, last push, reads and plates today
-GET  /api/traffic/lists                    the plate lists
-POST /api/traffic/lists                    {plate, list: allow | deny | watch, note?, expires_at?} (operator)
-PUT  /api/traffic/lists/{id}               {note?, expires_at?} (operator)
+GET  /api/traffic/lists                    the plate lists, each with last seen, passes in 7 / 30 days, Otso's
+                                           description, other entries for its plate and which applies, in force now
+GET  /api/traffic/lists/{id}               one entry with its sightings, notes, alarms and the vehicle Otso saw last
+POST /api/traffic/lists                    {plate (? and * for a partial plate), list: allow | deny | watch, note?,
+                                           expires_at?, category?, schedule? {when: always | soc | hours, days, from,
+                                           to}, action? alarm | mark, priority?, cameras?, expect? {vehicle_type, color,
+                                           make, model}} (operator)
+POST /api/traffic/lists/import             {entries: [{plate, list, note?, category?, expires_at?}]} (operator)
+PUT  /api/traffic/lists/{id}               any of the above but plate and list; null clears (operator)
 DELETE /api/traffic/lists/{id}             (operator)
 GET  /api/cameras/{id}/traffic             what the camera says (model, licence, plate reading, push slots, SD card),
                                            this server's setup and the camera's push health (operator)
@@ -217,50 +223,119 @@ async def status():
     return {"cameras": out, "silent_after_s": settings.traffic_silent_s}
 
 
+class Schedule(BaseModel):
+    when: Literal["always", "soc", "hours"]
+    days: list[int] | None = None
+    from_: str | None = Field(None, alias="from", max_length=5)
+    to: str | None = Field(None, max_length=5)
+
+    def plain(self) -> dict:
+        return {"when": self.when, "days": self.days, "from": self.from_, "to": self.to}
+
+
+class Expect(BaseModel):
+    vehicle_type: str | None = Field(None, max_length=40)
+    color: str | None = Field(None, max_length=40)
+    make: str | None = Field(None, max_length=40)
+    model: str | None = Field(None, max_length=40)
+
+
+Category = Literal["employee", "contractor", "visitor", "resident", "delivery", "trespass", "police", "other"]
+
+
 class EntryIn(BaseModel):
     plate: str = Field(..., min_length=2, max_length=20)
     list: Literal["allow", "deny", "watch"]
     note: str = Field("", max_length=200)
     expires_at: float | None = None
+    category: Category | None = None
+    schedule: Schedule | None = None
+    action: Literal["alarm", "mark"] | None = None
+    priority: Literal["low", "medium", "high"] | None = None
+    cameras: list[str] | None = Field(None, max_length=50)
+    expect: Expect | None = None
 
 
 class EntryEdit(BaseModel):
+    """Only the fields sent change; a field sent as null clears it (clear_expiry: the older way to clear expires_at)."""
     note: str | None = Field(None, max_length=200)
     expires_at: float | None = None
     clear_expiry: bool = False
+    category: Category | None = None
+    schedule: Schedule | None = None
+    action: Literal["alarm", "mark"] | None = None
+    priority: Literal["low", "medium", "high"] | None = None
+    cameras: list[str] | None = Field(None, max_length=50)
+    expect: Expect | None = None
+
+
+class ImportIn(BaseModel):
+    entries: list[dict] = Field(..., max_length=traffic.IMPORT_MAX)
+
+
+def _options(body: BaseModel, sent: set[str]) -> dict:
+    out = {}
+    for k in ("category", "action", "priority", "cameras"):
+        if k in sent:
+            out[k] = getattr(body, k)
+    if "schedule" in sent:
+        out["schedule"] = body.schedule.plain() if body.schedule else None
+    if "expect" in sent:
+        out["expect"] = body.expect.model_dump() if body.expect else None
+    return out
 
 
 @router.get("/api/traffic/lists")
 async def lists():
-    now = time.time()
-    rows = db.all("SELECT * FROM plate_lists ORDER BY list, plate")
-    for r in rows:
-        r["expired"] = bool(r["expires_at"] and r["expires_at"] <= now)
-        last = db.one("SELECT ts, camera_id FROM vehicle_reads WHERE list_entry=? ORDER BY ts DESC LIMIT 1", [r["id"]])
-        r["last_seen"] = last["ts"] if last else None
-        r["last_camera"] = last["camera_id"] if last else None
-    return rows
+    """Every entry with what the Lists page shows (traffic.lists_overview): last seen, passes in 7 and 30 days, Otso's
+    description of its vehicle, other entries for the same plate and which list applies, in force now."""
+    return await asyncio.to_thread(traffic.lists_overview)
+
+
+@router.get("/api/traffic/lists/{entry_id}")
+async def list_entry(entry_id: int):
+    """One entry opened (traffic.entry_detail): its latest sightings, the plate's notes, its alarms, the vehicle Otso saw last."""
+    d = await asyncio.to_thread(traffic.entry_detail, entry_id)
+    if d is None:
+        raise HTTPException(404, "unknown entry")
+    return d
 
 
 @router.post("/api/traffic/lists")
 async def add_entry(body: EntryIn, request: Request):
     who = require(request, "operator")
     try:
-        return traffic.add_entry(body.plate, body.list, body.note, body.expires_at, who)
+        return await asyncio.to_thread(traffic.add_entry, body.plate, body.list, body.note, body.expires_at, who,
+                                       **_options(body, body.model_fields_set))
     except ValueError as e:
         raise HTTPException(422, str(e))
 
 
+@router.post("/api/traffic/lists/import")
+async def import_entries(body: ImportIn, request: Request):
+    """CSV rows the page parsed: {plate, list, note?, category?, expires_at?} each; per row ok or why not (operator)."""
+    who = require(request, "operator")
+    results = await asyncio.to_thread(traffic.import_entries, body.entries, who)
+    log.info("plate lists: %d of %d rows imported by %s", sum(r["ok"] for r in results), len(results), who)
+    return {"results": results, "added": sum(r["ok"] for r in results)}
+
+
 @router.put("/api/traffic/lists/{entry_id}")
 async def edit_entry(entry_id: int, body: EntryEdit, request: Request):
-    require(request, "operator")
-    if not db.one("SELECT id FROM plate_lists WHERE id=?", [entry_id]):
+    who = require(request, "operator")
+    sent = set(body.model_fields_set)
+    changes = _options(body, sent)
+    if "note" in sent:
+        changes["note"] = body.note or ""
+    if body.clear_expiry or "expires_at" in sent:
+        changes["expires_at"] = None if body.clear_expiry else body.expires_at
+    try:
+        e = await asyncio.to_thread(traffic.edit_entry, entry_id, who, **changes)
+    except ValueError as ex:
+        raise HTTPException(422, str(ex))
+    if e is None:
         raise HTTPException(404, "unknown entry")
-    if body.note is not None:
-        db.execute("UPDATE plate_lists SET note=? WHERE id=?", [body.note, entry_id])
-    if body.clear_expiry or body.expires_at is not None:
-        db.execute("UPDATE plate_lists SET expires_at=? WHERE id=?", [None if body.clear_expiry else body.expires_at, entry_id])
-    return db.one("SELECT * FROM plate_lists WHERE id=?", [entry_id])
+    return e
 
 
 @router.delete("/api/traffic/lists/{entry_id}")

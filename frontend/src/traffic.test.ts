@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   type PushSlot, confBand, confText, countBars, countsSummary, dateFromExpiry, directionText, expiryFromDate, expiryText, filterOptions,
   isSilent, listBadge, listError, nearChip, normPlate, onList, periodSince, plateProblem, plateText, pushText, slotText, stateText, timeAgo,
-  vehicleText, knownPlate, otsoText, otsoWhen, isDescription,
+  vehicleText, knownPlate, otsoText, otsoWhen, isDescription, NO_ENTRY_DRAFT, conflictText, csvToRows, daysText, draftToBody, effectText,
+  entriesToCsv, entryToDraft, expiryOf, filterEntries, normEntryPlate, scheduleText, seenText, type ListEntry,
 } from "./traffic";
 
 describe("one read", () => {
@@ -129,6 +130,14 @@ describe("lists", () => {
     expect(plateProblem("ABCDEFGHIJK")).toMatch(/at most 10/);
     expect(plateProblem("abc 1234")).toBeNull();
   });
+  it("takes a partial plate", () => {
+    expect(normEntryPlate("abc 12?")).toBe("ABC12?");
+    expect(normEntryPlate("34**")).toBe("34*");
+    expect(plateProblem("ABC12?")).toBeNull();
+    expect(plateProblem("34*")).toBeNull();
+    expect(plateProblem("?*")).toMatch(/2 known characters/);
+    expect(plateProblem("A?")).toMatch(/2 known characters/);
+  });
   it("one entry per plate and list", () => {
     const entries = [{ plate: "ABC1234", list: "deny" as const }];
     expect(onList(entries, "abc-1234", "deny")).toBe(true);
@@ -138,6 +147,71 @@ describe("lists", () => {
     const detail = (e: unknown) => String(e instanceof Error ? e.message : e).replace(/^\d{3}\s*/, "");
     expect(listError(new Error('403 {"detail":"needs operator"}'), detail)).toBe("Changing plate lists needs the operator role");
     expect(listError(new Error("422 not a plate"), detail)).toBe("not a plate");
+  });
+});
+
+describe("list entry options", () => {
+  const entry = (over: Partial<ListEntry> = {}): ListEntry => ({
+    id: 1, plate: "ABC1234", list: "watch", note: "", expires_at: null, created_at: 0, by: null, expired: false, last_seen: null, last_camera: null, ...over,
+  });
+  it("says when an entry applies", () => {
+    expect(scheduleText(null)).toBe("Always");
+    expect(scheduleText({ when: "soc" })).toBe("During SOC hours");
+    expect(scheduleText({ when: "hours", days: [0, 1, 2, 3, 4], from: "22:00", to: "06:00" })).toBe("Mon-Fri, 10:00 PM-6:00 AM");
+    expect(daysText([5, 6])).toBe("Sat, Sun");
+    expect(daysText([0, 2, 4])).toBe("Mon, Wed, Fri");
+    expect(daysText([0, 1, 2, 3, 4, 5, 6])).toBe("Every day");
+  });
+  it("says what a hit does", () => {
+    expect(effectText({ list: "deny" })).toBe("High alarm");
+    expect(effectText({ list: "watch" })).toBe("Medium alarm");
+    expect(effectText({ list: "allow" })).toBe("Marks the read");
+    expect(effectText({ list: "allow", action: "alarm" })).toBe("Low alarm");
+    expect(effectText({ list: "watch", priority: "high" })).toBe("High alarm");
+    expect(effectText({ list: "deny", action: "mark" })).toBe("Marks the read");
+  });
+  it("warns when another list wins", () => {
+    expect(conflictText({ list: "allow", overridden_by: "watch", conflicts: [{ id: 2, list: "watch", plate: "PR700809" }] }))
+      .toBe("Does nothing: this plate is also on the watch list, which applies instead");
+    expect(conflictText({ list: "watch", overridden_by: null, conflicts: [{ id: 1, list: "allow", plate: "PR700809" }] }))
+      .toBe("Also on the allow list (this entry applies)");
+    expect(conflictText({ list: "watch", overridden_by: null, conflicts: [] })).toBe("");
+    expect(seenText({ seen_7d: 3, seen_30d: 12 })).toBe("3 this week · 12 in 30 days");
+    expect(seenText({ seen_7d: 0, seen_30d: 0 })).toBe("not seen in 30 days");
+  });
+  it("turns the form into a request and back", () => {
+    const now = 1_000_000;
+    const body = draftToBody({ ...NO_ENTRY_DRAFT, plate: "abc 12?", list: "watch", note: " BOLO ", category: "police", expiry: "7d", when: "hours",
+      days: [5, 6], from: "08:00", to: "12:00", action: "alarm", priority: "high", cameras: ["cam8"], expect: { color: "white", make: " ", vehicle_type: "van" } }, now);
+    expect(body).toEqual({ plate: "ABC12?", list: "watch", note: "BOLO", expires_at: now + 7 * 86400, category: "police",
+      schedule: { when: "hours", days: [5, 6], from: "08:00", to: "12:00" }, action: "alarm", priority: "high", cameras: ["cam8"],
+      expect: { color: "white", vehicle_type: "van" } });
+    const plain = draftToBody({ ...NO_ENTRY_DRAFT, plate: "XYZ1", action: "mark", priority: "high" }, now);
+    expect(plain).toMatchObject({ schedule: null, action: "mark", priority: null, cameras: null, expect: null, category: null, expires_at: null });
+    const back = entryToDraft(entry({ category: "police", schedule: { when: "soc" }, expect: { make: "Ford" }, expires_at: new Date(2026, 10, 1, 23, 59, 59).getTime() / 1000 }));
+    expect(back).toMatchObject({ category: "police", when: "soc", expect: { make: "Ford" }, expiry: "date", date: "2026-11-01" });
+    expect(expiryOf({ expiry: "", date: "" }, now)).toBeNull();
+    expect(expiryOf({ expiry: "24h", date: "" }, now)).toBe(now + 86400);
+  });
+  it("searches plate, note, category and vehicle", () => {
+    const es = [entry({ id: 1, plate: "ABC1234", note: "Dana", category: "employee", look: "white Ford F-150 pickup truck" }),
+      entry({ id: 2, plate: "PR700809", note: "Shawn", list: "allow" })];
+    expect(filterEntries(es, "abc 1234").map((e) => e.id)).toEqual([1]);
+    expect(filterEntries(es, "employee").map((e) => e.id)).toEqual([1]);
+    expect(filterEntries(es, "ford pickup").map((e) => e.id)).toEqual([1]);
+    expect(filterEntries(es, "allowed").map((e) => e.id)).toEqual([2]);
+    expect(filterEntries(es, "").length).toBe(2);
+  });
+  it("exports CSV that imports back", () => {
+    const csv = entriesToCsv([entry({ plate: "ABC1234", list: "deny", category: "trespass", note: 'banned, "again"', expires_at: new Date(2026, 10, 1, 23, 59, 59).getTime() / 1000 })]);
+    expect(csv.split("\n")[0]).toBe("plate,list,category,note,expires,applies,on_a_hit,last_seen");
+    const rows = csvToRows(csv);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ plate: "ABC1234", list: "deny", category: "trespass", note: 'banned, "again"' });
+    expect(new Date(rows[0].expires_at! * 1000).getDate()).toBe(1);
+    // no header: plate, list, category, note, expires
+    expect(csvToRows("XYZ999,Watch,,blue van\r\n\n")).toEqual([{ plate: "XYZ999", list: "watch", category: undefined, note: "blue van", expires_at: null }]);
+    expect(csvToRows("")).toEqual([]);
   });
 });
 

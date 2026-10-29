@@ -337,35 +337,364 @@ def iou(a: list[float], b: list[float]) -> float:
     return inter / union if union > 0 else 0.0
 
 
+# ---- list entries and their options (see "Lists" in docs/traffic-camera-plan.md)
+
+CATEGORIES = ("employee", "contractor", "visitor", "resident", "delivery", "trespass", "police", "other")
+ACTIONS = ("alarm", "mark")
+PRIORITIES = ("low", "medium", "high")
+LIST_ORDER = {"deny": 0, "watch": 1, "allow": 2}
+ENTRY_JSON = ("schedule", "cameras", "expect")
+WILD = re.compile(r"[?*]")
+
+
+def entry_row(r: dict | None) -> dict | None:
+    """A plate_lists row with its JSON options decoded."""
+    if r is None:
+        return None
+    out = dict(r)
+    for k in ENTRY_JSON:
+        out[k] = json.loads(r[k]) if r.get(k) else None
+    return out
+
+
 def list_entries(now: float | None = None) -> list[dict]:
     now = now or time.time()
-    return db.all("SELECT * FROM plate_lists WHERE expires_at IS NULL OR expires_at > ? ORDER BY list, plate", [now])
+    return [entry_row(r) for r in db.all("SELECT * FROM plate_lists WHERE expires_at IS NULL OR expires_at > ? ORDER BY list, plate", [now])]
 
 
-def match_list(plate_: str | None, now: float | None = None) -> dict | None:
-    """The list entry this plate hits: an exact entry first, deny before watch before allow; then a near one."""
+def is_pattern(p: str | None) -> bool:
+    return bool(p and WILD.search(p))
+
+
+def normalize_entry_plate(raw: str) -> str | None:
+    """A plate typed for a list: like plate.normalize, but ? (one character) and * (any run) are kept for a partial
+    plate (a police lookout "ABC 12?", "starts with 34": 34*), which needs 2+ known characters."""
+    s = str(raw or "").strip().upper()
+    if "?" in s or "*" in s:
+        p = re.sub(r"\*+", "*", re.sub(r"[^A-Z0-9?*]", "", s))
+        known = len(WILD.sub("", p))
+        return p if known >= 2 and len(p) <= 12 and p != "*" else None
+    return plate.normalize(raw)
+
+
+def plate_fits(entry_plate: str, plate_: str) -> bool:
+    """An entry's plate (or partial plate) against a read plate: exactly, or ? = one character and * = any run."""
+    if not is_pattern(entry_plate):
+        return entry_plate == plate_
+    rx = "".join("." if c == "?" else ".*" if c == "*" else re.escape(c) for c in entry_plate)
+    return re.fullmatch(rx, plate_) is not None
+
+
+def _hhmm(v) -> int | None:
+    """"7:00" / "07:00" / "23:59" -> minutes of the day; None for anything else."""
+    m = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*", str(v or ""))
+    return int(m[1]) * 60 + int(m[2]) if m and int(m[1]) < 24 and int(m[2]) < 60 else None
+
+
+def _site_now(now: float) -> dt.datetime:
+    """`now` in the Site's time zone (the hub's AI schedule carries it), else the server's own."""
+    cfg = aischedule.config()
+    tz = aischedule.tz_of(cfg) if cfg and cfg.get("timezone") else None
+    return dt.datetime.fromtimestamp(now, tz) if tz else dt.datetime.fromtimestamp(now)
+
+
+def schedule_active(schedule: dict | None, now: float, armed: bool | None) -> bool:
+    """always (None) | {when: soc}: while the Site's SOC monitoring is armed (unknown = not) | {when: hours, days:
+    [0-6, Monday 0], from: "HH:MM", to: "HH:MM"} in the Site's time zone, `to` <= `from` running past midnight (the
+    days are the start's)."""
+    if not schedule:
+        return True
+    if schedule.get("when") == "soc":
+        return bool(armed)
+    f, t = _hhmm(schedule.get("from")), _hhmm(schedule.get("to"))
+    if f is None or t is None:
+        return True
+    days = set(schedule.get("days") or range(7))
+    local = _site_now(now)
+    m = local.hour * 60 + local.minute
+    if f < t:
+        return local.weekday() in days and f <= m < t
+    # overnight (or 24 h when from == to): today's evening part, or yesterday's after midnight
+    return (local.weekday() in days and m >= f) or ((local.weekday() - 1) % 7 in days and m < t)
+
+
+def entry_active(e: dict, now: float, camera_id: str | None = None, armed: bool | None = None) -> bool:
+    """Is the entry in force for a read now: not expired, its schedule, its cameras."""
+    if e.get("expires_at") and e["expires_at"] <= now:
+        return False
+    if camera_id and e.get("cameras") and camera_id not in e["cameras"]:
+        return False
+    return schedule_active(e.get("schedule"), now, armed)
+
+
+def _armed_if_needed(entries: list[dict]) -> bool | None:
+    if not any((e.get("schedule") or {}).get("when") == "soc" for e in entries):
+        return None
+    from .deterrence import armed_now
+    return armed_now()
+
+
+def match_list(plate_: str | None, now: float | None = None, camera_id: str | None = None, armed: bool | None = None,
+               near_ok: bool = True) -> dict | None:
+    """The list entry this plate hits, of those in force (entry_active): an exact entry first, then a partial plate
+    ("pattern"), then a near one (one character off; near_ok), deny before watch before allow at each step. The entry
+    with "match" and its "effect" (hit_effect)."""
     if not plate_:
         return None
+    now = now or time.time()
     entries = list_entries(now)
-    order = {"deny": 0, "watch": 1, "allow": 2}
-    for how in ("exact", "near"):
-        hits = [e for e in entries if (e["plate"] == plate_ if how == "exact" else near(e["plate"], plate_))]
+    if armed is None:
+        armed = _armed_if_needed(entries)
+    entries = [e for e in entries if entry_active(e, now, camera_id, armed)]
+    steps = (("exact", lambda e: not is_pattern(e["plate"]) and e["plate"] == plate_),
+             ("pattern", lambda e: is_pattern(e["plate"]) and plate_fits(e["plate"], plate_)),
+             ("near", lambda e: near_ok and not is_pattern(e["plate"]) and near(e["plate"], plate_)))
+    for how, fits in steps:
+        hits = [e for e in entries if fits(e)]
         if hits:
-            e = min(hits, key=lambda e: order.get(e["list"], 9))
-            return {**e, "match": how}
+            e = min(hits, key=lambda e: LIST_ORDER.get(e["list"], 9))
+            return {**e, "match": how, "effect": hit_effect(e)}
     return None
 
 
-def add_entry(plate_raw: str, list_: str, note: str = "", expires_at: float | None = None, by: str | None = None) -> dict:
-    p = plate.normalize(plate_raw)
+def hit_effect(e: dict) -> dict:
+    """What a hit does: {alarm: bool, priority}. The list's own unless the entry says: deny a high alarm, watch a medium
+    one, allow only marks the read (an allow entry set to alarm is a low one: "tell me when the owner arrives")."""
+    action = e.get("action") or ("mark" if e["list"] == "allow" else "alarm")
+    return {"alarm": action == "alarm", "priority": e.get("priority") or ALARM_LISTS.get(e["list"], "low")}
+
+
+def conflicts(e: dict, entries: list[dict]) -> list[dict]:
+    """Other entries for the same plate (or a partial plate that covers it): [{id, list, plate}]."""
+    out = []
+    for o in entries:
+        if o["id"] == e["id"]:
+            continue
+        same = o["plate"] == e["plate"] or (is_pattern(o["plate"]) and not is_pattern(e["plate"]) and plate_fits(o["plate"], e["plate"])) \
+            or (is_pattern(e["plate"]) and not is_pattern(o["plate"]) and plate_fits(e["plate"], o["plate"]))
+        if same:
+            out.append({"id": o["id"], "list": o["list"], "plate": o["plate"]})
+    return out
+
+
+def clean_schedule(v) -> dict | None:
+    if not v:
+        return None
+    if not isinstance(v, dict) or v.get("when") not in ("always", "soc", "hours"):
+        raise ValueError("schedule.when must be always, soc or hours")
+    if v["when"] == "always":
+        return None
+    if v["when"] == "soc":
+        return {"when": "soc"}
+    f, t = _hhmm(v.get("from")), _hhmm(v.get("to"))
+    if f is None or t is None:
+        raise ValueError("set hours need from and to as HH:MM")
+    days = sorted({int(d) for d in (v.get("days") or range(7)) if str(d).isdigit() and 0 <= int(d) <= 6})
+    if not days:
+        raise ValueError("pick at least one day")
+    return {"when": "hours", "days": days, "from": f"{f // 60:02d}:{f % 60:02d}", "to": f"{t // 60:02d}:{t % 60:02d}"}
+
+
+def clean_expect(v) -> dict | None:
+    if not v:
+        return None
+    if not isinstance(v, dict):
+        raise ValueError("expect must be {vehicle_type, color, make, model}")
+    out = plate.parse_vehicle({k: v.get(k) for k in ("vehicle_type", "color", "make", "model")})
+    if out and not (out.get("vehicle_type") or out.get("color") or out.get("make")):
+        raise ValueError("the expected vehicle needs a type, colour or make")
+    return out
+
+
+def _entry_fields(category=None, schedule=None, action=None, priority=None, cameras=None, expect=None) -> dict:
+    if category is not None and category not in CATEGORIES:
+        raise ValueError(f"category must be one of {', '.join(CATEGORIES)}")
+    if action is not None and action not in ACTIONS:
+        raise ValueError("action must be alarm or mark")
+    if priority is not None and priority not in PRIORITIES:
+        raise ValueError("priority must be low, medium or high")
+    cams = [str(c)[:64] for c in cameras][:50] if cameras else None
+    known = {c["id"] for c in db.cameras()}
+    if cams and any(c not in known for c in cams):
+        raise ValueError(f"unknown camera {next(c for c in cams if c not in known)!r}")
+    sched, exp = clean_schedule(schedule), clean_expect(expect)
+    return {"category": category, "schedule": json.dumps(sched) if sched else None, "action": action, "priority": priority,
+            "cameras": json.dumps(cams) if cams else None, "expect": json.dumps(exp) if exp else None}
+
+
+def add_entry(plate_raw: str, list_: str, note: str = "", expires_at: float | None = None, by: str | None = None,
+              **options) -> dict:
+    """Add (or replace: one entry per plate and list) an entry. options: category, schedule, action, priority, cameras,
+    expect (see _entry_fields). ValueError for anything that isn't valid."""
+    p = normalize_entry_plate(plate_raw)
     if not p:
-        raise ValueError(f"{plate_raw[:20]!r} is not a plate")
+        raise ValueError(f"{plate_raw[:20]!r} is not a plate (a partial plate needs 2 known characters)")
     if list_ not in LISTS:
         raise ValueError(f"list must be one of {', '.join(LISTS)}")
-    db.execute("INSERT INTO plate_lists (plate, list, note, expires_at, created_at, by) VALUES (?,?,?,?,?,?) "
-               "ON CONFLICT(plate, list) DO UPDATE SET note=excluded.note, expires_at=excluded.expires_at, by=excluded.by",
-               [p, list_, (note or "")[:200], expires_at, time.time(), by])
-    return db.one("SELECT * FROM plate_lists WHERE plate=? AND list=?", [p, list_])
+    f = _entry_fields(**options)
+    now = time.time()
+    db.execute("INSERT INTO plate_lists (plate, list, note, expires_at, created_at, by, category, schedule, action, priority, "
+               "cameras, expect, updated_at, updated_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+               "ON CONFLICT(plate, list) DO UPDATE SET note=excluded.note, expires_at=excluded.expires_at, "
+               "category=excluded.category, schedule=excluded.schedule, action=excluded.action, priority=excluded.priority, "
+               "cameras=excluded.cameras, expect=excluded.expect, updated_at=excluded.updated_at, updated_by=excluded.updated_by",
+               [p, list_, (note or "")[:200], expires_at, now, by, f["category"], f["schedule"], f["action"], f["priority"],
+                f["cameras"], f["expect"], now, by])
+    return entry_row(db.one("SELECT * FROM plate_lists WHERE plate=? AND list=?", [p, list_]))
+
+
+def edit_entry(entry_id: int, by: str | None = None, **changes) -> dict | None:
+    """Change an entry's note, expires_at or options; a key present with None clears it."""
+    cur = entry_row(db.one("SELECT * FROM plate_lists WHERE id=?", [entry_id]))
+    if cur is None:
+        return None
+    opts = {k: changes[k] if k in changes else cur.get(k) for k in ("category", "schedule", "action", "priority", "cameras", "expect")}
+    f = _entry_fields(**opts)
+    sets = {**f, "updated_at": time.time(), "updated_by": by}
+    if "note" in changes:
+        sets["note"] = (changes["note"] or "")[:200]
+    if "expires_at" in changes:
+        sets["expires_at"] = changes["expires_at"]
+    db.execute(f"UPDATE plate_lists SET {', '.join(f'{k}=?' for k in sets)} WHERE id=?", [*sets.values(), entry_id])
+    return entry_row(db.one("SELECT * FROM plate_lists WHERE id=?", [entry_id]))
+
+
+# ---- what the Lists page shows
+
+def _plate_where(p: str) -> tuple[str, list]:
+    """SQL for reads of an entry's plate: the camera's or Otso's, a partial plate by GLOB (? and * mean the same there)."""
+    if is_pattern(p):
+        return "(plate GLOB ? OR otso_plate GLOB ?)", [p, p]
+    return "(plate=? OR otso_plate=?)", [p, p]
+
+
+def applies(e: dict, others: list[dict]) -> str | None:
+    """Which list wins when the same plate is on several (deny, then watch, then allow, exact before partial): None
+    when this entry does, else that list's name."""
+    better = [o for o in others if LIST_ORDER[o["list"]] < LIST_ORDER[e["list"]]
+              or (o["list"] == e["list"] and is_pattern(e["plate"]) and not is_pattern(o["plate"]))]
+    return min(better, key=lambda o: LIST_ORDER[o["list"]])["list"] if better else None
+
+
+def lists_overview(now: float | None = None) -> list[dict]:
+    """Every entry (expired ones too, marked), each with: last seen (time, camera, read), passes in the last 7 and 30
+    days, Otso's latest description of its vehicle, other entries for the same plate and which list applies, and
+    whether it is in force now (its schedule; cameras aside)."""
+    now = now or time.time()
+    rows = [entry_row(r) for r in db.all("SELECT * FROM plate_lists ORDER BY list, plate")]
+    armed = _armed_if_needed(rows)
+    sql, p = noise_sql()
+    out = []
+    for e in rows:
+        w, wp = _plate_where(e["plate"])
+        last = db.one(f"SELECT id, ts, camera_id, otso_look FROM vehicle_reads WHERE {w} AND NOT {sql} ORDER BY ts DESC LIMIT 1", [*wp, *p])
+        n = db.one(f"SELECT COUNT(DISTINCT CASE WHEN ts >= ? THEN COALESCE(pass_id, id) END) AS d7, "
+                   f"COUNT(DISTINCT COALESCE(pass_id, id)) AS d30 FROM vehicle_reads WHERE {w} AND ts >= ? AND NOT {sql}",
+                   [now - 7 * 86400, *wp, now - 30 * 86400, *p])
+        look = db.one(f"SELECT otso_look FROM vehicle_reads WHERE {w} AND otso_look IS NOT NULL ORDER BY ts DESC LIMIT 1", wp)
+        others = conflicts(e, rows)
+        out.append({**e, "expired": bool(e["expires_at"] and e["expires_at"] <= now), "pattern": is_pattern(e["plate"]),
+                    "last_seen": last["ts"] if last else None, "last_camera": last["camera_id"] if last else None,
+                    "last_read_id": last["id"] if last else None, "seen_7d": n["d7"] or 0, "seen_30d": n["d30"] or 0,
+                    "look": look["otso_look"] if look else None, "conflicts": others,
+                    "overridden_by": applies(e, others), "active": entry_active(e, now, None, armed),
+                    "effect": hit_effect(e)})
+    return out
+
+
+def entry_detail(entry_id: int, now: float | None = None) -> dict | None:
+    """One entry opened on the Lists page: its row (lists_overview), its latest sightings (one read per pass, newest
+    first), the plate's counted notes (an exact plate), the alarms it raised in the last 30 days, and the vehicle Otso
+    saw last (to save as the vehicle the plate belongs on)."""
+    now = now or time.time()
+    row = next((x for x in lists_overview(now) if x["id"] == entry_id), None)
+    if row is None:
+        return None
+    w, wp = _plate_where(row["plate"])
+    sql, p = noise_sql()
+    reads = db.all(f"SELECT * FROM vehicle_reads WHERE {w} AND NOT {sql} ORDER BY ts DESC LIMIT 60", [*wp, *p])
+    seen, sightings = set(), []
+    for r in reads:
+        k = r["pass_id"] or r["id"]
+        if k not in seen and len(sightings) < 8:
+            seen.add(k)
+            sightings.append(public(r))
+    vehicle = None
+    for r in reads:
+        o = json.loads(r["otso"]) if r.get("otso") else {}
+        if o.get("vehicle"):
+            vehicle = {**o["vehicle"], "read_id": r["id"], "ts": r["ts"]}
+            break
+    pe, pp = ("plate GLOB ?", [row["plate"]]) if row["pattern"] else ("plate=?", [row["plate"]])
+    alarms = [{"id": a["id"], "ts": a["start_ts"], "priority": a["priority"], "camera_id": a["camera_id"],
+               "text": (json.loads(a["policy"]) if a["policy"] else {}).get("text")}
+              for a in db.all(f"SELECT id, start_ts, priority, camera_id, policy FROM events WHERE {pe} AND start_ts >= ? "
+                              f"AND (policy LIKE '%plate_list%' OR policy LIKE '%plate_pattern%') ORDER BY start_ts DESC LIMIT 10",
+                              [*pp, now - 30 * 86400])]
+    notes = plate_notes(row["plate"], now, now)["notes"] if not row["pattern"] and row["last_seen"] else []
+    return {**row, "sightings": sightings, "notes": notes, "alarms": alarms, "vehicle": vehicle}
+
+
+IMPORT_MAX = 2000
+
+
+def import_entries(rows: list[dict], by: str | None = None) -> list[dict]:
+    """CSV import (the page parses the file): each row added like add_entry; [{line, plate, list, ok, error?}]."""
+    out = []
+    for k, x in enumerate(rows[:IMPORT_MAX], 1):
+        try:
+            e = add_entry(str(x.get("plate") or ""), str(x.get("list") or "").lower(), str(x.get("note") or ""), x.get("expires_at"), by,
+                          category=(str(x["category"]).lower() or None) if x.get("category") else None)
+            out.append({"line": k, "plate": e["plate"], "list": e["list"], "ok": True})
+        except (ValueError, TypeError) as ex:
+            out.append({"line": k, "plate": str(x.get("plate") or "")[:20], "list": str(x.get("list") or "")[:10], "ok": False, "error": str(ex)})
+    return out
+
+
+# ---- the vehicle a listed plate belongs on (cloned-plate alarm)
+
+TYPE_WORDS = (("motorcycle", ("motorcycle", "motorbike", "scooter")), ("bus", ("bus",)),
+              ("truck", ("semi", "box truck", "dump", "tractor", "tanker", "flatbed", "tow truck", "wrecker")),
+              ("van", ("van", "minivan")), ("pickup", ("pickup", "truck")), ("suv", ("suv", "crossover")),
+              ("car", ("car", "sedan", "hatchback", "coupe", "wagon", "convertible")))
+COLOR_WORDS = (("gray", ("gray", "grey", "silver", "charcoal", "gunmetal")), ("white", ("white", "pearl")),
+               ("black", ("black",)), ("red", ("red", "maroon", "burgundy")), ("blue", ("blue", "navy")),
+               ("green", ("green",)), ("brown", ("brown", "tan", "beige", "bronze", "gold")),
+               ("yellow", ("yellow",)), ("orange", ("orange",)), ("purple", ("purple",)))
+MAKE_SAME = {"chevy": "chevrolet", "ram": "dodge", "vw": "volkswagen", "mercedes-benz": "mercedes", "benz": "mercedes"}
+
+
+def _class(text: str | None, table) -> str | None:
+    s = f" {(text or '').lower()} "
+    for name, words in table:
+        if any(re.search(rf"\b{re.escape(w)}\b", s) for w in words):
+            return name
+    return None
+
+
+def vehicle_mismatch(expect: dict | None, seen: dict | None) -> list[str]:
+    """Why the vehicle seen isn't the one expected: a different kind of vehicle, or a different make and colour (one
+    alone can be a misreading: Otso names makes from a back view, and colours shift at night). [] = it fits, or too
+    little is known to say."""
+    if not expect or not seen:
+        return []
+    out = []
+    te, ts = _class(expect.get("vehicle_type"), TYPE_WORDS), _class(seen.get("vehicle_type"), TYPE_WORDS)
+    if te and ts and te != ts:
+        out.append(f"a {ts} instead of a {te}")
+    me = MAKE_SAME.get((expect.get("make") or "").lower(), (expect.get("make") or "").lower())
+    ms = MAKE_SAME.get((seen.get("make") or "").lower(), (seen.get("make") or "").lower())
+    ce, cs = _class(expect.get("color"), COLOR_WORDS), _class(seen.get("color"), COLOR_WORDS)
+    if me and ms and me != ms and ce and cs and ce != cs:
+        out.append(f"a {cs} {seen.get('make')} instead of a {ce} {expect.get('make')}")
+    return out
+
+
+def expected_entries(plate_: str | None, now: float | None = None) -> list[dict]:
+    """The entries (not expired) for exactly this plate that say which vehicle it belongs on."""
+    if not plate_:
+        return []
+    return [e for e in list_entries(now) if e["plate"] == plate_ and e.get("expect")]
 
 
 # ---------------------------------------------------------------- storing a read
@@ -456,8 +785,8 @@ def ingest(cam: dict, p: dict, received: float | None = None) -> dict:
         set_traffic(cam["id"], zone_offset_s=r["zone_offset"])
     if not r["clock_ok"]:
         log.warning("[%s] traffic read time %r doesn't match the receive time: using the receive time", cam["id"], p.get("time"))
-    hit = match_list(r["plate"], received) if (r["confidence"] or 0) >= settings.traffic_list_min_conf else None
-    alarm = hit is not None and hit["list"] in ALARM_LISTS
+    hit = match_list(r["plate"], received, cam["id"]) if (r["confidence"] or 0) >= settings.traffic_list_min_conf else None
+    alarm = hit is not None and hit["effect"]["alarm"]
     kinds = ["plate", "vehicle", "violation"] + (["full"] if alarm or settings.traffic_keep_full else [])
     images = _save_images(cam["id"], p, r["ts"], kinds)
     read_id = db.execute_insert(
@@ -475,13 +804,15 @@ def ingest(cam: dict, p: dict, received: float | None = None) -> dict:
     health.heard(cam["id"], "read", received)
     if "vehicle" not in images and not is_noise(r):
         from_recording.add(read_id, received + REC_DELAY_S)
+    if r["plate"] and expected_entries(r["plate"], received):
+        looker.urgent(read_id, received)   # Otso checks it is the vehicle the plate belongs on (cloned-plate alarm)
     out = {"read_id": read_id, "event_id": None, "alarm_id": None, "list": hit["list"] if hit else None}
     if alarm:
         out["alarm_id"] = open_alarm(cam, read_id, hit)
         return out
     if r["plate"] and (r["confidence"] or 0) >= settings.traffic_attach_min_conf:
         out["event_id"] = attach_read(read_id)
-    if r["plate"] and not hit:   # an allowed plate raises nothing
+    if r["plate"] and not (hit and hit["list"] == "allow"):   # an allowed plate raises nothing
         try:
             out["alarm_id"] = check_patterns(cam, read_id)
         except Exception:  # noqa: BLE001 - the read is stored; a pattern check must not fail the camera's push
@@ -783,6 +1114,7 @@ def store_otso(read_id: int, result: dict, notes: dict | None = None, by: str = 
 
 LOOK_WAIT_S = 5.0        # between checks while there is nothing to look at, Qwen is busy or the hour's looks are used
 LOOK_TIMEOUT_S = 60.0
+URGENT_S = 900.0         # a listed plate's vehicle waits this long for its picture (REC_TRIES x REC_RETRY_S)
 
 
 class Looker:
@@ -791,6 +1123,25 @@ class Looker:
 
     def __init__(self) -> None:
         self.looked: deque = deque()
+        self.wanted: dict[int, float] = {}   # read id -> until when: a listed plate's vehicle to check now (urgent)
+        self.lock = threading.Lock()
+
+    def urgent(self, read_id: int, now: float | None = None) -> None:
+        """Look at this read as soon as Otso is ready, outside the hourly limit and the AI schedule: its plate is on a
+        list that says which vehicle it belongs on (a person set that up, so it is checked like a person's request).
+        Waits up to URGENT_S for the vehicle picture (cut from the recording when the camera sent none)."""
+        with self.lock:
+            self.wanted[read_id] = (now or time.time()) + URGENT_S
+
+    def next_urgent(self, now: float) -> int | None:
+        with self.lock:
+            for rid, until in sorted(self.wanted.items()):
+                if until < now:
+                    self.wanted.pop(rid, None)
+                elif image_path(rid, "vehicle") is not None:
+                    self.wanted.pop(rid, None)
+                    return rid
+        return None
 
     def room(self, now: float) -> bool:
         while self.looked and self.looked[0] < now - 3600:
@@ -825,10 +1176,12 @@ class Looker:
                       "result": "unreadable", "reason": "not sure of every character"}
         await asyncio.to_thread(store_otso, read_id, result, None, "otso")
         out = {**result, "alarm": None}
+        cam = camera(r["camera_id"])
+        if cam and result.get("vehicle"):
+            out["mismatch"] = await asyncio.to_thread(check_expected, cam, read_id, result["vehicle"])
         if result.get("result") == "read" and not r["plate"]:
-            hit = await asyncio.to_thread(match_list, result["plate"])
-            cam = camera(r["camera_id"])
-            if hit and hit["list"] in ALARM_LISTS and cam:
+            hit = await asyncio.to_thread(match_list, result["plate"], None, r["camera_id"])
+            if hit and hit["effect"]["alarm"] and cam:
                 db.execute("UPDATE vehicle_reads SET list=?, list_match=?, list_entry=? WHERE id=?",
                            [hit["list"], hit["match"], hit["id"], read_id])
                 out["alarm"] = await asyncio.to_thread(open_alarm, cam, read_id, hit, result["plate"])
@@ -847,22 +1200,25 @@ class Looker:
         """Forever: look at the next vehicle whenever ready(). A new alarm is published and described like a camera
         read's."""
         while True:
-            await asyncio.sleep(LOOK_WAIT_S)
+            await asyncio.sleep(LOOK_WAIT_S if not self.wanted else 1)
             try:
                 now = time.time()
-                if not await self.ready(pipeline, now):
-                    continue
-                read_id = await asyncio.to_thread(self.next_read, now)
+                read_id = await asyncio.to_thread(self.next_urgent, now) if self.wanted and pipeline.vlm_ready else None
                 if read_id is None:
-                    continue
-                self.looked.append(now)
+                    if not await self.ready(pipeline, now):
+                        continue
+                    read_id = await asyncio.to_thread(self.next_read, now)
+                    if read_id is None:
+                        continue
+                    self.looked.append(now)
                 out = await self.look(read_id)
                 log.debug("traffic read %s: Otso looked: %s %s", read_id, out.get("plate") or out.get("result"),
                           plate.vehicle_words(out.get("vehicle")))
-                if out.get("alarm"):
-                    pipeline.publish(out["alarm"])
-                    if not pipeline.plan_synopsis(out["alarm"]):
-                        await pipeline.reindex(out["alarm"])
+                for eid in (out.get("alarm"), out.get("mismatch")):
+                    if eid:
+                        pipeline.publish(eid)
+                        if not pipeline.plan_synopsis(eid):
+                            await pipeline.reindex(eid)
             except Exception:  # noqa: BLE001 - keep looking
                 log.exception("traffic: Otso's look failed")
 
@@ -1140,18 +1496,43 @@ def open_alarm(cam: dict, read_id: int, hit: dict, otso_plate: str | None = None
         db.execute("UPDATE vehicle_reads SET event_id=? WHERE id=?", [prev["event_id"], read_id])
         return prev["event_id"]
     plate_ = otso_plate or r["plate"]
-    shown = plate.display(plate_)
-    words = {"deny": "on the deny list", "watch": "on the watch list"}[hit["list"]]
-    text = (f"Plate {shown} is {words}" if hit["match"] == "exact"
-            else f"Plate {shown} is one character off {plate.display(hit['plate'])}, {words}")
-    text += f" ({hit['note']})" if hit.get("note") else ""
-    text += " (read by Otso: the camera read no plate)" if otso_plate else ""
+    text = hit_text(plate_, hit) + (" (read by Otso: the camera read no plate)" if otso_plate else "")
     policy = {"kind": "plate_list", "list": hit["list"], "match": hit["match"], "plate": plate_, "entry": hit["plate"],
-              "priority": ALARM_LISTS[hit["list"]], "text": text}
+              "priority": hit_effect(hit)["priority"], "text": text, **({"category": hit["category"]} if hit.get("category") else {})}
     eid = _plate_event(cam, r, policy, "traffic/plate_list", hit["list"], plate_, by_otso=bool(otso_plate))
-    log.info("[%s] plate %s %s (%s match, read %s%s): alarm event %s", cam["id"], plate_, words, hit["match"], read_id,
-             ", Otso's read" if otso_plate else "", eid)
+    log.info("[%s] plate %s on the %s list (%s match, read %s%s): alarm event %s", cam["id"], plate_, hit["list"], hit["match"],
+             read_id, ", Otso's read" if otso_plate else "", eid)
     return eid
+
+
+LIST_WORDS = {"deny": "on the deny list", "watch": "on the watch list", "allow": "on the allow list"}
+
+
+def hit_text(plate_: str, hit: dict) -> str:
+    """"Plate ABC 1234 is on the deny list (trespass: banned 10/12)", "... matches ABC12? on the watch list", "... is one
+    character off ..."."""
+    shown, words = plate.display(plate_), LIST_WORDS[hit["list"]]
+    text = (f"Plate {shown} is {words}" if hit["match"] == "exact"
+            else f"Plate {shown} matches {hit['plate']} {words}" if hit["match"] == "pattern"
+            else f"Plate {shown} is one character off {plate.display(hit['plate'])}, {words}")
+    why = ": ".join(x for x in (hit.get("category"), hit.get("note")) if x)
+    return text + (f" ({why})" if why else "")
+
+
+def footage_list_rule(e: dict) -> dict | None:
+    """A plate Otso read from an event's footage (plate.py) on a list entry that raises an alarm: the event's broken
+    rule (policy.check), as a traffic read's list hit would be. Exact and partial plates only (a near match on a plate
+    read from footage is too loose), never on a traffic camera (its plate is the camera's read, checked at the read)."""
+    if not e.get("plate") or reads_plates(e["camera_id"]):
+        return None
+    if ((e.get("detections") or {}).get("plate_read") or {}).get("source") == "camera":
+        return None
+    hit = match_list(e["plate"], e["start_ts"], e["camera_id"], near_ok=False)
+    if not hit or not hit["effect"]["alarm"]:
+        return None
+    return {"kind": "plate_list", "list": hit["list"], "match": hit["match"], "plate": e["plate"], "entry": hit["plate"],
+            "priority": hit["effect"]["priority"], "text": hit_text(e["plate"], hit) + " (read by Otso from the footage)",
+            **({"category": hit["category"]} if hit.get("category") else {})}
 
 
 # ---------------------------------------------------------------- plate pattern alerts
@@ -1279,6 +1660,34 @@ def check_patterns(cam: dict, read_id: int, armed: bool | None = None) -> int | 
     eid = _plate_event(cam, r, policy, "traffic/plate_pattern", kind, r["plate"])
     log.info("[%s] plate %s: %s (read %s): alarm event %s", cam["id"], r["plate"], kind, read_id, eid)
     return eid
+
+
+def check_expected(cam: dict, read_id: int, seen: dict) -> int | None:
+    """After Otso described a read's vehicle: is it the vehicle the plate's list entry says the plate belongs on? A
+    different one raises the cloned-plate alarm (high: a plate on the wrong vehicle is often stolen), once per plate
+    per traffic_pattern_cooldown_s. Returns a new alarm's id."""
+    r = db.one("SELECT * FROM vehicle_reads WHERE id=?", [read_id])
+    p_ = (r or {}).get("plate") or (r or {}).get("otso_plate")
+    if not r or not p_:
+        return None
+    for e in expected_entries(p_, r["ts"]):
+        why = vehicle_mismatch(e["expect"], seen)
+        if not why:
+            continue
+        prev = db.one("SELECT id FROM events WHERE plate=? AND track_id LIKE 'lpr:%' AND rules LIKE ? AND start_ts >= ? LIMIT 1",
+                      [p_, '%"rule": "mismatch"%', r["ts"] - settings.traffic_pattern_cooldown_s])
+        if prev:
+            db.execute("UPDATE vehicle_reads SET event_id=? WHERE id=?", [prev["id"], read_id])
+            return None
+        expected = plate.vehicle_words(e["expect"])
+        text = (f"Plate {plate.display(p_)} belongs on a {expected}" + (f" ({e['note']})" if e.get("note") else "")
+                + f", but Otso saw {why[0]} ({plate.vehicle_words(seen)}): the plate may be stolen or on the wrong vehicle")
+        policy = {"kind": "plate_pattern", "pattern": "mismatch", "plate": p_, "priority": "high", "text": text,
+                  "expected": e["expect"], "seen": seen, "entry": e["id"]}
+        eid = _plate_event(cam, r, policy, "traffic/plate_pattern", "mismatch", p_, by_otso=not r["plate"])
+        log.info("[%s] plate %s on the wrong vehicle (read %s): %s; alarm event %s", cam["id"], p_, read_id, why[0], eid)
+        return eid
+    return None
 
 
 # ---------------------------------------------------------------- search and counts

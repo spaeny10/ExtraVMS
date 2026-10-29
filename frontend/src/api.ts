@@ -7,7 +7,7 @@ import type { AnalyticsRule, AudioEncoder, CameraDevice, CameraTime, ClockResult
 import type { CatalogVoice, Spoken, VoiceEngines, VoiceSetting } from "./talkdownVoice";
 import type { LiveCodecs } from "./codecs";
 import type { DeterConfig, DeterRequest, DeterRule, DeterRules, Deterrence, DeterrenceBrief, MilesightExtras, MilesightWrite } from "./deterrence";
-import type { CameraTraffic, CameraTrafficServer, Counts, CountsQuery, ImageKind, ListEntry, ListEntryEdit, ListEntryIn, ReadDetail, ReadPlateResult, ReadsPage, ReadsQuery, TrafficAlerts, TrafficStatus } from "./traffic";
+import type { CameraTraffic, CameraTrafficServer, Counts, CountsQuery, ImageKind, ImportResult, ListEntry, ListEntryDetail, ListEntryEdit, ListEntryIn, ReadDetail, ReadPlateResult, ReadsPage, ReadsQuery, TrafficAlerts, TrafficStatus } from "./traffic";
 /** include = detect only here; exclude = mask out; area = just a name for a place (never filters);
  * ppe = people who stay in it must wear the required items (backend/nvr/ppe.py; never filters) */
 export type ZoneType = "include" | "exclude" | "area" | "ppe";
@@ -852,6 +852,8 @@ export function makeApi(base: string, opts: ApiOptions = {}) {
   trafficStatus: () => req<TrafficStatus>("/api/traffic/status"),
   plateLists: () => req<ListEntry[]>("/api/traffic/lists"),
   addPlateEntry: (b: ListEntryIn) => req<ListEntry>("/api/traffic/lists", json("POST", b)),
+  plateEntry: (id: number) => req<ListEntryDetail>(`/api/traffic/lists/${id}`),
+  importPlateEntries: (entries: ListEntryIn[] | Record<string, unknown>[]) => req<ImportResult>("/api/traffic/lists/import", json("POST", { entries })),
   editPlateEntry: (id: number, b: ListEntryEdit) => req<ListEntry>(`/api/traffic/lists/${id}`, json("PUT", b)),
   deletePlateEntry: (id: number) => req<{ ok: boolean }>(`/api/traffic/lists/${id}`, { method: "DELETE" }),
   cameraTraffic: (camera: string) => req<CameraTraffic>(`/api/cameras/${camera}/traffic`),

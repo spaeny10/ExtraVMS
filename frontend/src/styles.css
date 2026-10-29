@@ -1394,6 +1394,29 @@ body:has(.drag-ghost) { cursor: grabbing; user-select: none; }
 .plates-add-form { align-items: flex-end; }
 .plates-add-form .field.grow { min-width: 180px; }
 .plates-table input { width: 100%; }
+/* Plates › Lists (PlateLists.tsx) */
+.plates-entry-form { display: grid; gap: 6px; margin-bottom: 10px; }
+.plates-entry-form.editing { padding: 12px 16px 16px; }
+.plates-entry-options { display: grid; gap: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel-2); }
+.plates-entry-options fieldset { border: 0; margin: 0; padding: 0; display: grid; gap: 4px; }
+.plates-entry-options legend { font-weight: 600; font-size: 13px; padding: 0; margin-bottom: 2px; }
+.plates-entry-options .row { flex-wrap: wrap; gap: 6px 12px; }
+.plates-entry-options input:not([type]), .plates-entry-options input[type="text"] { width: 140px; }
+.plates-lists-tools { gap: 8px; margin: 6px 0; }
+.plates-lists-tools input[type="search"] { min-width: 240px; }
+.plates-import-errors { margin: 4px 0 8px; }
+.plates-lists-table tr.plate-entry { cursor: pointer; }
+.plates-lists-table tr.plate-entry:hover, .plates-lists-table tr.plate-entry.open { background: var(--panel-2); }
+.plates-lists-table tr.plate-entry-detail > td { background: var(--panel-2); padding: 10px 12px 14px; }
+.plate-entry-body { display: grid; grid-template-columns: minmax(180px, 300px) 1fr; gap: 16px; align-items: start; }
+.plate-entry-pic { display: grid; gap: 6px; justify-items: start; }
+.plate-entry-pic .vehicle-crop.big { width: 100%; max-width: 300px; border-radius: 6px; }
+.plate-entry-pic .plate-crop { height: 40px; }
+.plate-entry-facts p { margin: 0 0 6px; }
+.plate-entry-sightings { display: flex; flex-wrap: wrap; gap: 8px; }
+.plate-entry-sighting { display: grid; justify-items: center; gap: 2px; }
+.plate-entry-modal { width: min(900px, 100%); }
+@media (max-width: 700px) { .plate-entry-body { grid-template-columns: 1fr; } }
 /* counts: a bar per hour or day, the part with a plate filled in */
 .counts-card { gap: 6px; }
 .counts-card h3 { margin: 0; }

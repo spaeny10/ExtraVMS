@@ -11,8 +11,9 @@
  *    takes a plate or a description ("white pickup ladder rack": isDescription), which searches those words. A read the camera
  *    sent without a vehicle picture shows one cut from the recording (the server does it, marked "From the recording"),
  *    and Timeline opens the recording at the read's moment to check it.
- *  - Lists: allow / deny / watch plates with a note and an optional expiry. Deny and watch hits raise an alarm event
- *    (deny high, watch medium); allow only marks the read. Changes need the operator role (a viewer gets the 403).
+ *  - Lists (PlateLists.tsx): allow / deny / watch plates with their options (partial plates, categories, when they
+ *    apply, what a hit does, cameras, the vehicle the plate belongs on), what each has seen, CSV import and export.
+ *    Changes need the operator role (a viewer gets the 403).
  *  - Traffic: vehicles per hour (24 h) and per day (7 days), all of them and those with a plate, and each camera's push
  *    health (a camera set up and silent past silent_after_s is flagged, as the server's traffic_push_silent alert is).
  * The camera's state and direction are hints, shown as "reported". Most reads have no plate (rear plates only in
@@ -25,14 +26,13 @@ import { useNav } from "./nav";
 import { EventDetail } from "./EventDetail";
 import { useQueuedImage } from "./imageQueue";
 import { formatPlate, plateError } from "./plate";
+import { ListsSection } from "./PlateLists";
 import {
-  type Bar, type Direction, type ListEntry, type Period, type PlateList, type Read, type ReadDetail, type TrafficStatus, PERIODS, PLATE_LISTS,
-  VEHICLE_COLORS, VEHICLE_TYPES, confBand, confText, countBars, countsSummary, dateFromExpiry, directionText, expiryFromDate, expiryText,
-  filterOptions, isDescription, isSilent, knownPlate, listBadge, listError, listName, nearChip, onList, otsoText, otsoWhen, periodSince, plateProblem,
-  plateText, pushText,
-  stateText, timeAgo, vehicleText,
+  type Bar, type Direction, type Period, type PlateList, type Read, type ReadDetail, type TrafficStatus, PERIODS, PLATE_LISTS,
+  VEHICLE_COLORS, VEHICLE_TYPES, confBand, confText, countBars, countsSummary, directionText, filterOptions, isDescription, isSilent,
+  knownPlate, listBadge, listError, listName, nearChip, otsoText, otsoWhen, periodSince, plateText, pushText, stateText, vehicleText,
 } from "./traffic";
-import { Icon, confirmDialog, errorText, promptDialog, toast } from "./ui";
+import { Icon, errorText, promptDialog, toast } from "./ui";
 
 /** A server the page can show (the hub: each of the Site's servers with traffic cameras). */
 export type PlatesSource = { id: string; name: string; api: SiteApi };
@@ -99,6 +99,7 @@ function PlatesBody({ a, section, source, renderEvent, openTimeline }: {
   }, [a]);
   const name = (id: string) => status?.cameras.find((c) => c.camera_id === id)?.name ?? cameras.find((c) => c.id === id)?.name ?? id;
   const [eventId, setEventId] = useState<number | null>(null);
+  const [readId, setReadId] = useState<number | null>(null);   // a read opened from the Lists (a sighting)
   const closeEvent = () => setEventId(null);
 
   return <>
@@ -107,7 +108,9 @@ function PlatesBody({ a, section, source, renderEvent, openTimeline }: {
       <p className="muted small">No traffic cameras on this server yet. Set one up under Settings › Cameras › (the camera) › Camera › Traffic.</p>
     )}
     {section === "reads" && <ReadsSection a={a} status={status} name={name} onEvent={setEventId} onTimeline={toTimeline} />}
-    {section === "lists" && <ListsSection a={a} name={name} />}
+    {section === "lists" && <ListsSection a={a} name={name} cameras={cameras} onRead={setReadId} onEvent={setEventId} />}
+    {readId !== null && <ReadPanel a={a} id={readId} name={name} onClose={() => setReadId(null)} onEvent={setEventId}
+      onTimeline={(camera, ts) => { setReadId(null); toTimeline(camera, ts); }} />}
     {section === "traffic" && <TrafficSection a={a} status={status} />}
     {eventId !== null && (renderEvent ? renderEvent({ source, id: eventId, cameraName: name, onClose: closeEvent })
       : <EventDetail id={eventId} site={a} cameraName={name} onClose={closeEvent} />)}
@@ -443,117 +446,6 @@ function ReadPanel({ a, id: initial, name, onClose, onEvent, onTimeline }: {
         )}
       </div>
     </div>
-  );
-}
-
-// ---------------------------------------------------------------- lists
-
-type ListDraft = { plate: string; list: PlateList; note: string; expires: string };
-const NO_DRAFT: ListDraft = { plate: "", list: "deny", note: "", expires: "" };
-
-function ListsSection({ a, name }: { a: SiteApi; name: (id: string) => string }) {
-  const [entries, setEntries] = useState<ListEntry[] | null>(null);
-  const [err, setErr] = useState("");
-  const [d, setD] = useState<ListDraft>(NO_DRAFT);
-  const [busy, setBusy] = useState(false);
-  const [edit, setEdit] = useState<{ id: number; note: string; expires: string } | null>(null);
-  const load = () => a.plateLists().then((x) => { setEntries(x); setErr(""); }).catch((e) => setErr(errorText(e)));
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { load(); }, [a]);
-
-  const problem = d.plate ? plateProblem(d.plate) : null;
-  const dup = entries && d.plate && !problem && onList(entries, d.plate, d.list);
-  const add = async () => {
-    if (!d.plate || problem || dup) return;
-    setBusy(true);
-    try {
-      await a.addPlateEntry({ plate: d.plate, list: d.list, note: d.note.trim(), expires_at: expiryFromDate(d.expires) });
-      toast.success(`${formatPlate(d.plate)} added to the ${d.list} list`);
-      setD({ ...NO_DRAFT, list: d.list });
-      load();
-    } catch (e) { toast.error(listError(e, errorText)); }
-    setBusy(false);
-  };
-  const save = async () => {
-    if (!edit) return;
-    const exp = expiryFromDate(edit.expires);
-    try {
-      await a.editPlateEntry(edit.id, exp ? { note: edit.note.trim(), expires_at: exp } : { note: edit.note.trim(), clear_expiry: true });
-      setEdit(null);
-      load();
-    } catch (e) { toast.error(listError(e, errorText)); }
-  };
-  const remove = async (e: ListEntry) => {
-    if (!await confirmDialog(`Take ${formatPlate(e.plate)} off the ${e.list} list?`, {
-      message: e.list === "allow" ? "Its reads are no longer marked." : "Its reads no longer raise an alarm.", confirmLabel: "Remove", danger: true,
-    })) return;
-    try {
-      await a.deletePlateEntry(e.id);
-      toast.success(`${formatPlate(e.plate)} removed from the ${e.list} list`);
-      load();
-    } catch (x) { toast.error(listError(x, errorText)); }
-  };
-
-  return (
-    <section className="plates-lists">
-      <p className="muted small">
-        A plate on the deny list raises a high-priority alarm when a camera reads it, the watch list a medium one; the allow list only marks
-        its reads. A plate one character off is a possible match (the alarm says so). Changes need the operator role.
-      </p>
-      <form className="row plates-add-form" onSubmit={(e) => { e.preventDefault(); add(); }}>
-        <label className="field"><span>Plate</span>
-          <input value={d.plate} onChange={(e) => setD({ ...d, plate: e.target.value })} placeholder="e.g. 1691AJN" autoCapitalize="characters" autoComplete="off" spellCheck={false} />
-        </label>
-        <label className="field"><span>List</span>
-          <select value={d.list} onChange={(e) => setD({ ...d, list: e.target.value as PlateList })}>
-            {PLATE_LISTS.map((l) => <option key={l} value={l}>{listName(l)}</option>)}
-          </select>
-        </label>
-        <label className="field grow"><span>Note</span>
-          <input value={d.note} maxLength={200} onChange={(e) => setD({ ...d, note: e.target.value })} placeholder="who, why (e.g. trespass notice 10/12)" />
-        </label>
-        <label className="field"><span>Expires (optional)</span>
-          <input type="date" value={d.expires} onChange={(e) => setD({ ...d, expires: e.target.value })} />
-        </label>
-        <button type="submit" disabled={busy || !d.plate || !!problem || !!dup}>{busy ? "Adding…" : "Add"}</button>
-      </form>
-      {problem && <p className="error small">{problem}</p>}
-      {dup && <p className="muted small">{formatPlate(d.plate)} is already on the {d.list} list.</p>}
-      {err && <p className="error small">{err}</p>}
-      {entries && entries.length === 0 && <div className="empty">No plates on any list yet.</div>}
-      {entries && entries.length > 0 && (
-        <table className="table plates-table">
-          <thead><tr><th>Plate</th><th>List</th><th>Note</th><th>Expires</th><th>Last seen</th><th /></tr></thead>
-          <tbody>
-            {entries.map((e) => edit?.id === e.id ? (
-              <tr key={e.id}>
-                <td><strong className="plate-text">{formatPlate(e.plate)}</strong></td>
-                <td><span className={`badge list-badge ${e.list}`}>{listName(e.list)}</span></td>
-                <td><input value={edit.note} maxLength={200} autoFocus aria-label="Note" onChange={(x) => setEdit({ ...edit, note: x.target.value })} /></td>
-                <td><input type="date" value={edit.expires} aria-label="Expires" onChange={(x) => setEdit({ ...edit, expires: x.target.value })} /></td>
-                <td />
-                <td className="row">
-                  <button className="small" onClick={save}>Save</button>
-                  <button className="ghost small" onClick={() => setEdit(null)}>Cancel</button>
-                </td>
-              </tr>
-            ) : (
-              <tr key={e.id} className={e.expired ? "muted" : ""}>
-                <td><strong className="plate-text">{formatPlate(e.plate)}</strong></td>
-                <td><span className={`badge list-badge ${e.list}`}>{listName(e.list)}</span></td>
-                <td>{e.note || <span className="muted small">—</span>}{e.by && <div className="muted small">added by {e.by} · {fmtWhen(e.created_at)}</div>}</td>
-                <td className="small">{expiryText(e)}</td>
-                <td className="small">{e.last_seen ? <span title={fmtTime(e.last_seen)}>{timeAgo(e.last_seen)}{e.last_camera ? ` · ${name(e.last_camera)}` : ""}</span> : <span className="muted">not seen</span>}</td>
-                <td className="row">
-                  <button className="ghost small" onClick={() => setEdit({ id: e.id, note: e.note, expires: dateFromExpiry(e.expires_at) })}>Edit</button>
-                  <button className="ghost small" onClick={() => remove(e)}>Remove</button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-    </section>
   );
 }
 

@@ -166,6 +166,32 @@ Decided while building:
     2 hours or more from every earlier sighting.
   - **When.** New and unusual alert only while the Site's SOC monitoring is armed, unless set to "Any time". On a
     highway a new plate is every other car, so they stay off there.
+- **Lists: more options and details** (2026-10-29, Shawn: "give the lists more options and details"). The Lists page
+  showed only "last seen 4 h ago", and a plate on two lists (PR700809, allowed and watched) silently did what the watch
+  entry said.
+  - **Each entry** can have a category (employee, contractor, visitor, resident, delivery, trespass notice, police
+    lookout, other), an expiry (in 24 hours, 7 or 30 days, or a date), and when it applies: always, during SOC hours,
+    or set days and hours in the Site's time zone (past midnight allowed).
+  - **What a hit does:** the list's own (deny a high alarm, watch a medium one, allow only marks), another priority,
+    or only mark the read. It can also be limited to some cameras.
+  - **Partial plates** for a police lookout: `?` is one unknown character, `*` any number ("ABC12?", "34*"). They
+    match after exact plates, before near ones, and the alarm says "matches ABC12?".
+  - **The vehicle a plate belongs on (cloned-plate alarm).** A read of that plate gets Otso's look at once, outside
+    the hourly limit and the AI schedule, because a person set it up. A different kind of vehicle, or another make and
+    colour, raises a high alarm. One detail alone doesn't: Otso names makes from a back view, and colours shift at
+    night. "Use the vehicle Otso saw" saves it from the latest sighting.
+  - **The table** shows, per entry: what a hit does, when it applies, its cameras and expiry, passes in 7 and 30 days,
+    last seen, Otso's description of its vehicle, and a warning when another list wins for the same plate.
+  - **An opened entry** shows its latest sightings (each opens the read), the plate's counted notes, its alarms in the
+    last 30 days, and the vehicle it belongs on.
+  - **Also:** search, and CSV export and import (plate, list, category, note, expires; one row's mistake doesn't stop
+    the rest).
+- **Plates read from footage check the lists.** Before this, a plate Otso read from an ordinary camera's footage
+  (plate.py) was only kept on its event. Now `policy.check` turns a list hit into the event's broken rule, with "read
+  by Otso from the footage", so it reaches the hub and the SOC.
+  - **Matching:** exact and partial plates only (a near match on a plate read from footage is too loose), and never on
+    a traffic camera (its own read decides there).
+  - **Re-checked:** a person's Read plate checks it too.
 - **Search by description.** The Plates search box takes a plate or a description ("white pickup ladder rack";
   `isDescription` tells them apart). Each word must start a word of Otso's description or the camera's colour, type or
   make, one read per pass (`search(look=)`).
