@@ -152,6 +152,9 @@ class Settings(BaseSettings):
     # traffic_list_min_conf. traffic_push_base: the address cameras push to ("http://192.168.1.5:8080"); empty = this
     # server's address on the camera's network and `port`. No push for traffic_silent_s from a camera set up: alert.
     traffic_keep_days: int = 30
+    # A plate's sightings (time of day, direction, vehicle type; no pictures) are kept this long after its reads go,
+    # for Ask Otso's notes ("55 times this year"): traffic.roll_up
+    traffic_history_days: int = 400
     traffic_keep_full: bool = False
     traffic_attach_min_conf: float = 0.6
     traffic_list_min_conf: float = 0.5

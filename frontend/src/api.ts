@@ -846,7 +846,7 @@ export function makeApi(base: string, opts: ApiOptions = {}) {
   trafficRead: (id: number) => req<ReadDetail>(`/api/traffic/reads/${id}`),
   /** a read's picture (JPEG): kinds the read lists in `images` */
   trafficImage: (id: number, kind: ImageKind) => u(`/api/traffic/reads/${id}/image/${kind}`),
-  /** Read plate on a read the camera missed: Otso reads its vehicle crop (operator; one run per read every 30 s) */
+  /** Ask Otso on a read: Otso reads the plate from the camera's crops, plus notes on the plate's history (operator; one run per read every 30 s) */
   trafficReadPlate: (id: number) => req<ReadPlateResult>(`/api/traffic/reads/${id}/plate`, { method: "POST" }),
   trafficCounts: (p: CountsQuery = {}) => req<Counts>(`/api/traffic/counts?${qs(p)}`),
   trafficStatus: () => req<TrafficStatus>("/api/traffic/status"),

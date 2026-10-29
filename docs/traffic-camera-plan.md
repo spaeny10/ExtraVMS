@@ -114,6 +114,16 @@ Decided while building:
   3416AFR and 51121 right and 087 MAB as "087 MAU" (its B half hidden), all at medium. A medium answer shows as
   "Otso: probably ...". Otso's state is kept only at high, because it named a wrong state every time. Background plate
   reads keep the strict instruction.
+- **Ask Otso: a plate's history, only when asked.** Read plate became Ask Otso, which reads the plate and adds a few
+  notes about it, for example: "Seen 64 times since Nov 3, 2025, 61 of them this year", "Before this, last seen
+  yesterday at 8:19 AM, heading away", "Usually on weekdays around 8:15 AM (8:10-8:20 AM), heading away" and "About 5
+  times a week over the last 8 weeks". It also flags one plate on different kinds of vehicle, and gives counts per
+  camera. The notes appear only when a person clicks the button (Shawn), and are kept with Otso's answer.
+  - **Counted, not written by the model** (`traffic.plate_notes`): a model asked for counts makes them up. One sighting
+    is one pass.
+  - **Habits are not claimed from too little.** A habit needs sightings on 2 or more days, and "on weekdays" needs 5.
+  - **Year totals outlive the 30-day reads.** Before reads are pruned, each sighting's time of day, direction and
+    vehicle type is kept per plate and day in `plate_days`, without pictures, for `traffic_history_days` (400).
 - **Reads that aren't a vehicle are hidden.** At night cam8 read the car lot's sign as plates ("556BE", up to ~6 a
   minute). The rule: no vehicle type, and no plate or one under 0.7 (`traffic_noise_conf`). Those reads are kept but
   hidden from the reads list (unless "Show reads with no vehicle" is ticked, or in a plate search), from counts and

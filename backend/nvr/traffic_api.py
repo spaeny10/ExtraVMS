@@ -137,25 +137,30 @@ async def read_image(read_id: int, kind: Literal["plate", "vehicle", "full", "vi
 
 @router.post("/api/traffic/reads/{read_id}/plate")
 async def read_plate(read_id: int, request: Request):
-    """Read plate on a read the camera's own reader missed (or doubted): Otso looks at the camera's vehicle crop. A
-    person asked, so it runs outside the Site's AI hours too, metered as "plate" (as Read plate on an event)."""
+    """Ask Otso on a read: Otso reads the plate from the camera's crops (the camera's reader misses plates they show),
+    then notes on the plate's history (traffic.plate_notes: counted, not the model's). A person asked, so it runs
+    outside the Site's AI hours too, metered as "plate" (as Read plate on an event)."""
     require(request, "operator")
-    if not traffic.read(read_id):
+    first = traffic.read(read_id)
+    if not first:
         raise HTTPException(404, "unknown read")
-    if pipeline is None or not pipeline.vlm_ready:
-        raise HTTPException(503, "Otso is not ready yet")
     wait = traffic.read_limiter.wait_s(read_id)
     if wait > 0:
         raise HTTPException(429, f"this plate was just read; try again in {wait:.0f} s", headers={"Retry-After": str(int(wait) + 1)})
     # no vehicle picture yet: from the recording (on the cutters' own pool)
     await asyncio.get_running_loop().run_in_executor(traffic.CUT_POOL, traffic.cut_from_recording, read_id)
     crops = await asyncio.to_thread(traffic.otso_crops, read_id)
-    if not crops:
+    if not crops and not first["plate"]:
         raise HTTPException(400, "no picture of the vehicle was kept for this read")
+    if crops and (pipeline is None or not pipeline.vlm_ready):
+        raise HTTPException(503, "Otso is not ready yet")
     traffic.read_limiter.start(read_id)
     try:
-        with aischedule.job(plate.KIND):
-            result = await asyncio.wait_for(plate.read(crops, "chat", system=plate.ON_REQUEST_SYSTEM), plate.TIMEOUT_S)
+        if crops:
+            with aischedule.job(plate.KIND):
+                result = await asyncio.wait_for(plate.read(crops, "chat", system=plate.ON_REQUEST_SYSTEM), plate.TIMEOUT_S)
+        else:
+            result = {"result": "skipped", "reason": "no picture of the vehicle"}
     except (asyncio.TimeoutError, httpx.TimeoutException):
         raise HTTPException(504, "Otso took too long to read the plate; try again in a moment")
     except Exception as ex:  # noqa: BLE001 - the model is down or misconfigured
@@ -163,10 +168,13 @@ async def read_plate(read_id: int, request: Request):
         raise HTTPException(502, f"the plate could not be read: {str(ex)[:200]}")
     finally:
         traffic.read_limiter.done(read_id)
-    r = await asyncio.to_thread(traffic.store_otso, read_id, result)
+    about = first["plate"] or (result.get("plate") if result.get("result") == "read" else None)
+    notes = await asyncio.to_thread(traffic.plate_notes, about, first["ts"]) if about else None
+    r = await asyncio.to_thread(traffic.store_otso, read_id, result, notes)
     hit = traffic.match_list(result.get("plate")) if result.get("result") == "read" else None
     out = {k: result.get(k) for k in ("result", "plate", "plate_raw", "region", "confidence", "reason", "model", "crops")}
-    return {**out, "read": r, "list": {k: hit[k] for k in ("list", "match", "plate", "note")} if hit else None}
+    return {**out, "read": r, "list": {k: hit[k] for k in ("list", "match", "plate", "note")} if hit else None,
+            "about": notes["plate"] if notes else None, "notes": notes["notes"] if notes else []}
 
 
 @router.get("/api/traffic/counts")

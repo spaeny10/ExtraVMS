@@ -162,6 +162,7 @@ describe("Otso's Read plate", () => {
     expect(otsoText({ at: 1, result: "read", plate: "407MFL", region: "KS", confidence: "high" })).toBe("Otso: 407 MFL · KS");
     expect(otsoText({ at: 1, result: "read", plate: "3416AFR", confidence: "medium" })).toBe("Otso: probably 3416 AFR");
     expect(otsoText({ at: 1, result: "unreadable", reason: "not legible" })).toBe("Otso couldn't read it");
+    expect(otsoText({ at: 1, result: "skipped", reason: "no picture of the vehicle" })).toBe("Otso had no picture to read");
     expect(otsoText(null)).toBe("");
   });
 });

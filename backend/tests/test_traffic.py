@@ -82,6 +82,7 @@ def reset():
     db.execute("DELETE FROM plate_lists")
     db.execute("DELETE FROM events")
     db.execute("DELETE FROM recording_offsets")
+    db.execute("DELETE FROM plate_days")
     traffic.passes.recent.clear()
 
 
@@ -476,6 +477,9 @@ def test_read_plate_on_demand():
         assert j["result"] == "read" and j["plate"] == "407MFL" and j["confidence"] == "high" and j["region"] == "KS"
         assert j["read"]["plate"] is None and j["read"]["otso"]["plate"] == "407MFL" and j["read"]["otso_plate"] == "407MFL"
         assert j["list"] == {"list": "watch", "match": "exact", "plate": "407MFL", "note": "red Fiesta"}
+        # Ask Otso's notes on the plate it read (the camera read none), kept with its answer
+        assert j["about"] == "407MFL" and j["notes"] == ["The first time this plate has been seen here."]
+        assert j["read"]["otso"]["about"] == "407MFL" and j["read"]["otso"]["notes"] == j["notes"]
         # the camera's plate crop first, enlarged, asked as a plate close-up, at a person's priority; a high read stops there
         assert len(asked) == 1 and asked[0][1] == "chat" and asked[0][2] == plate_mod.PLATE_QUESTION
         assert asked[0][3] == plate_mod.ON_REQUEST_SYSTEM   # a person asked: soft but readable plates are read
@@ -755,6 +759,68 @@ def test_offsets_kept_and_older_reads_gentle():
         traffic.aligner.found.clear()
         traffic.from_recording.due.clear()
         traffic.from_recording.queued.clear()
+
+
+def _sighting(plate, when, cam="cam8", vtype="Truck", direction="away"):
+    t = when.timestamp()
+    db.execute("INSERT INTO vehicle_reads (camera_id, ts, received_at, plate, plate_raw, confidence, vehicle_type, direction) "
+               "VALUES (?,?,?,?,?,?,?,?)", [cam, t, t + 0.5, plate, plate, 0.9, vtype, direction])
+
+
+def test_plate_notes_from_a_plates_history():
+    """Ask Otso's notes: counted from the reads (and, once they are pruned, from plate_days), worded in code. A commuter
+    seen every weekday at ~8:15 going away since August, three times last November."""
+    reset()
+    now = dt.datetime(2026, 10, 28, 9, 0)                   # a Wednesday
+    days = [dt.date(2025, 11, 3) + dt.timedelta(days=k) for k in range(3)]
+    d = dt.date(2026, 8, 3)
+    while d < now.date():
+        if d.weekday() < 5:
+            days.append(d)
+        d += dt.timedelta(days=1)
+    for k, day in enumerate(days):
+        _sighting("7769ABL", dt.datetime.combine(day, dt.time(8, 10 + k % 11)))
+    _sighting("7769ABL", dt.datetime(2026, 10, 28, 8, 14))  # this one
+    this = dt.datetime(2026, 10, 28, 8, 14).timestamp()
+    # older reads go (traffic_keep_days): their sightings are kept per plate and day, without the reads
+    traffic.prune(keep_days=30, now=now.timestamp())
+    assert db.one("SELECT COUNT(*) n FROM vehicle_reads WHERE ts < ?", [now.timestamp() - 30 * 86400])["n"] == 0
+    assert db.one("SELECT COUNT(*) n FROM plate_days WHERE plate='7769ABL'")["n"] > 40
+    n = len(days) + 1
+    notes = traffic.plate_notes("7769ABL", this, now.timestamp())
+    assert notes["sightings"] == n
+    assert notes["notes"][0] == f"Seen {n} times since Nov 3, 2025, {n - 3} of them this year."
+    assert notes["notes"][1] == f"Before this, last seen yesterday at 8:{10 + (len(days) - 1) % 11} AM, heading away."
+    assert notes["notes"][2].startswith("Usually on weekdays around 8:15 AM (8:10-8:20 AM), heading away:"), notes["notes"]
+    assert notes["notes"][3] == "About 5 times a week over the last 8 weeks, on 40 of 56 days."
+    assert len(notes["notes"]) == 4
+    # past traffic_history_days the summaries go too
+    traffic.prune(keep_days=30, now=(now + dt.timedelta(days=500)).timestamp())
+    assert db.one("SELECT COUNT(*) n FROM plate_days")["n"] == 0
+
+
+def test_plate_notes_say_little_from_little():
+    """No habit from one afternoon (a car circling); different kinds of vehicle on one plate are pointed out; a first
+    sighting says so; the camera lot's sign (noise) is no sighting."""
+    reset()
+    now = dt.datetime(2026, 10, 28, 18, 0)
+    for m in (10, 14, 20):
+        _sighting("HLU", dt.datetime(2026, 10, 28, 17, m))
+    hlu = traffic.plate_notes("HLU", dt.datetime(2026, 10, 28, 17, 20).timestamp(), now.timestamp())["notes"]
+    assert hlu == ["Seen 3 times today.", "Before this, last seen today at 5:14 PM, heading away."]
+    for k in range(3):
+        _sighting("SWAP123", dt.datetime(2026, 10, 20 + k, 7, 0), vtype="Truck")
+        _sighting("SWAP123", dt.datetime(2026, 10, 20 + k, 19, 0), vtype="Car", direction="approach")
+    swap = traffic.plate_notes("SWAP123", now.timestamp(), now.timestamp())["notes"]
+    assert any(x.startswith("Seen on different kinds of vehicle (Truck 3 times, Car 3 times)") or
+               x.startswith("Seen on different kinds of vehicle (Car 3 times, Truck 3 times)") for x in swap), swap
+    assert "Usually around 7:00 AM, heading away: 3 of 6 times, on 3 days." in swap
+    assert "Usually around 7:00 PM, coming toward the camera: 3 of 6 times, on 3 days." in swap
+    _sighting("NEW1", dt.datetime(2026, 10, 28, 17, 0))
+    assert traffic.plate_notes("NEW1", now.timestamp(), now.timestamp())["notes"] == ["The first time this plate has been seen here."]
+    t = dt.datetime(2026, 10, 27, 23, 0).timestamp()
+    db.execute("INSERT INTO vehicle_reads (camera_id, ts, received_at, plate, confidence) VALUES ('cam8',?,?,?,?)", [t, t, "NEW1", 0.4])
+    assert traffic.plate_notes("NEW1", now.timestamp(), now.timestamp())["sightings"] == 1
 
 
 def test_hub_roles():

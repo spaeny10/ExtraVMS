@@ -365,6 +365,16 @@ CREATE TABLE IF NOT EXISTS recording_offsets (
     learned_at  REAL NOT NULL,
     PRIMARY KEY (camera_id, segment)
 );
+-- A plate's sightings from reads that were pruned (traffic.roll_up), for Ask Otso's notes: per camera, plate and day,
+-- sightings = JSON list of [minute of the day, direction, vehicle type], one per pass. No pictures
+CREATE TABLE IF NOT EXISTS plate_days (
+    camera_id   TEXT NOT NULL,
+    plate       TEXT NOT NULL,
+    day         TEXT NOT NULL,                    -- YYYY-MM-DD, local
+    sightings   TEXT NOT NULL,
+    PRIMARY KEY (camera_id, plate, day)
+);
+CREATE INDEX IF NOT EXISTS plate_days_plate ON plate_days(plate);
 -- Plate lists (traffic.py): allow (marks the read, no alarm), deny (a high-priority alarm), watch (medium)
 CREATE TABLE IF NOT EXISTS plate_lists (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,

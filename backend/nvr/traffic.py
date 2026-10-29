@@ -741,16 +741,191 @@ def otso_crops(read_id: int) -> list:
     return out
 
 
-def store_otso(read_id: int, result: dict) -> dict | None:
+def store_otso(read_id: int, result: dict, notes: dict | None = None) -> dict | None:
     """Keep Otso's answer on the read (a read plate, or why not), beside the camera's own. Its state only when it is
     sure: on a soft crop it named a wrong one every time (plate.ON_REQUEST_SYSTEM)."""
     info = {"at": round(time.time(), 1), **{k: result[k] for k in ("result", "plate", "plate_raw", "region", "confidence",
                                                                    "reason", "model", "crops") if result.get(k) not in (None, "")}}
     if info.get("confidence") != "high":
         info.pop("region", None)
+    if notes is not None:
+        info["about"], info["notes"] = notes["plate"], notes["notes"]
     db.execute("UPDATE vehicle_reads SET otso=?, otso_plate=? WHERE id=?",
                [json.dumps(info), result.get("plate") if result.get("result") == "read" else None, read_id])
     return read(read_id)
+
+
+# ---------------------------------------------------------------- a plate's history (Ask Otso's notes)
+# Counted from the reads, worded here, never by the model (a model asked for counts makes them up). One sighting = one
+# pass. Reads are kept traffic_keep_days; when they go (prune) their sightings are kept per plate and day in plate_days
+# (time of day, direction, vehicle type: no pictures) for traffic_history_days, so "this year" can be counted.
+
+HABIT_GAP_MIN = 60       # sightings further apart in the day than this are different habits (morning, evening)
+HABIT_SHARE = 0.25       # ...and a habit is at least this share of the sightings, on HABIT_DAYS different days at least
+HABIT_DAYS = 2           # (a car circling one afternoon is no habit); "on weekdays" takes WEEKDAY_DAYS
+WEEKDAY_DAYS = 5
+RATE_DAYS = 56           # "about 5 times a week" over the last 8 weeks: how it is now, not since it was first seen
+DIRECTION_WORDS = {"away": "heading away", "approach": "coming toward the camera"}
+
+
+def _pass_sightings(rows: list[dict]) -> list[dict]:
+    """Reads (oldest first) -> one sighting per pass: its first time, camera, most reported direction, vehicle type."""
+    by: dict[int, dict] = {}
+    for r in rows:
+        if is_noise(r):
+            continue
+        s = by.setdefault(r["pass_id"] or r["id"], {"ts": r["ts"], "camera_id": r["camera_id"], "dirs": [], "vehicle": None})
+        if r["direction"]:
+            s["dirs"].append(r["direction"])
+        s["vehicle"] = s["vehicle"] or r["vehicle_type"]
+    out = []
+    for s in by.values():
+        d = s.pop("dirs")
+        s["direction"] = max(set(d), key=d.count) if d else None
+        out.append(s)
+    return out
+
+
+def sightings(plate_norm: str) -> list[dict]:
+    """Every sighting of a plate (the camera's read or Otso's), oldest first: kept reads, then older days' summaries."""
+    rows = db.all("SELECT id, pass_id, ts, camera_id, direction, vehicle_type, plate, confidence FROM vehicle_reads "
+                  "WHERE plate=? OR otso_plate=? ORDER BY ts", [plate_norm, plate_norm])
+    out = _pass_sightings(rows)
+    for d in db.all("SELECT camera_id, day, sightings FROM plate_days WHERE plate=?", [plate_norm]):
+        midnight = dt.datetime.strptime(d["day"], "%Y-%m-%d").timestamp()
+        for minute, direction, vehicle in json.loads(d["sightings"]):
+            out.append({"ts": midnight + minute * 60, "camera_id": d["camera_id"], "direction": direction, "vehicle": vehicle})
+    return sorted(out, key=lambda s: s["ts"])
+
+
+def roll_up(cutoff: float) -> int:
+    """Before reads older than cutoff go: their sightings, per camera, plate and day, into plate_days. Returns how many."""
+    rows = db.all("SELECT id, pass_id, ts, camera_id, direction, vehicle_type, plate, otso_plate, confidence FROM vehicle_reads "
+                  "WHERE ts < ? AND (plate IS NOT NULL OR otso_plate IS NOT NULL) ORDER BY ts", [cutoff])
+    passes: dict[int, list] = {}
+    for r in rows:
+        passes.setdefault(r["pass_id"] or r["id"], []).append(r)
+    days: dict[tuple, list] = {}
+    for reads in passes.values():
+        s = _pass_sightings(reads)
+        if not s:
+            continue
+        t = dt.datetime.fromtimestamp(s[0]["ts"])
+        for p in {p for r in reads for p in (r["plate"], r["otso_plate"]) if p}:   # a pass read 671AED and 3671AED: both
+            days.setdefault((s[0]["camera_id"], p, t.strftime("%Y-%m-%d")), []).append(
+                [t.hour * 60 + t.minute, s[0]["direction"], s[0]["vehicle"]])
+    for (cam, p, day), new in days.items():
+        old = db.one("SELECT sightings FROM plate_days WHERE camera_id=? AND plate=? AND day=?", [cam, p, day])
+        db.execute("INSERT INTO plate_days (camera_id, plate, day, sightings) VALUES (?,?,?,?) "
+                   "ON CONFLICT(camera_id, plate, day) DO UPDATE SET sightings=excluded.sightings",
+                   [cam, p, day, json.dumps((json.loads(old["sightings"]) if old else []) + new)])
+    return sum(len(v) for v in days.values())
+
+
+def clock(minute: float) -> str:
+    h, m = divmod(int(round(minute)), 60)
+    return f"{(h % 12) or 12}:{m:02d} {'AM' if h % 24 < 12 else 'PM'}"
+
+
+def times(n: int) -> str:
+    return {1: "once", 2: "twice"}.get(n, f"{n} times")
+
+
+def clock_span(lo: float, hi: float) -> str:
+    """"8:04-8:30 AM", "11:50 AM-12:10 PM"."""
+    a, b = clock(lo), clock(hi)
+    return f"{a[:-3]}-{b}" if a[-2:] == b[-2:] else f"{a}-{b}"
+
+
+def day_text(d: dt.date, today: dt.date) -> str:
+    if d == today:
+        return "today"
+    if d == today - dt.timedelta(days=1):
+        return "yesterday"
+    return f"{d:%b} {d.day}" + (f", {d.year}" if d.year != today.year else "")
+
+
+def habits(seen: list[dict]) -> list[dict]:
+    """Times of day a plate keeps coming back at: groups of sightings within HABIT_GAP_MIN of each other holding
+    HABIT_SHARE of them; each with its middle time, range, weekday share and the direction most of them went."""
+    when = [(dt.datetime.fromtimestamp(s["ts"]), s) for s in seen]
+    mins = sorted(((t.hour * 60 + t.minute, t.weekday(), s) for t, s in when), key=lambda x: x[0])
+    groups: list[list] = []
+    for m in mins:
+        if groups and m[0] - groups[-1][-1][0] <= HABIT_GAP_MIN:
+            groups[-1].append(m)
+        else:
+            groups.append([m])
+    out = []
+    for g in groups:
+        days = {dt.date.fromtimestamp(x[2]["ts"]) for x in g}
+        if len(g) < max(2, HABIT_SHARE * len(seen)) or len(days) < HABIT_DAYS:
+            continue
+        d = [x[2]["direction"] for x in g if x[2]["direction"]]
+        top = max(set(d), key=d.count) if d else None
+        out.append({"n": len(g), "days": len(days), "mid": g[len(g) // 2][0], "lo": g[0][0], "hi": g[-1][0],
+                    "weekdays_only": all(x.weekday() < 5 for x in days), "weekends_only": all(x.weekday() >= 5 for x in days),
+                    "direction": top if top and d.count(top) >= 0.75 * len(g) else None})
+    return out
+
+
+def plate_notes(plate_norm: str, this_ts: float, now: float | None = None) -> dict:
+    """Ask Otso's notes on a plate: how often, when and which way it is usually seen, when last, on which vehicles."""
+    now = now or time.time()
+    today = dt.date.fromtimestamp(now)
+    seen = sightings(plate_norm)
+    notes: list[str] = []
+    if len(seen) <= 1:
+        return {"plate": plate_norm, "notes": ["The first time this plate has been seen here."], "sightings": len(seen)}
+    first = dt.date.fromtimestamp(seen[0]["ts"])
+    this_year = sum(dt.date.fromtimestamp(s["ts"]).year == today.year for s in seen)
+    notes.append(f"Seen {len(seen)} times today." if first == today else
+                 f"Seen {len(seen)} times since {day_text(first, today)}"
+                 + (f", {this_year} of them this year." if first.year < today.year else "."))
+    names = {c["id"]: c["name"] for c in db.all("SELECT id, name FROM cameras")}
+    before = [s for s in seen if s["ts"] < this_ts - PASS_GAP_S]
+    cams = {s["camera_id"] for s in seen}
+    if before:
+        s = before[-1]
+        t = dt.datetime.fromtimestamp(s["ts"])
+        notes.append(f"Before this, last seen {day_text(t.date(), today)} at {clock(t.hour * 60 + t.minute)}"
+                     + (f" on {names.get(s['camera_id'], s['camera_id'])}" if len(cams) > 1 else "")
+                     + (f", {DIRECTION_WORDS[s['direction']]}" if s["direction"] in DIRECTION_WORDS else "") + ".")
+    if len(seen) >= 3:
+        hs = habits(seen)
+        if not hs and len({dt.date.fromtimestamp(s["ts"]) for s in seen}) >= 3:
+            notes.append("Seen at different times of day, no usual time.")
+        for h in hs:
+            when = ("on weekdays " if h["weekdays_only"] and h["days"] >= WEEKDAY_DAYS
+                    else "at weekends " if h["weekends_only"] and h["days"] >= 3 else "")
+            span = f" ({clock_span(h['lo'], h['hi'])})" if h["hi"] - h["lo"] >= 5 else ""
+            way = f", {DIRECTION_WORDS[h['direction']]}" if h["direction"] in DIRECTION_WORDS else ""
+            notes.append(f"Usually {when}around {clock(round(h['mid'] / 5) * 5)}{span}{way}: {h['n']} of {len(seen)} times, "
+                         f"on {h['days']} days.")
+    # how often lately: over the last RATE_DAYS (or since first seen, when that is sooner)
+    span_days = min((today - first).days + 1, RATE_DAYS)   # calendar days, today counted
+    recent = [s for s in seen if (today - dt.date.fromtimestamp(s["ts"])).days < span_days]
+    days_seen = len({dt.date.fromtimestamp(s["ts"]) for s in recent})
+    over = f"over the last {span_days // 7} weeks" if span_days == RATE_DAYS else f"since {day_text(first, today)}"
+    if span_days >= 14:
+        per_week = round(len(recent) / (span_days / 7))
+        per_month = round(len(recent) / (span_days / 30))
+        notes.append(f"About {times(per_week)} a week {over}, on {days_seen} of {span_days} days." if per_week >= 1
+                     else f"About {times(per_month)} a month {over}." if per_month >= 1 else f"Seen {times(len(recent))} {over}.")
+    elif span_days >= 2:
+        notes.append(f"On {days_seen} of the last {span_days} days.")
+    types: dict[str, int] = {}
+    for s in seen:
+        if s["vehicle"]:
+            types[s["vehicle"]] = types.get(s["vehicle"], 0) + 1
+    shown = {k: v for k, v in types.items() if v >= 2 and v >= 0.2 * len(seen)}
+    if len(shown) > 1:
+        notes.append("Seen on different kinds of vehicle (" + ", ".join(f"{k} {v} times" for k, v in sorted(shown.items(), key=lambda x: -x[1]))
+                     + "): the plate may be misread, or on more than one vehicle.")
+    if len(cams) > 1:
+        per = {c: sum(s["camera_id"] == c for s in seen) for c in cams}
+        notes.append("By camera: " + ", ".join(f"{names.get(c, c)} {n}" for c, n in sorted(per.items(), key=lambda x: -x[1])) + ".")
+    return {"plate": plate_norm, "notes": notes, "sightings": len(seen)}
 
 
 # ---------------------------------------------------------------- events
@@ -1006,10 +1181,14 @@ def ask_evidence(question: str, since: float | None, until: float | None, now: f
 # ---------------------------------------------------------------- retention
 
 def prune(keep_days: int | None = None, now: float | None = None) -> int:
-    """Reads and their crops older than keep_days (an alarm event keeps its own copy of the picture). Returns rows deleted."""
+    """Reads and their crops older than keep_days (an alarm event keeps its own copy of the picture), their plates'
+    sightings kept first (roll_up) for traffic_history_days. Returns rows deleted."""
     keep_days = keep_days if keep_days is not None else settings.traffic_keep_days
     cutoff = (now or time.time()) - keep_days * 86400
+    roll_up(cutoff)
     n = db.execute("DELETE FROM vehicle_reads WHERE ts < ?", [cutoff]).rowcount or 0
+    oldest = dt.datetime.fromtimestamp((now or time.time()) - settings.traffic_history_days * 86400).strftime("%Y-%m-%d")
+    db.execute("DELETE FROM plate_days WHERE day < ?", [oldest])
     day = dt.datetime.fromtimestamp(cutoff).strftime("%Y-%m-%d")
     root = media_root()
     if root.is_dir():

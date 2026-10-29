@@ -1383,6 +1383,8 @@ body:has(.drag-ghost) { cursor: grabbing; user-select: none; }
 .plate-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; margin: 0; }
 .plate-facts dt { color: var(--muted); font-size: 12px; }
 .plate-facts dd { margin: 0; }
+.otso-notes { margin: 6px 0 0; padding-left: 18px; font-size: 13px; line-height: 1.45; }
+.otso-notes li + li { margin-top: 2px; }
 .plates-add { gap: 4px; }
 .plate-pass { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .plate-pass li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }

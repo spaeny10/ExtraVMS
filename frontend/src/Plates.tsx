@@ -3,8 +3,9 @@
  *  - Reads: search a plate or part of one (near plates, one character off, come back as "Possible: …" chips that search
  *    them), filters, the reads newest first with their plate and vehicle crops, "Load more" by before_id; a read opens
  *    a panel with the larger picture and the other reads of that vehicle's pass, and its event when it has one. The
- *    camera's reader misses plates its own crops show (cam8: plates ~60 px wide), so the panel has Read plate: Otso
- *    reads the vehicle crop (operator), its answer shown and kept beside the camera's, and searchable. A read the camera
+ *    camera's reader misses plates its own crops show (cam8: plates ~60 px wide), so the panel has Ask Otso: Otso
+ *    reads the plate from the camera's crops (operator), its answer shown and kept beside the camera's, and searchable,
+ *    with notes on the plate's history (how often, when, which way; counted on the server). A read the camera
  *    sent without a vehicle picture shows one cut from the recording (the server does it, marked "From the recording"),
  *    and Timeline opens the recording at the read's moment to check it.
  *  - Lists: allow / deny / watch plates with a note and an optional expiry. Deny and watch hits raise an alarm event
@@ -325,9 +326,8 @@ function ReadPanel({ a, id: initial, name, onClose, onEvent, onTimeline }: {
       const res = await a.trafficReadPlate(r.id);
       setR({ ...res.read, pass: r.pass });
       if (res.result === "read" && res.plate) {
-        toast.success(`Otso read ${formatPlate(res.plate, res.region)}`);
         if (res.list && res.list.list !== "allow") toast.error(`${formatPlate(res.plate)} is ${res.list.match === "near" ? "one character off a plate " : ""}on the ${res.list.list} list${res.list.note ? ` (${res.list.note})` : ""}`);
-      } else toast.error("Otso couldn't read this plate either");
+      } else if (res.result === "unreadable" && !r.plate) toast.error("Otso couldn't read this plate either");
     } catch (e) { toast.error(plateError(e)); }
     setReading(false);
   };
@@ -384,7 +384,12 @@ function ReadPanel({ a, id: initial, name, onClose, onEvent, onTimeline }: {
               </div>
               <dl className="plate-facts">
                 {r.plate_raw && r.plate_raw !== r.plate && <><dt>As read</dt><dd>{r.plate_raw}</dd></>}
-                {r.otso && <><dt>Otso</dt><dd>{otsoText(r.otso)} <span className="muted small">(read on request, {new Date(r.otso.at * 1000).toLocaleTimeString()})</span></dd></>}
+                {r.otso && <><dt>Otso</dt><dd>{otsoText(r.otso)} <span className="muted small">(asked, {new Date(r.otso.at * 1000).toLocaleTimeString()})</span>
+                  {!!r.otso.notes?.length && <ul className="otso-notes">
+                    {r.otso.about && r.otso.about !== r.plate && <li className="muted">About {formatPlate(r.otso.about)}:</li>}
+                    {r.otso.notes.map((n) => <li key={n}>{n}</li>)}
+                  </ul>}
+                </dd></>}
                 {r.region && <><dt>State</dt><dd>{r.region} <span className="muted small">(reported by the camera: a hint)</span></dd></>}
                 <dt>Vehicle</dt><dd>{vehicleText(r) || <span className="muted">not given</span>}</dd>
                 {r.direction && <><dt>Direction</dt><dd>{directionText(r.direction)}</dd></>}
@@ -399,10 +404,10 @@ function ReadPanel({ a, id: initial, name, onClose, onEvent, onTimeline }: {
                 <button className="ghost" onClick={() => onTimeline(r.camera_id, r.ts)} title="The recording at this moment">
                   <Icon name="timeline" size={14} /> Timeline
                 </button>
-                {r.images.includes("vehicle") && (
+                {(r.images.includes("vehicle") || r.images.includes("plate") || !!r.plate) && (
                   <button className="ghost" disabled={reading} onClick={readPlate}
-                    title="Otso looks at the camera's picture of this vehicle and reads the plate only if it is clearly legible">
-                    <Icon name="sparkle" size={14} /> {reading ? "Reading…" : r.otso ? "Read again" : r.plate ? "Check with Otso" : "Read plate"}
+                    title="Otso reads the plate from the camera's pictures and says how often, when and which way it is usually seen">
+                    <Icon name="sparkle" size={14} /> {reading ? "Asking Otso…" : r.otso ? "Ask again" : "Ask Otso"}
                   </button>
                 )}
                 {knownPlate(r) && <span className="row small plates-add">
