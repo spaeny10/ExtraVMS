@@ -356,6 +356,15 @@ CREATE TABLE IF NOT EXISTS vehicle_reads (
 CREATE INDEX IF NOT EXISTS vehicle_reads_cam_ts ON vehicle_reads(camera_id, ts);
 CREATE INDEX IF NOT EXISTS vehicle_reads_ts ON vehicle_reads(ts);
 CREATE INDEX IF NOT EXISTS vehicle_reads_plate ON vehicle_reads(plate);
+-- Where a traffic camera's reads sit in each recording segment (traffic.Aligner), kept so a restart doesn't learn it
+-- again with wide searches over the recording disk
+CREATE TABLE IF NOT EXISTS recording_offsets (
+    camera_id   TEXT NOT NULL,
+    segment     REAL NOT NULL,                    -- the segment's start (frames.find_segment)
+    offset_s    REAL NOT NULL,
+    learned_at  REAL NOT NULL,
+    PRIMARY KEY (camera_id, segment)
+);
 -- Plate lists (traffic.py): allow (marks the read, no alarm), deny (a high-priority alarm), watch (medium)
 CREATE TABLE IF NOT EXISTS plate_lists (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -678,6 +678,41 @@ def test_backfill_queues_recent_reads_without_a_picture():
     traffic.from_recording.queued.clear()
 
 
+def test_offsets_kept_and_older_reads_gentle():
+    """A segment's offset survives a restart (recording_offsets); an older read is cut only at a known offset, never
+    with a wide search over the recording disk."""
+    from nvr import frames
+    reset()
+    db.execute("DELETE FROM recording_offsets")
+    c = cam()
+    rec = FakeRecording(0.75)
+    real = frames.recording_frames, frames.recorded_frame, traffic.recording_segment
+    frames.recording_frames, frames.recorded_frame = rec.recording_frames, rec.recorded_frame
+    traffic.recording_segment = lambda camera_id, t: 3000.0
+    traffic.aligner.found.clear()
+    try:
+        t0 = time.time()
+        for k in range(2):
+            tex = _texture(100 + k)
+            rec.show(t0 + k * 20, tex)
+            rid = traffic.ingest(c, push_read(f"KEP{k}111", "0.9", at=t0 + k * 20, vehicle_snapshot="-", license_plate_snapshot=_b64(tex)), t0 + k * 20 + 0.5)["read_id"]
+            assert traffic.cut_from_recording(rid) is True
+        assert db.one("SELECT offset_s FROM recording_offsets WHERE camera_id='cam8' AND segment=3000.0")["offset_s"] == 0.75
+        traffic.aligner.found.clear()   # a restart
+        assert traffic.aligner.offset("cam8", 3000.0) == 0.75
+        # an older read in a segment with no known offset waits; it never searches wide
+        traffic.recording_segment = lambda camera_id, t: 4000.0
+        old = traffic.ingest(c, push_read("OLD9999", "0.9", at=t0 - 3600, vehicle_snapshot="-"), t0 - 3600 + 0.5)["read_id"]
+        db.execute("UPDATE vehicle_reads SET received_at=? WHERE id=?", [t0 - 3600, old])
+        before = len(rec.calls)
+        assert traffic.cut_from_recording(old) is None and len(rec.calls) == before
+    finally:
+        frames.recording_frames, frames.recorded_frame, traffic.recording_segment = real
+        traffic.aligner.found.clear()
+        traffic.from_recording.due.clear()
+        traffic.from_recording.queued.clear()
+
+
 def test_hub_roles():
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "hub"))
     from hub import roles

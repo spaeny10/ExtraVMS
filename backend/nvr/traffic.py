@@ -25,7 +25,10 @@ statusReportInterval (300 s). The camera resends a missed push only when it has 
   (REC_TRIES x REC_RETRY_S, the life of a segment) rather than show a guess. Cuts run one at a time on CUT_POOL, never
   in the shared pool: there a page of reads asking for their pictures filled it (TSS-DT 2026-10-28: the disk check queued behind them and read as a hung disk, a Read plate timed
   out). A picture asked for before it is cut answers 404 at once and the read is queued; older reads without one are
-  queued at start-up (BACKFILL_DAYS).
+  queued at start-up (BACKFILL_DAYS). The recording disk is a shared HDD: a fresh read's moment is still in memory, an
+  older one is read back from the disk (cam8's 4K segments; MediaMTX's listing timed out for every camera while
+  older reads were cut), so a segment's learned offset is kept (recording_offsets) and an older read is cut only at
+  a known offset (NARROW, ~2 s of video), one every OLD_GAP_S, never with a wide search.
 - Passes: reads of one camera less than PASS_GAP_S apart whose plates share PASS_COMMON characters in order are one
   pass (671AED / 3671AED / 387AED); `best` marks the most confident. A parked vehicle is one pass too: the camera
   re-reads it every few seconds (cam8 aimed at a car lot, 2026-10-28: one blue car 56 times in a minute), so a read of
@@ -92,6 +95,8 @@ REC_TRIES = 15                     # ...tried again REC_RETRY_S apart while the 
 REC_RETRY_S = 60.0                 # there: a 10-minute segment has a few strong matches by then (fewer at night)
 BACKFILL_DAYS = 3                  # at start-up, reads this recent still without a vehicle picture are queued
 BACKFILL_TRIES = REC_TRIES - 2     # ...with fewer tries (an old segment's offset may never be learned)
+FRESH_S = 600.0                    # a read this recent may be searched wide (its recording is still in memory)
+OLD_GAP_S = 5.0                    # an older read is cut at most this often (the recording disk is shared)
 CUT_POOL = ThreadPoolExecutor(2, thread_name_prefix="traffic-cut")   # decode + match: off the shared pool
 STRONG_MATCH = 0.93                # plate crop vs recording: a match this strong places the read (right: 0.97-0.99)
 AGREE = 2                          # ...and a segment's offset is taken once this many strong matches agree
@@ -501,7 +506,10 @@ class Aligner:
         with self.lock:
             q = sorted(self.found.get((camera_id, seg)) or [])
         group = max(([d for d in q if abs(d - c) <= AGREE_S] for c in q), key=len, default=[])
-        return float(group[len(group) // 2]) if len(group) >= AGREE else None
+        if len(group) >= AGREE:
+            return float(group[len(group) // 2])
+        row = db.one("SELECT offset_s FROM recording_offsets WHERE camera_id=? AND segment=?", [camera_id, seg])
+        return float(row["offset_s"]) if row else None   # learned before a restart
 
     def learn(self, camera_id: str, seg: float, d: float) -> None:
         with self.lock:
@@ -509,6 +517,11 @@ class Aligner:
             if len(self.found) > 500:   # old segments
                 for k in sorted(self.found, key=lambda k: k[1])[:250]:
                     del self.found[k]
+        known = self.offset(camera_id, seg)
+        if known is not None and len(self.found.get((camera_id, seg)) or []) >= AGREE:
+            db.execute("INSERT INTO recording_offsets (camera_id, segment, offset_s, learned_at) VALUES (?,?,?,?) "
+                       "ON CONFLICT(camera_id, segment) DO UPDATE SET offset_s=excluded.offset_s, learned_at=excluded.learned_at",
+                       [camera_id, seg, known, time.time()])
 
 
 aligner = Aligner()
@@ -550,6 +563,8 @@ def cut_from_recording(read_id: int) -> bool | None:
     if seg is None:
         return False
     learned = aligner.offset(cam, seg)
+    if learned is None and time.time() - r["received_at"] > FRESH_S:
+        return None   # an older read: only at a known offset (a wide search reads ~20 s of video back from the disk)
     frame, d = None, learned
     pf = settings.data_dir / images["plate"] if images.get("plate") else None
     pc = cv2.imread(str(pf), cv2.IMREAD_GRAYSCALE) if pf is not None and pf.is_file() and r["plate_box"] else None
@@ -627,6 +642,9 @@ class FromRecording:
             log.exception("traffic: queueing older reads for pictures failed")
         while True:
             for _at, read_id, tries in self.take(time.time()):
+                r = db.one("SELECT received_at FROM vehicle_reads WHERE id=?", [read_id])
+                if r and time.time() - r["received_at"] > FRESH_S:
+                    await asyncio.sleep(OLD_GAP_S)   # read back from the recording disk: gently
                 try:
                     done = await loop.run_in_executor(CUT_POOL, cut_from_recording, read_id)
                 except Exception:  # noqa: BLE001 - one read's picture must not stop the rest
