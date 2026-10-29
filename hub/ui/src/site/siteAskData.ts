@@ -164,6 +164,8 @@ export type References = {
   /** the refs the answer cites that exist in its evidence */
   cited: Set<string>;
   events: number; footage: number; journeys: number; gaps: number;
+  /** a traffic camera's plate reads (rows) */
+  plates?: number;
 };
 
 /**
@@ -185,7 +187,7 @@ export function buildReferences(items: readonly SiteAskSource[] | undefined, tex
   const rows = sorted.filter((x) => !isCard(x) && x.kind !== "note");
   const n = (k: SiteAskSource["kind"]) => list.filter((x) => x.kind === k).length;
   return { cards, rows, cited: new Set(order.keys()), events: cards.filter((x) => x.kind === "event").length, footage: n("footage"),
-    journeys: n("journey"), gaps: n("gap") };
+    journeys: n("journey"), gaps: n("gap"), plates: n("plate") };
 }
 
 /**
@@ -208,10 +210,11 @@ export function splitSources(items: readonly SiteAskSource[], text: string): { c
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
-/** "6 events · 2 footage moments · 1 journey"; "Nothing matched" when there is no evidence. */
-export function refCountsLine(r: Pick<References, "events" | "footage" | "journeys" | "gaps">): string {
+/** "6 events · 2 footage moments · 1 journey · 15 plate reads"; "Nothing matched" when there is no evidence. */
+export function refCountsLine(r: Pick<References, "events" | "footage" | "journeys" | "gaps" | "plates">): string {
   const parts: string[] = [];
   if (r.events) parts.push(plural(r.events, "event"));
+  if (r.plates) parts.push(plural(r.plates, "plate read"));
   if (r.footage) parts.push(plural(r.footage, "footage moment"));
   if (r.journeys) parts.push(plural(r.journeys, "journey"));
   if (r.gaps) parts.push(plural(r.gaps, "recording gap"));

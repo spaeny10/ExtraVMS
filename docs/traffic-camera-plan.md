@@ -126,6 +126,15 @@ Decided while building:
     many plates today?", Otso counted the sample and said 16 when there were 1,079. Now every plate question gets a
     counted totals note per camera first (`traffic.ask_totals`: vehicles, those with a plate, different plates, noise
     left out), and a named plate gets its count of passes.
+  - **Ask knows which plates came back, and talks like a teammate.** A real conversation went wrong after the count:
+    "top 5 visitors?" went to people, "I mean captured plates" restated the count, and "which plates were seen more
+    than once?" got "the evidence does not list...". Now a general plate question also gets the plates seen more than
+    once in the period, counted, with their times, direction and vehicle (`traffic.ask_repeats`). A follow-up to a plate
+    question stays on plates, in that period (`previous`). "Visitors", "regulars", "repeat" and "often" count as plate
+    words. Both answer prompts share one voice (`VOICE`): first person, the answer first, never "the evidence" or "the
+    sample", and a clarification answers the earlier question again. The hub's Sources line counts plate reads. The
+    replayed conversation then answered: 1,225 plates; the top 5 by plate; the same list when told "I mean plates"; the
+    10 plates seen more than once.
   - **Year totals outlive the 30-day reads.** Before reads are pruned, each sighting's time of day, direction and
     vehicle type is kept per plate and day in `plate_days`, without pictures, for `traffic_history_days` (400).
 - **Reads that aren't a vehicle are hidden.** At night cam8 read the car lot's sign as plates ("556BE", up to ~6 a

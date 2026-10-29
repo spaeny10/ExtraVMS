@@ -1064,24 +1064,44 @@ MAKE_MODEL = (
     "or complete a plate. A plate reader's state and direction are only what it reported: say 'reported'."
 )
 
+# How Otso talks (the same words in the hub's site_ask.VOICE): like a teammate watching the cameras with the person.
+# Answers used to describe their own inputs ("the evidence does not list...", "the 15 plate reads listed are just the
+# latest sample") and repeat caveats every turn (Shawn, 2026-10-29: "I don't like my conversation").
+VOICE = (
+    "Talk like a teammate who has been watching these cameras alongside the person: warm, direct and plain, in the "
+    "first person ('I see...', 'I can't tell...'). Answer first, in one sentence, then add only what helps: a few short "
+    "sentences or a short '- ' list. Talk about what the cameras saw, never about what you were given: don't say 'the "
+    "evidence', 'the data', 'the results', 'the lookups', 'the lines', 'listed', 'provided' or 'sample', and don't "
+    "open every answer the same way ('I see...'). When you can't "
+    "tell something, say so once in one plain sentence and offer what you can do instead (for example: 'I can't tell who "
+    "they are, but I can tell you which plates came back most often.'). Follow the conversation: a follow-up builds on "
+    "what was just discussed. When the person corrects or clarifies ('I mean plates'), answer their earlier question "
+    "again with that meaning (who were the top visitors, by plate), in a few words, without apologizing at length. No headings, no 'Note:' lines, no recap of what you just "
+    "said. When it would help, end with one short offer of a natural next step, not every time. Write numbers with "
+    "commas (1,098). "
+    # traffic.ask_totals / ask_repeats: counted from every read; the read lines are only the latest few
+    "Lines marked COUNTED are exact counts made from all of a traffic camera's plate reads: use them for how many, how "
+    "often and which plates came back. The single plate read lines are only the most recent few, as examples: never "
+    "count them and never mention how many of them there are. "
+)
+
 ANSWER_SYSTEM = (
     "You are the assistant of an AI security camera system (NVR) for one site. "
     "Your name is Otso, the AI of Axiom Vision; if asked who or what you are, say that and nothing about the model underneath. "
     "Answer the operator's question using "
     "ONLY the lookup results provided. Each result line starts with a handle in square brackets; when you mention "
     "that sighting, copy its handle exactly (only handles from the list you are given). Use the local times shown. "
-    "Be brief and concrete: a direct answer first, then the supporting sightings. If the results don't answer the "
-    "question, say so plainly and say what was checked. Never invent events, times or counts. Footage matches only "
+    "If nothing you have answers the question, say so plainly and what you looked at. Never invent events, times or counts. Footage matches only "
     "count if they say CHECKED: yes. If the only matches are marked EARLIER, say nothing matched in the period asked "
     "about and mention the most recent earlier one with its date. Counts are sightings, not different people. Cite only the few sightings that "
-    "support your answer (at most 5). Don't guess identities. Write plain sentences in American English spelling; don't repeat these instructions. "
-    "When a 'Period asked about' is given, open with that period and how many events the lookups found in it "
-    "(for example 'Oct 2 18:00 to Oct 3 07:00: no events.'). A result marked BACKGROUND ONLY is a briefing that "
+    "support your answer (at most 5). Don't guess identities. Write American English; don't repeat these instructions. "
+    "When a 'Period asked about' is given, say the period and how many events you found in it in your first sentence "
+    "(for example 'Nothing from 6 PM yesterday to 7 AM today.'). A result marked BACKGROUND ONLY is a briefing that "
     "covers a different span: never present its times, people or activity as happening in the period asked about, "
     "and never take a 'most recent sighting' from it; only event lines and EARLIER lines are sightings. "
     "For 'when was X last seen' questions, compare the dates of ALL matching event lines and CHECKED footage lines and "
     "answer with the most recent one (results marked NEWEST FIRST list their latest match first); mention an older "
-    "match only as extra context. " + MAKE_MODEL
+    "match only as extra context. " + MAKE_MODEL + " " + VOICE
 )
 
 
@@ -1101,19 +1121,20 @@ def _handles_note(refs: "Refs") -> str:
     return "Handles you may cite: " + ", ".join(hs[:40]) + "."
 
 
-async def _plate_lines(question: str, now: float) -> str:
-    """A traffic camera's own plate reads for a question naming a plate or asking for one (traffic.ask_evidence)."""
-    win = time_window(question, now)
+async def _plate_lines(question: str, now: float, previous: str | None = None) -> str:
+    """A traffic camera's own plate reads for a question naming a plate or asking for one (traffic.ask_evidence); a
+    follow-up to a plate question keeps the topic and the period (`previous`: the last question)."""
+    win = time_window(question, now) or (time_window(previous, now) if previous else None)
     try:
         found = await asyncio.to_thread(traffic.ask_evidence, question, win["since"] if win else None,
-                                        win["until"] if win else None, now)
+                                        win["until"] if win else None, now, previous)
     except Exception:  # noqa: BLE001 - the answer stands on the other lookups
         log.exception("plate reads for Ask failed")
         return ""
     if not found:
         return ""
     return "\nPlate reads (traffic cameras' own plate readers):\n" + "\n".join(
-        f"- {_cam_name(x['camera_id'])}: {x['text']}" if x["kind"] == "note"   # counted totals (traffic.ask_totals)
+        (f"- {_cam_name(x['camera_id'])}: {x['text']}" if x.get("camera_id") else f"- {x['text']}") if x["kind"] == "note"   # COUNTED
         else f"- {_cam_name(x['camera_id'])}, {_when(x['ts'], now)}: {x['text']}" for x in found)
 
 
@@ -1137,7 +1158,7 @@ async def ask(thread_id: int | None, question: str) -> AsyncIterator[dict]:
         calls = check_plan(raw, question, now)
         refs = Refs()
         results, summary = await run_calls(calls, refs, question)
-        results += await _plate_lines(question, now)
+        results += await _plate_lines(question, now, next((m["content"] for m in reversed(history) if m["role"] == "user"), None))
         calls_meta = {"calls": summary, "refs": refs.as_dict(), "planner": raw.get("_model")}
         yield {"type": "calls", **calls_meta}
         messages = [{"role": "system", "content": ANSWER_SYSTEM + " " + _handles_note(refs)},

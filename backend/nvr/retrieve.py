@@ -420,8 +420,11 @@ async def _retrieve(question: str, history: list[dict] | None, now: float | None
     items = keep_class(items, A.class_intent(used))
     window = _window(used, calls, now)
     try:   # a traffic camera's plate reads for a question naming a plate or asking for one (traffic.ask_evidence)
-        items += await asyncio.to_thread(traffic.ask_evidence, used, window["from"] if window else None,
-                                         window["to"] if window else None, now)
+        prev = _last_user(history)
+        # a follow-up keeps the topic and the period: "which plates came back?" after "how many plates today?"
+        pw = window or (_window(prev, [], now) if prev else None)
+        items += await asyncio.to_thread(traffic.ask_evidence, used, pw["from"] if pw else None,
+                                         pw["to"] if pw else None, now, prev)
     except Exception:  # noqa: BLE001 - the rest of the evidence stands without them
         log.exception("retrieve: plate reads failed")
     if window and A.time_window(used, now):

@@ -1153,10 +1153,19 @@ def period_text(since: float, until: float | None, now: float) -> str:
     return f"since {at(since)}" if until is None or until >= now - 60 else f"from {at(since)} to {at(until)}"
 
 
-def ask_totals(since: float, until: float | None, now: float, names: dict[str, str], listed: int,
+REPEATS_LIMIT = 10      # Ask: the plates seen most often in the period, each with up to REPEAT_TIMES of its times
+REPEAT_TIMES = 6
+# words that make a question about the traffic camera's vehicles without saying "plate" ("top 5 visitors?", "regulars")
+# (not "most", "top" or "cars": "the most recent person", "top of the stairs" and "cars in the lot" are about events)
+VISIT_WORDS = {"visitor", "visitors", "regular", "regulars", "repeat", "repeats", "returning", "frequent", "frequently",
+               "often", "twice", "traffic"}
+
+
+def ask_totals(since: float, until: float | None, now: float, names: dict[str, str],
                tokens: list[str] | None = None) -> list[dict]:
-    """Counted totals for Ask, one note per camera: the reads listed are a sample (ASK_LIMIT, the latest), and a model
-    counting them answered "16 plates today" when there were hundreds (TSS-DT 2026-10-29)."""
+    """Counted totals for Ask, one note per camera. The reads listed with them are only the latest few (ASK_LIMIT),
+    and a model counting those answered "16 plates today" when there were 1,079 (TSS-DT 2026-10-29); the hub's and
+    the server's answer rules say to count from these."""
     sql, p = noise_sql()
     end = until if until is not None else now + 1
     period = period_text(since, until, now)
@@ -1167,32 +1176,66 @@ def ask_totals(since: float, until: float | None, now: float, names: dict[str, s
                             f"AND ts < ? AND (plate LIKE ? OR otso_plate LIKE ?) AND NOT {sql} GROUP BY camera_id",
                             [since, end, f"%{t}%", f"%{t}%", *p]):
                 out.append({"kind": "note", "camera_id": r["camera_id"], "camera_name": names.get(r["camera_id"], r["camera_id"]),
-                            "text": f"plate reads matching {t} {period}, counted: {r['n']} vehicle passes"
-                                    + (f" (only the latest {listed} plate reads are listed)" if r["n"] > listed else "")})
+                            "text": f"COUNTED: plate {t} {period}: seen {times(r['n'])}"})
         return out
     for r in db.all(f"SELECT camera_id, COUNT(DISTINCT COALESCE(pass_id, id)) AS passes, "
                     f"COUNT(DISTINCT CASE WHEN plate IS NOT NULL THEN COALESCE(pass_id, id) END) AS with_plate, "
                     f"COUNT(DISTINCT plate) AS plates FROM vehicle_reads WHERE ts >= ? AND ts < ? AND NOT {sql} "
                     f"GROUP BY camera_id", [since, end, *p]):
         out.append({"kind": "note", "camera_id": r["camera_id"], "camera_name": names.get(r["camera_id"], r["camera_id"]),
-                    "text": f"traffic camera totals {period}, counted from all its reads (use these for how many): "
-                            f"{r['passes']} vehicles passed, {r['with_plate']} of them with a license plate read, "
-                            f"{r['plates']} different plates. The plate reads listed are only the latest {listed}, "
-                            f"a sample, not all of them"})
+                    "text": f"COUNTED: {r['with_plate']:,} vehicles with a license plate read {period} "
+                            f"({r['plates']:,} different plates; {r['passes']:,} vehicles passed in all)"})
     return out
 
 
-def ask_evidence(question: str, since: float | None, until: float | None, now: float | None = None) -> list[dict]:
-    """Plate reads for an Ask question: the plates it names (and near ones), or, when it asks about plates without
-    naming one ("tag of the white truck?"), the latest confident reads matching its colour and type words. Items:
-    {kind: "plate", read_id, ts, camera_id, camera_name, plate, confidence, event_id, text}, after a counted totals note
-    per camera ({kind: "note", camera_id, text}: ask_totals). Nothing without reads."""
+def ask_repeats(since: float, until: float | None, now: float, names: dict[str, str]) -> list[dict]:
+    """The plates seen more than once in the period, most first, counted, each with its times, the way it went and the
+    vehicle: "top 5 visitors?", "which plates came back?" (a list of the latest reads can't answer those)."""
+    sql, p = noise_sql()
+    end = until if until is not None else now + 1
+    period = period_text(since, until, now)
+    top = db.all(f"SELECT plate, COUNT(DISTINCT COALESCE(pass_id, id)) AS n FROM vehicle_reads WHERE ts >= ? AND ts < ? "
+                 f"AND plate IS NOT NULL AND NOT {sql} GROUP BY plate HAVING n >= 2 ORDER BY n DESC, MAX(ts) DESC LIMIT ?",
+                 [since, end, *p, REPEATS_LIMIT])
+    if not top:
+        return [{"kind": "note", "camera_id": None, "text": f"COUNTED: no license plate was seen more than once {period}"}]
+    today = dt.date.fromtimestamp(now)
+    lines = []
+    for t in top:
+        rows = db.all("SELECT id, pass_id, ts, camera_id, direction, vehicle_type, vehicle_color, vehicle_brand, plate, confidence "
+                      "FROM vehicle_reads WHERE plate=? AND ts >= ? AND ts < ? ORDER BY ts", [t["plate"], since, end])
+        seen = _pass_sightings(rows)
+        stamps = []
+        for x in seen[-REPEAT_TIMES:]:
+            d = dt.datetime.fromtimestamp(x["ts"])
+            stamps.append((f"{day_text(d.date(), today)} " if d.date() != today else "") + clock(d.hour * 60 + d.minute)
+                          + (f" {DIRECTION_WORDS[x['direction']]}" if x["direction"] in DIRECTION_WORDS else ""))
+        r = next((x for x in reversed(rows) if x["vehicle_type"]), None)
+        what = " ".join(v for v in ((r["vehicle_color"] or "").lower(), (r["vehicle_brand"] or ""), (r["vehicle_type"] or "").lower()) if v) if r else ""
+        cams = {x["camera_id"] for x in seen}
+        lines.append(f"{plate.display(t['plate'])}: {times(t['n'])}"
+                     + (f" (latest {len(stamps)}: " if t["n"] > len(stamps) else " (") + ", ".join(stamps) + ")"
+                     + (f", a {what} (reported)" if what else "")
+                     + (f", on {', '.join(names.get(c, c) for c in sorted(cams))}" if len(cams) > 1 else ""))
+    return [{"kind": "note", "camera_id": None,
+             "text": f"COUNTED: license plates seen more than once {period}, most often first: " + "; ".join(lines)}]
+
+
+def ask_evidence(question: str, since: float | None, until: float | None, now: float | None = None,
+                 previous: str | None = None) -> list[dict]:
+    """Plate reads for an Ask question: the plates it names (and near ones), or, when it asks about plates (or the
+    traffic camera's vehicles, VISIT_WORDS) without naming one, the latest confident reads matching its colour and type
+    words. Items: {kind: "plate", read_id, ts, camera_id, camera_name, plate, confidence, event_id, text}, after counted
+    notes ({kind: "note", text}: ask_totals per camera, and for a general question ask_repeats). `previous`: the last
+    question of the conversation; a follow-up to a plate question ("who were the top 5?") stays on plates. Nothing
+    without reads."""
     if not db.one("SELECT 1 AS x FROM vehicle_reads LIMIT 1"):
         return []
     from .assistant import PLATE_WORDS
     now = now or time.time()
     words = set(re.findall(r"[a-z0-9]+", question.lower()))
-    plate_words = bool(words & PLATE_WORDS)
+    before = set(re.findall(r"[a-z0-9]+", (previous or "").lower()))
+    plate_words = bool(words & PLATE_WORDS) or bool(words & VISIT_WORDS) or bool(before & PLATE_WORDS)
     tokens = plate_tokens(question, plate_words)
     if not tokens and not plate_words:
         return []
@@ -1206,7 +1249,7 @@ def ask_evidence(question: str, since: float | None, until: float | None, now: f
         kind = next((TYPES[w] for w in words if w in TYPES), None)
         rows = search(since=since, until=until, color="gray" if color == "grey" else color, vehicle_type=kind,
                       min_conf=settings.traffic_attach_min_conf, plates_only=True, limit=ASK_LIMIT)["reads"]
-    names = {c["id"]: c["name"] for c in db.cameras()}
+    names = {c["id"]: c["name"] for c in db.cameras() if c.get("traffic")} or {c["id"]: c["name"] for c in db.cameras()}
     seen, out = set(), []
     for r in sorted(rows, key=lambda r: -r["ts"]):
         if r["id"] in seen or not r["plate"]:
@@ -1215,8 +1258,10 @@ def ask_evidence(question: str, since: float | None, until: float | None, now: f
         out.append({"kind": "plate", "read_id": r["id"], "ts": r["ts"], "camera_id": r["camera_id"],
                     "camera_name": names.get(r["camera_id"], r["camera_id"]), "plate": r["plate"],
                     "confidence": r["confidence"], "event_id": r["event_id"], "text": read_line(r)})
-    out = out[:ASK_LIMIT]
-    return ask_totals(since, until, now, names, len(out), tokens) + out
+    notes = ask_totals(since, until, now, names, tokens)
+    if not tokens:
+        notes += ask_repeats(since, until, now, names)
+    return notes + out[:ASK_LIMIT]
 
 
 # ---------------------------------------------------------------- retention

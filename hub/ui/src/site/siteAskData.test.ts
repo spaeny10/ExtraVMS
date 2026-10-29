@@ -135,6 +135,9 @@ describe("References panel", () => {
     const none = buildReferences(undefined, "");
     expect(none.cards).toEqual([]);
     expect(refCountsLine(none)).toBe("Nothing matched");
+    // a plate question's answer rests on plate reads: not "Nothing matched" beside 15 of them
+    expect(refCountsLine({ events: 0, footage: 0, journeys: 0, gaps: 0, plates: 15 })).toBe("15 plate reads");
+    expect(refCountsLine({ events: 1, footage: 0, journeys: 0, gaps: 0, plates: 1 })).toBe("1 event · 1 plate read");
     expect(refCountsLine({ events: 1, footage: 1, journeys: 0, gaps: 0 })).toBe("1 event · 1 footage moment");
   });
 

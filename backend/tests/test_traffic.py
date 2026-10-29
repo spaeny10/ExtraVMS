@@ -430,8 +430,8 @@ def test_ask_evidence():
     named_all = traffic.ask_evidence("was ABC-1234 here at 10pm?", None, None)
     named = reads(named_all)
     assert [x["plate"] for x in named] == ["ABC1234"] and named[0]["kind"] == "plate"
-    assert named_all[0]["kind"] == "note" and "plate reads matching ABC1234 since " in named_all[0]["text"]
-    assert named_all[0]["text"].endswith("counted: 1 vehicle passes")
+    assert named_all[0]["kind"] == "note" and named_all[0]["text"].startswith("COUNTED: plate ABC1234 since ")
+    assert named_all[0]["text"].endswith(": seen once")
     assert "license plate ABC 1234 read by the camera's plate reader (88 % sure; state reported KS)" in named[0]["text"]
     assert "going away (reported)" in named[0]["text"] and named[0]["camera_name"] == "Traffic Camera"
     near = reads(traffic.ask_evidence("plate ABC1284", None, None))
@@ -445,8 +445,22 @@ def test_ask_evidence():
         traffic.ingest(c, push_read(f"MNY{k:04d}", "0.9", at=at), at + 0.5)
     many = traffic.ask_evidence("how many license plates were recorded today?", t0 - 2100, None)
     assert many[0]["kind"] == "note" and many[0]["camera_name"] == "Traffic Camera"
-    assert "23 vehicles passed, 23 of them with a license plate read, 23 different plates" in many[0]["text"]
-    assert "only the latest 15, a sample" in many[0]["text"] and len(reads(many)) == traffic.ASK_LIMIT
+    assert many[0]["text"].startswith("COUNTED: 23 vehicles with a license plate read since ")
+    assert many[0]["text"].endswith("(23 different plates; 23 vehicles passed in all)") and len(reads(many)) == traffic.ASK_LIMIT
+    assert many[1]["text"].startswith("COUNTED: no license plate was seen more than once since ")
+    # "top 5 visitors?" / "which plates came back?": the plates seen most often, counted, with their times
+    for k, m in enumerate((5, 50, 95)):
+        at = t0 - 1990 + m * 10
+        traffic.ingest(c, push_read("RPT1234", "0.9", at=at, vehicle_color="Gray", vehicle_type="SUV"), at + 0.5)
+    rep = traffic.ask_evidence("which plates were seen more than once today?", t0 - 2100, None)
+    line = next(x["text"] for x in rep if x["kind"] == "note" and "more than once" in x["text"])
+    assert line.startswith("COUNTED: license plates seen more than once since ") and "most often first: RPT 1234: 3 times (" in line
+    assert "heading away" in line and line.endswith(", a gray GMC suv (reported)")
+    # a follow-up stays on plates ("who were the top 5 visitors?" after a plate question), and visit words count too
+    assert traffic.ask_evidence("who were the top 5?", t0 - 2100, None) == []
+    assert reads(traffic.ask_evidence("who were the top 5?", t0 - 2100, None, previous="how many plates today?"))
+    assert reads(traffic.ask_evidence("who are the regulars?", t0 - 2100, None))
+    assert traffic.ask_evidence("what was the most recent person?", t0 - 2100, None) == []
     assert traffic.ask_evidence("how many people came in today?", None, None) == []
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "hub"))
     from hub import site_ask
