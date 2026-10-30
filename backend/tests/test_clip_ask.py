@@ -364,7 +364,7 @@ def test_chat_route_mixed_question_gets_two_frames_and_the_search():
 def test_chat_route_instructions_are_still_canned():
     q = FakeQwen()
     chunks = chat(ids["s2"], "Keep an eye out for him", q)
-    assert "Watch this person" in "".join(c.get("text", "") for c in chunks) and not q.calls
+    assert "Grouped by who" in "".join(c.get("text", "") for c in chunks) and not q.calls
     chunks = chat(ids["s2"], "Tell me when he first showed up", q)
     assert q.calls and any(c["type"] == "refs" for c in chunks)
 

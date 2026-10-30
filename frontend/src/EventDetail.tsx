@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  type NamedIdentity,
   api, fmtDuration, fmtTime, fmtWhen, ppeItemsText, type SiteApi,
   type ChatMessage, type ChatRef, type Feedback, type Journey, type NvrEvent, type Synopsis, type Threat, type TimelineEvent, type Verdict, type WeaponCheck,
 } from "./api";
@@ -128,7 +127,6 @@ export function EventDetail({ id: initialId, cameraName, onClose, site = api, va
             {e.feedback?.verdict === "false_alarm" && <span className="badge status-error">Marked false alarm</span>}
             <button className="ghost" onClick={() => { openInTimeline(e); onClose(); }} title="Show this event on the Timeline, playing from just before it">⏱ Open in Timeline</button>
             <LockControl key={`lock${e.id}`} e={e} site={site} onChange={() => site.event(e.id).then(setE)} />
-            {e.status === "verified" && <WatchControl key={`watch${e.id}`} e={e} site={site} onChange={() => site.event(e.id).then(setE)} />}
             {e.status === "open" || e.status === "pending"
               ? <span className="muted small" title="Verification runs automatically once the event ends">{e.status === "open" ? "Still tracking…" : "Verifying…"}</span>
               : <button className="ghost" onClick={() => site.reprocess(e.id).then(onClose).catch((err) => toast.error(err))} title="Run YOLO verification and the synopsis again">Reprocess</button>}
@@ -223,64 +221,6 @@ function JourneySection({ e, site, cameraName, onShow, onOpenTimeline }: {
         })}
       </ol>
     </section>
-  );
-}
-
-/** Put the person (or vehicle) in this clip on the watch list: future sightings that match their appearance are
- * raised to medium priority and shown under Needs attention. Names the fingerprint if it has no name yet. */
-function WatchControl({ e, site, onChange }: { e: NvrEvent; site: SiteApi; onChange: () => void }) {
-  const [ident, setIdent] = useState<(NamedIdentity & { sim: number }) | null | undefined>(undefined);
-  const [open, setOpen] = useState(false);
-  const [name, setName] = useState("");
-  const [note, setNote] = useState("");
-  const [known, setKnown] = useState<NamedIdentity[]>([]);  // so an existing name can be picked (adds this look)
-  const isPerson = e.camera_class === "person";
-  useEffect(() => { site.eventIdentity(e.id).then(setIdent).catch(() => setIdent(null)); }, [e.id, e.watched]);
-  if (ident === undefined) return null;
-  const watching = ident?.watch ? ident : null;
-  const stop = async () => {
-    if (!watching) return;
-    await site.watchIdentity(watching.id, false);
-    toast.success(`Stopped watching ${watching.name}`);
-    onChange();
-  };
-  const start = async (ev: React.FormEvent) => {
-    ev.preventDefault();
-    try {
-      if (ident) {
-        await site.watchIdentity(ident.id, true, note);
-        toast.success(`Watching ${ident.name}: matching sightings will be flagged`);
-      } else {
-        if (!name.trim()) return;
-        await site.nameIdentity({ kind: e.camera_class, name: name.trim(), notes: "", event_ids: [e.id], watch: true, watch_note: note });
-        toast.success(`Watching "${name.trim()}": matching sightings will be flagged`);
-      }
-      setOpen(false);
-      onChange();
-    } catch (err) { toast.error(err); }
-  };
-  if (watching) {
-    return <button className="ghost watch-on" title={`On the watch list${watching.watch_note ? `: ${watching.watch_note}` : ""}. Click to stop.`} onClick={stop}>👁 Watching {watching.name}</button>;
-  }
-  return (
-    <span className="watch-control">
-      <button className="ghost" onClick={() => { setOpen(!open); if (!open) site.identities(e.camera_class as "person" | "vehicle", 0).then((x) => setKnown(x.named)).catch(() => {}); }}
-        title="Flag future sightings of this person's appearance (clothing, build) as medium priority. Re-ID sees the outfit, not the face: name them again in each outfit.">
-        👁 Watch this {isPerson ? "person" : "vehicle"}
-      </button>
-      {open && (
-        <form className="watch-form" onSubmit={start}>
-          {ident
-            ? <span>Recognized as <strong>{ident.name}</strong>.</span>
-            : <><input autoFocus list="known-names-watch" placeholder={isPerson ? "Name (pick a known name to add this look to them)" : "Name, e.g. white van"} value={name} onChange={(ev) => setName(ev.target.value)} />
-                <datalist id="known-names-watch">{known.map((n) => <option key={n.id} value={n.name} />)}</datalist></>}
-          <input placeholder="Why (optional, shown with each sighting)" value={note} onChange={(ev) => setNote(ev.target.value)} />
-          <button type="submit" className="small" disabled={!ident && !name.trim()}>Watch</button>
-          <button type="button" className="ghost small" onClick={() => setOpen(false)}>Cancel</button>
-          <span className="muted small">Matches by appearance, not face; confirm sightings by naming them to sharpen it.</span>
-        </form>
-      )}
-    </span>
   );
 }
 

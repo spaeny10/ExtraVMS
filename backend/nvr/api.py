@@ -1529,8 +1529,9 @@ async def post_chat(event_id: int, body: ChatIn):
         # The chat can't act. Say so from code (the model tends to agree to anything) and point at the real feature.
         canned = ("I can't watch for anyone or send alerts from this chat; I only see this clip. To be told about this "
                   + ("person" if e["camera_class"] == "person" else "vehicle")
-                  + " in future, use **Watch this person** at the top of this event: sightings that match their appearance "
-                  "are then raised to medium priority and shown under Needs attention on Home.")
+                  + " in future, name them in **Find › Grouped by who** and choose **Watch** there: sightings that match "
+                  "their appearance are then raised to medium priority and shown under Needs attention on Home. It "
+                  "matches by clothing, so a change of outfit isn't recognized.")
         msg_id = db.add_chat(event_id, "assistant", canned, frames=[], at=body.at)
 
         async def canned_stream():
