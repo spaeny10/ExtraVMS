@@ -168,6 +168,18 @@ export function gapSkip(lanes: Record<string, { spans: Span[] }>, ids: string[],
   return { gap: true, next };
 }
 
+/** A lane's 👁: whether the camera plays. Isolated, the others don't play whatever the shown list says, so the eye
+ *  adds one to the camera playing (the two side by side; a phone, one camera at a time, switches to it) instead of
+ *  flipping an entry nobody sees. Otherwise it shows or hides the camera, and hiding the isolated one ends the solo. */
+export function eyeToggle(c: LayoutConfig, id: string, allIds: readonly string[], phone = false): LayoutConfig {
+  const solo = c.solo && allIds.includes(c.solo) ? c.solo : null;
+  if (solo && id !== solo) return phone ? { ...c, solo: id, visible: c.visible && !c.visible.includes(id) ? [...c.visible, id] : c.visible }
+    : { ...c, visible: allIds.filter((x) => x === solo || x === id), solo: null };
+  const vis = c.visible ?? [...allIds];
+  const on = vis.includes(id);
+  return { ...c, visible: on ? vis.filter((x) => x !== id) : [...vis, id], solo: on && c.solo === id ? null : c.solo };
+}
+
 /** The sighting a journey starts from here: the first on a camera this Timeline has (allIds), else the first. */
 export const journeyLead = <M extends Sighting>(members: readonly M[], allIds: readonly string[]): M =>
   members.find((m) => allIds.includes(m.cam)) ?? members[0];
@@ -450,11 +462,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
   const savedConfig = layoutId ? layouts.find((l) => l.id === layoutId)?.config : ALL_CAMERAS;
   const dirty = savedConfig ? norm(config) !== norm(savedConfig) : false;
 
-  const toggleVisible = (id: string) => setConfig((c) => {
-    const vis = c.visible ?? allIds;
-    const on = vis.includes(id);
-    return { ...c, visible: on ? vis.filter((x) => x !== id) : [...vis, id], solo: on && c.solo === id ? null : c.solo };
-  });
+  const toggleVisible = (id: string) => setConfig((c) => eyeToggle(c, id, allIds, isPhone));
   const toggleSolo = (id: string) => setConfig((c) => {
     const vis = c.visible ?? allIds;
     return { ...c, visible: vis.includes(id) ? c.visible : [...vis, id], solo: c.solo === id ? null : id };
@@ -1316,11 +1324,13 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
           {laneCams.map((c) => {
             const k = laneKey(c);
             const shown = visibleIds.includes(k);
+            const playing = tileIds.includes(k);
             const dim = (solo != null && solo !== k) || !inRegionScope(k);
             return (
               <div key={k} className={`tl-name-row ${shown ? "" : "lane-hidden"} ${dim ? "lane-dimmed" : ""} ${k === cam ? "active" : ""}`}>
-                <button className={`lane-btn lane-eye ${shown ? "on" : ""}`} onClick={() => toggleVisible(k)}
-                  title={shown ? "Hide this camera" : "Show this camera"} aria-pressed={shown}>{shown ? "👁" : "◌"}</button>
+                <button className={`lane-btn lane-eye ${playing ? "on" : ""}`} onClick={() => toggleVisible(k)}
+                  title={playing ? "Hide this camera" : solo ? (isPhone ? "Show this camera instead" : "Play this camera too") : "Show this camera"}
+                  aria-pressed={playing}>{playing ? "👁" : "◌"}</button>
                 <button className="tl-name" onClick={() => setCam(k)} title={camName(k)}>{camName(k)}</button>
                 {shown && (
                   <button className={`lane-btn lane-solo ${solo === k ? "on" : ""}`} onClick={() => toggleSolo(k)}
