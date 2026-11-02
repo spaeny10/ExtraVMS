@@ -410,9 +410,10 @@ def _current_dst(c: soap.Onvif) -> bool:
         return False
 
 
-def _set_datetime(c: soap.Onvif, mode: str, tz: str | None, warnings: list[str]) -> None:
+def _set_datetime(c: soap.Onvif, mode: str, tz: str | None, warnings: list[str]) -> bool:
     """SetSystemDateAndTime; a camera that refuses the zone (its own TZ notation) is set without it. Without a zone the
-    camera's own daylight-saving setting is sent back as it is."""
+    camera's own daylight-saving setting is sent back as it is. False: the zone was refused."""
+    took = True
     try:
         c.call(c.device_url, datetime_body(mode, tz, dst=False if tz else _current_dst(c)))
     except OnvifError as e:
@@ -422,7 +423,15 @@ def _set_datetime(c: soap.Onvif, mode: str, tz: str | None, warnings: list[str])
         c.call(c.device_url, datetime_body(mode, None, dst=_current_dst(c)))
         warnings.append(f"The camera refused the time zone {tz} ({clean(str(e), c.cam)}); its own time zone was kept. "
                         "Set the zone on the camera's web page.")
+        took = False
     _resync(c)   # set by hand, or the camera's NTP client stepped it at once
+    return took
+
+
+def _utc_text(s: int) -> str:
+    """-21600 -> "UTC-6", 19800 -> "UTC+5:30"."""
+    h, m = divmod(abs(s) // 60, 60)
+    return f"UTC{'-' if s < 0 else '+'}{h}" + (f":{m:02d}" if m else "")
 
 
 STEP_S = 5   # a camera this far off after switching to NTP is set from this server's clock at once
@@ -443,16 +452,21 @@ def set_time(cam: dict, mode: str, ntp_servers: list[str], tz: str | None, zone:
         c = connect(cam)
         if mode == "ntp":
             c.call(c.device_url, ntp_body(ntp_servers))
-            _set_datetime(c, "NTP", tz, warnings)
+            took = _set_datetime(c, "NTP", tz, warnings)
             off = read_time(c).get("offset_s")
             if off is not None and abs(off) > STEP_S:
                 _set_datetime(c, "Manual", None, warnings)
                 _set_datetime(c, "NTP", None, warnings)
                 warnings.append(f"The camera was {abs(off):.0f} s off: set from this server's clock, then back on NTP.")
         else:
-            _set_datetime(c, "Manual", tz, warnings)
+            took = _set_datetime(c, "Manual", tz, warnings)
         _resync(c)
         out = read_time(c, zone)
+    # some cameras (a Reolink) answer OK and keep their own zone: only the time read back shows it
+    check = out.get("zone_check")
+    if tz and took and check and not check["ok"]:
+        warnings.append(f"The camera accepted the time zone but kept its own: it shows {_utc_text(check['camera_s'])} where "
+                        f"{check['zone']} is {_utc_text(check['expected_s'])} now. Set the zone on the camera's web page.")
     return {**out, "warnings": warnings}
 
 

@@ -142,10 +142,11 @@ ME_RULES = ('<tan:GetRulesResponse>'
 
 class FakeCamera:
     """An ONVIF device service on 127.0.0.1. kind: "milesight" | "thermal" | "speaker". Its clock runs `offset` seconds
-    ahead of this machine's; authenticated calls must carry a digest of PW created within 5 s of the camera's clock."""
+    ahead of this machine's; authenticated calls must carry a digest of PW created within 5 s of the camera's clock.
+    ignore_tz: answers OK to a time zone and keeps its own (as a Reolink does)."""
 
-    def __init__(self, kind: str, offset: float = 0.0, reject_tz: bool = False):
-        self.kind, self.offset, self.reject_tz = kind, offset, reject_tz
+    def __init__(self, kind: str, offset: float = 0.0, reject_tz: bool = False, ignore_tz: bool = False):
+        self.kind, self.offset, self.reject_tz, self.ignore_tz = kind, offset, reject_tz, ignore_tz
         self.tz = "UTC+06:00:00" if kind == "milesight" else "CST6"
         self.local_off = -6 * 3600
         self.mode = "Manual"
@@ -263,9 +264,9 @@ class FakeCamera:
             return 500, fault("Invalid TimeZone", "ter:InvalidArgVal")
         self.mode = val(req, "DateTimeType")
         self.dst = val(req, "DaylightSavings")
-        if first(req, "TZ") is not None:
+        if first(req, "TZ") is not None and not self.ignore_tz:
             self.tz = val(req, "TZ")
-            self.local_off = -5 * 3600 if self.tz.startswith("CST6CDT") else self.local_off
+            self.local_off = camdevice.utc_offset_s("America/Chicago") if self.tz.startswith("CST6CDT") else self.local_off
         utc = first(req, "UTCDateTime")
         if utc is not None:
             t = dt.datetime(int(val(utc, "Year")), int(val(utc, "Month")), int(val(utc, "Day")), int(val(utc, "Hour")),
@@ -524,8 +525,7 @@ def test_set_time_ntp_steps_a_far_off_clock():
     assert abs(t["offset_s"]) < 3 and t["mode"] == "NTP" and t["timezone"] == "CST6CDT,M3.2.0,M11.1.0"
     assert t["ntp_servers"] == ["pool.ntp.org", "192.168.105.1"] and any("set from this server" in w for w in t["warnings"])
     assert api.state.ingests["cam3"].meta.resets == 1   # detections are re-timed against the new clock
-    if camdevice.utc_offset_s("America/Chicago") == -5 * 3600:
-        assert t["zone_check"]["ok"] is True
+    assert t["zone_check"]["ok"] is True and not any("kept its own" in w for w in t["warnings"])
     # bad input: refused before the camera is asked
     ME.requests.clear()
     assert call("PUT", "/api/cameras/cam3/device/time", {"mode": "ntp", "ntp_servers": ["pool.ntp.org"], "timezone": "Mars/Base"}).status_code == 422
@@ -551,6 +551,30 @@ def test_sync_now_and_a_refused_zone():
     assert abs(t["offset_s"]) < 3 and t["timezone"] == "CST6" and "refused the time zone" in t["warnings"][0]
     b = UV.bodies("SetSystemDateAndTime")
     assert "<tt:TZ>CST6CDT" in b[0] and "TimeZone" not in b[1] and "<tds:UTCDateTime>" in b[1]
+
+
+def test_a_zone_answered_ok_but_not_applied():
+    # a camera that says OK to the zone and keeps Pacific time: only the time read back shows it, so the answer warns
+    ME.ignore_tz, ME.tz, ME.local_off, ME.offset = True, "UTC+8:00:00DST+7:00:00,M3.2.0/02:00:00,M10.5.0/02:00:00", -8 * 3600, 0
+    try:
+        r = call("PUT", "/api/cameras/cam3/device/time", {"mode": "ntp", "ntp_servers": ["pool.ntp.org"], "timezone": "America/Chicago"})
+        assert r.status_code == 200, r.text
+        t = r.json()
+        assert t["zone_check"]["ok"] is False
+        want = "UTC-5" if camdevice.utc_offset_s("America/Chicago") == -5 * 3600 else "UTC-6"
+        assert [w for w in t["warnings"] if "kept its own" in w] == [
+            f"The camera accepted the time zone but kept its own: it shows UTC-8 where America/Chicago is {want} now. "
+            "Set the zone on the camera's web page."]
+        # the bulk "Fix clocks" passes it on too
+        r = call("POST", "/api/cameras/device/time", {"camera_ids": ["cam3"], "mode": "ntp", "ntp_servers": ["pool.ntp.org"],
+                                                      "timezone": "America/Chicago", "remember": False})
+        assert any("kept its own" in w for w in r.json()["results"][0]["warnings"])
+        # no zone asked for: nothing to warn about
+        t = call("PUT", "/api/cameras/cam3/device/time", {"mode": "ntp", "ntp_servers": ["pool.ntp.org"]}).json()
+        assert not any("kept its own" in w for w in t["warnings"])
+    finally:
+        ME.ignore_tz, ME.tz, ME.local_off = False, "UTC+06:00:00", -6 * 3600
+    assert camdevice._utc_text(-21600) == "UTC-6" and camdevice._utc_text(19800) == "UTC+5:30" and camdevice._utc_text(0) == "UTC+0"
 
 
 def test_video_gov_seconds_and_read_modify_write():
