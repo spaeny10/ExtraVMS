@@ -437,6 +437,14 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
   const visibleIds = allIds.filter((id) => config.visible == null || config.visible.includes(id));
   const solo = config.solo && allIds.includes(config.solo) ? config.solo : null;
   const tileIds = solo ? [solo] : visibleIds;
+  // the lanes of cameras not playing (hidden, or not the isolated one) fold into one "N more cameras" row under the
+  // playing ones; opened or folded is kept per browser. Nothing playing: every lane shows, to turn one on.
+  const [lanesOpen, setLanesOpen] = useState(() => loadNumber(sk("timelineLanesOpen"), 0) === 1);
+  const playingCams = orderedCams.filter((c) => tileIds.includes(laneKey(c)));
+  const folded = orderedCams.length - playingCams.length;
+  const laneCams = lanesOpen || !playingCams.length ? orderedCams : playingCams;
+  const foldRow = folded > 0 && playingCams.length > 0;
+  const toggleLanes = () => setLanesOpen((o) => { saveNumber(sk("timelineLanesOpen"), o ? 0 : 1); return !o; });
   const norm = (c: LayoutConfig) => JSON.stringify({ visible: [...(c.visible ?? allIds)].filter((id) => allIds.includes(id)).sort(), solo: c.solo ?? null,
     order: (c.order ?? []).filter((id) => allIds.includes(id)) });
   const savedConfig = layoutId ? layouts.find((l) => l.id === layoutId)?.config : ALL_CAMERAS;
@@ -748,7 +756,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
   const [showJourneys, setShowJourneys] = useState(() => loadNumber(sk("timelineShowJourneys"), 0) === 1);
   const laneY = (camId: string): number | null => {
     let y = 26; // axis height
-    for (const c of orderedCams) {
+    for (const c of laneCams) {
       const k = laneKey(c);
       const h = visibleIds.includes(k) ? 34 : 18;
       if (k === camId) return visibleIds.includes(k) ? y + h / 2 : null;
@@ -1083,14 +1091,14 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
     const measure = () => {
       const w = gridRef.current?.offsetWidth || window.innerWidth || 1200;
       // what's left for video above the controls, layout bar, filters and lanes (min 240px)
-      const lanesH = 26 + Math.max(1, cameras.length) * 34 + 40;
+      const lanesH = 26 + Math.max(1, laneCams.length) * 34 + (foldRow ? 22 : 0) + 40;
       const vh = window.innerHeight || 900; // a hidden/background tab can report 0
       setBox({ w, h: Math.max(240, vh - 190 - lanesH) });
     };
     measure();
     window.addEventListener("resize", measure);
     return () => window.removeEventListener("resize", measure);
-  }, [cameras.length, tileIds.length]);
+  }, [cameras.length, tileIds.length, laneCams.length, foldRow]);
   const { cols, hero } = tileLayout(tileIds.length, box.w, box.h);
   // the selected camera takes the large slot in the 3-camera layout
   const orderedTiles = hero && tileIds.includes(cam) ? [cam, ...tileIds.filter((id) => id !== cam)] : tileIds;
@@ -1305,7 +1313,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
       <div className="tl" tabIndex={0}>
         <div className="tl-names">
           <div className="tl-axis-spacer" />
-          {orderedCams.map((c) => {
+          {laneCams.map((c) => {
             const k = laneKey(c);
             const shown = visibleIds.includes(k);
             const dim = (solo != null && solo !== k) || !inRegionScope(k);
@@ -1321,6 +1329,14 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
               </div>
             );
           })}
+          {foldRow && (
+            <div className="tl-name-row tl-fold-row">
+              <button className="tl-name tl-fold" onClick={toggleLanes} aria-expanded={lanesOpen}
+                title={lanesOpen ? "Show only the lanes of the cameras playing" : "The cameras not playing (hidden, or not the isolated one): show their lanes"}>
+                {lanesOpen ? "▾ Only cameras playing" : `▸ ${folded} more camera${folded === 1 ? "" : "s"}`}
+              </button>
+            </div>
+          )}
         </div>
         <div
           ref={track}
@@ -1342,7 +1358,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
               </div>
             ))}
           </div>
-          {orderedCams.map((c) => {
+          {laneCams.map((c) => {
             const k = laneKey(c);
             const lane = lanes[k];
             const shown = visibleIds.includes(k);
@@ -1421,6 +1437,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
               </div>
             );
           })}
+          {foldRow && <div className="tl-lane tl-fold-row" />}
           {connectors.length > 0 && (
             <svg className="tl-connectors" width={width} height="100%">
               {connectors.map((sg, i) => {
