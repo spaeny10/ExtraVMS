@@ -243,7 +243,8 @@ def test_tool_lines_and_refs():
 def test_window():
     e = db.event(ids["anchor"])
     w = clipask.window(e, "How many times did he come?", route("How many times did he come?"), NOW)
-    assert w["since"] == DAY and w["until"] == DAY + 24 * H and "clip's day" in w["label"]
+    # the next midnight, not DAY + 24 h: a day the clocks change on is 23 or 25 hours long
+    assert w["since"] == DAY and w["until"] == (dt.datetime.fromtimestamp(DAY) + dt.timedelta(days=1)).timestamp() and "clip's day" in w["label"]
     w = clipask.window(e, "has he ever been here", route("has he ever been here"), NOW)
     assert w["since"] == (dt.datetime.fromtimestamp(DAY) - dt.timedelta(days=clipask.EVER_DAYS)).timestamp() and w["until"] == NOW
     w = clipask.window(e, "how many times in the last 3 days", route("how many times in the last 3 days"), NOW)
