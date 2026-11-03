@@ -36,12 +36,53 @@ class FakeWS:
 
 
 async def _settle(ws: FakeWS):
-    """Let the loop drain what was fed."""
+    """Let the loop drain what was fed, and the heartbeats it handed to their task (agents._heartbeats) finish."""
     for _ in range(100):
         if ws.inbox.empty():
             await asyncio.sleep(0.01)
-            return
+            break
         await asyncio.sleep(0.005)
+    hb = [t for t in asyncio.all_tasks() if t.get_name().startswith("heartbeats-")]
+    if hb:
+        await asyncio.wait(hb, timeout=5)
+
+
+def test_slow_heartbeat_database_work_does_not_hold_the_tunnel():
+    """The heartbeat's database work runs on a thread, after the read loop has moved on: a response head for one of
+    this server's streams, arriving right behind a heartbeat whose database work takes half a second, gets through
+    at once. Heartbeats are still handled one at a time, in order."""
+    from tunnelproto import Stream
+    done: list[float] = []
+
+    def slow_db(site, summary, skew):
+        time.sleep(0.5)
+        done.append(summary["n"])
+
+    async def main():
+        real, agents._heartbeat_db = agents._heartbeat_db, slow_db
+        ws = FakeWS()
+        conn = agents.AgentConn(ws, {"id": "srv-slow", "org_id": "o", "name": "x", "summary": {}}, None, "token")
+        conn.turn_expires = time.time() + 10**6   # no TURN refresh in this test
+        s = Stream(7)
+        conn.streams[7] = s
+        loop = asyncio.create_task(agents.registry._loop(conn))
+        try:
+            t0 = time.monotonic()
+            ws.feed({"t": "heartbeat", "now": time.time(), "summary": {"n": 1}})
+            ws.feed({"t": "heartbeat", "now": time.time(), "summary": {"n": 2}})
+            ws.feed({"t": "res", "id": 7, "status": 200, "headers": {"content-type": "video/mp4"}})
+            await asyncio.wait_for(s.head.wait(), 2)
+            head_s = time.monotonic() - t0
+            await _settle(ws)
+        finally:
+            agents._heartbeat_db = real
+            await ws.close()
+            await loop
+        return head_s
+
+    head_s = asyncio.run(main())
+    assert head_s < 0.2, head_s
+    assert done == [1, 2]
 
 
 def _cams(server_id):

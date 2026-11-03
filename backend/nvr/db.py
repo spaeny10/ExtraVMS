@@ -365,6 +365,18 @@ CREATE TABLE IF NOT EXISTS recording_offsets (
     learned_at  REAL NOT NULL,
     PRIMARY KEY (camera_id, segment)
 );
+-- The recordings index (recindex.py): each finished segment file's span, so the Timeline's listing is a query rather
+-- than MediaMTX opening every file in the window. camera_id is the MediaMTX path (the folder under recordings_dir)
+CREATE TABLE IF NOT EXISTS rec_segments (
+    camera_id   TEXT NOT NULL,
+    name        TEXT NOT NULL,                    -- the file name
+    start_ts    REAL NOT NULL,
+    end_ts      REAL NOT NULL,
+    size        INTEGER NOT NULL,                 -- size and mtime as last read: a change means read the header again
+    mtime       REAL NOT NULL,
+    PRIMARY KEY (camera_id, name)
+);
+CREATE INDEX IF NOT EXISTS rec_segments_cam_start ON rec_segments(camera_id, start_ts);
 -- A plate's sightings from reads that were pruned (traffic.roll_up), for Ask Otso's notes: per camera, plate and day,
 -- sightings = JSON list of [minute of the day, direction, vehicle type], one per pass. No pictures
 CREATE TABLE IF NOT EXISTS plate_days (
@@ -932,6 +944,20 @@ class Database:
         def run(c):
             c.execute("DELETE FROM events_fts WHERE rowid=?", (event_id,))
             c.execute("DELETE FROM events_vec WHERE rowid=?", (event_id,))
+        self._run(run)
+
+    def replace_rec_segments(self, camera_id: str, rows: list[tuple], gone: list[str]) -> None:
+        """recindex: upsert (camera_id, name, start_ts, end_ts, size, mtime) rows and drop the named files, in one go."""
+        def run(c):   # one transaction: the first scan of a camera writes thousands of rows
+            c.execute("BEGIN")
+            try:
+                c.executemany("DELETE FROM rec_segments WHERE camera_id=? AND name=?", [(camera_id, n) for n in gone])
+                c.executemany("INSERT OR REPLACE INTO rec_segments(camera_id, name, start_ts, end_ts, size, mtime) "
+                              "VALUES (?,?,?,?,?,?)", rows)
+                c.execute("COMMIT")
+            except BaseException:
+                c.execute("ROLLBACK")
+                raise
         self._run(run)
 
     def delete_event(self, event_id: int) -> None:

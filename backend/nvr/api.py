@@ -30,7 +30,7 @@ from . import assistant, backup, baseline, cells, footage, frames, health, ident
 from . import synopsis as vlm
 from . import advisor, ai_serve, detector, direct, gpumem, hub_agent, inference, lan_cert, lan_guard, sdbackfill, site_actions, siteconfig
 from . import camweb, deterrence, deterrence_api, device_api, speakers_api, talkdown, traffic, traffic_api
-from . import aischedule, clipask, plate, snapshots, vlmroute
+from . import aischedule, clipask, plate, recindex, snapshots, vlmroute
 from . import summary as summary_mod
 from .config import ROOT, settings
 from .db import JOURNEY_CAMS_SQL, LOCKED_SQL, PRIORITY_RANK_SQL, db, event_filters
@@ -163,7 +163,8 @@ async def lifespan(app: FastAPI):
         ("traffic-retention", traffic.prune_loop()),   # plate reads past traffic_keep_days
         ("traffic-pictures", traffic.from_recording.run()),   # a read sent without a vehicle picture: from the recording
         ("traffic-looks", traffic.looker.run(p)),   # Otso looks at each vehicle when Qwen is free: plate, description
-        ("playback-encoder", playback_encoder()),   # probe the SD encoder now, not on the first hub viewer's request
+        ("playback-encoder", playback_encoder()),
+        ("recordings-index", recindex.run()),   # every segment's span in the database: listings without walking the disk   # probe the SD encoder now, not on the first hub viewer's request
     ]]
     https = _https_server() if settings.direct_enabled else None
     https_task = asyncio.create_task(_serve_https(https), name="https") if https is not None else None
@@ -1911,7 +1912,7 @@ async def recordings(camera_id: str, start: float | None = None, end: float | No
     if not MTX_PATH_RE.fullmatch(camera_id):
         raise HTTPException(400, "bad camera id")
     try:
-        spans = await mediamtx.recording_spans(camera_id, start, end)
+        spans = await recindex.recording_spans(camera_id, start, end)   # the index; MediaMTX for the file being written
     except httpx.HTTPError as e:
         # Keep the lane's events and locks on screen; the recording bar refreshes on the next poll.
         log.warning("recordings %s: MediaMTX listing failed (%s); returning no spans", camera_id, type(e).__name__)

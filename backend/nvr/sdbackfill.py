@@ -29,7 +29,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
 
-from . import fmp4mux, mediamtx, sdreplay
+from . import fmp4mux, mediamtx, recindex, sdreplay
 from .config import settings
 from .db import db
 from .onvif_soap import Onvif, OnvifError, discover_services, find_all, sync_clock, text
@@ -286,7 +286,7 @@ async def camera_gaps(cam: dict, hours: float = LOOKBACK_H, now: float | None = 
     """{camera_id, sd: status, gaps: [{from, to, seconds, on_card}], restored: [rows]} for the last `hours`."""
     now = now or time.time()
     lo, hi = now - hours * 3600, now - TAIL_MARGIN_S
-    lister = list_spans or mediamtx.recording_spans
+    lister = list_spans or recindex.recording_spans   # 24 h of listing: the index, not a walk of the disk
     try:
         listing = await lister(cam["id"], lo - 3600, now)   # from an hour earlier: a hole at `lo` needs the span before it
         error = None

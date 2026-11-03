@@ -13,6 +13,7 @@ schedule goes down in `welcome` and `ai_schedule` frames, the server's Qwen use 
 from __future__ import annotations
 
 import asyncio
+import collections
 import logging
 import time
 
@@ -47,6 +48,10 @@ class AgentConn:
         self.closed = asyncio.Event()
         self.location: dict | None = _location_of(site)   # the Site (locations row) this server belongs to
         self.still_at: dict[str, float] = {}               # camera -> when its last still was taken in
+        # heartbeats are handled by their own task, off the read loop (AgentRegistry._heartbeats), in order (camera
+        # alerts count consecutive bad ones); at most 16 wait (8 min of them), the oldest dropped if the database is stuck
+        self.hb_frames: collections.deque = collections.deque(maxlen=16)
+        self.hb_task: asyncio.Task | None = None
 
     def tag(self) -> dict:
         """What org-wide messages say about where they came from: the server and its Site."""
@@ -196,6 +201,17 @@ def _sync_cameras(site: dict, cams: list, disabled, source: str) -> None:
         cameras.sync(site, cams, full=True, disabled=disabled if isinstance(disabled, list) else None, source=source)
     except Exception:
         log.exception("cameras registry sync for %s", site.get("id"))
+
+
+def _heartbeat_db(site: dict, summary: dict, skew: float) -> None:
+    """A heartbeat's database work, on a worker thread (AgentRegistry._on_heartbeat): the site row, the camera
+    registry, alerts. None of it touches the event loop."""
+    db.run(sa.update(db.sites).where(db.sites.c.id == site["id"]).values(
+        last_seen_at=time.time(), online=True, summary=summary, clock_skew_s=round(skew, 1),
+        version=summary.get("version") or site.get("version")))
+    if isinstance(summary.get("cameras"), list):   # an empty summary says nothing about cameras
+        _sync_cameras(site, summary["cameras"], summary.get("disabled"), "heartbeat")
+    alerts.on_heartbeat(site, summary, skew)
 
 
 def _central_cameras(conn: "AgentConn") -> None:
@@ -369,30 +385,11 @@ class AgentRegistry:
                 await self._on_hello(conn, frame)
             elif t == "heartbeat":
                 conn.last_seen = time.time()
-                prev, summary = conn.summary or (conn.site or {}).get("summary") or {}, frame.get("summary") or {}
-                if summary and "cameras" not in summary and isinstance(prev.get("cameras"), list):
-                    # a minimal heartbeat (the server's database is failing: summary.minimal_summary) has no camera
-                    # data: keep the last known cameras for the site card and camera alerts, with its problems on top
-                    summary = {**prev, **summary, "minimal": True}
-                conn.summary = summary
-                before, after = camera_status(prev), camera_status(summary)
-                if conn.site:
-                    skew = float(frame.get("now") or time.time()) - time.time()
-                    db.run(sa.update(db.sites).where(db.sites.c.id == conn.site_id).values(
-                        last_seen_at=time.time(), online=True, summary=conn.summary, clock_skew_s=round(skew, 1),
-                        version=conn.summary.get("version") or conn.site.get("version")))
-                    if isinstance(conn.summary.get("cameras"), list):   # an empty summary says nothing about cameras
-                        _sync_cameras(conn.site, conn.summary["cameras"], conn.summary.get("disabled"), "heartbeat")
-                        _central_cameras(conn)
-                    alerts.on_heartbeat(conn.site, conn.summary, skew)
-                    _soc(conn, soc.on_attention, conn.summary.get("attention"))
-                    _talkdown_voice(conn)
-                    _ai_schedule(conn)
-                    await self._refresh_turn(conn)
-                    if after is not None and after != before:
-                        # site and server pages refetch on this instead of polling (hub/ui useFleetRefresh)
-                        self.broadcast_org(conn.site["org_id"], {"type": "server_status", "cameras_up": len(after[0]),
-                                                                 "cameras_total": after[1], **conn.tag()})
+                # handled by its own task: the site row, camera registry and alerts are synchronous database work,
+                # and done here they held every stream of this server (its video included) behind them
+                conn.hb_frames.append(frame)
+                if conn.hb_task is None or conn.hb_task.done():
+                    conn.hb_task = asyncio.create_task(self._heartbeats(conn), name=f"heartbeats-{conn.site_id}")
             elif t == "event":
                 msg = frame.get("msg") or {}
                 conn.broadcast(msg)
@@ -430,6 +427,40 @@ class AgentRegistry:
                 await conn.send({"t": "pong", "ts": frame.get("ts")})
             elif t == "rotated":
                 log.info("site %s confirmed token rotation", conn.site_id)
+
+    async def _heartbeats(self, conn: AgentConn) -> None:
+        """The heartbeats waiting, one at a time and in order per server."""
+        while conn.hb_frames:
+            frame = conn.hb_frames.popleft()
+            try:
+                await self._on_heartbeat(conn, frame)
+            except Exception:
+                log.exception("heartbeat from %s", conn.site_id)
+
+    async def _on_heartbeat(self, conn: AgentConn, frame: dict) -> None:
+        prev, summary = conn.summary or (conn.site or {}).get("summary") or {}, frame.get("summary") or {}
+        if summary and "cameras" not in summary and isinstance(prev.get("cameras"), list):
+            # a minimal heartbeat (the server's database is failing: summary.minimal_summary) has no camera
+            # data: keep the last known cameras for the site card and camera alerts, with its problems on top
+            summary = {**prev, **summary, "minimal": True}
+        conn.summary = summary
+        before, after = camera_status(prev), camera_status(summary)
+        if not conn.site:
+            return
+        skew = float(frame.get("now") or time.time()) - time.time()
+        # the database part on a thread: the hub's database calls block, and on the event loop they paused every
+        # server's tunnel and every browser while they ran (alerts alone is a query or two per camera)
+        await asyncio.to_thread(_heartbeat_db, conn.site, summary, skew)
+        if isinstance(summary.get("cameras"), list):
+            _central_cameras(conn)
+        _soc(conn, soc.on_attention, summary.get("attention"))
+        _talkdown_voice(conn)
+        _ai_schedule(conn)
+        await self._refresh_turn(conn)
+        if after is not None and after != before:
+            # site and server pages refetch on this instead of polling (hub/ui useFleetRefresh)
+            self.broadcast_org(conn.site["org_id"], {"type": "server_status", "cameras_up": len(after[0]),
+                                                     "cameras_total": after[1], **conn.tag()})
 
     async def _on_hello(self, conn: AgentConn, frame: dict) -> None:
         conn.hello = frame
@@ -496,6 +527,13 @@ class AgentRegistry:
 
     async def _detach(self, conn: AgentConn) -> None:
         conn.closed.set()
+        # a heartbeat still being handled would write online=True after the offline below: let it finish first
+        conn.hb_frames.clear()
+        if conn.hb_task is not None and not conn.hb_task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(conn.hb_task), 10)
+            except Exception:  # noqa: BLE001 - slow or failed: go offline regardless
+                pass
         for s in list(conn.streams.values()):
             await s.abort("site disconnected")
         conn.streams.clear()
