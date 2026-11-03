@@ -161,6 +161,8 @@ class FakeCamera:
                         '<tt:MaxExposureTime>33333</tt:MaxExposureTime></tt:Exposure><tt:IrCutFilter>AUTO</tt:IrCutFilter>'
                         '<tt:Sharpness>50</tt:Sharpness><tt:WideDynamicRange><tt:Mode>OFF</tt:Mode></tt:WideDynamicRange>')
         self.requests: list[tuple[str, str, str]] = []   # (path, action, body xml)
+        self.set_delay = 0.0          # a video change answered only this much later (the camera restarts its encoder)
+        self.set_ignored = False      # ...and not applied at all
         self.lock = threading.Lock()
         cam = self
 
@@ -323,7 +325,10 @@ class FakeCamera:
         # stored as the camera will hand it out again (its own element name)
         x = re.sub(r"^<[\w]+:Configuration", f"<{tag}", x)
         x = re.sub(r"</[\w]+:Configuration>$", f"</{tag}>", x)
-        self.ve[cfg.get("token")] = x
+        if not self.set_ignored:
+            self.ve[cfg.get("token")] = x
+        if self.set_delay:
+            time.sleep(self.set_delay)
         return 200, envelope("<trt:SetVideoEncoderConfigurationResponse/>")
 
     def do_GetAudioEncoderConfigurations(self, req):
@@ -599,6 +604,23 @@ def test_video_gov_seconds_and_read_modify_write():
     r = call("PUT", "/api/cameras/cam3/device/video/VE_1", {"bitrate_kbps": 4096, "resolution": "1920x1080"})
     assert (r.json()["bitrate_kbps"], r.json()["width"], r.json()["height"]) == (4096, 1920, 1080)
     assert "keep-me" in ME.ve["VE_1"]
+
+
+def test_video_change_answered_late_is_read_back_not_failed():
+    """T-304 cam1 (MS-C8175) took a new bitrate but answered after the call had timed out, and the page said the change
+    failed. Now the change waits longer and the read-back decides: the new value, or an error if it didn't take."""
+    set_s, total = camdevice.VIDEO_SET_TIMEOUT_S, camdevice.VIDEO_CHANGE_S
+    camdevice.VIDEO_SET_TIMEOUT_S, camdevice.VIDEO_CHANGE_S = 1, 6
+    ME.set_delay = 2.0
+    try:
+        r = call("PUT", "/api/cameras/cam3/device/video/VE_1", {"bitrate_kbps": 3072})
+        assert r.status_code == 200 and r.json()["bitrate_kbps"] == 3072, r.text
+        ME.set_ignored = True
+        r = call("PUT", "/api/cameras/cam3/device/video/VE_1", {"bitrate_kbps": 2048})
+        assert r.status_code == 422 and "still has its old settings" in r.text, r.text
+    finally:
+        camdevice.VIDEO_SET_TIMEOUT_S, camdevice.VIDEO_CHANGE_S = set_s, total
+        ME.set_delay, ME.set_ignored = 0.0, False
 
 
 def test_video_refused_before_any_write():

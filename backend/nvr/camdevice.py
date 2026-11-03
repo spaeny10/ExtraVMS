@@ -39,6 +39,8 @@ from .onvif_soap import OnvifError, find, find_all, local, text
 log = logging.getLogger("nvr.camdevice")
 
 CALL_TIMEOUT_S = 6
+VIDEO_SET_TIMEOUT_S = 20   # a video encoder change: the camera restarts its encoder before it answers
+VIDEO_CHANGE_S = 25        # ...the change and its read-back together (the hub gives up after 30 s)
 NS = {"tds": "http://www.onvif.org/ver10/device/wsdl", "trt": "http://www.onvif.org/ver10/media/wsdl",
       "tr2": "http://www.onvif.org/ver20/media/wsdl", "tt": "http://www.onvif.org/ver10/schema",
       "timg": "http://www.onvif.org/ver20/imaging/wsdl", "tan": "http://www.onvif.org/ver20/analytics/wsdl"}
@@ -773,8 +775,29 @@ def set_video(cam: dict, token: str, changes: dict) -> tuple[dict, dict]:
         else:
             body = (f"<trt:SetVideoEncoderConfiguration>{xml_of(el, '{%s}Configuration' % NS['trt'])}"
                     "<trt:ForcePersistence>true</trt:ForcePersistence></trt:SetVideoEncoderConfiguration>")
-        c.call(url, body)
-        video = read_video(c, cam, profiles, kind_p)
+        # A camera restarts its encoder to apply the change, and may answer only after that, or go quiet for a few
+        # seconds after answering: T-304 cam1 (MS-C8175, 2026-11-03) took the new bitrate but the 6 s call timed out,
+        # and the page said the change failed. Wait longer, then read back until it answers (within the hub's 30 s).
+        deadline = time.monotonic() + VIDEO_CHANGE_S
+        timed_out = False
+        try:
+            c.call(url, body, timeout=VIDEO_SET_TIMEOUT_S)
+        except OnvifError as e:
+            if "timed out" not in str(e).lower():
+                raise
+            timed_out = True
+            log.warning("camera %s: no answer to the video change within %.0f s; reading back what it has",
+                        cam["id"], VIDEO_SET_TIMEOUT_S)
+        while True:
+            try:
+                video = read_video(c, cam, profiles, kind_p)
+                if timed_out and plan_video(parse_video_config(_get_video_config(c, kind, url, token)), opts, kind, changes):
+                    raise Invalid("the camera didn't answer the change and still has its old settings")
+                break
+            except OnvifError as e:
+                if "timed out" not in str(e).lower() or time.monotonic() > deadline:
+                    raise
+                time.sleep(1.0)
     return next((v for v in video["encoders"] if v["token"] == token), video["encoders"][0]), new
 
 
