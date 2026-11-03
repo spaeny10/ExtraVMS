@@ -42,11 +42,12 @@ RUN set -eu; f="mediamtx_${MEDIAMTX_VERSION}_linux_amd64.tar.gz"; \
 # A10 are Ampere (sm_86), which cu128 covers; so do Blackwell cards if one is added later.
 FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
-# ffmpeg: clips and the low-bitrate playback transcodes (NVENC via the driver's libnvidia-encode, mounted by the
-# toolkit when NVIDIA_DRIVER_CAPABILITIES includes "video"). libgl1/libglib2: opencv-python, which ultralytics pulls in.
+# ffmpeg: clips, exports and the low-bitrate playback transcodes (NVENC via the driver's libnvidia-encode, mounted by the
+# toolkit when NVIDIA_DRIVER_CAPABILITIES includes "video"). fonts-dejavu-core: the export grid's camera names and clock.
+# libgl1/libglib2: opencv-python, which ultralytics pulls in.
 RUN apt-get update -qq \
  && apt-get install -y -qq --no-install-recommends python3 python3-venv python3-dev build-essential \
-      ffmpeg ca-certificates libgl1 libglib2.0-0t64 tzdata >/dev/null \
+      ffmpeg fonts-dejavu-core ca-certificates libgl1 libglib2.0-0t64 tzdata >/dev/null \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/nvr
