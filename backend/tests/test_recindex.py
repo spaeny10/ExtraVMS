@@ -139,6 +139,34 @@ def test_a_camera_that_stopped_and_an_abandoned_file():
     assert "cam6" not in recindex._live
 
 
+def test_lane_queries_from_many_threads_get_their_own_rows():
+    """The Timeline asks for every lane at once and each lane's query runs on a worker thread. sqlite3 shares one
+    prepared statement per SQL text, so reading rows outside the lock mixed lanes' rows (None columns, IndexError)."""
+    from concurrent.futures import ThreadPoolExecutor
+    rows = [(f"lane{i}", f"f{j}.mp4", T0 + j * 60, T0 + j * 60 + 60, 1, 1.0) for i in range(8) for j in range(300)]
+    for i in range(8):
+        db.replace_rec_segments(f"lane{i}", [r for r in rows if r[0] == f"lane{i}"], [])
+
+    def one_lane(i: int) -> bool:
+        for _ in range(40):
+            try:
+                got = recindex._rows(f"lane{i}", T0, T0 + 300 * 60)
+            except Exception:   # noqa: BLE001 - IndexError / TypeError from mixed rows
+                return False
+            if len(got) != 300 or any(s is None or e is None or e - s != 60 for s, e in got):
+                return False
+        return True
+
+    def scanner() -> bool:   # the index's scan thread: transactions on the same connection meanwhile
+        for k in range(60):
+            db.replace_rec_segments("busy", [("busy", f"b{k}.mp4", T0 + k, T0 + k + 1, 1, 1.0)], [])
+        return True
+
+    with ThreadPoolExecutor(9) as ex:
+        results = list(ex.map(lambda f: f(), [scanner] + [lambda i=i: one_lane(i) for i in range(8)]))
+    assert all(results), results
+
+
 def test_the_lane_answer_is_gzipped_when_the_browser_takes_it():
     import gzip
     import json

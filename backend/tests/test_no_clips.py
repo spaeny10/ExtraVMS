@@ -154,6 +154,24 @@ def test_verify_reads_the_recording_and_stores_no_clip():
     assert not (DATA / "events" / str(eid) / "clip.mp4").exists()
 
 
+def test_an_end_hours_ahead_is_verified_now_not_waited_for():
+    """The camera's clock moved while the event was open and its end came out 6 h ahead (T-304 cam4, 2026-11-03):
+    verification waited for it and every event behind it waited too. Now its end becomes now and it is verified."""
+    import time
+    p = pl.Pipeline()
+    p.verifier = CapturingVerifier()
+    p.cameras = {"cam1": CAM}
+    now = time.time()
+    eid = db.create_event(camera_id="cam1", track_id="v9", camera_class="vehicle", camera_conf=0.9, start_ts=now - 30,
+                          end_ts=now + 6 * 3600, path=[[now - 30, 0.1, 0.1, 0.2, 0.5, 0.9]], status="pending")
+    t0 = time.monotonic()
+    asyncio.run(asyncio.wait_for(p._verify(eid), 5))
+    assert time.monotonic() - t0 < 2
+    e = db.event(eid)
+    assert e["status"] == "rejected" and e["start_ts"] == now - 30 and now - 10 < e["end_ts"] <= time.time()
+    assert len(p.verifier.sources) == 1
+
+
 def test_verify_without_recording_is_an_error_not_a_crash():
     class NoFrames(CapturingVerifier):
         def verify(self, e, src, clip_start, zl):

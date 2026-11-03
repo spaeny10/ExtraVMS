@@ -297,6 +297,12 @@ export const MUTE_LABELS: Record<string, string> = {
   warningLight: "Warning light", autoTracking: "Auto tracking", appPush: "App push", mqtt: "MQTT",
 };
 
+/** The mutes a camera's disarm lists, the known ones in MUTE_LABELS order, then any others; none when it lists none. */
+export function disarmMutes(mutes: Record<string, boolean> | null | undefined): string[] {
+  const m = mutes ?? {};
+  return [...Object.keys(MUTE_LABELS).filter((k) => k in m), ...Object.keys(m).filter((k) => !(k in MUTE_LABELS))];
+}
+
 /** The form: numbers as typed text (checked by milesightProblems), the rest as read. */
 export type MilesightDraft = {
   white_light: { mode: MsWhiteLightMode; sensitivity: string; delay_s: string; start: string; stop: string; brightness: string };

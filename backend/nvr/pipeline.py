@@ -23,6 +23,7 @@ from .verifier import Verifier, event_dir, grab_frames
 
 log = logging.getLogger("nvr.pipeline")
 _ATTEMPT = re.compile(r"^synopsis \(attempt (\d+)\)")
+FUTURE_END_S = 300.0   # verification waits for an event's end to be recorded; one further ahead than this is a clock jump
 
 
 def recording_frame(camera_id: str, t: float):
@@ -292,6 +293,19 @@ class Pipeline:
         # MediaMTX flushes fMP4 parts every second; wait until the end of the event's span (+ post-roll) is on disk.
         clip_end = e["end_ts"] + settings.clip_post_roll
         wait = clip_end + settings.recording_lag - time.time()
+        if wait > FUTURE_END_S:
+            # An end hours ahead: the camera's clock moved while the event was open (its times are the camera's,
+            # corrected by an offset learned before the move). Waiting for it held every event queued behind it: on
+            # T-304 (2026-11-03) cam4's clock was fixed mid-event, the event ended 6 h ahead, and nothing was verified
+            # for 3 h, again after every restart. Its end becomes now; its start too if that is ahead as well.
+            now = time.time()
+            start = min(e["start_ts"], now - 1)
+            end = max(start, now - settings.clip_post_roll - settings.recording_lag)
+            log.warning("event %s ended %.0f s in the future (the camera's clock moved?): verified as ending now",
+                        event_id, e["end_ts"] - now)
+            db.update_event(event_id, start_ts=start, end_ts=end)
+            e = {**e, "start_ts": start, "end_ts": end}
+            clip_end, wait = end + settings.clip_post_roll, 0
         if wait > 0:
             await asyncio.sleep(wait)
         clip_start = e["start_ts"] - settings.clip_pre_roll

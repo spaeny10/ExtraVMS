@@ -14,8 +14,8 @@ import {
   type AnalyticsRule, type AudioEncoder, type CameraDevice, type CameraTime, type ClockResult, type ImagingField, type ImagingSource,
   type TimeDefaults, type Unsupported, type VideoEncoder,
 } from "./cameraDevice";
-import { MUTE_LABELS, type MilesightDraft, type MilesightExtras, type MilesightWrite, type MsSection, milesightChanges, milesightDraft,
-  milesightProblems, sectionBody } from "./deterrence";
+import { MUTE_LABELS, type MilesightDraft, type MilesightExtras, type MilesightWrite, type MsSection, disarmMutes, milesightChanges,
+  milesightDraft, milesightProblems, sectionBody } from "./deterrence";
 import { TrafficSetupSection } from "./TrafficSetup";
 import { confirmDialog, errorText, toast } from "./ui";
 
@@ -459,7 +459,9 @@ function MilesightSection({ camera }: { camera: Camera }) {
   );
   const wl = m.white_light, rb = m.red_blue, siren = m.siren, dz = m.disarm;
   const w = d.white_light;
-  const mutes = dz ? [...Object.keys(MUTE_LABELS).filter((k) => k in dz.mutes), ...Object.keys(dz.mutes).filter((k) => !(k in MUTE_LABELS))] : [];
+  // a section the camera didn't answer is {supported: false, reason} with no mutes: reading them blanked the whole
+  // page (T-304 cam1, 2026-11-03, opening the Camera tab to change the frame rate)
+  const mutes = dz?.supported ? disarmMutes(dz.mutes) : [];
   return <>
     <h3 className="spaced">White light</h3>
     {!wl?.supported ? <MsUnsupported part={wl} /> : (

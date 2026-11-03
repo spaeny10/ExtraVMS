@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MAX_RULES, type DeterRule, type Deterrence, type MilesightExtras, anyOn, armedText, countdownText, deterButtons, deterRequest, errorStatus,
+import { MAX_RULES, type DeterRule, type Deterrence, type MilesightExtras, anyOn, armedText, disarmMutes, countdownText, deterButtons, deterRequest, errorStatus,
   hasDeterrence, lastText, milesightChanges, milesightDraft, milesightProblems, newRule, normalizeRule, offerCameraSpeaker, outputNow, ruleProblems,
   rulesDirty, rulesHaveNothing, rulesProblems, secondsChoices, sectionBody, sirenSourceChoices, sirenSourceName, sirenSpeakerTitle, sirenWayText,
   unavailableText, type SirenRoute } from "./deterrence";
@@ -184,6 +184,14 @@ describe("Milesight extras", () => {
     siren: { supported: true, files: [{ index: 0, name: "Alarm", present: true }], play_index: 0, speaker_volume: 60, volume_writable: true, file_writable: false },
     disarm: { supported: true, enable: false, mutes: { record: false, output: true }, writable: true },
   };
+  it("a disarm section the camera didn't answer: no mutes, and the form still works (it blanked the page)", () => {
+    expect(disarmMutes(m.disarm?.supported ? m.disarm.mutes : undefined)).toEqual(["record", "output"]);
+    expect(disarmMutes({ output: true, custom: false, record: true })).toEqual(["record", "output", "custom"]);
+    expect(disarmMutes(undefined)).toEqual([]);
+    const down: MilesightExtras = { ...m, disarm: { supported: false, error: true, reason: "no answer from the camera's web API" } as unknown as MilesightExtras["disarm"] };
+    expect(milesightChanges(down, milesightDraft(down))).toEqual({});
+    expect(milesightProblems(down, milesightDraft(down))).toEqual({});
+  });
   it("an unchanged form sends nothing", () => {
     expect(milesightChanges(m, milesightDraft(m))).toEqual({});
     expect(milesightProblems(m, milesightDraft(m))).toEqual({});

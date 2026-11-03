@@ -801,11 +801,16 @@ class Database:
         params = tuple(params)
         return self._run(lambda c: c.execute(sql, params).lastrowid)
 
+    # The rows are read under the lock too: Python's sqlite3 shares one prepared statement per SQL text on a connection,
+    # so two threads reading the same query at once stepped the same statement and got each other's rows (T-304,
+    # 2026-11-03: the recordings index's lane queries from worker threads failed with None columns / IndexError).
     def all(self, sql: str, params: Iterable[Any] = ()) -> list[dict]:
-        return [dict(r) for r in self._fetch(self.execute(sql, params).fetchall)]
+        with self.lock:
+            return [dict(r) for r in self._fetch(self.execute(sql, params).fetchall)]
 
     def one(self, sql: str, params: Iterable[Any] = ()) -> dict | None:
-        row = self._fetch(self.execute(sql, params).fetchone)
+        with self.lock:
+            row = self._fetch(self.execute(sql, params).fetchone)
         return dict(row) if row else None
 
     def _fetch(self, fn):
