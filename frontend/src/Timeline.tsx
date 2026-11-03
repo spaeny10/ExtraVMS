@@ -1,4 +1,5 @@
 import { Icon, confirmDialog, promptDialog, toast, useDismiss, useIsPhone } from "./ui";
+import { ExportsChip, RangeActions, RangeDialog, type Exporter } from "./RangeDialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, fmtTime, localApi, type ApiResolver, type Camera, type KeptSpan, type Layout, type LayoutConfig, type Lock, type PlaybackQuality, type TimelineEvent, UNUSUAL_MIN } from "./api";
 import { ConfidenceSlider, loadNumber, saveNumber } from "./ConfidenceSlider";
@@ -227,7 +228,7 @@ function loadConfig(key: string): LayoutConfig {
 export type QualityToggle = { value: PlaybackQuality; set: (q: PlaybackQuality) => void; title?: string };
 
 export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = localApi, layoutStore = apiLayoutStore, storageKey = "", remote,
-  mediaFor, qualityFor, qualityToggle, soloHint, onQualityUnavailable, iceFor, canRecoverSd = true }: {
+  mediaFor, qualityFor, qualityToggle, soloHint, onQualityUnavailable, iceFor, canRecoverSd = true, exporter }: {
   cameras: TimelineCamera[]; focus?: TimelineFocus | null; onClearFocus?: () => void;
   /** may this user put footage back from a camera's SD card (admin)? The server UI on its LAN: yes; the hub passes the
    *  user's role. The server checks it again. */
@@ -255,6 +256,9 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
   qualityToggle?: QualityToggle;
   /** the "Isolated" chip's tooltip while one camera is soloed (the hub's "playing one camera via the hub" note) */
   soloHint?: string;
+  /** starts an export of cameras on more than one server (the hub's: it collects the servers' parts into one zip);
+   *  cameras of one server are always exported by that server */
+  exporter?: Exporter;
 }) {
   const media = mediaFor ?? apiFor;
   // per lane server: is it reached over the slow hub link? (a function on the hub, where some servers may be direct)
@@ -858,16 +862,26 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
 
   // ---- locking ranges (Shift+drag) and existing locks
   const [selection, setSelection] = useState<{ cam: string; start: number; end: number } | null>(null);
-  const [lockPrompt, setLockPrompt] = useState<{ cam: string; start: number; end: number; note: string } | null>(null);
+  const [picked, setPicked] = useState<{ cam: string; start: number; end: number } | null>(null);   // a selection, finished
+  const [rangeDialog, setRangeDialog] = useState<"export" | "lock" | null>(null);
   const [openLock, setOpenLock] = useState<(Lock & { key: string }) | null>(null);   // key = the lane it was clicked on
-  const saveLock = async () => {
-    if (!lockPrompt) return;
-    const off = offOf(lockPrompt.cam);
-    await apiFor(serverOf(lockPrompt.cam)).createLock({ camera_id: idOf(lockPrompt.cam), start_ts: lockPrompt.start + off, end_ts: lockPrompt.end + off, note: lockPrompt.note });
-    toast.success("Footage locked · kept until you unlock it");
-    setLockPrompt(null);
-    setSelection(null);
+  const clearRange = () => { setPicked(null); setSelection(null); setRangeDialog(null); };
+  const lockRange = async (keys: string[], start: number, end: number, note: string) => {
+    await Promise.all(keys.map((k) => apiFor(serverOf(k)).createLock({ camera_id: idOf(k), start_ts: start + offOf(k), end_ts: end + offOf(k), note })));
+    clearRange();
     load(viewRef.current);
+  };
+  // this server's export (the server UI): every camera picked must be on one server; the hub passes its own exporter
+  const serverExporter: Exporter = async (r) => {
+    const servers = [...new Set(r.keys.map(serverOf))];
+    if (servers.length > 1) throw new Error("These cameras are on more than one server: export them from the hub's Site Timeline");
+    const site = apiFor(servers[0]);
+    const off = offOf(r.keys[0]);
+    const job = await site.createExport({ cameras: r.keys.map(idOf), start: r.start + off, end: r.end + off, quality: r.quality,
+      audio: r.audio, grid: r.grid, lock: r.lock, note: r.note, event_id: r.eventId ?? null });
+    if (r.lock) load(viewRef.current);
+    return { status: () => site.getExport(job.id), downloadUrl: () => site.exportDownloadUrl(job.id),
+      label: `${r.keys.length === 1 ? camName(r.keys[0]) : `${r.keys.length} cameras`} · ${fmtClock(r.start)}` };
   };
 
   // ---- SD card recovery: a gap the camera's card covers can be put back (admin)
@@ -936,7 +950,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
       const t0 = Math.min(toT(x), nowS());
       drag.current = { mode: "select", pointer: ev.pointerId, cam: laneEl.dataset.cam, t0 };
       setSelection({ cam: laneEl.dataset.cam, start: t0, end: t0 });
-      setLockPrompt(null);
+      setPicked(null);
       return;
     }
     if (grab) {
@@ -995,7 +1009,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
     drag.current = null;
     if (!d) return;
     if (d.mode === "select") {
-      if (selection && selection.end - selection.start >= 1) setLockPrompt({ ...selection, note: "" });
+      if (selection && selection.end - selection.start >= 1) setPicked(selection);
       else setSelection(null);
       return;
     }
@@ -1328,6 +1342,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
           </span>
         ))}
         <span className="spacer" />
+        <ExportsChip />
         <span className="muted small">{inView} in view</span>
         <button className="ghost small" onClick={() => jumpToEvent(-1)} title="Previous matching event ([)">◀ Prev</button>
         <button className="ghost small" onClick={() => jumpToEvent(1)} title="Next matching event (])">Next ▶</button>
@@ -1345,7 +1360,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
             <li>👁 shows or hides a camera · 🔍 isolates it (1–9; 0 back to the grid) · double-click a tile to isolate it</li>
             <li>Scroll to zoom · drag to pan · drag the playhead to scrub</li>
             <li>Space play / pause · ← → 10 s · + − zoom · [ ] previous / next event</li>
-            <li>Shift+drag along a lane to lock that range</li>
+            <li>Shift+drag along a lane to select a range: then Export or Lock</li>
           </ul>
         </TlMenu>
       </div>
@@ -1363,13 +1378,17 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
           <button className="ghost small" onClick={() => onClearFocus?.()} aria-label="Clear focus">✕</button>
         </div>
       )}
-      {lockPrompt && (
-        <form className="lock-bar" onSubmit={(ev) => { ev.preventDefault(); saveLock(); }}>
-          <span>🔒 Lock <strong>{camName(lockPrompt.cam)}</strong> {fmtClock(lockPrompt.start)} → {fmtClock(lockPrompt.end).slice(-8)} ({Math.round(lockPrompt.end - lockPrompt.start)} s)</span>
-          <input autoFocus placeholder="Reason (optional)" value={lockPrompt.note} onChange={(e) => setLockPrompt({ ...lockPrompt, note: e.target.value })} />
-          <button type="submit">Lock range</button>
-          <button type="button" className="ghost" onClick={() => { setLockPrompt(null); setSelection(null); }}>Cancel</button>
-        </form>
+      {picked && !rangeDialog && (
+        <RangeActions start={picked.start} end={picked.end} onExport={() => setRangeDialog("export")} onLock={() => setRangeDialog("lock")}
+          onClear={clearRange} />
+      )}
+      {picked && rangeDialog && (
+        <RangeDialog mode={rangeDialog} start={picked.start} end={picked.end}
+          cameras={cameras.map((c) => ({ key: laneKey(c), name: camName(laneKey(c)) }))}
+          ticked={rangeDialog === "export" ? (tileIds.includes(picked.cam) ? tileIds : [picked.cam, ...tileIds]) : [picked.cam]}
+          eventId={focus?.eventId ?? null} locker={lockRange}
+          exporter={(r) => (exporter && new Set(r.keys.map(serverOf)).size > 1 ? exporter(r) : serverExporter(r))}
+          onClose={() => { if (rangeDialog === "export") clearRange(); else setRangeDialog(null); }} />
       )}
       {openLock && (
         <div className="lock-bar">

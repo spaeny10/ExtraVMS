@@ -885,6 +885,10 @@ export function makeApi(base: string, opts: ApiOptions = {}) {
   retentionStats: () => req<RetentionStats>("/api/retention/stats"),
   retentionPreview: (cam: string, hours = 24) => req<RetentionPreview>(`/api/retention/preview?camera=${cam}&hours=${hours}`),
   createLock: (l: { camera_id: string; start_ts: number; end_ts: number; note?: string }) => req<Lock>("/api/locks", json("POST", l)),
+  // ---- exports (backend exports.py): per-camera MP4s, an optional grid video, a report and checksums, zipped
+  createExport: (b: ExportBody) => req<ExportJob>("/api/exports", json("POST", b)),
+  getExport: (id: string) => req<ExportJob>(`/api/exports/${id}`),
+  exportDownloadUrl: (id: string) => u(`/api/exports/${id}/download`),
   deleteLock: (id: number) => req(`/api/locks/${id}`, { method: "DELETE" }),
   lockEvent: (id: number, note = "") => req<Lock>(`/api/events/${id}/lock`, json("POST", { note })),
   unlockEvent: (id: number) => req(`/api/events/${id}/lock`, { method: "DELETE" }),
@@ -937,6 +941,17 @@ export function makeApi(base: string, opts: ApiOptions = {}) {
     req<ChatMessage[]>(`/api/events/${id}/chat/${msgId}/saved?saved=${saved}`, { method: "PUT" }),
   };
 }
+/** POST /api/exports: camera ids on that server, epoch seconds on that server's clock. */
+export type ExportBody = {
+  cameras: string[]; start: number; end: number; quality: "original" | "sd"; audio: boolean; grid: boolean; lock: boolean;
+  event_id?: number | null; note?: string; site?: string;
+};
+export type ExportJob = {
+  id: string; state: "queued" | "running" | "done" | "failed"; step: string; progress: number; zip_name: string; zip_bytes: number;
+  error: string | null; files: { name: string; bytes: number; sha256: string; kind: string; camera?: string }[];
+  missing: { id: string; name: string; why: string }[]; start: number; end: number;
+};
+
 export type SiteApi = ReturnType<typeof makeApi>;
 /** The site this page is served from. */
 export const api = makeApi(BASE);

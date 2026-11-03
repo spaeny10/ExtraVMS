@@ -56,6 +56,7 @@ RULES: list[tuple[set[str], re.Pattern, str]] = [
     ({"PUT", "DELETE"}, re.compile(r"^/api/events/\d+/chat(/|$)"), "operator"),        # keep/forget clip-chat notes
     ({"POST"}, re.compile(r"^/api/links/\d+/reject$"), "operator"),                       # "not the same person"
     ({"POST", "DELETE"}, re.compile(r"^/api/(locks|layouts|dashboards)(/|$)"), "operator"),
+    ({"POST"}, re.compile(r"^/api/exports$"), "operator"),   # a video export (files to hand over); locks the range by default
     ({"POST"}, re.compile(r"^/api/remote/test$"), "admin"),
     ({"POST"}, re.compile(r"^/api/config/(import|merge)$"), "admin"),
     ({"POST"}, re.compile(r"^/api/config/history(/files)?$"), "admin"),   # tunnel-only on the site; the proxy refuses it anyway

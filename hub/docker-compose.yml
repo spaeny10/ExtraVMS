@@ -74,8 +74,9 @@ services:
       HUB_LAN_ACME_DIRECTORY: ${HUB_LAN_ACME_DIRECTORY:-https://acme-v02.api.letsencrypt.org/directory}
       HUB_LAN_ACME_EMAIL: ${HUB_LAN_ACME_EMAIL:-}
       HUB_LAN_CERT_WEEKLY_CAP: ${HUB_LAN_CERT_WEEKLY_CAP:-30}
+      HUB_EXPORTS_DIR: /srv/exports   # Site exports across servers, kept 7 days (exports.py)
     # downloads served at /downloads/ (the Axiom Bridge: bridge/publish.ps1 puts each version here); read-only inside
-    volumes: ["./downloads:/srv/downloads:ro"]
+    volumes: ["./downloads:/srv/downloads:ro", "hub_exports:/srv/exports"]
     depends_on:
       postgres: { condition: service_healthy }
     expose: ["8000"]
@@ -147,6 +148,7 @@ services:
           devices: [{ driver: nvidia, count: 1, capabilities: [gpu] }]
 
 volumes:
+  hub_exports:
   hf_cache:
   caddy_data:
   caddy_config:

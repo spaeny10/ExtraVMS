@@ -31,7 +31,7 @@ from . import assistant, backup, baseline, cells, footage, frames, health, ident
 from . import synopsis as vlm
 from . import advisor, ai_serve, detector, direct, gpumem, hub_agent, inference, lan_cert, lan_guard, sdbackfill, site_actions, siteconfig
 from . import camweb, deterrence, deterrence_api, device_api, speakers_api, talkdown, traffic, traffic_api
-from . import aischedule, clipask, plate, recindex, snapshots, vlmroute
+from . import aischedule, clipask, exports, plate, recindex, snapshots, vlmroute
 from . import summary as summary_mod
 from .config import ROOT, settings
 from .db import JOURNEY_CAMS_SQL, LOCKED_SQL, PRIORITY_RANK_SQL, db, event_filters
@@ -165,7 +165,8 @@ async def lifespan(app: FastAPI):
         ("traffic-pictures", traffic.from_recording.run()),   # a read sent without a vehicle picture: from the recording
         ("traffic-looks", traffic.looker.run(p)),   # Otso looks at each vehicle when Qwen is free: plate, description
         ("playback-encoder", playback_encoder()),
-        ("recordings-index", recindex.run()),   # every segment's span in the database: listings without walking the disk   # probe the SD encoder now, not on the first hub viewer's request
+        ("recordings-index", recindex.run()),
+        ("exports-cleanup", exports.cleanup_loop()),   # exports are kept 7 days   # every segment's span in the database: listings without walking the disk   # probe the SD encoder now, not on the first hub viewer's request
     ]]
     https = _https_server() if settings.direct_enabled else None
     https_task = asyncio.create_task(_serve_https(https), name="https") if https is not None else None
@@ -1876,6 +1877,80 @@ async def create_lock(body: LockIn):
     lock_id = db.execute("INSERT INTO locks (camera_id, start_ts, end_ts, note, created_at) VALUES (?,?,?,?,?)",
                          [body.camera_id, body.start_ts, body.end_ts, body.note, time.time()]).lastrowid
     return db.one("SELECT * FROM locks WHERE id=?", [lock_id])
+
+
+# ---------------------------------------------------------------- exports (exports.py)
+
+class ExportIn(BaseModel):
+    cameras: list[str] = Field(min_length=1, max_length=24)
+    start: float
+    end: float
+    quality: Literal["original", "sd"] = "original"
+    audio: bool = True
+    grid: bool = False
+    tiles: bool = False      # the hub's grid across servers: 640x360 copies, fetched with /files/
+    lock: bool = True
+    event_id: int | None = None
+    note: str = Field("", max_length=300)
+    site: str = Field("", max_length=120)
+
+
+@app.post("/api/exports")
+async def create_export(body: ExportIn, request: Request):
+    """Start an export (exports.py): per-camera MP4s, an optional grid video, a report and checksums, zipped."""
+    by = speakers_api.require(request, "operator")
+    if body.end <= body.start:
+        raise HTTPException(422, "the end must be after the start")
+    if body.end - body.start > exports.MAX_S:
+        raise HTTPException(422, f"at most {exports.MAX_S // 60} minutes in one export")
+    if body.grid and body.end - body.start > exports.GRID_MAX_S:
+        raise HTTPException(422, f"the grid video is limited to {exports.GRID_MAX_S // 60} minutes; export less, or without the grid")
+    known = {c["id"]: c for c in db.cameras()}
+    missing = [c for c in body.cameras if c not in known or not MTX_PATH_RE.fullmatch(c)]
+    if missing:
+        raise HTTPException(422, f"no camera {', '.join(missing[:5])} on this server")
+    cams = [{"id": c, "name": known[c].get("name") or c} for c in dict.fromkeys(body.cameras)]
+    job = exports.start(cams, body.start, body.end, encoder=await playback_encoder(), quality=body.quality, audio=body.audio,
+                        grid=body.grid, tiles=body.tiles, lock=body.lock, by=by, event_id=body.event_id, note=body.note, site=body.site)
+    log.info("export %s started by %s: %s, %.0f s", job.id, by, ",".join(c["id"] for c in cams), body.end - body.start)
+    return job.public()
+
+
+@app.get("/api/exports")
+async def list_exports():
+    return [j.public() for j in exports.recent()]
+
+
+def _export(job_id: str) -> exports.Job:
+    try:
+        job = exports.get(job_id)
+    except ValueError:
+        job = None
+    if job is None:
+        raise HTTPException(404, "no such export")
+    return job
+
+
+@app.get("/api/exports/{job_id}")
+async def get_export(job_id: str):
+    return _export(job_id).public()
+
+
+@app.get("/api/exports/{job_id}/download")
+async def download_export(job_id: str):
+    job = _export(job_id)
+    if job.state != "done":
+        raise HTTPException(409, "the export isn't ready")
+    return FileResponse(exports.job_dir(job.id) / job.zip_name, media_type="application/zip", filename=job.zip_name)
+
+
+@app.get("/api/exports/{job_id}/files/{name}")
+async def export_file(job_id: str, name: str):
+    """One file of a finished export (the hub collects them for a Site export across servers)."""
+    job = _export(job_id)
+    if job.state != "done" or name not in {f["name"] for f in job.files} | {"checksums.txt"}:
+        raise HTTPException(404, "no such file")
+    return FileResponse(exports.job_dir(job.id) / name, filename=name)
 
 
 @app.delete("/api/locks/{lock_id}")

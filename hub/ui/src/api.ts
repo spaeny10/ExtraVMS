@@ -479,6 +479,15 @@ export function sendLiveReport(body: unknown): void {
   fetch(LIVE_REPORT_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: data, keepalive: true }).catch(() => {});
 }
 
+/** A Site export across servers (hub exports.py); the cameras as {server, camera}, times on the hub's clock. */
+export const siteExport = {
+  create: (location: string, b: { cameras: { server: string; camera: string }[]; start: number; end: number; quality: string;
+    audio: boolean; grid: boolean; lock: boolean; note: string }) =>
+    req<import("@site/api").ExportJob>(`/api/locations/${location}/exports`, json("POST", b)),
+  status: (id: string) => req<import("@site/api").ExportJob>(`/api/exports/${id}`),
+  downloadUrl: (id: string) => `/api/exports/${id}/download`,
+};
+
 export const api = {
   me: () => req<Me>("/auth/me").then((m) => { setMapConfig(m.map); return m; }),
   directToken: (server: string) => req<DirectToken>(`/api/servers/${server}/direct-token`, { method: "POST" }),

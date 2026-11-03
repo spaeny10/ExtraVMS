@@ -16,11 +16,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PlaybackQuality } from "@site/api";
 import type { Camera as ServerCam } from "@site/api";
 import { NavContext, type TimelineFocus, type TimelineTarget } from "@site/nav";
-import { camKey } from "@site/playback";
+import { camKey, fmtClock, splitKey } from "@site/playback";
+import type { Exporter } from "@site/RangeDialog";
 import { toast } from "@site/ui";
 import { decodeCells, regions } from "@site/region";
 import { TimelineView, type TimelineCamera } from "@site/Timeline";
-import { api, type Org, type Server, type Site } from "./api";
+import { api, siteExport, type Org, type Server, type Site } from "./api";
 import { directStateOf, useDirectVersion } from "./direct";
 import { isDirect, mediaApi, siteApi } from "./hubSource";
 import { effectiveOffset, focusFor, fromLaneKeys, hubLayoutStore, initialTimelineLayout, journeyMembers, migrateLocalLayouts, momentTarget,
@@ -116,6 +117,13 @@ export function SiteTimeline({ site, query, syncUrl = true, canRecoverSd = false
 
   const storageKey = `timeline.${site.id}.`;
   const layoutStore = useMemo(() => hubLayoutStore(site.id, api), [site.id]);
+  // a selection across servers: the hub collects each server's part into one zip (and builds the grid)
+  const exportSite: Exporter = useCallback(async (r) => {
+    const job = await siteExport.create(site.id, { cameras: r.keys.map((k) => { const { server, id } = splitKey(k); return { server, camera: id }; }),
+      start: r.start, end: r.end, quality: r.quality, audio: r.audio, grid: r.grid, lock: r.lock, note: r.note });
+    return { status: () => siteExport.status(job.id), downloadUrl: () => siteExport.downloadUrl(job.id),
+      label: `${r.keys.length} cameras · ${fmtClock(r.start)}` };
+  }, [site.id]);
   // TimelineView reads the picked layout's id when it mounts: move this browser's older layouts (and that id) first
   const [layoutsMovedFor, setLayoutsMovedFor] = useState<string | null>(null);
   const layoutsMoved = layoutsMovedFor === site.id;
@@ -257,7 +265,7 @@ export function SiteTimeline({ site, query, syncUrl = true, canRecoverSd = false
       <TimelineView key={site.id} cameras={cameras} focus={focus} onClearFocus={clearFocus} apiFor={siteApi} mediaFor={mediaApi} remote={viaHub}
         qualityFor={qualityFor} onQualityUnavailable={onSdBusy} layoutStore={layoutStore} storageKey={storageKey} iceFor={iceServersFor}
         qualityToggle={hubSd ? { value: quality, set: setQuality, title: "Playback quality for cameras reached through the hub: SD is a 720p low-bitrate copy that starts faster on a slow uplink" } : undefined}
-        soloHint={hubSolo && anyHub ? HUB_SOLO_HINT : undefined} canRecoverSd={canRecoverSd} />
+        soloHint={hubSolo && anyHub ? HUB_SOLO_HINT : undefined} canRecoverSd={canRecoverSd} exporter={exportSite} />
     </NavContext.Provider>
   );
 }

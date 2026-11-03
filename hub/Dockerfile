@@ -14,6 +14,8 @@ RUN cd hub/ui && npm run build
 # Stage 2: the hub service
 FROM python:3.12-slim
 WORKDIR /app
+# ffmpeg + a font: the grid video of a Site export across servers (exports.py)
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core && rm -rf /var/lib/apt/lists/*
 COPY tunnelproto tunnelproto
 COPY hub/pyproject.toml hub/pyproject.toml
 COPY hub/hub hub/hub

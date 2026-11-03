@@ -205,6 +205,7 @@ main { flex: 1; padding: 16px; }
 .ep-rec, .ep-gap { position: absolute; top: 0; bottom: 0; }
 /* this event: an outlined box nearly the strip's height; the camera's other events (.ep-tick) are solid bars in the middle */
 .ep-event { position: absolute; top: 5px; bottom: 5px; border-radius: 6px; background: color-mix(in srgb, var(--accent) 24%, transparent); border: 2px solid var(--accent); pointer-events: none; }
+.ep-range { position: absolute; top: 0; bottom: 0; background: rgb(234 179 8 / .25); border-left: 2px solid #eab308; border-right: 2px solid #eab308; pointer-events: none; z-index: 2; }   /* a Shift+drag selection (export / lock) */
 .ep-hover { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px solid var(--muted); pointer-events: none; z-index: 1; }
 .ep-hover span { position: absolute; bottom: 4px; left: 6px; font-size: 11px; background: var(--panel-2); border: 1px solid var(--border); padding: 1px 6px; border-radius: 4px; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .ep-thumb-snap { position: relative; aspect-ratio: 2592 / 1520; display: grid; place-items: center; color: #aaa; font-size: 13px; }
@@ -531,6 +532,20 @@ h3.spaced { margin-top: 18px; }
 .tl-selection { position: absolute; top: 0; bottom: 0; background: rgb(234 179 8 / .25); border-left: 2px solid #eab308; border-right: 2px solid #eab308; pointer-events: none; z-index: 2; }
 .lock-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; background: color-mix(in srgb, #eab308 12%, var(--panel)); border: 1px solid #eab308; border-radius: 8px; padding: 8px 12px; }
 .lock-bar input { flex: 1; min-width: 180px; }
+/* a selected range: Export or Lock (RangeDialog.tsx) */
+.range-actions { background: color-mix(in srgb, var(--accent) 10%, var(--panel)); border-color: var(--accent); }
+.range-actions span { flex: 1; }
+.range-dialog { width: min(520px, 100%); max-height: calc(100vh - 48px); overflow: auto; }
+.range-dialog fieldset { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin: 0; display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.range-dialog fieldset legend { padding: 0 4px; }
+.range-cams { max-height: 220px; overflow: auto; }
+.range-cams label { min-width: 200px; }
+.export-progress { display: flex; flex-direction: column; gap: 4px; }
+.export-progress .bar { height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; }
+.export-progress .bar span { display: block; height: 100%; background: var(--accent); transition: width .4s; }
+.export-done { display: flex; flex-direction: column; gap: 4px; }
+a.button { display: inline-block; text-align: center; padding: 7px 12px; border-radius: 8px; background: var(--accent); color: #fff; text-decoration: none; font-weight: 600; }
+.export-row { display: flex; flex-direction: column; gap: 4px; min-width: 280px; }
 
 /* "How feedback improves Qwen" pop-out */
 .stat-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }

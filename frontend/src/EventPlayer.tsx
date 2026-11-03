@@ -13,6 +13,7 @@ import { fracIn, hoverFrameTime, isDrag, panWindow, pinchStart, pinchWindow, thu
 import { Icon, useIsPhone } from "./ui";
 import { ZoomFrame, ZoomLayer, ZoomScope } from "./VideoZoom";
 import { useFullscreen } from "./useFullscreen";
+import { ExportsChip, RangeActions, RangeDialog, type Exporter, type Locker } from "./RangeDialog";
 
 /** What the event viewer can do with the player: seek it (Ask answers' frames, notes) to epoch `t`, paused if asked. */
 export type EventPlayerHandle = { seek: (t: number, pause?: boolean) => void };
@@ -50,7 +51,7 @@ let chunkSeq = 0;
  *  record the viewer is still fetching. */
 type Selected = Pick<TimelineEvent, "id" | "start_ts" | "end_ts" | "status" | "camera_class" | "yolo_class">;
 /** A press on the strip: `pan` drags the window, `scrub` the playhead (grabbed within GRAB_PX of it). */
-type StripDrag = { mode: "pan" | "scrub"; id: number; x0: number; w0: Win; moving: boolean; type: string };
+type StripDrag = { mode: "pan" | "scrub" | "select"; id: number; x0: number; w0: Win; moving: boolean; type: string; t0?: number };
 /** How close to the playhead (px) a press grabs it to scrub, as on the Timeline page; a fingertip is less precise. */
 const GRAB_PX = 12;
 const GRAB_TOUCH_PX = 28;
@@ -90,8 +91,10 @@ const release = (v: HTMLVideoElement) => {
  * The pure decisions are in eventPlayback.ts. `startAt`: where to start instead (a phone coming back to the Clip tab, or
  * a chat frame tapped while the player was hidden), read when it mounts.
  */
-export function EventPlayer({ e, site, startAt, onTime, handle, onFootage, onSelectEvent }: {
+export function EventPlayer({ e, site, startAt, onTime, handle, onFootage, onSelectEvent, cameraName }: {
   e: NvrEvent; site: SiteApi;
+  /** the camera's name (export and lock dialogs) */
+  cameraName?: string;
   startAt?: { t: number; paused: boolean } | null;
   /** the playhead (epoch seconds), a few times a second while it moves */
   onTime?: (t: number) => void;
@@ -406,6 +409,20 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage, onSel
   }, []);
   const drag = useRef<StripDrag | null>(null);
   const [dragMode, setDragMode] = useState<StripDrag["mode"] | null>(null);   // a drag under way (cursor, no hover)
+  // Shift+drag on the strip selects a range; then only Export or Lock (RangeDialog.tsx)
+  const [range, setRange] = useState<{ start: number; end: number } | null>(null);
+  const [rangeDone, setRangeDone] = useState(false);
+  const [rangeDialog, setRangeDialog] = useState<"export" | "lock" | null>(null);
+  const clearRange = () => { setRange(null); setRangeDone(false); setRangeDialog(null); };
+  const exporter: Exporter = async (r) => {
+    const job = await site.createExport({ cameras: [cam], start: r.start, end: r.end, quality: r.quality, audio: r.audio, grid: r.grid,
+      lock: r.lock, note: r.note, event_id: e.id });
+    return { status: () => site.getExport(job.id), downloadUrl: () => site.exportDownloadUrl(job.id), label: `Event #${e.id} · ${clock(r.start)}` };
+  };
+  const locker: Locker = async (keys, start, end, note) => {
+    await Promise.all(keys.map((k) => site.createLock({ camera_id: k, start_ts: start, end_ts: end, note })));
+    clearRange();
+  };
   const touches = useRef(new Map<number, number>());   // touch pointerId -> clientX, for the pinch
   const pinch = useRef<PinchStart | null>(null);
   const timeAtX = (clientX: number) => atFrac(fracIn(clientX, strip.current!.getBoundingClientRect()), st.current.win);
@@ -445,6 +462,17 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage, onSel
         return;
       }
     }
+    if (ev.shiftKey && !touch) {
+      const t = Math.min(timeAtX(ev.clientX), nowS());
+      drag.current = { mode: "select", id: ev.pointerId, x0: ev.clientX, w0: st.current.win, moving: true, type: ev.pointerType, t0: t };
+      setDragMode("select");
+      setRange({ start: t, end: t });
+      setRangeDone(false);
+      setRangeDialog(null);
+      try { strip.current?.setPointerCapture(ev.pointerId); } catch { /* released */ }
+      endHover();
+      return;
+    }
     const r = strip.current!.getBoundingClientRect();
     const phX = toFrac(shownT, win) * r.width;
     const grab = shownT >= win.start && shownT <= win.end && Math.abs(ev.clientX - r.left - phX) <= (touch ? GRAB_TOUCH_PX : GRAB_PX);
@@ -466,6 +494,11 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage, onSel
     const d = drag.current;
     if (!d) { if (ev.pointerType !== "touch") hoverAt(ev.clientX, ev.target as Element); return; }
     if (d.id !== ev.pointerId) return;
+    if (d.mode === "select") {
+      const t = Math.min(timeAtX(ev.clientX), nowS());
+      setRange({ start: Math.min(d.t0!, t), end: Math.max(d.t0!, t) });
+      return;
+    }
     if (!d.moving) {
       if (!isDrag(ev.clientX - d.x0, d.type)) return;
       d.moving = true;
@@ -486,6 +519,11 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage, onSel
     drag.current = null;
     setDragMode(null);
     if (!d || d.id !== ev.pointerId) return;
+    if (d.mode === "select") {
+      if (range && range.end - range.start >= 1) setRangeDone(true);
+      else setRange(null);
+      return;
+    }
     if (d.moving) {
       if (d.mode === "scrub") { setScrubT(null); seek(timeAtX(ev.clientX)); }
       return;
@@ -732,6 +770,7 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage, onSel
           </div>
         )}
         <div className={`ep-strip${dragMode === "pan" ? " panning" : dragMode === "scrub" ? " scrubbing" : ""}`} ref={strip}
+          title="Drag to pan · Shift+drag to select a range to export or lock"
           onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel}
           onPointerLeave={() => { if (!drag.current) endHover(); }}>
           <div className={`ep-track ${pieces ? "" : "unknown"}`} role="slider" tabIndex={0} onKeyDown={onKeyDown}
@@ -743,6 +782,7 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage, onSel
             ))}
             {scale.map((m) => <div key={m.t} className="ep-grid" style={{ left: `${(m.frac * 100).toFixed(3)}%` }} />)}
             <div className="ep-event" style={{ left: pct(cur.start_ts), width: `max(6px, ${((toFrac(end, win) - toFrac(cur.start_ts, win)) * 100).toFixed(3)}%)` }} />
+            {range && <div className="ep-range" style={{ left: pct(range.start), width: pct(win.start + range.end - range.start) }} />}
             {hover && !dragMode && (
               <div className="ep-hover" style={{ left: `${(toFrac(hover.t, win) * 100).toFixed(3)}%` }}>
                 {!(hoverEvent || hoverGap || hoverShot) && <span>{clock(hover.t)}</span>}
@@ -789,7 +829,17 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage, onSel
               title="The recording as stored" onClick={() => setPicked("hd")}>HD</button>
           </div>
         )}
+        <ExportsChip />
       </div>
+      {range && rangeDone && !rangeDialog && (
+        <RangeActions start={range.start} end={range.end} onExport={() => setRangeDialog("export")} onLock={() => setRangeDialog("lock")}
+          onClear={clearRange} />
+      )}
+      {range && rangeDone && rangeDialog && (
+        <RangeDialog mode={rangeDialog} start={range.start} end={range.end} cameras={[{ key: cam, name: cameraName ?? cam }]}
+          ticked={[cam]} eventId={e.id} exporter={exporter} locker={locker}
+          onClose={() => { if (rangeDialog === "export") clearRange(); else setRangeDialog(null); }} />
+      )}
     </div>
   );
 }

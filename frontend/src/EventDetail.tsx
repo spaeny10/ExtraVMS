@@ -144,7 +144,7 @@ export function EventDetail({ id: initialId, cameraName, onClose, site = api, va
         <div className={`modal-grid ${isPhone ? "phone" : ""}`}>
           {(!isPhone || view === "clip") && <div>
             <EventPlayer key={playerKey} e={e} site={site} startAt={resume} onTime={onTime} handle={player} onFootage={setFootage}
-              onSelectEvent={onSelectEvent} />
+              onSelectEvent={onSelectEvent} cameraName={cameraName(e.camera_id)} />
             {crops.length > 0 && (
               <div className="crops">
                 {crops.map((k) => <img key={k.file} src={site.media(e, k.file)} alt="" />)}

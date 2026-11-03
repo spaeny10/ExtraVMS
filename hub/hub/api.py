@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, EmailStr, Field
 
 from . import __version__, alerts, auth, backups, cameras, dashboards, db, digest, direct, fleet_actions, proxy, push, soc_api, turn, vlm_proxy
+from . import exports   # Site exports across servers
 from . import fleet as fleet_mod
 from . import find as find_mod
 from . import camera_groups as groups_mod
@@ -2657,6 +2658,7 @@ async def telemetry_live_stats(server: str = Query(min_length=1, max_length=64),
 app.include_router(vlm_proxy.router)
 app.include_router(soc_api.router)   # SOC: staff, monitoring/arming, contacts, procedures
 app.include_router(bridges_api.router)   # Axiom Bridge: a Site's bridges, enrollment codes, bridged cameras
+app.include_router(exports.router)   # Site exports across servers: one zip, the grid built here
 app.include_router(proxy.router)
 app.include_router(camweb.router)   # camera web pages: sessions, Caddy's on-demand TLS ask
 
