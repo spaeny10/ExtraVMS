@@ -7,12 +7,14 @@ per camera for a 24 h window and 20-46 s for a week (TSS-DT, 2026-11-03), and ag
 A finished segment carries its length in moov/mvhd: MediaMTX patches it when it closes the file, and so do
 fmp4.trim (retention) and fmp4mux (SD card backfill). Its start is in moov/udta/mtxi (wall-clock ns, what MediaMTX
 lists by), not the file name: names are local time, and the hour repeated when daylight saving ends has every name
-twice, an hour apart. So a segment costs one small header read, once: the scan here lists each camera's folder every SCAN_S (names, sizes, modification times) and
-reads the header only of files it hasn't seen or that changed; deleted files drop out.
+twice, an hour apart. So a segment costs one small header read, once: the scan here lists each camera's folder every
+SCAN_S (names, sizes, modification times) and reads the header only of files it hasn't seen or that changed; deleted
+files drop out.
 
-The file still being written (the newest; its mvhd still says 0) isn't indexed: recording_spans() asks MediaMTX for
-just the tail after the last indexed segment, which is one file. Until a camera's first scan is done, the whole
-listing comes from MediaMTX as before.
+The file still being written (the newest, its mvhd still 0) isn't stored: it counts as recorded from its start to
+now (LIVE_LAG_S). Asking MediaMTX for just that one file still cost ~220 ms with a folder of 1-minute files. When it
+closes (or the camera stops and MediaMTX closes it) it gets its length and is indexed like the rest. Until a camera's
+first scan is done, its whole listing comes from MediaMTX as before.
 """
 from __future__ import annotations
 
@@ -34,7 +36,12 @@ SCAN_S = 15.0
 HEAD_BYTES = 64 * 1024        # ftyp + moov of a MediaMTX segment: ~1-2 KB; read a little more for odd cameras
 LONGEST_S = 6 * 3600          # no segment is longer (MediaMTX's recordSegmentDuration, SD restores: 10 min)
 
+LIVE_LAG_S = 2.0              # the file being written is listed up to this long ago (MediaMTX writes 1 s parts)
+LIVE_MAX_S = 2 * 3600         # ...and only while it started this recently: one older without a length was abandoned
+MERGE_S = 0.5                 # back-to-back files closer than this are listed as one span (as sdbackfill merges)
+
 _ready: set[str] = set()      # paths whose first scan is done: their listing comes from the index
+_live: dict[str, float] = {}  # path -> start of the file being written, as of the last scan
 
 
 def header_info(path: Path) -> tuple[float | None, float | None]:
@@ -116,18 +123,26 @@ def scan_path(path: str) -> int:
              db.all("SELECT name, size, mtime FROM rec_segments WHERE camera_id=?", [path])}
     starts = sorted(s for s, _, _ in files.values())
     upserts = []
+    live = None
     for name, (start, size, mtime) in files.items():
-        if name == newest or known.get(name) == (size, mtime):
+        if known.get(name) == (size, mtime):
             continue
         head_start, dur = header_info(folder / name)
         start = head_start or start
         if dur is None:
+            if name == newest and start > time.time() - LIVE_MAX_S:
+                live = start   # being written: listed up to now, stored once it closes
+                continue
             # a finished file without its length (MediaMTX stopped mid-segment): it ends at its last write, or
             # where the next one starts
             nxt = next((s for s in starts if s > start), None)
             dur = max(0.0, (min(mtime, nxt) if nxt else mtime) - start)
         upserts.append((path, name, start, start + dur, size, mtime))
-    gone = [n for n in known if n not in files or n == newest]
+    if live is None:
+        _live.pop(path, None)
+    else:
+        _live[path] = live
+    gone = [n for n in known if n not in files]
     if upserts or gone:
         db.replace_rec_segments(path, upserts, gone)
     return len(upserts) + len(gone)
@@ -160,26 +175,30 @@ async def run(stop: asyncio.Event | None = None) -> None:
         await asyncio.sleep(SCAN_S)
 
 
-def _rows(path: str, lo: float, hi: float) -> tuple[list[tuple[float, float]], float | None]:
+def _rows(path: str, lo: float, hi: float) -> list[tuple[float, float]]:
     rows = db.all("SELECT start_ts, end_ts FROM rec_segments WHERE camera_id=? AND start_ts>=? AND start_ts<? AND end_ts>? "
                   "ORDER BY start_ts", [path, lo - LONGEST_S, hi, lo])
-    last = db.one("SELECT MAX(end_ts) AS e FROM rec_segments WHERE camera_id=?", [path])
-    return [(r["start_ts"], r["end_ts"]) for r in rows], (last or {}).get("e")
+    return [(r["start_ts"], r["end_ts"]) for r in rows]
 
 
 async def recording_spans(path: str, start: float | None = None, end: float | None = None) -> list[dict]:
-    """MediaMTX /list's answer ({start: RFC 3339, duration}, clipped to the window), from the index: only what is
-    after the last indexed segment (the file being written) is asked of MediaMTX."""
+    """MediaMTX /list's answer ({start: RFC 3339, duration}, clipped to the window) from the index, the file being
+    written included; back-to-back files are one span (a week of 1-minute files was 1,000 entries)."""
     if path not in _ready:
         return await mediamtx.recording_spans(path, start, end)
     lo, hi = start or 0.0, end or float("inf")
-    rows, last = await asyncio.to_thread(_rows, path, lo, hi)
+    spans = await asyncio.to_thread(_rows, path, lo, hi)
+    if (live := _live.get(path)) is not None:
+        spans.append((live, time.time() - LIVE_LAG_S))
+    merged: list[list[float]] = []
+    for s, e in sorted(spans):
+        if merged and s <= merged[-1][1] + MERGE_S:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
     out = []
-    for s, e in rows:
+    for s, e in merged:
         s, e = max(s, lo), min(e, hi)
         if e > s:
             out.append({"start": mediamtx.rfc3339(s), "duration": round(e - s, 3)})
-    tail_from = max(lo, (last or 0.0) - 1)
-    if tail_from < hi:
-        out += await mediamtx.recording_spans(path, tail_from, end)
     return out

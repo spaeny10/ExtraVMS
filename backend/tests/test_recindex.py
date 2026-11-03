@@ -1,5 +1,5 @@
-"""Recordings index: segment spans from file names + moov/mvhd, kept in step with the folder; the listing from the
-index with only the file being written asked of MediaMTX.
+"""Recordings index: segment spans from moov/udta/mtxi + moov/mvhd, kept in step with the folder; the listing from the
+index, the file being written up to now, MediaMTX only before a camera's first scan.
 
 Run: ..\\.venv\\Scripts\\python.exe tests\\test_recindex.py   (from backend/)
 """
@@ -8,6 +8,7 @@ import os
 import struct
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 os.environ["NVR_DATA_DIR"] = tempfile.mkdtemp(prefix="nvr-recindex-test-")
@@ -19,7 +20,7 @@ from nvr import mediamtx, recindex  # noqa: E402
 from nvr.db import db  # noqa: E402
 from nvr.fmp4 import segment_name  # noqa: E402
 
-T0 = 1793700000.0   # 2026-11-03, on a whole second
+T0 = float(int(time.time()) // 60 * 60 - 3600)   # an hour ago: a newest file without a length counts as being written
 
 
 def box(typ: bytes, body: bytes) -> bytes:
@@ -90,33 +91,52 @@ def test_a_finished_file_without_its_length_ends_at_the_next():
     assert rows[0]["start_ts"] == T0 and T0 < rows[0]["end_ts"] <= T0 + 45
 
 
-def test_listing_from_the_index_plus_the_tail():
+def test_listing_from_the_index_the_file_being_written_up_to_now():
+    n0 = float(int(time.time()) - 600)   # the last ten minutes: five finished 1-minute files, a hole, the one being written
     for i in range(5):
-        segment("cam3", T0 + 60 * i, 60)
-    segment("cam3", T0 + 300, None)
+        segment("cam3", n0 + 60 * i, 60, wall=n0 + 60 * i)
+    segment("cam3", n0 + 400, None, wall=n0 + 400)
     asked = []
 
-    async def tail(path, start=None, end=None):
+    async def mtx(path, start=None, end=None):
         asked.append((path, start, end))
-        return [{"start": mediamtx.rfc3339(T0 + 300), "duration": 12.5}]
+        return [{"start": mediamtx.rfc3339(n0), "duration": 12.5}]
 
     real = mediamtx.recording_spans
-    mediamtx.recording_spans = tail
+    mediamtx.recording_spans = mtx
     try:
-        assert asyncio.run(recindex.recording_spans("cam3", T0 + 30, T0 + 400)) == [{"start": mediamtx.rfc3339(T0 + 300), "duration": 12.5}]
-        assert asked == [("cam3", T0 + 30, T0 + 400)]   # not scanned yet: all of it from MediaMTX
+        assert asyncio.run(recindex.recording_spans("cam3", n0 + 30, n0 + 900)) == [{"start": mediamtx.rfc3339(n0), "duration": 12.5}]
+        assert asked == [("cam3", n0 + 30, n0 + 900)]   # not scanned yet: all of it from MediaMTX
         asked.clear()
         recindex.scan_all()
-        out = asyncio.run(recindex.recording_spans("cam3", T0 + 30, T0 + 400))
-        assert out[0] == {"start": mediamtx.rfc3339(T0 + 30), "duration": 30.0}       # clipped to the window
-        assert [o["duration"] for o in out[1:4]] == [60.0, 60.0, 60.0]
-        assert out[-1] == {"start": mediamtx.rfc3339(T0 + 300), "duration": 12.5}      # the file being written
-        assert asked == [("cam3", T0 + 299, T0 + 400)]  # MediaMTX only for what is after the last indexed segment
-        asked.clear()
-        out = asyncio.run(recindex.recording_spans("cam3", T0 + 70, T0 + 130))         # all in the past: no MediaMTX
-        assert [o["duration"] for o in out] == [50.0, 10.0] and asked == []
+        out = asyncio.run(recindex.recording_spans("cam3", n0 + 30, n0 + 900))
+        assert asked == []                               # scanned: MediaMTX isn't asked at all
+        assert out[0] == {"start": mediamtx.rfc3339(n0 + 30), "duration": 270.0}      # five files, one span, clipped
+        assert len(out) == 2 and out[1]["start"] == mediamtx.rfc3339(n0 + 400)
+        assert 600 - recindex.LIVE_LAG_S - 400 - 2 < out[1]["duration"] <= 600 - recindex.LIVE_LAG_S - 400 + 2   # up to now
+        out = asyncio.run(recindex.recording_spans("cam3", n0 + 70, n0 + 130))
+        assert out == [{"start": mediamtx.rfc3339(n0 + 70), "duration": 60.0}]
     finally:
         mediamtx.recording_spans = real
+
+
+def test_a_camera_that_stopped_and_an_abandoned_file():
+    n0 = float(int(time.time()) - 900)
+    segment("cam5", n0, 60, wall=n0)
+    last = segment("cam5", n0 + 60, None, wall=n0 + 60)    # being written
+    recindex.scan_path("cam5")
+    assert "cam5" in recindex._live and db.one("SELECT COUNT(*) n FROM rec_segments WHERE camera_id='cam5'")["n"] == 1
+    last.unlink()
+    segment("cam5", n0 + 60, 42.0, wall=n0 + 60)            # the camera stopped: MediaMTX closed it, no new file
+    recindex.scan_path("cam5")
+    assert "cam5" not in recindex._live
+    rows = db.all("SELECT start_ts, end_ts FROM rec_segments WHERE camera_id='cam5' ORDER BY start_ts")
+    assert rows[-1]["end_ts"] == n0 + 102
+    # an unfinished file from long ago (MediaMTX died mid-segment, nothing since) isn't "being written" forever
+    old = float(int(time.time()) - recindex.LIVE_MAX_S - 600)
+    segment("cam6", old, None, wall=old)
+    recindex.scan_path("cam6")
+    assert "cam6" not in recindex._live
 
 
 if __name__ == "__main__":
