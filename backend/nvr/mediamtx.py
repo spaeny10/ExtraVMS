@@ -393,15 +393,31 @@ class MediaMTX:
                 self.proc.kill()
 
 
+_local: tuple[asyncio.AbstractEventLoop, httpx.AsyncClient] | None = None
+
+
+def local_client() -> httpx.AsyncClient:
+    """One pooled client for MediaMTX's API, metrics and playback server. A new httpx client builds an SSL context
+    (loading the CA bundle) on the event loop, 0.2-1 s while a verify thread holds the GIL, and the Timeline lists
+    every lane at once: on TSS-DT (2026-11-03) recordings listings took 7-24 s and /api/health up to 1.2 s, so the
+    lanes stayed empty and scrubbing had nothing to play. These are plain http, no certificates. One per event loop
+    (the tests run several); callers pass their own timeout."""
+    global _local
+    loop = asyncio.get_running_loop()
+    if _local is None or _local[0] is not loop:
+        _local = (loop, httpx.AsyncClient(verify=False, timeout=5,
+                                          limits=httpx.Limits(max_connections=None, max_keepalive_connections=32)))
+    return _local[1]
+
+
 def rfc3339(ts: float) -> str:
     return dt.datetime.fromtimestamp(ts, dt.timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 async def path_status() -> dict[str, dict]:
-    async with httpx.AsyncClient(timeout=5) as c:
-        r = await c.get(f"{settings.mediamtx_api}/v3/paths/list")
-        r.raise_for_status()
-        return {p["name"]: p for p in r.json().get("items", [])}
+    r = await local_client().get(f"{settings.mediamtx_api}/v3/paths/list", timeout=5)
+    r.raise_for_status()
+    return {p["name"]: p for p in r.json().get("items", [])}
 
 
 async def recording_spans(path: str, start: float | None = None, end: float | None = None) -> list[dict]:
@@ -411,20 +427,18 @@ async def recording_spans(path: str, start: float | None = None, end: float | No
     if end:
         params["end"] = rfc3339(end)
     # Listing walks the segment files on disk; a week on a busy spinning disk can take well over 10 s.
-    async with httpx.AsyncClient(timeout=httpx.Timeout(90, connect=5)) as c:
-        r = await c.get(f"{settings.mediamtx_playback}/list", params=params)
-        if r.status_code == 404:
-            return []
-        r.raise_for_status()
-        return r.json()
+    r = await local_client().get(f"{settings.mediamtx_playback}/list", params=params, timeout=httpx.Timeout(90, connect=5))
+    if r.status_code == 404:
+        return []
+    r.raise_for_status()
+    return r.json()
 
 
 async def fetch_clip(path: str, start: float, duration: float, dest) -> None:
     """Download [start, start+duration] from the recordings as a standard MP4."""
     params = {"path": path, "start": rfc3339(start), "duration": f"{duration:.3f}", "format": "mp4"}
-    async with httpx.AsyncClient(timeout=60) as c:
-        async with c.stream("GET", f"{settings.mediamtx_playback}/get", params=params) as r:
-            r.raise_for_status()
-            with open(dest, "wb") as f:
-                async for chunk in r.aiter_bytes():
-                    f.write(chunk)
+    async with local_client().stream("GET", f"{settings.mediamtx_playback}/get", params=params, timeout=60) as r:
+        r.raise_for_status()
+        with open(dest, "wb") as f:
+            async for chunk in r.aiter_bytes():
+                f.write(chunk)

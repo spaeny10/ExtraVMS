@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 os.environ.setdefault("NVR_ALLOWED_HOSTS", "lan")  # the test client's Host (lan_guard Host allow-list)
@@ -70,8 +71,14 @@ def test_capabilities_and_busy():
         r = asyncio.run(_get("/api/playback/capabilities"))
         assert r.status_code == 200 and r.json() == {"sd": True, "encoder": "libx264"}
         api._sd_active = api.sd_max("libx264")
-        r = asyncio.run(_get("/api/playback/cam1?start=1700000000&duration=30&q=sd"))
-        assert r.status_code == 503 and r.json()["detail"] == "too many transcodes"
+        queue, api.SD_QUEUE_S = api.SD_QUEUE_S, 0.3
+        try:
+            t0 = time.monotonic()
+            r = asyncio.run(_get("/api/playback/cam1?start=1700000000&duration=30&q=sd"))
+            assert r.status_code == 503 and r.json()["detail"] == "too many transcodes"
+            assert time.monotonic() - t0 >= 0.3            # it waited for a slot first
+        finally:
+            api.SD_QUEUE_S = queue
         api._sd_active = 0
         assert asyncio.run(_get("/api/playback/cam1?start=1700000000&q=xx")).status_code == 422   # only sd|hd
         api._encoder[:] = [None]

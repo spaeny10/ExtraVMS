@@ -27,8 +27,6 @@ import time
 from collections import deque
 from pathlib import Path
 
-import httpx
-
 from . import ingest, mediamtx
 from .config import settings
 from .db import db
@@ -229,9 +227,8 @@ class StreamHealth:
         self.events_down_since = ingest.events_down_since
 
     async def sample(self) -> None:
-        async with httpx.AsyncClient(timeout=5) as c:
-            r = await c.get(self.url)
-            r.raise_for_status()
+        r = await mediamtx.local_client().get(self.url, timeout=5)
+        r.raise_for_status()
         self.ingest(r.text)
 
     def ingest(self, metrics_text: str, now: float | None = None) -> None:

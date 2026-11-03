@@ -16,6 +16,7 @@ import threading
 import subprocess
 import urllib.parse
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -162,6 +163,7 @@ async def lifespan(app: FastAPI):
         ("traffic-retention", traffic.prune_loop()),   # plate reads past traffic_keep_days
         ("traffic-pictures", traffic.from_recording.run()),   # a read sent without a vehicle picture: from the recording
         ("traffic-looks", traffic.looker.run(p)),   # Otso looks at each vehicle when Qwen is free: plate, description
+        ("playback-encoder", playback_encoder()),   # probe the SD encoder now, not on the first hub viewer's request
     ]]
     https = _https_server() if settings.direct_enabled else None
     https_task = asyncio.create_task(_serve_https(https), name="https") if https is not None else None
@@ -2230,13 +2232,18 @@ async def footage_verify(body: FootageVerifyIn):
             "model": r.get("_model")}
 
 
+# Scrub previews decode on their own threads: on the pipeline's 2-thread decode pool they queued behind plate,
+# weapon and PPE evidence work, and 9 Timeline tiles scrubbing at once waited 8-15 s for a frame (TSS-DT 2026-11-03)
+_previews = ThreadPoolExecutor(max_workers=4, thread_name_prefix="preview")
+
+
 @app.get("/api/frame/{camera_id}")
 async def frame(camera_id: str, t: float, w: int = Query(960, ge=320, le=1280), exact: bool = False):
     """Single preview frame from the recordings, for live timeline scrubbing."""
     if not re.fullmatch(r"[a-z0-9_]{1,32}", camera_id):
         raise HTTPException(400)
     loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(state.pipeline.decode, frames.preview_jpeg, camera_id, t, w, exact)
+    result = await loop.run_in_executor(_previews, frames.preview_jpeg, camera_id, t, w, exact)
     if not result:
         raise HTTPException(404, "no recording at that time")
     data, frame_ts, live = result
@@ -2258,11 +2265,10 @@ async def _needs_audio_transcode(camera_id: str) -> bool:
         return hit[1]
     needs = False
     try:
-        async with httpx.AsyncClient(timeout=3) as c:
-            r = await c.get(f"{settings.mediamtx_api}/v3/paths/get/{camera_id}")
-            if r.status_code == 200:
-                tracks = [t if isinstance(t, str) else t.get("codec", "") for t in r.json().get("tracks", [])]
-                needs = any(t in BROWSER_MUTE_AUDIO for t in tracks)
+        r = await mediamtx.local_client().get(f"{settings.mediamtx_api}/v3/paths/get/{camera_id}", timeout=3)
+        if r.status_code == 200:
+            tracks = [t if isinstance(t, str) else t.get("codec", "") for t in r.json().get("tracks", [])]
+            needs = any(t in BROWSER_MUTE_AUDIO for t in tracks)
     except httpx.HTTPError:
         pass
     _audio_tracks[camera_id] = (time.time(), needs)
@@ -2430,9 +2436,14 @@ async def playback_encoder() -> str | None:
 
 
 def sd_max(encoder: str | None) -> int:
+    """Concurrent SD transcodes. NVENC: 4. Each holds a 4K CUDA decoder and an encoder on the GPU YOLO shares: 8 at once
+    ran TSS-DT's A4500 (7 GB free) out of memory (CUDA_ERROR_OUT_OF_MEMORY, 2026-11-03). More tiles wait in the queue."""
     if settings.playback_transcode_max > 0:
         return settings.playback_transcode_max
     return 4 if encoder == "h264_nvenc" else 2
+
+
+SD_QUEUE_S = 8.0   # a request over the limit waits this long for a slot (a 20 s chunk transcodes in ~3 s) before 503
 
 
 @app.get("/api/playback/capabilities")
@@ -2446,12 +2457,18 @@ async def _playback_sd(camera_id: str, params: dict) -> StreamingResponse:
     enc = await playback_encoder()
     if enc is None:
         raise HTTPException(501, "this site cannot transcode playback")
-    # a plain counter, not an asyncio.Semaphore: the limit refuses at once (503) rather than queueing, and
-    # the release happens in finish(), which may run on the reaper's or the garbage collector's thread
-    with _sd_lock:
-        if _sd_active >= sd_max(enc):
+    # a plain counter, not an asyncio.Semaphore: the release happens in finish(), which may run on the reaper's or
+    # the garbage collector's thread. Over the limit, wait a little for a slot: refusing at once (503) switched the
+    # whole server to HD on the hub's Timeline and reloaded every tile
+    deadline = time.monotonic() + SD_QUEUE_S
+    while True:
+        with _sd_lock:
+            if _sd_active < sd_max(enc):
+                _sd_active += 1
+                break
+        if time.monotonic() >= deadline:
             raise HTTPException(503, "too many transcodes")
-        _sd_active += 1
+        await asyncio.sleep(0.1)
 
     def release() -> None:
         global _sd_active
@@ -2477,11 +2494,11 @@ async def playback(camera_id: str, start: float, duration: float = Query(60, le=
         return await _playback_sd(camera_id, params)
     if await _needs_audio_transcode(camera_id):
         return await _playback_transcoded(camera_id, params)
-    client = httpx.AsyncClient(timeout=None)
-    req = client.build_request("GET", f"{settings.mediamtx_playback}/get", params=params)
+    client = mediamtx.local_client()
+    req = client.build_request("GET", f"{settings.mediamtx_playback}/get", params=params, timeout=None)
     r = await client.send(req, stream=True)
     if r.status_code != 200:
-        await r.aclose(); await client.aclose()
+        await r.aclose()
         raise HTTPException(r.status_code, "no recording for that range")
 
     async def body():
@@ -2491,7 +2508,7 @@ async def playback(camera_id: str, start: float, duration: float = Query(60, le=
         except httpx.HTTPError as e:  # MediaMTX went away mid-stream (restart); end the response quietly
             log.info("playback %s ended early: %s", camera_id, e)
         finally:
-            await r.aclose(); await client.aclose()
+            await r.aclose()
 
     return StreamingResponse(body(), media_type="video/mp4")
 

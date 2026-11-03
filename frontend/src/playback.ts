@@ -1,19 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { frameUrl } from "./api";
 
-export const CHUNK = 600; // seconds of recording loaded per playback request near live
-export const FAR_CHUNK = 120; // ...and when scrubbing back in time: several cameras each pulling a 10-minute file over a remote link is what buffers
-export const FIRST_FAR_CHUNK = 20; // the first chunk after a far-back seek: small, so playback starts within a second; the next one is prefetched
+export const CHUNK = 600; // seconds per request of the live view's recording fallback (LivePlayer)
+export const FAR_CHUNK = 120; // the Timeline's continuation chunks on the LAN (near live too: a 600 s prefetch was a whole 10-minute file in memory per tile)
+export const FIRST_FAR_CHUNK = 20; // the first chunk after a seek: small, so playback starts within a second and the connection is freed; the next one is prefetched
 export const PREFETCH_LEAD_S = 15; // start fetching the next chunk this long before the current one ends
-export const FAR_S = 1800;
-export const isFar = (t: number): boolean => nowS() - t >= FAR_S;
 export const REMOTE_FIRST_CHUNK = 20; // through the hub: the site uplink is slow, so start with a chunk that arrives in a few seconds
 export const REMOTE_CHUNK = 60; // ...and continue in 60 s chunks (near live too): a 600 s HEVC chunk can't arrive faster than real time
 /** How long a playback chunk starting at `t` should be (`remote`: the camera is reached through the hub). */
-export const chunkLen = (t: number, remote = false): number => (remote ? REMOTE_CHUNK : isFar(t) ? FAR_CHUNK : CHUNK);
-/** ...and for the first chunk after a seek: a short one far back (or remote), so the tile shows video quickly while
- *  the full-length continuation downloads behind it. */
-export const firstChunkLen = (t: number, remote = false): number => (remote ? REMOTE_FIRST_CHUNK : isFar(t) ? FIRST_FAR_CHUNK : CHUNK);
+export const chunkLen = (_t: number, remote = false): number => (remote ? REMOTE_CHUNK : FAR_CHUNK);
+/** ...and for the first chunk after a seek: a short one, so the tile shows video quickly while the full-length
+ *  continuation downloads behind it. Near live it used to be 600 s: nine tiles each holding a 10-minute stream open
+ *  queued the rest behind the browser's six connections per server. */
+export const firstChunkLen = (_t: number, remote = false): number => (remote ? REMOTE_FIRST_CHUNK : FIRST_FAR_CHUNK);
 
 export const STALL_S = 8; // remote: a download whose buffer hasn't grown (and video hasn't moved) for this long is dead
 export const AHEAD_SLACK_S = 4; // the clock may run this far past the buffered end before the tile considers reloading

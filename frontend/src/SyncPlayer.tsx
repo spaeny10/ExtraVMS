@@ -2,6 +2,7 @@ import { RegionBadge, RegionOverlay } from "./RegionPaint";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type Camera, type PlaybackQuality, type SiteApi } from "./api";
 import { PREFETCH_LEAD_S, chunkLen, driftReloadAllowed, dropPrefetch, firstChunkLen, isBuffered, prefetchChunk, shouldReload, spanAt, useLatestFrame, type Prefetched, type Span } from "./playback";
+import { START_TIMEOUT_S, prefetchLead } from "./eventPlayback";
 import { LivePlayer } from "./LivePlayer";
 import type { WhepState } from "./WhepPlayer";
 import { ZoomFrame, ZoomLayer, ZoomScope } from "./VideoZoom";
@@ -10,6 +11,9 @@ export type TileStatus = "idle" | "paused" | "playing" | "buffering" | "gap";
 const DRIFT_S = 0.5;      // paused: re-seek a tile further than this from the shared clock
 const TRIM_DRIFT_S = 0.15; // playing: nudge the rate when further than this
 const SEEK_DRIFT_S = 6;    // playing: seek/reload when further than this
+const BUFFERED_SEEK_S = 2; // playing: ...or just seek when further than this and the target is already buffered (a rate
+                           // nudge took ~17 s to close a 5 s jump, showing the wrong moment meanwhile)
+const RETRY_AFTER_ERROR_S = 2; // a chunk that failed is asked for again this soon
 const TICK_MS = 250;
 const JUMP_S = 2;          // the clock moving this much more than playback explains is a seek (or a skipped gap), not drift
 const monoS = () => performance.now() / 1000;
@@ -97,6 +101,8 @@ function SyncTileView({
   const lastDriftReloadAt = useRef<number | null>(null); // rate-limits drift reloads (DRIFT_RELOAD_MIN_S)
   const lastClock = useRef<{ t: number; at: number } | null>(null);
   const seekPending = useRef(false);                      // the clock jumped: reload now, no waiting, no rate limit
+  const loadAt = useRef(0);                               // when the current chunk was asked for (start timeout)
+  const tickRef = useRef<(() => void) | null>(null);      // run the clock follower now (a drag ended, play / pause)
   const chunkRef = useRef(chunk);
   chunkRef.current = chunk;
 
@@ -112,6 +118,7 @@ function SyncTileView({
     lastBufferedEnd.current = 0;
     lastCurTime.current = -1;
     lastProgressAt.current = monoS(); // a new download gets a full STALL_S before it can be called dead
+    loadAt.current = monoS();
     if (blobInUse.current) URL.revokeObjectURL(blobInUse.current);
     blobInUse.current = null;
     const remote = props.current.remote;
@@ -185,12 +192,18 @@ function SyncTileView({
         load(t);
         return report(playing ? "buffering" : "paused");
       }
-      if (!v || !loaded.current) return report(playing ? "buffering" : "paused");
+      if (!v || !loaded.current) {
+        // no metadata yet: a chunk that failed (404/429/500, a dropped link) or never answered is asked for again,
+        // instead of the tile buffering until the clock passes its end (up to two minutes)
+        if (now - loadAt.current >= (remote ? START_TIMEOUT_S.remote : START_TIMEOUT_S.local)) load(t);
+        return report(playing ? "buffering" : "paused");
+      }
       const rel = t - c.start;
       const drift = v.currentTime - rel; // > 0: this tile is ahead of the clock
       let rate = speed;
       let behind = false; // the clock is past what has arrived: report buffering so the Timeline holds
-      if (Math.abs(drift) > SEEK_DRIFT_S || (!playing && Math.abs(drift) > DRIFT_S)) {
+      if (Math.abs(drift) > SEEK_DRIFT_S || (!playing && Math.abs(drift) > DRIFT_S) ||
+        (Math.abs(drift) > BUFFERED_SEEK_S && isBuffered(v, rel, 0.1))) {
         // Large gap (or paused: nothing to catch up with): jump.
         if (isBuffered(v, rel, 0.1)) v.currentTime = rel;
         else {
@@ -215,12 +228,14 @@ function SyncTileView({
       if (Math.abs(v.playbackRate - rate) > 0.01) v.playbackRate = rate;
       if (playing && v.paused) v.play().catch(() => {});
       if (!playing && !v.paused) v.pause();
-      if (playing && c.start + c.len - t < PREFETCH_LEAD_S * Math.max(1, speed)) prefetchNext(c);
+      if (playing && c.start + c.len - t < prefetchLead(c.len, PREFETCH_LEAD_S) * Math.max(1, speed)) prefetchNext(c);
       report(!playing ? "paused" : !behind && v.readyState >= 3 && !v.paused ? "playing" : "buffering");
     };
     tick();
+    tickRef.current = tick;
     const id = window.setInterval(tick, TICK_MS);
     return () => {
+      tickRef.current = null;
       window.clearInterval(id);
       delete statusRef.current![cam];
       dropPrefetch(prefetch.current);
@@ -230,6 +245,9 @@ function SyncTileView({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cam]);
+
+  // A drag ending or play / pause: act now rather than on the next tick (up to TICK_MS later)
+  useEffect(() => { tickRef.current?.(); }, [scrubbing, playing]);
 
   // Scrub previews: frames at the dragged time; refine to the exact frame when the cursor rests.
   useEffect(() => {
@@ -275,18 +293,23 @@ function SyncTileView({
             onLoadedMetadata={(e) => {
               loaded.current = true;
               e.currentTarget.currentTime = Math.max(0, (clockRef.current ?? chunk.start) - chunk.start);
+              if (props.current.playing && !props.current.scrubbing) e.currentTarget.play().catch(() => {});
             }}
             onProgress={(e) => { if (loaded.current) noteProgress(e.currentTarget); }}
             onSeeked={onCaughtUp}
             onPlaying={onCaughtUp}
-            onError={quality === "sd" && onSdUnavailable ? () => {
+            onError={() => {
+              // try again shortly: the tick's start timeout, brought forward
+              const timeout = props.current.remote ? START_TIMEOUT_S.remote : START_TIMEOUT_S.local;
+              loadAt.current = Math.min(loadAt.current, monoS() - timeout + RETRY_AFTER_ERROR_S);
+              if (quality !== "sd" || !onSdUnavailable) return;
               // a <video> error carries no HTTP status: ask again and read just the status line (the body is
               // aborted), so only "too many transcodes" (503) flips to HD, not a gap or a dropped link
               const src = chunk.src;
               if (src.startsWith("blob:")) return;
               const ctrl = new AbortController();
               fetch(src, { signal: ctrl.signal }).then((r) => { ctrl.abort(); if (r.status === 503) onSdUnavailable(); }).catch(() => {});
-            } : undefined}
+            }}
             onEnded={(e) => {
               const d = e.currentTarget.duration;
               const next = chunk.start + (Number.isFinite(d) && d > 0 ? d : chunk.len) + 0.1;

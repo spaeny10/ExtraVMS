@@ -15,7 +15,7 @@ import {
   CHUNK, FAR_CHUNK, FIRST_FAR_CHUNK, PREFETCH_LEAD_S, REMOTE_CHUNK, REMOTE_FIRST_CHUNK, mergeSpans, nowS,
 } from "./playback";
 
-const NOW = Math.floor(nowS());   // chunk lengths (playback.ts isFar) read the real clock
+const NOW = Math.floor(nowS());
 const OLD = NOW - 3 * 86400;   // far back: short first chunks
 
 const ev = (id: number, start_ts: number, extra: Partial<TimelineEvent> = {}): TimelineEvent => ({
@@ -227,10 +227,10 @@ describe("the camera's other events", () => {
 });
 
 describe("recording chunks", () => {
-  it("a short first chunk far back, full ones when continuing (the Timeline's lengths)", () => {
+  it("a short first chunk, full ones when continuing (the Timeline's lengths)", () => {
     expect(chunkAt(OLD, null, { remote: false, cont: false, now: NOW })).toEqual({ start: OLD, len: FIRST_FAR_CHUNK });
     expect(chunkAt(OLD, null, { remote: false, cont: true, now: NOW }).len).toBe(FAR_CHUNK);
-    expect(chunkAt(NOW - 120, null, { remote: false, cont: false, now: NOW }).len).toBe(CHUNK);
+    expect(chunkAt(NOW - 120, null, { remote: false, cont: false, now: NOW }).len).toBe(FIRST_FAR_CHUNK);   // near live too
   });
   it("through the hub: the remote lengths", () => {
     expect(chunkAt(OLD, null, { remote: true, cont: false, now: NOW }).len).toBe(REMOTE_FIRST_CHUNK);
@@ -244,7 +244,7 @@ describe("recording chunks", () => {
   });
   it("the span still growing at the live edge isn't cut", () => {
     const spans = [{ start: NOW - 3600, end: NOW - 5 }];
-    expect(chunkAt(NOW - 300, spans, { remote: false, cont: false, now: NOW }).len).toBe(CHUNK);
+    expect(chunkAt(NOW - 60, spans, { remote: false, cont: true, now: NOW }).len).toBe(FAR_CHUNK);   // 55 s to its listed end
   });
   it("continues right after a chunk, skips a gap to the next recording, stops at the end or the live edge", () => {
     const spans = [{ start: OLD, end: OLD + 100 }, { start: OLD + 300, end: OLD + 400 }];

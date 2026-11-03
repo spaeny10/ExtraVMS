@@ -118,7 +118,11 @@ def check_hub_url(url: str) -> None:
         raise ValueError("the hub address must look like wss://hub.example.com/agent")
     if u.scheme == "ws" and u.hostname.lower() not in LOOPBACK_HOSTS and not settings.hub_allow_insecure:
         raise ValueError("plain ws:// is only allowed to this machine; use wss:// (or set NVR_HUB_ALLOW_INSECURE=1 for a dev hub)")
-BULK_FRAME = 1024 * 1024         # video bodies go up the tunnel in 1 MB frames (uvicorn's WebSocket limit at the hub is 16 MB)
+BULK_FRAME = 256 * 1024          # video bodies go up the tunnel in frames of up to 256 KB (uvicorn's limit at the hub is 16 MB)
+# ...and never wait longer than this for one to fill: waiting for a full 1 MB held back ~11 s of the hub's 700 kbps SD
+# playback (a 20 s first chunk is 1-1.4 MB: the browser got nothing until the server had encoded nearly all of it),
+# and a 1 MB frame held the one send lock ~0.8 s on a 10 Mbit/s uplink, ahead of every other stream's frames
+BULK_FLUSH_S = 0.05
 
 
 def _fingerprint(token: str) -> str:
@@ -494,6 +498,33 @@ class HubAgent:
         started = False
         bulk = False
         pending = bytearray()
+        flush_lock = asyncio.Lock()      # the timed flush and the app's own sends go out in order
+        flush_timer: asyncio.Task | None = None
+
+        async def flush(final: bool = False) -> None:
+            nonlocal flush_timer
+            async with flush_lock:
+                if flush_timer is not None and flush_timer is not asyncio.current_task():
+                    flush_timer.cancel()
+                flush_timer = None
+                data = bytes(pending)
+                pending.clear()
+                for piece in split(data, BULK_FRAME if bulk else CHUNK):
+                    await s.take_credit(len(piece))
+                    if s.aborted:
+                        raise asyncio.CancelledError
+                    await self._send_bytes(chunk(s.id, piece))
+                if final:
+                    await self._send({"t": "end", "id": s.id})
+
+        async def flush_later() -> None:
+            try:
+                await asyncio.sleep(BULK_FLUSH_S)
+                await flush()
+            except asyncio.CancelledError:
+                pass   # flushed by the app's next send, or the stream ended / was aborted (the request task sees that)
+            except Exception as e:  # noqa: BLE001 - the tunnel dropped: the request task ends with it
+                log.debug("hub request %s: timed flush failed: %s", s.id, e)
 
         async def receive():
             data = await s.read()
@@ -502,7 +533,7 @@ class HubAgent:
             return {"type": "http.request", "body": data, "more_body": True}
 
         async def send(msg):
-            nonlocal started, bulk
+            nonlocal started, bulk, flush_timer
             if s.aborted:
                 raise asyncio.CancelledError
             if msg["type"] == "http.response.start":
@@ -517,15 +548,10 @@ class HubAgent:
                 last = not msg.get("more_body", False)
                 pending.extend(msg.get("body", b""))
                 if bulk and len(pending) < BULK_FRAME and not last:
+                    if flush_timer is None:
+                        flush_timer = asyncio.create_task(flush_later())
                     return
-                for piece in split(bytes(pending), BULK_FRAME if bulk else CHUNK):
-                    await s.take_credit(len(piece))
-                    if s.aborted:
-                        raise asyncio.CancelledError
-                    await self._send_bytes(chunk(s.id, piece))
-                pending.clear()
-                if last:
-                    await self._send({"t": "end", "id": s.id})
+                await flush(final=last)
 
         try:
             await self.app(scope, receive, send)
@@ -539,6 +565,9 @@ class HubAgent:
                 await self._send({"t": "end", "id": s.id})
             elif not s.aborted:
                 await self._send({"t": "abort", "id": s.id, "reason": "error"})
+        finally:
+            if flush_timer is not None:
+                flush_timer.cancel()
 
     async def _serve_ws(self, req: dict, s: Stream) -> None:
         """A WebSocket from the hub (see WS_BINARY above) against our own app, in-process, as a marked websocket scope."""

@@ -471,6 +471,8 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
   const visibleIds = allIds.filter((id) => config.visible == null || config.visible.includes(id));
   const solo = config.solo && allIds.includes(config.solo) ? config.solo : null;
   const tileIds = solo ? [solo] : visibleIds;
+  const tileIdsRef = useRef(tileIds);   // the recordings load asks for the cameras playing first
+  tileIdsRef.current = tileIds;
   // the lanes of cameras not playing (hidden, or not the isolated one) fold into one "N more cameras" row under the
   // playing ones; opened or folded is kept per browser. Nothing playing: every lane shows, to turn one on.
   const [lanesOpen, setLanesOpen] = useState(() => loadNumber(sk("timelineLanesOpen"), 0) === 1);
@@ -544,33 +546,51 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
 
   // Load spans + events for the visible window (plus margin), debounced while zooming/panning.
   // Failed recordings loads are retried with backoff (retryDelayMs) until the server answers again.
+  // Each lane is drawn as its answer comes in: one slow server (or tunnel) used to keep every lane empty, and with
+  // nothing loaded the player had nothing to scrub. `landed` keeps an older, slower answer from replacing a newer one.
   const retry = useRef<{ attempt: number; timer: number | null }>({ attempt: 0, timer: null });
+  const loadSeq = useRef(0);
+  const landed = useRef<Record<string, number>>({});
   const load = useCallback(async (v: View) => {
     if (retry.current.timer != null) { window.clearTimeout(retry.current.timer); retry.current.timer = null; }
+    const seq = ++loadSeq.current;
     const margin = (v.end - v.start) * 0.5;
-    const entries = await Promise.all(
-      cameras.map(async (c) => {
-        const k = laneKey(c);
-        const off = offOf(k);   // ask in the server's clock, then shift the answer back onto the shared one
-        try {
-          const r = await apiFor(serverOf(k)).recordings(c.id, v.start - margin + off, v.end + margin + off);
-          return [k, shiftLane({ spans: mergeSpans(r.spans), events: r.events, kept: r.kept ?? [], locks: r.locks ?? [],
-            restored: r.restored ?? [], card: r.sd_card ?? null }, -off)] as const;
-        } catch {
-          return [k, null] as const;
-        }
-      }),
-    );
-    // A failed lane keeps what it showed before (a dropped tunnel shouldn't blank the Timeline), flagged `error`.
-    setLanes((prev) => Object.fromEntries(entries.map(([k, l]) =>
-      [k, l ?? { ...(prev[k] ?? EMPTY_LANE), error: true }])));
+    const lane1 = async (c: Camera) => {
+      const k = laneKey(c);
+      const off = offOf(k);   // ask in the server's clock, then shift the answer back onto the shared one
+      let lane: Lane | null;
+      try {
+        // `media`: on the hub, a server reached on its LAN answers directly instead of through the tunnel
+        const r = await media(serverOf(k)).recordings(c.id, v.start - margin + off, v.end + margin + off);
+        lane = shiftLane({ spans: mergeSpans(r.spans), events: r.events, kept: r.kept ?? [], locks: r.locks ?? [],
+          restored: r.restored ?? [], card: r.sd_card ?? null }, -off);
+      } catch {
+        lane = null;
+      }
+      if (seq >= (landed.current[k] ?? 0)) {
+        landed.current[k] = seq;
+        // A failed lane keeps what it showed before (a dropped tunnel shouldn't blank the Timeline), flagged `error`.
+        setLanes((prev) => ({ ...prev, [k]: lane ?? { ...(prev[k] ?? EMPTY_LANE), error: true } }));
+      }
+      return [k, lane] as const;
+    };
+    // the cameras playing first, the folded / hidden lanes after them (a Site's 16 cameras compete for one tunnel)
+    const playingNow = new Set(tileIdsRef.current);
+    const entries = [
+      ...await Promise.all(cameras.filter((c) => playingNow.has(laneKey(c))).map(lane1)),
+      ...await Promise.all(cameras.filter((c) => !playingNow.has(laneKey(c))).map(lane1)),
+    ];
+    if (Object.values(landed.current).some((s) => s > seq)) return;   // a newer load has landed: it owns the window
     loadedFor.current = { start: v.start - margin, end: v.end + margin };
+    // drop lanes of cameras no longer on this Timeline (and hand the focus/seek effects the finished window)
+    const keys = new Set(entries.map(([k]) => k));
+    setLanes((prev) => Object.fromEntries(Object.entries(prev).filter(([k]) => keys.has(k))));
     if (entries.some(([, l]) => l == null)) {
       const delay = retryDelayMs(retry.current.attempt++);
       retry.current.timer = window.setTimeout(() => { retry.current.timer = null; loadRef.current(viewRef.current); }, delay);
     } else retry.current.attempt = 0;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cameras, apiFor]);
+  }, [cameras, apiFor, media]);
   const loadRef = useRef(load); // the retry timer calls the current load (cameras may have changed meanwhile)
   loadRef.current = load;
   useEffect(() => () => {

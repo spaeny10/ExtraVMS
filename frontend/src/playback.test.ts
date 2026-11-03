@@ -1,15 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  CHUNK, DRIFT_RELOAD_MIN_S, FAR_CHUNK, FIRST_FAR_CHUNK, HOLD_MAX_MS, REMOTE_CHUNK, REMOTE_FIRST_CHUNK, RETRY_STEADY_MS, STALL_S,
+  DRIFT_RELOAD_MIN_S, FAR_CHUNK, FIRST_FAR_CHUNK, HOLD_MAX_MS, REMOTE_CHUNK, REMOTE_FIRST_CHUNK, RETRY_STEADY_MS, STALL_S,
   camKey, chunkLen, driftReloadAllowed, dropPrefetch, firstChunkLen, nowS, prefetchChunk, retryDelayMs, shouldReload, splitKey, LIVE_LAG, reachesLiveEdge,
 } from "./playback";
 
 describe("chunk lengths", () => {
-  it("near live: long chunks; far back: a short first chunk then full ones", () => {
+  it("a short first chunk then 120 s ones, near live and far back alike", () => {
     const recent = nowS() - 60;
     const far = nowS() - 3 * 86400;
-    expect(firstChunkLen(recent)).toBe(CHUNK);
-    expect(chunkLen(recent)).toBe(CHUNK);
+    expect(firstChunkLen(recent)).toBe(FIRST_FAR_CHUNK);
+    expect(chunkLen(recent)).toBe(FAR_CHUNK);
     expect(firstChunkLen(far)).toBe(FIRST_FAR_CHUNK);
     expect(chunkLen(far)).toBe(FAR_CHUNK);
     expect(FIRST_FAR_CHUNK).toBeLessThan(FAR_CHUNK);
@@ -27,8 +27,8 @@ describe("chunk lengths through the hub (remote)", () => {
   });
   it("local values are unchanged when remote is false or omitted", () => {
     const recent = nowS() - 60;
-    expect(chunkLen(recent, false)).toBe(CHUNK);
-    expect(firstChunkLen(recent, false)).toBe(CHUNK);
+    expect(chunkLen(recent, false)).toBe(FAR_CHUNK);
+    expect(firstChunkLen(recent, false)).toBe(FIRST_FAR_CHUNK);
     expect(chunkLen(nowS() - 3 * 86400, false)).toBe(FAR_CHUNK);
   });
 });

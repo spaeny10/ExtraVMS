@@ -341,6 +341,42 @@ def test_enroll_token_ignored_once_enrolled():
         db.set_setting("hub_token", None)
 
 
+def test_video_goes_out_within_the_flush_time():
+    """A slow video body (the hub's SD playback trickles at ~90 KB/s) is not held until a full frame: each piece goes
+    up within BULK_FLUSH_S. Fast pieces are still coalesced, frames stay in order, and `end` comes last."""
+    async def video_app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"video/mp4")]})
+        for _ in range(3):        # a burst: one frame
+            await send({"type": "http.response.body", "body": b"a" * 1000, "more_body": True})
+        await asyncio.sleep(0.3)  # an encoder producing the next fragment
+        await send({"type": "http.response.body", "body": b"b" * 2000, "more_body": True})
+        await asyncio.sleep(0.3)
+        await send({"type": "http.response.body", "body": b"c" * (hub_agent.BULK_FRAME + 10), "more_body": True})
+        await send({"type": "http.response.body", "body": b"d", "more_body": False})
+
+    class Wire:
+        def __init__(self):
+            self.frames: list = []
+
+        async def send(self, raw):
+            self.frames.append((time.monotonic(), decode(raw)))
+
+    async def run():
+        agent = hub_agent.HubAgent(video_app, None)
+        agent._ws = wire = Wire()
+        s = hub_agent.Stream(5)
+        s.push(None)
+        t0 = time.monotonic()
+        await asyncio.wait_for(agent._serve({"id": 5, "method": "GET", "path": "/v", "query": "", "headers": {}}, s), 3)
+        data = [(t - t0, f[1]) for t, f in wire.frames if isinstance(f, tuple)]
+        assert data[0][1] == b"a" * 3000 and data[0][0] < 0.2           # out after the flush time, not after 1 MB
+        assert data[1][1] == b"b" * 2000 and 0.3 < data[1][0] < 0.5
+        assert b"".join(d for _, d in data) == b"a" * 3000 + b"b" * 2000 + b"c" * (hub_agent.BULK_FRAME + 10) + b"d"
+        assert max(len(d) for _, d in data) <= hub_agent.BULK_FRAME
+        assert wire.frames[-1][1] == {"t": "end", "id": 5}
+    asyncio.run(run())
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

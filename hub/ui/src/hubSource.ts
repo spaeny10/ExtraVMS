@@ -21,8 +21,9 @@ export const siteApi = (site: string): SiteApi => {
   return c;
 };
 
-/** The SiteApi members that only build media URLs (or read what playback can do): these may go direct. */
-const MEDIA_KEYS = ["media", "frameUrl", "playbackUrl", "whepUrl", "whepSessionUrl", "playbackCapabilities"] as const;
+/** The SiteApi members that only build media URLs or read (what playback can do, the recordings listing): these may go
+ *  direct. The listing through the tunnel competed with the video for the Site's uplink. */
+const MEDIA_KEYS = ["media", "frameUrl", "playbackUrl", "whepUrl", "whepSessionUrl", "playbackCapabilities", "recordings"] as const;
 
 /**
  * A client whose media URLs point straight at the server on its LAN and whose REST calls (and so every write: locks,
