@@ -139,6 +139,28 @@ def test_a_camera_that_stopped_and_an_abandoned_file():
     assert "cam6" not in recindex._live
 
 
+def test_the_lane_answer_is_gzipped_when_the_browser_takes_it():
+    import gzip
+    import json
+
+    from starlette.requests import Request
+
+    from nvr import api
+
+    def req(accept: str | None) -> Request:
+        return Request({"type": "http", "method": "GET", "path": "/", "query_string": b"",
+                        "headers": [(b"accept-encoding", accept.encode())] if accept else []})
+
+    data = {"events": [{"id": i, "cells": "A" * 96, "start_ts": T0 + i} for i in range(200)]}
+    r = api.json_maybe_gzip(req("gzip, deflate, br"), data)
+    assert r.headers["content-encoding"] == "gzip" and r.headers["vary"] == "Accept-Encoding"
+    assert json.loads(gzip.decompress(r.body)) == data and len(r.body) < len(json.dumps(data)) / 4
+    plain = api.json_maybe_gzip(req(None), data)
+    assert "content-encoding" not in plain.headers and json.loads(plain.body) == data
+    small = api.json_maybe_gzip(req("gzip"), {"spans": []})   # not worth it
+    assert "content-encoding" not in small.headers
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

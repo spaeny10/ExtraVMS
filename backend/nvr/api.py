@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import collections
 import datetime as dt
+import gzip
 import json
 import logging
 import mimetypes
@@ -1907,8 +1908,27 @@ async def unlock_event(event_id: int):
     return {"ok": True}
 
 
+GZIP_MIN = 2048   # smaller JSON answers aren't worth compressing
+
+
+def json_maybe_gzip(request: Request, data) -> Response:
+    """A JSON answer, gzipped when the browser takes it. A week of one camera's Timeline lane is ~320 KB of events
+    and ~30 KB gzipped, and through the hub it crosses the Site's uplink. Per route rather than GZipMiddleware, which
+    would also compress video and hold back streamed answers (Ask's NDJSON)."""
+    body = json.dumps(data, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode()
+    if len(body) < GZIP_MIN or "gzip" not in request.headers.get("accept-encoding", "").lower():
+        return Response(body, media_type="application/json", headers={"Vary": "Accept-Encoding"})
+    return Response(gzip.compress(body, 5), media_type="application/json",
+                    headers={"Content-Encoding": "gzip", "Vary": "Accept-Encoding"})
+
+
 @app.get("/api/recordings/{camera_id}")
-async def recordings(camera_id: str, start: float | None = None, end: float | None = None):
+async def recordings(camera_id: str, request: Request, start: float | None = None, end: float | None = None):
+    """A Timeline lane: recorded spans, events, kept / locked / restored footage, the SD card's range."""
+    return json_maybe_gzip(request, await recordings_data(camera_id, start, end))
+
+
+async def recordings_data(camera_id: str, start: float | None = None, end: float | None = None) -> dict:
     if not MTX_PATH_RE.fullmatch(camera_id):
         raise HTTPException(400, "bad camera id")
     try:

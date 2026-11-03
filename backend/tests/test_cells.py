@@ -81,7 +81,7 @@ def test_backfill_and_api_rows():
     mediamtx.recording_spans = no_spans
     from nvr.pipeline import Pipeline
     api.state.pipeline = Pipeline()  # list_events annotates rows with live pipeline state
-    rows = asyncio.run(api.recordings("cam1", now - 10, now + 10))["events"]
+    rows = asyncio.run(api.recordings_data("cam1", now - 10, now + 10))["events"]
     assert {r["id"]: r["cells"] for r in rows}[a] == cells.for_event(path)
     listed = asyncio.run(api.list_events(camera="cam1", status="verified", min_yolo=0, limit=50))
     assert listed[0]["cells"] == cells.for_event(path)
