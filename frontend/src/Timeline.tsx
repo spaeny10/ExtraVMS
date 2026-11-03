@@ -1,4 +1,4 @@
-import { confirmDialog, promptDialog, toast, useIsPhone } from "./ui";
+import { Icon, confirmDialog, promptDialog, toast, useDismiss, useIsPhone } from "./ui";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, fmtTime, localApi, type ApiResolver, type Camera, type KeptSpan, type Layout, type LayoutConfig, type Lock, type PlaybackQuality, type TimelineEvent, UNUSUAL_MIN } from "./api";
 import { ConfidenceSlider, loadNumber, saveNumber } from "./ConfidenceSlider";
@@ -100,6 +100,28 @@ const STEPS = [1, 5, 10, 30, 60, 300, 600, 900, 1800, 3600, 10800, 21600, 43200,
 const SPEEDS = [0.5, 1, 2, 4, 8, 16];
 const PRESETS: [string, number][] = [["5m", 300], ["1h", 3600], ["6h", 21600], ["24h", 86400], ["7d", 604800]];
 const HEAVY_TILES = 6;
+/** the filters behind the Filters button (People / Vehicles / PPE stay on the bar): changed ones are counted on it */
+const MENU_FILTERS = ["status", "minThreat", "minYolo", "hideFalseAlarms", "synopsisOnly"] as const;
+
+/** A button on the Timeline's bar with a panel under it (Filters, View, ?). Stays open while picking, as Live's View
+ *  menu does; Escape or a click outside closes it. */
+function TlMenu({ label, title, badge, align = "left", children }: {
+  label: React.ReactNode; title: string; badge?: React.ReactNode; align?: "left" | "right"; children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
+  const btn = useRef<HTMLButtonElement>(null);
+  useDismiss(box, open, () => setOpen(false), btn);
+  return (
+    <div ref={box} className="tl-menu">
+      <button ref={btn} className={`ghost small tl-menu-btn ${badge ? "set" : ""}`} aria-haspopup="dialog" aria-expanded={open}
+        onClick={() => setOpen(!open)} title={title}>
+        {label}{badge ? <span className="tl-badge">{badge}</span> : null}<Icon name="chevronDown" size={14} />
+      </button>
+      {open && <div className={`tl-pop ${align}`} role="dialog" aria-label={title}>{children}</div>}
+    </div>
+  );
+}
 
 const tzShift = (t: number) => -new Date(t * 1000).getTimezoneOffset() * 60;
 const pad = (n: number) => String(n).padStart(2, "0");
@@ -231,7 +253,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
   onQualityUnavailable?: (server: string) => void;
   /** shows an SD/HD switch in the toolbar */
   qualityToggle?: QualityToggle;
-  /** shown above the controls while one camera is soloed (the hub's "playing one camera via the hub" note) */
+  /** the "Isolated" chip's tooltip while one camera is soloed (the hub's "playing one camera via the hub" note) */
   soloHint?: string;
 }) {
   const media = mediaFor ?? apiFor;
@@ -291,6 +313,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
   const [width, setWidth] = useState(1000);
   const [filter, setFilterState] = useState<Filter>(() => loadFilter(sk("timelineFilter")));
   const filterActive = JSON.stringify({ ...DEFAULT_FILTER, ...filter }) !== JSON.stringify(DEFAULT_FILTER);
+  const menuFilters = MENU_FILTERS.filter((k) => ({ ...DEFAULT_FILTER, ...filter })[k] !== DEFAULT_FILTER[k]).length;
   const setFilter = (patch: Partial<Filter>) => {
     const next = { ...filter, ...patch };
     setFilterState(next);
@@ -302,7 +325,6 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
   };
   const track = useRef<HTMLDivElement>(null);
   const drag = useRef<Drag | null>(null);
-  const [moreOpen, setMoreOpen] = useState(false); // phones only: the layout & filter bars are folded away
   const viewRef = useRef(view);
   const loadedFor = useRef<View | null>(null);   // time window the current lane data covers
   const pendingFocus = useRef<TimelineFocus | null>(null);
@@ -1113,6 +1135,9 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
   heroRef.current = { hero, cam };
   const previewWidth = solo || tileIds.length === 1 ? 960 : 640;
   const selectedLayout = layouts.find((l) => l.id === layoutId);
+  // on the View button: the named layout (● unsaved changes), else how many cameras show when not all
+  const viewBadge = selectedLayout ? `${selectedLayout.name}${dirty ? " ●" : ""}`
+    : visibleIds.length < cameras.length ? `${visibleIds.length}/${cameras.length}` : null;
 
   return (
     <div className="view timeline-view" onKeyDown={onKey}>
@@ -1179,7 +1204,6 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
           ))}
         </div>
       )}
-      {solo && soloHint && <div className="muted small tl-solo-hint">{soloHint}</div>}
       <div className={`tl-controls ${isPhone ? "phone" : ""}`}>
         <button onClick={() => seekTo((playhead ?? nowS()) - 10)} title="Back 10 s (←)">⏪ 10s</button>
         <button onClick={togglePlay} className="tl-play">{playing ? "⏸ Pause" : "▶ Play"}</button>
@@ -1220,51 +1244,62 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
           title={isLive ? "Playing the live streams; seek, pause or scrub to go back to the recordings" : "Jump to live"}>● Live</button>
       </div>
 
-      <button className="ghost small tl-more-toggle" onClick={() => setMoreOpen(!moreOpen)} aria-expanded={moreOpen}>
-        {moreOpen ? "▾" : "▸"} Layout & filters{filterActive ? " (filtered)" : ""}
-      </button>
-      <div className={`tl-layout-bar tl-more ${moreOpen ? "open" : ""}`}>
-        <span className="muted small">Layout</span>
-        <select value={layoutId} onChange={(e) => pickLayout(+e.target.value)}>
-          <option value={0}>All cameras</option>
-          {layouts.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
-        </select>
-        {dirty && <span className="dirty-dot" title="Unsaved changes to this layout">●</span>}
-        {layoutId !== 0 && <button className="ghost small" disabled={!dirty} onClick={saveLayout}>Save</button>}
-        <button className="ghost small" onClick={saveLayoutAs}>Save as…</button>
-        {selectedLayout && <button className="ghost small" onClick={renameLayout}>Rename</button>}
-        {selectedLayout && <button className="ghost small" onClick={deleteLayout}>Delete</button>}
-        <span className="muted small">
-          {solo ? `Isolated: ${camName(solo)} (press 0 or 🔍 to return to the grid)` : `${visibleIds.length} of ${cameras.length} cameras shown`}
-        </span>
-        {tileIds.length > HEAVY_TILES && <span className="muted small">· {tileIds.length} full-resolution streams at once is heavy; hide some for smoother playback</span>}
-      </div>
-
-      <div className={`tl-filters tl-more ${moreOpen ? "open" : ""}`}>
-        <span className="muted small">Show</span>
+      <div className="tl-bar">
         <button className={`chip ${filter.person ? "on-person" : ""}`} onClick={() => setFilter({ person: !filter.person })}>People</button>
         <button className={`chip ${filter.vehicle ? "on-vehicle" : ""}`} onClick={() => setFilter({ vehicle: !filter.vehicle })}>Vehicles</button>
         <button className={`chip ${filter.ppe ? "on-ppe" : ""}`} onClick={() => setFilter({ ppe: !filter.ppe })}
           title="Only events that broke a PPE rule (the hatched markers)">PPE violations</button>
-        <select value={filter.status} onChange={(e) => setFilter({ status: e.target.value as Filter["status"] })} title="Verification status">
-          <option value="verified">Verified</option>
-          <option value="active">In progress</option>
-          <option value="rejected">Rejected</option>
-          <option value="all">All statuses</option>
-        </select>
-        <select value={filter.minThreat} onChange={(e) => setFilter({ minThreat: e.target.value as Filter["minThreat"] })} title="Minimum priority: the higher of Otso's threat level and how unusual the event is for its camera (time, place, how long it stayed). Your synopsis corrections and false-alarm verdicts override it.">
-          <option value="any">Any priority</option>
-          <option value="low">Low and above</option>
-          <option value="medium">Medium and above</option>
-          <option value="high">High only</option>
-        </select>
-        <ConfidenceSlider value={filter.minYolo} onChange={(v) => setFilter({ minYolo: v })} />
-        <label className="row small"><input type="checkbox" checked={filter.hideFalseAlarms} onChange={(e) => setFilter({ hideFalseAlarms: e.target.checked })} /> Hide false alarms</label>
-        <label className="row small"><input type="checkbox" checked={filter.synopsisOnly} onChange={(e) => setFilter({ synopsisOnly: e.target.checked })} /> With synopsis only</label>
-        <button className="ghost small" onClick={() => { setFilterState(DEFAULT_FILTER); try { localStorage.removeItem(sk("timelineFilter")); } catch { /* ignore */ } }}>Reset</button>
-        <label className="row small" title="Draw lines between sightings of the same person on different cameras">
-          <input type="checkbox" checked={showJourneys} onChange={(e) => { setShowJourneys(e.target.checked); saveNumber(sk("timelineShowJourneys"), e.target.checked ? 1 : 0); }} /> Show journeys
-        </label>
+        <TlMenu label="Filters" title="Status, priority, confidence, false alarms, synopsis and journeys" badge={menuFilters || null}>
+          <label className="tl-pop-sec"><span className="tl-pop-h">Status</span>
+            <select value={filter.status} onChange={(e) => setFilter({ status: e.target.value as Filter["status"] })} title="Verification status">
+              <option value="verified">Verified</option>
+              <option value="active">In progress</option>
+              <option value="rejected">Rejected</option>
+              <option value="all">All statuses</option>
+            </select>
+          </label>
+          <label className="tl-pop-sec"><span className="tl-pop-h">Priority</span>
+            <select value={filter.minThreat} onChange={(e) => setFilter({ minThreat: e.target.value as Filter["minThreat"] })} title="Minimum priority: the higher of Otso's threat level and how unusual the event is for its camera (time, place, how long it stayed). Your synopsis corrections and false-alarm verdicts override it.">
+              <option value="any">Any priority</option>
+              <option value="low">Low and above</option>
+              <option value="medium">Medium and above</option>
+              <option value="high">High only</option>
+            </select>
+          </label>
+          <div className="tl-pop-sec"><ConfidenceSlider value={filter.minYolo} onChange={(v) => setFilter({ minYolo: v })} /></div>
+          <label className="row small"><input type="checkbox" checked={filter.hideFalseAlarms} onChange={(e) => setFilter({ hideFalseAlarms: e.target.checked })} /> Hide false alarms</label>
+          <label className="row small"><input type="checkbox" checked={filter.synopsisOnly} onChange={(e) => setFilter({ synopsisOnly: e.target.checked })} /> With synopsis only</label>
+          <label className="row small" title="Draw lines between sightings of the same person on different cameras">
+            <input type="checkbox" checked={showJourneys} onChange={(e) => { setShowJourneys(e.target.checked); saveNumber(sk("timelineShowJourneys"), e.target.checked ? 1 : 0); }} /> Show journeys
+          </label>
+          <div><button className="ghost small" disabled={!filterActive}
+            onClick={() => { setFilterState(DEFAULT_FILTER); try { localStorage.removeItem(sk("timelineFilter")); } catch { /* ignore */ } }}>Reset filters</button></div>
+        </TlMenu>
+        <TlMenu label="View" title="Layouts: which cameras show, saved by name" badge={viewBadge}>
+          <label className="tl-pop-sec"><span className="tl-pop-h">Layout</span>
+            <select value={layoutId} onChange={(e) => pickLayout(+e.target.value)}>
+              <option value={0}>All cameras</option>
+              {layouts.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+            </select>
+            {dirty && <span className="dirty-dot" title="Unsaved changes to this layout">●</span>}
+          </label>
+          <div className="tl-pop-sec">
+            {layoutId !== 0 && <button className="ghost small" disabled={!dirty} onClick={saveLayout}>Save</button>}
+            <button className="ghost small" onClick={saveLayoutAs}>Save as…</button>
+            {selectedLayout && <button className="ghost small" onClick={renameLayout}>Rename</button>}
+            {selectedLayout && <button className="ghost small" onClick={deleteLayout}>Delete</button>}
+          </div>
+          <span className="muted small">{visibleIds.length} of {cameras.length} cameras shown · 👁 beside a camera's name shows or hides it, 🔍 isolates it</span>
+        </TlMenu>
+        {solo && !isPhone && (
+          <span className="chip tl-solo-chip" title={soloHint ?? "Only this camera plays · 0 or ✕ goes back to the grid"}>
+            Isolated: {camName(solo)}
+            <button className="linkish" onClick={() => setConfig((c) => ({ ...c, solo: null }))} aria-label="Back to the grid" title="Back to the grid (0)">✕</button>
+          </span>
+        )}
+        {tileIds.length > HEAVY_TILES && (
+          <span className="muted small" title={`${tileIds.length} full-resolution streams at once is heavy; hide some for smoother playback`}>{tileIds.length} streams · heavy</span>
+        )}
         {Object.keys(regionMap).map((id) => (
           <span key={id} className="chip on region-chip" title="The Timeline shows only this camera's events that passed through the painted region; other lanes are dimmed (✎ on the tile to edit, ✕ to clear)">
             ▦ region on {camName(id)}
@@ -1273,9 +1308,26 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
           </span>
         ))}
         <span className="spacer" />
-        <span className="muted small">{inView} matching in view</span>
-        <button className="ghost small" onClick={() => jumpToEvent(-1)} title="Previous matching event ([)">◀ Prev event</button>
-        <button className="ghost small" onClick={() => jumpToEvent(1)} title="Next matching event (])">Next event ▶</button>
+        <span className="muted small">{inView} in view</span>
+        <button className="ghost small" onClick={() => jumpToEvent(-1)} title="Previous matching event ([)">◀ Prev</button>
+        <button className="ghost small" onClick={() => jumpToEvent(1)} title="Next matching event (])">Next ▶</button>
+        <TlMenu label="?" title="What the colours mean, and shortcuts" align="right">
+          <div className="legend tl-legend">
+            <span><i className="sw span" /> recorded</span>
+            <span><i className="sw kept" /> AI-kept (past continuous window)</span>
+            <span><i className="sw locked" /> locked</span>
+            <span><i className="sw restored" /> recovered from SD card</span>
+            <span><i className="sw person" /> person</span>
+            <span><i className="sw vehicle" /> vehicle</span>
+            <span><i className="sw ppe" /> PPE violation</span>
+          </div>
+          <ul className="tl-keys muted small">
+            <li>👁 shows or hides a camera · 🔍 isolates it (1–9; 0 back to the grid) · double-click a tile to isolate it</li>
+            <li>Scroll to zoom · drag to pan · drag the playhead to scrub</li>
+            <li>Space play / pause · ← → 10 s · + − zoom · [ ] previous / next event</li>
+            <li>Shift+drag along a lane to lock that range</li>
+          </ul>
+        </TlMenu>
       </div>
 
       {focus && (
@@ -1474,17 +1526,6 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
           )}
         </div>
       </div>
-      </div>
-      <div className="legend muted small">
-        <span><i className="sw span" /> recorded</span>
-        <span><i className="sw kept" /> AI-kept (past continuous window)</span>
-        <span><i className="sw locked" /> locked</span>
-        <span><i className="sw restored" /> recovered from SD card</span>
-        <span><i className="sw person" /> person</span>
-        <span><i className="sw vehicle" /> vehicle</span>
-        <button className={`legend-toggle ${filter.ppe ? "on" : ""}`} onClick={() => setFilter({ ppe: !filter.ppe })}
-          title={filter.ppe ? "Showing PPE violations only · tap to show everything" : "Tap to show PPE violations only"}><i className="sw ppe" /> PPE violation</button>
-        <span>👁 show/hide · 🔍 isolate (1–9, 0 = grid) · double-click a tile to isolate · scroll to zoom · drag to pan · drag the playhead to scrub · Space / ← → / + − / [ ] events · Shift+drag a lane to lock</span>
       </div>
       {open !== null && (
         <NavContext.Provider value={detailNav}>
