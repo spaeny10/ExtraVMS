@@ -13,6 +13,7 @@ import re
 import signal
 import subprocess
 import time
+from pathlib import Path
 
 import httpx
 
@@ -283,14 +284,27 @@ class OllamaServer:
         if not settings.ollama_exe.exists():
             log.error("Ollama not found at %s; synopses disabled", settings.ollama_exe)
             return
-        await asyncio.gather(*(self._serve(role) for role in self.roles()))
+        await asyncio.gather(*(self._serve(role) for role in self.roles()), self._trim_logs())
+
+    LOG_MAX = 200 << 20    # the runner logs a line per request: TSS-DT's ollama.log reached 1.1 GB (2026-11-04)
+    LOG_KEEP = 20 << 20
+
+    async def _trim_logs(self) -> None:
+        while True:
+            for name in self.LOGS.values():
+                with contextlib.suppress(OSError):
+                    await asyncio.to_thread(trim_log, settings.runtime_dir / name, self.LOG_MAX, self.LOG_KEEP)
+            await asyncio.sleep(600)
 
     async def _serve(self, role: str) -> None:
         env = ollama_env(vlmroute.router.models[role])
         log_file = open(settings.runtime_dir / self.LOGS[role], "ab")
+        port = _port(vlmroute.router.models[role].url)
         while True:
+            if port:
+                await reclaim_port(port, role, {p.pid for p in self.procs.values() if p and p.returncode is None})
             # own process group / session so stop() can take the model runners (llama-server) down with the server
-            kw = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
+            kw ={"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
             self.procs[role] = await asyncio.create_subprocess_exec(str(settings.ollama_exe), "serve", env=env,
                                                                     stdout=log_file, stderr=log_file, **kw)
             code = await self.procs[role].wait()
@@ -305,6 +319,54 @@ class OllamaServer:
             p = self.procs.get(r)
             if p and p.returncode is None:
                 await kill_tree(p.pid)
+
+
+def trim_log(path: Path, max_bytes: int, keep: int) -> bool:
+    """Past max_bytes: the last `keep` bytes go to <name>.1 and the log is emptied in place. Ollama writes through
+    an append-mode handle, so its next line lands at the new end (renaming a file it holds open fails on Windows)."""
+    if not path.exists() or path.stat().st_size <= max_bytes:
+        return False
+    with open(path, "r+b") as f:
+        f.seek(-keep, os.SEEK_END)
+        tail = f.read()
+        Path(f"{path}.1").write_bytes(tail)
+        f.truncate(0)
+    return True
+
+
+def _port(url: str) -> int | None:
+    m = re.search(r":(\d+)(?:/|$)", url.split("://", 1)[-1])
+    return int(m.group(1)) if m else None
+
+
+def port_listeners(port: int) -> list[tuple[int, str]]:
+    """(pid, process name) of whatever listens on this TCP port, any address."""
+    try:
+        import psutil
+        out = []
+        for c in psutil.net_connections(kind="tcp"):
+            if c.status == psutil.CONN_LISTEN and c.laddr and c.laddr.port == port and c.pid:
+                with contextlib.suppress(psutil.Error):
+                    out.append((c.pid, psutil.Process(c.pid).name()))
+        return out
+    except Exception as e:  # noqa: BLE001 - psutil missing or denied: start as before
+        log.debug("listeners on %s: %s", port, e)
+        return []
+
+
+async def reclaim_port(port: int, role: str, mine: set[int] = frozenset(), wait_s: float = 10) -> None:
+    """Free our instance's port from an `ollama serve` left behind by an earlier NVR process. Those run in their own
+    process group, so they outlive an NVR that was killed; the new one then failed to bind every 5 s while the old
+    one, with that day's settings, kept answering (TSS-DT, 2026-10-23 to 11-04). Anything that isn't Ollama is left
+    alone: the bind error in the instance's log says what holds the port."""
+    stale =[(pid, name) for pid, name in port_listeners(port) if pid not in mine and name.lower().startswith("ollama")]
+    for pid, name in stale:
+        log.warning("ollama serve (%s): port %d held by a leftover %s (pid %d); stopping it and its runners", role, port, name, pid)
+        await kill_tree(pid)
+    if stale:
+        deadline = time.monotonic() + wait_s
+        while time.monotonic() < deadline and port_listeners(port):
+            await asyncio.sleep(0.5)
 
 
 async def kill_tree(pid: int) -> None:
