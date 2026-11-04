@@ -7,6 +7,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { Dialogs, Icon, OfflineBanner, Toaster, confirmDialog, promptDialog, toast, useIsPhone } from "@site/ui";
 import { ThemeToggle } from "@site/ThemeToggle";
+import type { SiteApi } from "@site/api";
+import { ShareContext } from "@site/share";
 import { AlertsPage } from "./AlertsPage";
 import { AllSitesPage } from "./AllSitesPage";
 import { CustomerPage } from "./customer/CustomerPage";
@@ -18,7 +20,14 @@ import { InvitePage } from "./InvitePage";
 import { type CustomerTab, fullBleed, go, matchRoute, navigate, topNav, usePath } from "./nav";
 import { SitePage } from "./SitePage";
 import { SitesPage } from "./SitesPage";
-import { type AuditRow, type CoverageUsage, type HubAdmin, type Me, type Org, type PushInfo, ago, api, fmtTime } from "./api";
+import { type AuditRow, type CoverageUsage, type HubAdmin, type Me, type Org, type PushInfo, ago, api, fmtTime, shareLinks } from "./api";
+
+/** The server pages the hub shows reach a server through /s/<server> (siteApi, mediaApi's REST side): an export there
+ *  can become a public link (shares.py), the hub fetching the server's files. */
+const shareServerExport = (site: SiteApi, exportId: string) => {
+  const m = /^\/s\/([^/]+)/.exec(site.base);
+  return m ? (o: { days: 1 | 7 | 30; passcode?: string; note?: string }) => shareLinks.create({ source: { kind: "server", id: exportId, server: m[1] }, ...o }) : null;
+};
 import { ALL_CUSTOMERS } from "./hubAdmin";
 import { KIND_LABEL } from "./labels";
 import { isSocUser, socLanding } from "./access";
@@ -75,6 +84,7 @@ export default function App() {
   // one SOC socket and alarm ringer for the header and the page, only while a SOC page is open (leaving the console
   // closes the socket and silences the alarm; the provider stays mounted so going back reconnects without a remount)
   return (
+    <ShareContext.Provider value={shareServerExport}>
     <SocStreamProvider me={me} enabled={page === "soc" && soc}>
       <OfflineBanner />
       <header className="hub-top">
@@ -120,6 +130,7 @@ export default function App() {
       <Toaster />
       <Dialogs />
     </SocStreamProvider>
+    </ShareContext.Provider>
   );
 }
 

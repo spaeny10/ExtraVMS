@@ -33,7 +33,7 @@ export const CUSTOMER_TABS = ["sites", "servers", "members", "invites", "ai", "a
 export type CustomerTab = (typeof CUSTOMER_TABS)[number];
 
 /** Site → Settings sub-tabs. General is the Site's own form; Servers its servers (a top-level tab before); Monitoring all of its SOC set-up (armed hours, call list, procedures). */
-export const SETTINGS_SECTIONS = ["general", "servers", "cameras", "monitoring"] as const;
+export const SETTINGS_SECTIONS = ["general", "servers", "cameras", "monitoring", "shared"] as const;
 /** The old Contacts and Procedures sub-tabs, now parts of Monitoring: their links land on that part (/settings/monitoring#contacts). */
 const MONITORING_PARTS = ["contacts", "procedures"] as const;
 export type SettingsSection = (typeof SETTINGS_SECTIONS)[number];

@@ -170,6 +170,30 @@ audit_log = Table("audit_log", metadata,
                   Column("path", String(400), nullable=True), Column("status", Integer, nullable=True),
                   Column("ip", String(64), nullable=True), Column("detail", sa.JSON, nullable=True))
 
+# ---- shared export links (shares.py): a public, expiring link to a copy of an export kept on the hub
+share_links = Table("share_links", metadata,
+                    Column("id", String(24), primary_key=True),
+                    Column("token_hash", String(64), nullable=False, unique=True),   # sha256 of the link's token; the token itself isn't kept
+                    Column("org_id", String(24), nullable=False, index=True), Column("location_id", String(24), nullable=False, index=True),
+                    Column("created_by", String(24), nullable=True), Column("created_email", String(200), nullable=True),
+                    Column("created_at", Float, nullable=False), Column("expires_at", Float, nullable=False, index=True),
+                    Column("revoked_at", Float, nullable=True), Column("purged_at", Float, nullable=True),   # files deleted
+                    Column("passcode_hash", String(200), nullable=True),
+                    Column("title", String(200), nullable=False), Column("note", String(300), nullable=True),
+                    Column("range_start", Float, nullable=True), Column("range_end", Float, nullable=True),
+                    Column("source", sa.JSON, nullable=True),            # {kind: hub|server, id, server?}
+                    Column("state", String(16), nullable=False),          # copying | ready | failed
+                    Column("error", String(300), nullable=True),
+                    Column("files", sa.JSON, nullable=True),             # [{name, bytes, sha256, kind}]
+                    Column("zip_name", String(200), nullable=True),
+                    Column("views", Integer, nullable=False, default=0), Column("downloads", Integer, nullable=False, default=0))
+share_access = Table("share_access", metadata,
+                     Column("id", Integer, primary_key=True, autoincrement=True),
+                     Column("link_id", String(24), nullable=False, index=True), Column("ts", Float, nullable=False),
+                     Column("ip", String(64), nullable=True), Column("user_agent", String(300), nullable=True),
+                     Column("action", String(24), nullable=False),      # view | download | passcode-failed
+                     Column("name", String(200), nullable=True))
+
 # ---- SOC (soc.py, soc_api.py). Per-Site contacts and procedures; incidents are the SOC's record of one or more
 # events at a Site, keyed by the same (server, event) as customer alerts. incident_log is append-only.
 location_contacts = Table("location_contacts", metadata,

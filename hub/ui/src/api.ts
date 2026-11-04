@@ -488,6 +488,21 @@ export const siteExport = {
   downloadUrl: (id: string) => `/api/exports/${id}/download`,
 };
 
+/** Shared export links (hub shares.py). */
+export type ShareLinkRow = {
+  id: string; created_email: string | null; created_at: number; expires_at: number; revoked_at: number | null; title: string;
+  note: string | null; range_start: number | null; range_end: number | null; state: string; status: string; error: string | null;
+  zip_name: string | null; views: number; downloads: number; passcode: boolean; files: number;
+};
+export type ShareAccess = { id: number; ts: number; ip: string | null; user_agent: string | null; action: string; name: string | null };
+export const shareLinks = {
+  create: (b: { source: { kind: "hub" | "server"; id: string; server?: string }; days: number; passcode?: string; note?: string }) =>
+    req<ShareLinkRow & { url: string }>("/api/shares", json("POST", b)),
+  list: (location: string) => req<ShareLinkRow[]>(`/api/locations/${location}/shares`),
+  revoke: (id: string) => req<ShareLinkRow>(`/api/shares/${id}`, { method: "DELETE" }),
+  access: (id: string) => req<ShareAccess[]>(`/api/shares/${id}/access`),
+};
+
 export const api = {
   me: () => req<Me>("/auth/me").then((m) => { setMapConfig(m.map); return m; }),
   directToken: (server: string) => req<DirectToken>(`/api/servers/${server}/direct-token`, { method: "POST" }),

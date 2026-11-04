@@ -1,6 +1,7 @@
 import { Icon, confirmDialog, promptDialog, toast, useDismiss, useIsPhone } from "./ui";
 import { ExportsChip, RangeActions, RangeDialog, type Exporter } from "./RangeDialog";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ShareContext } from "./share";
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { api, fmtTime, localApi, type ApiResolver, type Camera, type KeptSpan, type Layout, type LayoutConfig, type Lock, type PlaybackQuality, type TimelineEvent, UNUSUAL_MIN } from "./api";
 import { ConfidenceSlider, loadNumber, saveNumber } from "./ConfidenceSlider";
 import { classPass } from "./classFilter";
@@ -864,6 +865,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
   const [selection, setSelection] = useState<{ cam: string; start: number; end: number } | null>(null);
   const [picked, setPicked] = useState<{ cam: string; start: number; end: number } | null>(null);   // a selection, finished
   const [rangeDialog, setRangeDialog] = useState<"export" | "lock" | null>(null);
+  const shareFor = useContext(ShareContext);   // the hub: a public link to a copy of the export
   const [openLock, setOpenLock] = useState<(Lock & { key: string }) | null>(null);   // key = the lane it was clicked on
   const clearRange = () => { setPicked(null); setSelection(null); setRangeDialog(null); };
   const lockRange = async (keys: string[], start: number, end: number, note: string) => {
@@ -880,7 +882,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
     const job = await site.createExport({ cameras: r.keys.map(idOf), start: r.start + off, end: r.end + off, quality: r.quality,
       audio: r.audio, grid: r.grid, lock: r.lock, note: r.note, event_id: r.eventId ?? null });
     if (r.lock) load(viewRef.current);
-    return { status: () => site.getExport(job.id), downloadUrl: () => site.exportDownloadUrl(job.id),
+    return { status: () => site.getExport(job.id), downloadUrl: () => site.exportDownloadUrl(job.id), share: shareFor?.(site, job.id) ?? undefined,
       label: `${r.keys.length === 1 ? camName(r.keys[0]) : `${r.keys.length} cameras`} · ${fmtClock(r.start)}` };
   };
 

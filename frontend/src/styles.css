@@ -546,6 +546,10 @@ h3.spaced { margin-top: 18px; }
 .export-done { display: flex; flex-direction: column; gap: 4px; }
 a.button { display: inline-block; text-align: center; padding: 7px 12px; border-radius: 8px; background: var(--accent); color: #fff; text-decoration: none; font-weight: 600; }
 .export-row { display: flex; flex-direction: column; gap: 4px; min-width: 280px; }
+.share-form { gap: 8px; flex-wrap: wrap; }
+.share-form input { flex: 1; min-width: 160px; }
+.share-made { display: flex; flex-direction: column; gap: 6px; }
+.share-made input { flex: 1; min-width: 0; font-family: ui-monospace, monospace; font-size: 12px; }
 
 /* "How feedback improves Qwen" pop-out */
 .stat-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }

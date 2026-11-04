@@ -19,6 +19,7 @@ from pydantic import BaseModel, EmailStr, Field
 
 from . import __version__, alerts, auth, backups, cameras, dashboards, db, digest, direct, fleet_actions, proxy, push, soc_api, turn, vlm_proxy
 from . import exports   # Site exports across servers
+from . import shares   # public, expiring links to an export's copy
 from . import fleet as fleet_mod
 from . import find as find_mod
 from . import camera_groups as groups_mod
@@ -74,6 +75,7 @@ async def _sweeper() -> None:
             camweb.sweep()   # camera web pages past their idle or hard limit
             stills.purge_old()   # last pictures older than 30 days
             lan_certs.sweep()   # DNS-01 values an interrupted order left, order rows past the weekly window
+            shares.sweep()   # expired share links lose their files
         except Exception:
             log.exception("sweeper")
         await asyncio.sleep(30)
@@ -2659,6 +2661,7 @@ app.include_router(vlm_proxy.router)
 app.include_router(soc_api.router)   # SOC: staff, monitoring/arming, contacts, procedures
 app.include_router(bridges_api.router)   # Axiom Bridge: a Site's bridges, enrollment codes, bridged cameras
 app.include_router(exports.router)   # Site exports across servers: one zip, the grid built here
+app.include_router(shares.router)   # shared export links (/x/<token>) and their management
 app.include_router(proxy.router)
 app.include_router(camweb.router)   # camera web pages: sessions, Caddy's on-demand TLS ask
 

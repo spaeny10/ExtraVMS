@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { fmtTime, type NvrEvent, type PlaybackQuality, type SiteApi, type TimelineEvent } from "./api";
 import {
   FarCache, KEY_STEP_S, STEP_STATUSES, afterPlaybackError, anyRecorded, asTimelineEvent, atFrac, centreOn, chunkAt, chunkStep,
@@ -14,6 +14,7 @@ import { Icon, useIsPhone } from "./ui";
 import { ZoomFrame, ZoomLayer, ZoomScope } from "./VideoZoom";
 import { useFullscreen } from "./useFullscreen";
 import { ExportsChip, RangeActions, RangeDialog, type Exporter, type Locker } from "./RangeDialog";
+import { ShareContext } from "./share";
 
 /** What the event viewer can do with the player: seek it (Ask answers' frames, notes) to epoch `t`, paused if asked. */
 export type EventPlayerHandle = { seek: (t: number, pause?: boolean) => void };
@@ -414,10 +415,12 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage, onSel
   const [rangeDone, setRangeDone] = useState(false);
   const [rangeDialog, setRangeDialog] = useState<"export" | "lock" | null>(null);
   const clearRange = () => { setRange(null); setRangeDone(false); setRangeDialog(null); };
+  const shareFor = useContext(ShareContext);
   const exporter: Exporter = async (r) => {
     const job = await site.createExport({ cameras: [cam], start: r.start, end: r.end, quality: r.quality, audio: r.audio, grid: r.grid,
       lock: r.lock, note: r.note, event_id: e.id });
-    return { status: () => site.getExport(job.id), downloadUrl: () => site.exportDownloadUrl(job.id), label: `Event #${e.id} · ${clock(r.start)}` };
+    return { status: () => site.getExport(job.id), downloadUrl: () => site.exportDownloadUrl(job.id), share: shareFor?.(site, job.id) ?? undefined,
+      label: `Event #${e.id} · ${clock(r.start)}` };
   };
   const locker: Locker = async (keys, start, end, note) => {
     await Promise.all(keys.map((k) => site.createLock({ camera_id: k, start_ts: start, end_ts: end, note })));

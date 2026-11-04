@@ -1,6 +1,7 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 import type { ExportJob } from "./api";
 import { fmtClock } from "./playback";
+import { SHARE_DAYS, type ShareResult, type Sharer } from "./share";
 import { toast } from "./ui";
 
 /** A camera that can be picked: `key` is the lane key (camKey: "server/id" on the hub, the bare id on a server). */
@@ -10,7 +11,7 @@ export type ExportRequest = {
   note: string; eventId?: number | null;
 };
 /** A started export: where its status and its zip are (one server's job, or the hub's for a Site across servers). */
-export type ExportHandle = { status: () => Promise<ExportJob>; downloadUrl: () => string; label: string };
+export type ExportHandle = { status: () => Promise<ExportJob>; downloadUrl: () => string; label: string; share?: Sharer };
 export type Exporter = (r: ExportRequest) => Promise<ExportHandle>;
 export type Locker = (keys: string[], start: number, end: number, note: string) => Promise<void>;
 
@@ -66,6 +67,51 @@ function follow(handle: ExportHandle): Running {
 
 const mb = (b: number) => `${(b / 1e6).toFixed(b < 1e7 ? 1 : 0)} MB`;
 
+/** "Share link…": how long it works, an optional passcode, then the link to copy. */
+function ShareLink({ share }: { share: Sharer }) {
+  const [open, setOpen] = useState(false);
+  const [days, setDays] = useState<1 | 7 | 30>(7);
+  const [passcode, setPasscode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [made, setMade] = useState<ShareResult | null>(null);
+  if (!open) return <button type="button" className="ghost small" onClick={() => setOpen(true)}>🔗 Share link…</button>;
+  if (made) {
+    return (
+      <div className="share-made">
+        <span className="small">Anyone with this link{passcode ? " and the passcode" : ""} can watch and download the export until {fmtClock(made.expires_at)}.</span>
+        <div className="row">
+          <input readOnly value={made.url} onFocus={(e) => e.currentTarget.select()} aria-label="Share link" />
+          <button type="button" className="small" onClick={() => { void navigator.clipboard?.writeText(made.url); toast.success("Link copied"); }}>Copy</button>
+        </div>
+        {passcode && <span className="muted small">Send the passcode another way (a call or a text), not with the link.</span>}
+      </div>
+    );
+  }
+  const create = async () => {
+    setBusy(true);
+    try {
+      setMade(await share({ days, passcode: passcode.trim() || undefined }));
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="share-form row small">
+      <label className="row">Works for
+        <select value={days} onChange={(e) => setDays(Number(e.target.value) as 1 | 7 | 30)}>
+          {SHARE_DAYS.map((d) => <option key={d.days} value={d.days}>{d.label}</option>)}
+        </select>
+      </label>
+      <input type="text" placeholder="Passcode (optional, 4+ characters)" value={passcode} onChange={(e) => setPasscode(e.target.value)} maxLength={64} />
+      <button type="button" className="small" disabled={busy || (passcode.trim().length > 0 && passcode.trim().length < 4)} onClick={() => void create()}>
+        {busy ? "Making…" : "Make link"}</button>
+      <button type="button" className="ghost small" onClick={() => setOpen(false)}>Cancel</button>
+    </div>
+  );
+}
+
 function ExportStatus({ run }: { run: Running }) {
   const j = run.job;
   if (!j) return <p className="muted small">{run.error ? `Can't reach the server: ${run.error}` : "Starting…"}</p>;
@@ -83,6 +129,7 @@ function ExportStatus({ run }: { run: Running }) {
       <a className="button" href={run.handle.downloadUrl()} download={j.zip_name}>⬇ Download {j.zip_name} ({mb(j.zip_bytes)})</a>
       <span className="muted small">{j.files.filter((f) => f.kind !== "report").length} files, report and checksums · kept 7 days</span>
       {j.missing.length > 0 && <span className="small warn-text">Not included: {j.missing.map((m) => `${m.name} (${m.why})`).join(", ")}</span>}
+      {run.handle.share && <ShareLink share={run.handle.share} />}
     </div>
   );
 }
@@ -180,8 +227,8 @@ export function RangeDialog({ mode, start, end, cameras, ticked, eventId, export
                 <option value="sd">SD 720p (smaller)</option>
               </select>
             </label>
-            <label className="row small"><input type="checkbox" checked={audio} onChange={(e) => setAudio(e.target.checked)} /> Audio</label>
-            <label className="row small" title={end - start > GRID_MAX_S ? `Up to ${GRID_MAX_S / 60} minutes` : "All the cameras side by side in one video, with names and the time"}>
+            <label className="row small"><input type="checkbox" checked={audio} onChange={(e) => setAudio(e.target.checked)} /> Audio (in each camera's file)</label>
+            <label className="row small" title={end - start > GRID_MAX_S ? `Up to ${GRID_MAX_S / 60} minutes` : "All the cameras side by side in one video, with names and the time; silent (each camera's own file has its sound)"}>
               <input type="checkbox" checked={grid} disabled={end - start > GRID_MAX_S} onChange={(e) => setGrid(e.target.checked)} /> Grid video
             </label>
             <label className="row small"><input type="checkbox" checked={lock} onChange={(e) => setLock(e.target.checked)} /> Also lock this footage</label>

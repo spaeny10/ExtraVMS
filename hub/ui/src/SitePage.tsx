@@ -6,6 +6,7 @@
  * /sites/:id/ask/:thread), Alerts the customer-wide page scoped to this Site (AlertsPage's SiteAlerts), Plates the server
  * UI's Plates page over the Site's servers with traffic cameras (SitePlates).
  */
+import { SharedLinks } from "./SharedLinks";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Icon, confirmDialog, promptDialog, toast } from "@site/ui";
 import { type Camera, type Me, type Org, type Server, type Site, type SiteCoverage, ago, api, fmtTime } from "./api";
@@ -203,7 +204,7 @@ function ServersTab({ site, admin, onChanged }: { site: Site; admin: boolean; on
   );
 }
 
-const SECTION_LABEL: Record<SettingsSection, string> = { general: "General", servers: "Servers", cameras: "Cameras", monitoring: "Monitoring" };
+const SECTION_LABEL: Record<SettingsSection, string> = { general: "General", servers: "Servers", cameras: "Cameras", monitoring: "Monitoring", shared: "Shared links" };
 
 /**
  * Settings sub-tabs. Servers (the Site's servers as cards, for everyone who sees the Site) was a top-level tab. Cameras (camera groups, talk-down speakers) is shown to everyone, edited by the Site's admins (the
@@ -228,6 +229,7 @@ function SettingsSections({ site, org, me, section, admin, onChanged, cov, setCo
       {section === "general" ? <SettingsTab site={site} admin={admin} onChanged={onChanged} me={me} org={org} cov={cov} setCov={setCov} />
         : section === "servers" ? <ServersTab site={site} admin={admin} onChanged={onChanged} />
         : section === "cameras" ? <><CamerasBox key={site.id} site={site} />{canOpenCameraWeb(me, org) && <CameraWebCard key={`web-${site.id}`} site={site} />}</>
+        : section === "shared" ? <SharedLinks key={site.id} site={site} />
         : <MonitoringSection site={site} editor={editor} canArm={canArm} />}
     </>
   );

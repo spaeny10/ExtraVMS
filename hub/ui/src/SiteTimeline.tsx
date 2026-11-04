@@ -21,7 +21,7 @@ import type { Exporter } from "@site/RangeDialog";
 import { toast } from "@site/ui";
 import { decodeCells, regions } from "@site/region";
 import { TimelineView, type TimelineCamera } from "@site/Timeline";
-import { api, siteExport, type Org, type Server, type Site } from "./api";
+import { api, shareLinks, siteExport, type Org, type Server, type Site } from "./api";
 import { directStateOf, useDirectVersion } from "./direct";
 import { isDirect, mediaApi, siteApi } from "./hubSource";
 import { effectiveOffset, focusFor, fromLaneKeys, hubLayoutStore, initialTimelineLayout, journeyMembers, migrateLocalLayouts, momentTarget,
@@ -122,6 +122,7 @@ export function SiteTimeline({ site, query, syncUrl = true, canRecoverSd = false
     const job = await siteExport.create(site.id, { cameras: r.keys.map((k) => { const { server, id } = splitKey(k); return { server, camera: id }; }),
       start: r.start, end: r.end, quality: r.quality, audio: r.audio, grid: r.grid, lock: r.lock, note: r.note });
     return { status: () => siteExport.status(job.id), downloadUrl: () => siteExport.downloadUrl(job.id),
+      share: (o) => shareLinks.create({ source: { kind: "hub", id: job.id }, ...o }),
       label: `${r.keys.length} cameras · ${fmtClock(r.start)}` };
   }, [site.id]);
   // TimelineView reads the picked layout's id when it mounts: move this browser's older layouts (and that id) first
