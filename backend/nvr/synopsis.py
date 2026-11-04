@@ -298,7 +298,7 @@ class OllamaServer:
 
     async def _serve(self, role: str) -> None:
         env = ollama_env(vlmroute.router.models[role])
-        log_file = open(settings.runtime_dir / self.LOGS[role], "ab")
+        log_file = open_log(settings.runtime_dir / self.LOGS[role])
         port = _port(vlmroute.router.models[role].url)
         while True:
             if port:
@@ -321,9 +321,27 @@ class OllamaServer:
                 await kill_tree(p.pid)
 
 
+def open_log(path: Path):
+    """A log file a child process writes to, always at the end, so trim_log can empty it while the child runs.
+    POSIX O_APPEND does that. On Windows Python's "ab" only appends for Python's own writes (the C runtime seeks
+    first); a child writing through the inherited handle keeps its own offset, and after a trim it wrote its next
+    line 1.1 GB in, the gap filled with zeros (TSS-DT, 2026-11-04). A handle opened with FILE_APPEND_DATA and
+    no FILE_WRITE_DATA appends every write, whoever makes it."""
+    if os.name != "nt":
+        return open(path, "ab")
+    import _winapi
+    import msvcrt
+    FILE_APPEND_DATA, FILE_READ_ATTRIBUTES, SYNCHRONIZE = 0x4, 0x80, 0x100000
+    share = 0x1 | 0x2 | 0x4                     # read, write, delete: trim_log opens it too
+    h = _winapi.CreateFile(str(path), FILE_APPEND_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE, share, 0,
+                           4, 0x80, 0)           # OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL
+    return open(msvcrt.open_osfhandle(h, os.O_APPEND), "ab", buffering=0)
+
+
 def trim_log(path: Path, max_bytes: int, keep: int) -> bool:
     """Past max_bytes: the last `keep` bytes go to <name>.1 and the log is emptied in place. Ollama writes through
-    an append-mode handle, so its next line lands at the new end (renaming a file it holds open fails on Windows)."""
+    an append-only handle (open_log), so its next line lands at the new end (renaming a file it holds open fails on
+    Windows)."""
     if not path.exists() or path.stat().st_size <= max_bytes:
         return False
     with open(path, "r+b") as f:

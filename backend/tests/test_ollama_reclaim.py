@@ -3,8 +3,10 @@
 Run: ..\\.venv\\Scripts\\python.exe tests\\test_ollama_reclaim.py  (from backend/)"""
 import asyncio
 import os
+import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 os.environ["NVR_DATA_DIR"] = tempfile.mkdtemp(prefix="nvr-reclaim-test-")  # never the real DB
@@ -59,16 +61,27 @@ def test_listeners_returns_pairs():
 
 
 def test_trim_log_keeps_the_tail_and_appends_after():
+    """Another process (Ollama) writes through the inherited handle. Python's own "ab" appends only for Python's
+    writes on Windows: the child kept its offset and refilled the emptied log with 1.1 GB of zeros (TSS-DT 2026-11-04)."""
     p = Path(os.environ["NVR_DATA_DIR"]) / "ollama.log"
     p.write_bytes(b"a" * 900 + b"b" * 100)
     assert not synopsis.trim_log(p, 2000, 100)            # under the limit: untouched
-    with open(p, "ab") as writer:                         # Ollama's handle, open throughout
+    child = ("import sys, time\n"
+             "sys.stdout.buffer.write(b'first\\n'); sys.stdout.flush()\n"
+             "while not __import__('os').path.exists(sys.argv[1]): time.sleep(0.05)\n"
+             "sys.stdout.buffer.write(b'next\\n'); sys.stdout.flush()\n")
+    go = Path(os.environ["NVR_DATA_DIR"]) / "go"
+    with synopsis.open_log(p) as log_file:                # the handle Ollama inherits, open throughout
+        proc = subprocess.Popen([sys.executable, "-c", child, str(go)], stdout=log_file)
+        deadline = time.time() + 20
+        while p.stat().st_size < 1006 and time.time() < deadline:
+            time.sleep(0.05)
         assert synopsis.trim_log(p, 500, 100)
-        assert Path(f"{p}.1").read_bytes() == b"b" * 100
+        assert Path(f"{p}.1").read_bytes() == b"b" * 94 + b"first\n"
         assert p.stat().st_size == 0
-        writer.write(b"next line\n")
-        writer.flush()
-    assert p.read_bytes() == b"next line\n"               # no gap of zeros where the old content was
+        go.write_text("x")
+        assert proc.wait(20) == 0
+    assert p.read_bytes() == b"next\n"                    # no gap of zeros where the old content was
 
 
 if __name__ == "__main__":
