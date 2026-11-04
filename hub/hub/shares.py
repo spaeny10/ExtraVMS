@@ -23,10 +23,11 @@ import re
 import secrets
 import shutil
 import time
+import urllib.parse
 from pathlib import Path
 
 import sqlalchemy as sa
-from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
@@ -315,7 +316,11 @@ aria-label="Passcode"><button type="submit">Open</button></form>""")
 
 
 @router.post("/x/{token}")
-async def public_passcode(token: str, request: Request, passcode: str = Form("", max_length=64)):
+async def public_passcode(token: str, request: Request):
+    # the form body read by hand: FastAPI's Form needs python-multipart, which the hub image doesn't have (declaring a
+    # Form parameter made the hub fail at start, 2026-11-03)
+    raw = (await request.body())[:2048].decode("utf-8", "replace")
+    passcode = (urllib.parse.parse_qs(raw).get("passcode") or [""])[0][:64]
     row = _live(token)
     if row is None or not row.get("passcode_hash"):
         return _gone()
