@@ -126,8 +126,24 @@ camweb.py, server nvr/camweb.py). Setting it up once:
   `docker compose -f hub/docker-compose.yml exec caddy caddy validate --config /etc/caddy/Caddyfile` and
   `docker compose -f hub/docker-compose.yml up -d caddy` (the new environment variable recreates the container).
 - **Servers** need this version (their hello lists `camweb`); an older one answers "update the server first".
-- Let's Encrypt allows 50 new certificates per registered domain per week; each camera's name is stable, so a camera
-  costs one certificate (renewed by Caddy) the first time anyone opens it. Caddy falls back to ZeroSSL when it is hit.
+- **One wildcard instead of a certificate per camera** (hub/hub/camweb_cert.py): Let's Encrypt allows 50 new
+  certificates per registered domain per week, shared with the servers' LAN certificates, and at a fleet of thousands
+  of cameras one install day could use the week up. So the hub holds one `*.cam.axiomvision.ai` certificate (DNS-01
+  through the hub's own `dns` service, like the LAN certificates) and Caddy fetches it at each handshake
+  (`get_certificate http http://hub:8000/api/camweb/cert`; a renewal is used at once, no reload). Until the hub has it,
+  the endpoint answers 204 and Caddy issues per camera name on demand as before. The endpoint hands out the private key
+  only to Caddy's own request (Host `hub:8000`, no X-Forwarded-*); anything from outside gets 404.
+  Setting it up once (needs `HUB_LAN_CERTS=1`, below):
+  1. Namecheap → Advanced DNS: `CNAME _acme-challenge.cam → _acme-challenge._camweb.lan.axiomvision.ai.` (it overrides
+     the `*.cam` wildcard for that one name). Until it is there the hub orders nothing and logs once a day
+     "waiting for the DNS record at the registrar".
+  2. After pulling, rebuild the hub, then validate and recreate Caddy (the Caddyfile changed):
+     `docker compose -f hub/docker-compose.yml exec caddy caddy validate --config /etc/caddy/Caddyfile` and
+     `docker compose -f hub/docker-compose.yml up -d --force-recreate caddy`.
+  3. Within the hour the hub logs "camera pages certificate: issued *.cam.axiomvision.ai until ...". Check:
+     `echo | openssl s_client -connect hub.axiomvision.ai:443 -servername cnotacamera1.cam.axiomvision.ai 2>/dev/null | openssl x509 -noout -subject`
+     → `CN = *.cam.axiomvision.ai`. Per-camera certificates Caddy already has are still served from its memory until
+     its next restart; after that every camera name gets the wildcard. `HUB_CAMWEB_WILDCARD=0` turns it off.
 
 ## Direct-on-LAN names and certificates
 A browser on a server's own LAN plays media straight from it (Direct · LAN, hub/ui/src/direct.ts). With only the
@@ -150,9 +166,12 @@ server can hold a Let's Encrypt certificate for its own names:
 - **Renewal and limits**: renewed when less than min(30 days, a third of the lifetime) is left, by the server's hourly
   check. One order per server at a time; after an order no new one for that server for 2 days (a server that lost
   its key waits); failures back off 1 h, 2 h, 4 h … 24 h; 10 failed orders in an hour pause all orders for the hour;
-  at most `HUB_LAN_CERT_WEEKLY_CAP` (30) certificates per 7 days over all servers (the hub logs "weekly cap" when it
-  is reached). Let's Encrypt allows 50 new certificates per registered domain per week and the camera web pages'
-  certificates (`*.cam.axiomvision.ai`) count against the same 50; a large initial rollout fills over a few weeks.
+  at most `HUB_LAN_CERT_WEEKLY_CAP` (30) NEW certificates per 7 days over all servers (the hub logs "weekly cap" when
+  it is reached). Renewals (a server that had a certificate: the same names again) are not counted: Let's Encrypt
+  exempts an exact set of names it issued before from its 50 a week per registered domain and its 300 orders per
+  3 hours, and 2,000 servers renew ~230 a week. Renewals only have a brake of 100 an hour against a runaway. So the
+  50 a week limits onboarding (~30-40 new servers a week); a bigger rollout needs Let's Encrypt's rate limit
+  adjustment form for axiomvision.ai.
 - **Fallback**: a customer router with DNS rebinding protection (many consumer routers, Pi-hole, some ISPs' DNS) drops
   answers that point at private addresses. The name then doesn't resolve, the probe fails and the browser keeps using
   the hub tunnel, exactly as off the LAN. Fix per site by allowing `lan.axiomvision.ai` in the router's rebind

@@ -15,7 +15,12 @@ Limits (Let's Encrypt allows 50 certificates per registered domain per week, sha
   * one order in flight per server; renew once less than min(30 days, a third of the lifetime) is left (renew_at)
   * after an order: none for this server for REISSUE_GAP_S (a server that lost its key waits), after a failure a
     backoff of 1 h, 2 h, 4 h ... 24 h (BACKOFF_S)
-  * settings.lan_cert_weekly_cap certificates per 7 days over all servers (running orders count), logged when hit
+  * settings.lan_cert_weekly_cap NEW certificates per 7 days over all servers (running orders count), logged when
+    hit. A renewal (the server had a certificate: the same names again) is not counted: Let's Encrypt exempts orders
+    for an exact set of names it issued before from its 50 a week per registered domain and its 300 orders per 3 h,
+    and 2,000 servers on 90-day certificates renew ~230 a week, which a shared cap of 30 would let expire. Renewals
+    have their own brake, RENEWALS_PER_HOUR, against a runaway (LE still allows 5 per exact set per week; the gap
+    after an order keeps a server under that).
   * FAILURE_BRAKE failed orders in an hour (e.g. the delegation is broken) pause all orders for that hour
 
 The ACME account key is made once and kept in the kv table (like the VAPID key, push.py); it is never logged. The
@@ -45,6 +50,7 @@ RENEW_BEFORE_S = 30 * DAY
 REISSUE_GAP_S = 2 * DAY
 BACKOFF_S = (3600.0, 2 * 3600.0, 4 * 3600.0, 8 * 3600.0, 16 * 3600.0, DAY)
 FAILURE_BRAKE = 10
+RENEWALS_PER_HOUR = 100
 WEEK_S = 7 * DAY
 ORDER_TIMEOUT_S = 600.0
 CHALLENGE_TTL_S = 1800.0
@@ -137,19 +143,31 @@ def _save(server_id: str, **values) -> None:
             c.execute(sa.update(db.lan_certs).where(db.lan_certs.c.server_id == server_id).values(**values))
 
 
-def counts(now: float) -> tuple[int, int, float | None]:
-    """(certificates issued or being ordered in the last 7 days, orders failed in the last hour, oldest of the former)."""
+def counts(now: float) -> tuple[int, int, float | None, int]:
+    """(NEW certificates issued or being ordered in the last 7 days, orders failed in the last hour, oldest of the
+    first, renewals issued or being ordered in the last hour)."""
+    o = db.lan_cert_orders.c
+    not_failed = sa.or_(o.ok.is_(None), o.ok == True)  # noqa: E712
+    new = sa.or_(o.renewal.is_(None), o.renewal == False)  # noqa: E712
     with db.engine().connect() as c:
-        week = sa.and_(db.lan_cert_orders.c.at > now - WEEK_S, sa.or_(db.lan_cert_orders.c.ok.is_(None), db.lan_cert_orders.c.ok == True))  # noqa: E712
+        week = sa.and_(o.at > now - WEEK_S, not_failed, new)
         issued = c.execute(sa.select(sa.func.count()).select_from(db.lan_cert_orders).where(week)).scalar() or 0
-        oldest = c.execute(sa.select(sa.func.min(db.lan_cert_orders.c.at)).where(week)).scalar()
+        oldest = c.execute(sa.select(sa.func.min(o.at)).where(week)).scalar()
         failed = c.execute(sa.select(sa.func.count()).select_from(db.lan_cert_orders).where(
-            db.lan_cert_orders.c.at > now - 3600, db.lan_cert_orders.c.ok == False)).scalar() or 0  # noqa: E712
-    return int(issued), int(failed), oldest
+            o.at > now - 3600, o.ok == False)).scalar() or 0  # noqa: E712
+        renewed = c.execute(sa.select(sa.func.count()).select_from(db.lan_cert_orders).where(
+            o.at > now - 3600, not_failed, o.renewal == True)).scalar() or 0  # noqa: E712
+    return int(issued), int(failed), oldest, int(renewed)
+
+
+def is_renewal(row: dict | None) -> bool:
+    """The server was issued a certificate before. Its names never change (*.<its label>.<zone>), so the next order
+    is for the same exact set: a renewal to Let's Encrypt."""
+    return bool(row and row.get("fullchain"))
 
 
 def policy(row: dict | None, key_hash: str, now: float, in_flight: bool, issued_week: int, failed_hour: int,
-           oldest_week: float | None, cap: int) -> tuple[str, float]:
+           oldest_week: float | None, cap: int, renewed_hour: int = 0) -> tuple[str, float]:
     """What to do with a valid CSR: ("issued", 0) = send the stored chain, ("pending", 0) = an order already runs,
     ("order", 0) = start one, ("later", seconds) = not now."""
     row = row or {}
@@ -162,6 +180,10 @@ def policy(row: dict | None, key_hash: str, now: float, in_flight: bool, issued_
         return "later", row["next_order_at"] - now
     if failed_hour >= FAILURE_BRAKE:
         return "later", 3600.0
+    if is_renewal(row):
+        if renewed_hour >= RENEWALS_PER_HOUR:
+            return "later", 3600.0
+        return "order", 0.0
     if issued_week >= cap:
         return "later", max(3600.0, (oldest_week or now) + WEEK_S - now)
     return "order", 0.0
@@ -196,21 +218,22 @@ async def _on_csr(conn, frame: dict) -> dict:
     kh = key_sha256(csr.public_key())
     now = time.time()
     row = _row(sid)
-    issued, failed, oldest = counts(now)
+    issued, failed, oldest, renewed = counts(now)
     cap = max(0, int(settings.lan_cert_weekly_cap))
-    what, wait = policy(row, kh, now, sid in _in_flight, issued, failed, oldest, cap)
+    what, wait = policy(row, kh, now, sid in _in_flight, issued, failed, oldest, cap, renewed)
     if what == "issued":
         return {"status": "issued", "fullchain": row["fullchain"]}
     if what == "pending":
         return {"status": "pending"}
     if what == "later":
-        if issued >= cap and now - _cap_logged_at > 6 * 3600:
+        if not is_renewal(row) and issued >= cap and now - _cap_logged_at > 6 * 3600:
             _cap_logged_at = now
             log.warning("lan cert: the weekly cap of %d certificates is reached; %s and others wait (HUB_LAN_CERT_WEEKLY_CAP)", cap, sid)
         return {"status": "later", "retry_after": int(wait) + 1}
     _in_flight.add(sid)
     with db.engine().begin() as c:
-        oid = c.execute(db.lan_cert_orders.insert().values(server_id=sid, at=now, ok=None)).inserted_primary_key[0]
+        oid = c.execute(db.lan_cert_orders.insert().values(server_id=sid, at=now, ok=None,
+                                                           renewal=is_renewal(row))).inserted_primary_key[0]
     task = asyncio.create_task(_issue(sid, pem.encode("ascii"), kh, oid), name=f"lan-cert-{sid}")
     _tasks.add(task)
     task.add_done_callback(_tasks.discard)

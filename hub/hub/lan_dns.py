@@ -11,6 +11,8 @@ stays "Secure". Names (all lowercase, case-insensitive on the wire):
   <a-b-c-d>.<label>     A a.b.c.d when a.b.c.d is private (10/8, 172.16/12, 192.168/16, 100.64/10; no leading zeros)
                         and <label> is an enrolled, non-retired server; NXDOMAIN otherwise.
   _acme-challenge.<label>   TXT: the DNS-01 values of that server's running ACME order (lan_challenges).
+  _acme-challenge._camweb   TXT: the same for the camera pages' wildcard *.cam.axiomvision.ai (camweb_cert.py), which
+                        the registrar's CNAME _acme-challenge.cam.axiomvision.ai points here.
   <zone>                SOA and NS (settings.lan_dns_ns); <label> itself exists with no records.
 
 Authoritative only: never recursive, REFUSED for names outside the zone, NXDOMAIN for unknown names in it, no answer
@@ -46,6 +48,7 @@ log = logging.getLogger("hub.lan_dns")
 
 PRIVATE = tuple(ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"))
 CHALLENGE = "_acme-challenge"
+CAMWEB_LABEL = "_camweb"   # _acme-challenge._camweb.<zone>: the camera pages' wildcard (camweb_cert.py); no server label has "_"
 A_TTL = 3600          # an address name never changes what it points at
 TXT_TTL = 30
 NEG_TTL = 60          # SOA minimum: how long a resolver may cache "no such name" (a challenge appears seconds later)
@@ -258,6 +261,18 @@ class Zone:
             log.debug("lan dns: %s %s -> apex", qname, dns.rdatatype.to_text(qtype))
             return
         server = rel[-1]
+        if server == CAMWEB_LABEL:   # the camera pages' wildcard (camweb_cert.py): only its challenge TXT
+            values = self.source.values(f"{CHALLENGE}.{CAMWEB_LABEL}.{self.zone.to_text(omit_final_dot=True)}")
+            if len(rel) == 1:
+                r.authority.append(self._soa())
+            elif len(rel) == 2 and rel[0] == CHALLENGE:
+                if (qtype == dns.rdatatype.TXT or any_type) and values:
+                    r.answer.append(dns.rrset.from_text(qname, TXT_TTL, "IN", "TXT", *(f'"{v}"' for v in values[:4])))
+                else:
+                    r.authority.append(self._soa())
+            else:
+                self._nx(r, qname, qtype)
+            return
         if not self.source.known(server) or len(rel) > 2:
             return self._nx(r, qname, qtype)
         if len(rel) == 1:   # <label> itself: exists (names below it do), no records

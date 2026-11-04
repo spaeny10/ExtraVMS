@@ -426,7 +426,10 @@ lan_certs = Table("lan_certs", metadata,
 lan_cert_orders = Table("lan_cert_orders", metadata,
                         Column("id", Integer, primary_key=True, autoincrement=True),
                         Column("server_id", String(24), nullable=False), Column("at", Float, nullable=False, index=True),
-                        Column("ok", Boolean, nullable=True))   # None while running
+                        Column("ok", Boolean, nullable=True),   # None while running
+                        # the server had a certificate before (same names): Let's Encrypt doesn't count it against the
+                        # 50 a week per registered domain, so neither does the weekly cap (None on rows from before)
+                        Column("renewal", Boolean, nullable=True))
 lan_challenges = Table("lan_challenges", metadata,
                        Column("name", String(253), primary_key=True), Column("value", String(128), primary_key=True),
                        Column("expires_at", Float, nullable=False))
@@ -468,7 +471,7 @@ ADDED_COLUMNS = [("sites", "retired_at"), ("sites", "location_id"), ("membership
                  ("locations", "lat"), ("locations", "lon"), ("locations", "address_parts"), ("locations", "geocoded_at"),
                  ("locations", "geocode_source"), ("users", "totp_last_step"), ("central_instances", "camera_network"),
                  ("central_instances", "camera_limit"), ("locations", "ai_mode"), ("locations", "ai_outside"),
-                 ("locations", "digest_ppe"), ("incidents", "vehicles")]
+                 ("locations", "digest_ppe"), ("incidents", "vehicles"), ("lan_cert_orders", "renewal")]
 
 
 def upgrade(eng: Engine) -> None:

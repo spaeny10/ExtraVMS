@@ -58,12 +58,15 @@ class Settings(BaseSettings):
     lan_certs: bool = False                   # order certificates (turn on once `dig` shows the delegation works)
     lan_acme_directory: str = "https://acme-v02.api.letsencrypt.org/directory"   # staging: acme-staging-v02.api...
     lan_acme_email: str = ""                  # ACME account contact; empty = none
-    lan_cert_weekly_cap: int = 30             # certificates per 7 days, all servers (LE allows 50 per registered domain,
-                                              # shared with the camera web pages' certificates on cam.axiomvision.ai)
+    lan_cert_weekly_cap: int = 30             # NEW certificates per 7 days, all servers (LE allows 50 per registered
+                                              # domain; renewals don't count there or here: lan_certs.py)
 
     # Camera web pages (camweb.py): each camera's own page at https://<label>.<camweb_domain>/ through its server's tunnel
     camweb_domain: str = ""                   # e.g. cam.axiomvision.ai (wildcard DNS to the hub); empty = "cam." + the public URL's parent domain
-    camweb_salt: str = ""                     # mixed into the labels; empty = a random one kept in kv (camweb:salt)
+    camweb_wildcard: bool = True              # one Let's Encrypt wildcard for every camera page (camweb_cert.py), once
+                                              # lan_certs is on and the registrar's _acme-challenge CNAME is there
+    camweb_cert_host: str = "hub:8000"        # the Host of Caddy's get_certificate request (the Caddyfile's URL)
+    camweb_salt: str = ""                   # mixed into the labels; empty = a random one kept in kv (camweb:salt)
     camweb_idle_s: int = 1800                 # a session ends after this long without a request ...
     camweb_max_s: int = 7200                  # ... and this long after it was opened, whatever happens
     camweb_key_ttl_s: int = 60                # the one-time key in the link the hub opens

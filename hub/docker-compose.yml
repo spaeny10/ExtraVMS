@@ -74,6 +74,8 @@ services:
       HUB_LAN_ACME_DIRECTORY: ${HUB_LAN_ACME_DIRECTORY:-https://acme-v02.api.letsencrypt.org/directory}
       HUB_LAN_ACME_EMAIL: ${HUB_LAN_ACME_EMAIL:-}
       HUB_LAN_CERT_WEEKLY_CAP: ${HUB_LAN_CERT_WEEKLY_CAP:-30}
+      # one wildcard for the camera pages (camweb_cert.py) once the registrar has the _acme-challenge.cam CNAME
+      HUB_CAMWEB_WILDCARD: ${HUB_CAMWEB_WILDCARD:-1}
       HUB_EXPORTS_DIR: /srv/exports   # Site exports across servers, kept 7 days (exports.py)
     # downloads served at /downloads/ (the Axiom Bridge: bridge/publish.ps1 puts each version here); read-only inside
     volumes: ["./downloads:/srv/downloads:ro", "hub_exports:/srv/exports"]

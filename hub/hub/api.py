@@ -20,6 +20,7 @@ from pydantic import BaseModel, EmailStr, Field
 from . import __version__, alerts, auth, backups, cameras, dashboards, db, digest, direct, fleet_actions, proxy, push, soc_api, turn, vlm_proxy
 from . import exports   # Site exports across servers
 from . import shares   # public, expiring links to an export's copy
+from . import camweb_cert   # one wildcard certificate for every camera page
 from . import fleet as fleet_mod
 from . import find as find_mod
 from . import camera_groups as groups_mod
@@ -48,6 +49,8 @@ async def lifespan(app: FastAPI):
         tasks.append(asyncio.create_task(geocode.backfill_once_at_start(), name="geocode-backfill"))   # once per start, 1 request/s
     if coverage.enabled():
         tasks.append(asyncio.create_task(coverage.daily_loop(), name="coverage"))   # CoverageMap refresh, inside the monthly budget
+    if camweb_cert.enabled():
+        tasks.append(asyncio.create_task(camweb_cert.run(), name="camweb-cert"))   # *.cam wildcard: order / renew hourly
     task = tasks[0]
     log.info("hub %s up on http://%s:%s (%s)", __version__, settings.host, settings.port, settings.public_url)
     yield
@@ -2664,6 +2667,7 @@ app.include_router(exports.router)   # Site exports across servers: one zip, the
 app.include_router(shares.router)   # shared export links (/x/<token>) and their management
 app.include_router(proxy.router)
 app.include_router(camweb.router)   # camera web pages: sessions, Caddy's on-demand TLS ask
+app.include_router(camweb_cert.router)   # ... and their wildcard certificate, for Caddy's get_certificate
 
 
 # ---------------------------------------------------------------- hub pages

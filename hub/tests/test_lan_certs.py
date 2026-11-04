@@ -106,6 +106,14 @@ def test_policy():
     assert what == "later" and wait == pytest.approx(d)
     assert p(None, week=30, oldest=now - 7 * d + 60)[1] == 3600          # ... but at least an hour
     assert p(None, week=29) == ("order", 0)
+    # a renewal (the server had a certificate: the same names again) isn't held by the weekly cap: Let's Encrypt
+    # doesn't count it either, and 2,000 servers renew ~230 a week
+    assert p(due, week=30, oldest=now - 6 * d) == ("order", 0)
+    assert p(fresh, "k2", week=500) == ("order", 0)                      # lost its key, cap long reached: still renewed
+    full = lan_certs.RENEWALS_PER_HOUR
+    assert lan_certs.policy(due, "k1", now, False, 0, 0, None, 30, full) == ("later", 3600)   # the runaway brake
+    assert lan_certs.policy(due, "k1", now, False, 0, 0, None, 30, full - 1) == ("order", 0)
+    assert p(due, failed=lan_certs.FAILURE_BRAKE) == ("later", 3600)     # the failure brake still holds renewals
 
 
 def test_welcome_offer(monkeypatch):
@@ -428,6 +436,31 @@ def test_limits_and_refusals(acme, caplog):
         assert (await _csr(conn, make_csr()[0]))["status"] == "later"
 
     asyncio.run(go())
+
+
+def test_renewal_goes_past_a_full_weekly_cap(acme):
+    """A server with a certificate due for renewal is ordered even when the week's new certificates are used up, and
+    its order is marked as a renewal (so it doesn't hold back a new server either)."""
+    conn = Conn(SID)
+    now = time.time()
+    lan_certs._save(SID, key_sha256="old", fullchain="OLD PEM", not_before=now - 61 * lan_certs.DAY,
+                    not_after=now + 29 * lan_certs.DAY, issued_at=now - 61 * lan_certs.DAY, next_order_at=None, failures=0)
+    settings.lan_cert_weekly_cap, cap = 3, settings.lan_cert_weekly_cap
+    try:
+        with db.engine().begin() as c:
+            for i in range(3):
+                c.execute(db.lan_cert_orders.insert().values(server_id=f"s_other{i}", at=now - 3600, ok=True))
+
+        async def go():
+            assert (await _csr(conn, make_csr()[0]))["status"] == "pending"
+            await _drain()
+        asyncio.run(go())
+        mine = db.one(sa.select(db.lan_cert_orders).where(db.lan_cert_orders.c.server_id == SID))
+        assert mine["renewal"] is True and mine["ok"] is True and acme.orders == 1
+        issued, _, _, renewed = lan_certs.counts(time.time())
+        assert issued == 3 and renewed == 1              # the renewal isn't counted against new certificates
+    finally:
+        settings.lan_cert_weekly_cap = cap
 
 
 def test_sweep_clears_leftovers(acme):

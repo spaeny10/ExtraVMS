@@ -20,9 +20,12 @@
 # Each camera's own page at https://<label>.{$HUB_CAMWEB_DOMAIN}/ (DNS: *.cam.axiomvision.ai -> this host). The hub
 # handles every request on these names itself (sessions, the camera's server tunnel); the Host header is passed as is.
 # No compression here: camera pages are passed through byte for byte.
+# Certificates: the hub's one wildcard for *.cam (camweb_cert.py), fetched at each handshake (a renewal is used at once);
+# while the hub has none (204), a certificate per camera name on demand as before, gated by tls-ok.
 *.{$HUB_CAMWEB_DOMAIN} {
 	tls {
 		on_demand
+		get_certificate http http://hub:8000/api/camweb/cert
 	}
 	reverse_proxy hub:8000 {
 		transport http {
