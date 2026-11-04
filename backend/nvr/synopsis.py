@@ -261,7 +261,12 @@ def ollama_env(inst: vlmroute.LocalModel, base: dict | None = None) -> dict:
             "OLLAMA_FLASH_ATTENTION": "1", "OLLAMA_KV_CACHE_TYPE": "q8_0",
             # requests through the OpenAI-compatible /v1 (the hub's shared AI for other sites) can't set num_ctx
             # per call, so the server default must be the same context the native calls ask for
-            "OLLAMA_CONTEXT_LENGTH": str(inst.num_ctx)}
+            "OLLAMA_CONTEXT_LENGTH": str(inst.num_ctx),
+            # llama-server's prompt cache in system RAM (default 8 GB): every request's state is saved, ~240-390 MB
+            # each for the 27B, and only the ~230-token instructions ever match a later prompt (each event has its
+            # own pictures). TSS-DT's runner sat at 7.8 GB of RAM for that; 1 GB still keeps the shared prefix.
+            # An LLAMA_ARG_CACHE_RAM already in the environment wins.
+            "LLAMA_ARG_CACHE_RAM": (os.environ if base is None else base).get("LLAMA_ARG_CACHE_RAM", "1024")}
 
 
 class OllamaServer:

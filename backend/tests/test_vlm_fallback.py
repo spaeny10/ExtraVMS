@@ -187,6 +187,8 @@ def test_two_ollama_envs():
         assert env["OLLAMA_KEEP_ALIVE"] == "-1" and env["PATH"] == "x" and "OLLAMA_MODELS" not in env  # one shared store
     assert p["OLLAMA_NUM_PARALLEL"] == "2" and f["OLLAMA_NUM_PARALLEL"] == "1"
     assert p["OLLAMA_CONTEXT_LENGTH"] == "8192" and f["OLLAMA_CONTEXT_LENGTH"] == "6144"
+    assert p["LLAMA_ARG_CACHE_RAM"] == "1024" and f["LLAMA_ARG_CACHE_RAM"] == "1024"   # not llama-server's 8 GB
+    assert synopsis.ollama_env(rt.models["primary"], base={"LLAMA_ARG_CACHE_RAM": "0"})["LLAMA_ARG_CACHE_RAM"] == "0"
     assert synopsis.OllamaServer().roles() == ["primary", "fallback"]
     configure(fallback=False)
     assert synopsis.OllamaServer().roles() == ["primary"]
