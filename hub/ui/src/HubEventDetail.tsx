@@ -15,7 +15,10 @@ import { mediaApi } from "./hubSource";
 import { type EventRef, timelineTargetHref } from "./eventOpen";
 import { navigate } from "./nav";
 
-export function HubEventDetail({ ev, cameraName, onClose }: { ev: EventRef; cameraName: (cam: string) => string; onClose: () => void }) {
+/** `regions`: opened from a feed filtered by painted regions (Site Live): the player's previous / next keep to them. */
+export function HubEventDetail({ ev, cameraName, onClose, regions = false }: {
+  ev: EventRef; cameraName: (cam: string) => string; onClose: () => void; regions?: boolean;
+}) {
   const isPhone = useIsPhone();
   // the clip, snapshot and crops come straight from the server on its LAN (mediaApi); lock, feedback, chat and the
   // other writes stay on the hub proxy, because mediaApi only redirects media URL builders
@@ -27,11 +30,12 @@ export function HubEventDetail({ ev, cameraName, onClose }: { ev: EventRef; came
       if (ev.location) navigate(href); else location.href = href;
     },
   }), [ev.location, ev.server]);
+  const regionKey = useMemo(() => (regions ? (cam: string) => camKey(ev.server, cam) : undefined), [regions, ev.server]);
   return (
     <NavContext.Provider value={nav}>
       {/* keyed by server too: the same id on another server is another event */}
       <EventDetail key={`${ev.server}/${ev.id}`} id={ev.id} site={mediaApi(ev.server)} cameraName={cameraName} onClose={onClose}
-        variant={isPhone ? "drawer" : "modal"} />
+        variant={isPhone ? "drawer" : "modal"} regionKey={regionKey} />
     </NavContext.Provider>
   );
 }

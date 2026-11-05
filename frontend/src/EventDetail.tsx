@@ -9,6 +9,7 @@ import { clipOrigin } from "./eventPlayback";
 import { StatusBadge, eventLabel, placeholder, rejectedReason } from "./Events";
 import { useNav } from "./nav";
 import { ReadPlate } from "./PlateRead";
+import { useRegions } from "./region";
 import { Icon, confirmDialog, toast, useIsPhone } from "./ui";
 import { aiModelLabel } from "./aiName";
 
@@ -20,10 +21,14 @@ const THREATS: Threat[] = ["none", "low", "medium", "high"];
  * `site` = the API of the server the event lives on (the hub passes one per server; default: this server).
  * `variant` "drawer" docks the viewer to the right edge at full height (the hub's SOC workstation opens it beside the
  * incident it is working on, so the queue stays visible); the default "modal" is the centered dialog every page uses.
+ * `regionKey`: opened from a view filtered by painted regions (Live's feed, the Timeline): the key a camera's region is
+ * stored under (region.ts; the hub's is server/camera), so the player's previous / next and ticks keep to that region.
  */
-export function EventDetail({ id: initialId, cameraName, onClose, site = api, variant = "modal" }: {
+export function EventDetail({ id: initialId, cameraName, onClose, site = api, variant = "modal", regionKey }: {
   id: number; cameraName: (id: string) => string; onClose: () => void; site?: SiteApi; variant?: "modal" | "drawer";
+  regionKey?: (camera: string) => string;
 }) {
+  const regionMap = useRegions();
   // the viewer can step to another camera's sighting of the same person (Journey), or to another event of the camera
   // on the player's strip (a tick, previous / next)
   const [id, setId] = useState(initialId);
@@ -144,7 +149,7 @@ export function EventDetail({ id: initialId, cameraName, onClose, site = api, va
         <div className={`modal-grid ${isPhone ? "phone" : ""}`}>
           {(!isPhone || view === "clip") && <div>
             <EventPlayer key={playerKey} e={e} site={site} startAt={resume} onTime={onTime} handle={player} onFootage={setFootage}
-              onSelectEvent={onSelectEvent} cameraName={cameraName(e.camera_id)} />
+              onSelectEvent={onSelectEvent} cameraName={cameraName(e.camera_id)} region={regionKey ? regionMap[regionKey(e.camera_id)] : undefined} />
             {crops.length > 0 && (
               <div className="crops">
                 {crops.map((k) => <img key={k.file} src={site.media(e, k.file)} alt="" />)}

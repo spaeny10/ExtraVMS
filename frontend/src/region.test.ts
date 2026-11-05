@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { NBYTES, cellIndex, encodeCells, regionFetchKey, regionFetchPlan, setCell, type RegionResults } from "./region";
+import { NBYTES, cellIndex, encodeCells, regionFetchKey, regionFetchPlan, regionScope, setCell, type RegionResults } from "./region";
 
 const painted = (...cells: number[]) => { const b = new Uint8Array(NBYTES); cells.forEach((c) => setCell(b, c, true)); return b; };
 
@@ -38,5 +38,34 @@ describe("regionFetchPlan (per-camera region fetches)", () => {
 
   it("hub keys (server/camera) survive the key round trip", () => {
     expect(regionFetchPlan(new Map(), regionFetchKey(["srv1/cam 2"], { "srv1/cam 2": b1 })).stale).toEqual([["srv1/cam 2", encodeCells(b1)]]);
+  });
+});
+
+describe("regionScope (the event viewer's previous / next kept to a painted region)", () => {
+  const region = painted(cellIndex(3, 3));
+  const through = encodeCells(painted(cellIndex(3, 3), cellIndex(4, 3)));
+  const elsewhere = encodeCells(painted(cellIndex(20, 10)));
+  const evs = [
+    { id: 1, status: "verified", cells: through },
+    { id: 2, status: "verified", cells: elsewhere },
+    { id: 3, status: "open", cells: null },                                 // still open: its path isn't complete yet
+    { id: 4, status: "verified", cells: through, ptz_preset: "away" },      // camera turned away: can't match
+    { id: 5, status: "pending", cells: null },
+  ];
+
+  it("keeps the events through the region, asks the server for those only, and tags its cached answers", () => {
+    const s = regionScope(region);
+    expect(s.keep(evs).map((e) => e.id)).toEqual([1, 3]);
+    expect(s.query).toEqual({ region: encodeCells(region) });
+    expect(s.tag).not.toBe("");
+    expect(regionScope(painted(cellIndex(9, 9))).tag).not.toBe(s.tag);   // another region: other answers
+  });
+
+  it("no region (or an empty one): everything, nothing added to the query", () => {
+    for (const s of [regionScope(undefined), regionScope(new Uint8Array(NBYTES))]) {
+      expect(s.keep(evs)).toBe(evs);
+      expect(s.query).toEqual({});
+      expect(s.tag).toBe("");
+    }
   });
 });

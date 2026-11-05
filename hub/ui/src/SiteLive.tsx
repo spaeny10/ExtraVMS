@@ -1021,7 +1021,7 @@ function SiteActivity({ site, servers, tiles, multi, activity: a, onShowAll, fil
         <FeedMore shown={shown} total={cards.length} onMore={showMore} />
       </aside>
       {/* a sibling of the column, as in LiveView, so the column's scroll and card styles don't reach the viewer */}
-      {open && <HubEventDetail ev={open} cameraName={cameraNameFor(names, open.server)} onClose={() => setOpen(null)} />}
+      {open && <HubEventDetail ev={open} cameraName={cameraNameFor(names, open.server)} onClose={() => setOpen(null)} regions />}
     </>
   );
 }

@@ -8,6 +8,7 @@ import {
   withSelected, zoomStep, zoomWindowWidth, type Source, type StepButton, type StepPlan, type Win,
 } from "./eventPlayback";
 import { httpStatus } from "./liveFallback";
+import { regionScope } from "./region";
 import { PREFETCH_LEAD_S, dropPrefetch, isBuffered, mergeSpans, nowS, prefetchChunk, spanAt, useLatestFrame, type Prefetched, type Span } from "./playback";
 import { fracIn, hoverFrameTime, isDrag, panWindow, pinchStart, pinchWindow, thumbLeft, wheelWindow, type PinchStart } from "./timeZoom";
 import { Icon, useIsPhone } from "./ui";
@@ -91,9 +92,13 @@ const release = (v: HTMLVideoElement) => {
  * transcode slots plays HD. Without a recording of the event: its own clip.mp4 if it still has one, else the snapshot.
  * The pure decisions are in eventPlayback.ts. `startAt`: where to start instead (a phone coming back to the Clip tab, or
  * a chat frame tapped while the player was hidden), read when it mounts.
+ * `region`: the camera's painted region when the viewer was opened from a view filtered by it (Live's feed, the
+ * Timeline): the strip's ticks and previous / next are then only the events through it (region.ts regionPass; beyond
+ * the listing the server matches it, `region=`), as in the view the viewer came from.
  */
-export function EventPlayer({ e, site, startAt, onTime, handle, onFootage, onSelectEvent, cameraName }: {
+export function EventPlayer({ e, site, startAt, onTime, handle, onFootage, onSelectEvent, cameraName, region }: {
   e: NvrEvent; site: SiteApi;
+  region?: Uint8Array;
   /** the camera's name (export and lock dialogs) */
   cameraName?: string;
   startAt?: { t: number; paused: boolean } | null;
@@ -572,8 +577,10 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage, onSel
   };
 
   const label = (x: Selected) => `${x.yolo_class ?? x.camera_class} · ${fmtTime(x.start_ts)}${x.status === "rejected" ? " · rejected" : ""}`;
-  const marks = ticks(listing.events, win, cur.id, label);
-  const all = withSelected(listing.events, cur as TimelineEvent);
+  const scope = useMemo(() => regionScope(region), [region]);
+  const inRegion = useMemo(() => scope.keep(listing.events), [listing.events, scope]);
+  const marks = ticks(inRegion, win, cur.id, label);
+  const all = withSelected(inRegion, cur as TimelineEvent);
   const selected = all.find((x) => x.id === cur.id)!;
   // Previous / next: the listing's neighbour, else the server's nearest beyond it (eventPlayback.ts stepPlan, farNeighbour),
   // asked as soon as it is needed so the button shows what it does; greyed out only when the server says there is none.
@@ -583,12 +590,13 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage, onSel
   const tStep = jumping?.at ?? t;
   const nowMs = Date.now();
   const button = (dir: -1 | 1): [StepPlan<TimelineEvent>, StepButton<TimelineEvent>] => {
-    const plan = stepPlan(all, selected, tStep, dir, now, cam);
+    const plan = stepPlan(all, selected, tStep, dir, now, cam + scope.tag);   // (the far answers' key)
     return [plan, stepButton(plan, plan.kind === "far" ? farCache.get(plan.key) : undefined, listing.spans !== undefined, nowMs)];
   };
   const [prevPlan, prev] = button(-1), [nextPlan, next] = button(1);
   const askFar = (plan: StepPlan<TimelineEvent> & { kind: "far" }, force = false) =>
-    farCache.ask(plan.key, () => farNeighbour((q) => site.events({ camera: cam, status: STEP_STATUSES, ...q }), plan.anchor, plan.dir, nowS())
+    farCache.ask(plan.key, () => farNeighbour((q) => site.events({ camera: cam, status: STEP_STATUSES, ...scope.query, ...q })
+      .then(scope.keep), plan.anchor, plan.dir, nowS())
       .then((x) => (x ? asTimelineEvent(x) : null)), Date.now(), force);
   const alive = useRef(true);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
@@ -636,6 +644,7 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage, onSel
     seek(j.at);   // (clears `jumping`)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [listing, jumping]);
+  const inR = scope.tag ? " through the painted region" : "";
   const pieces = spans ? coverage(spans, win) : null;
   const gaps = pieces?.some((p) => !p.recorded && p.end - p.start > 2);
   // round times between the end labels: about one per 80 px, none within 95 px of an end (an end label is ~60 px wide)
@@ -809,13 +818,14 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage, onSel
       {gaps ? <div className="ep-legend small muted"><i className="ep-key rec" /> recorded <i className="ep-key gap" /> not recorded</div> : null}
       <div className="ep-controls">
         <button type="button" className="ghost" disabled={prev.disabled} onClick={() => step(prevPlan, prev)}
-          aria-label="Previous event on this camera"
-          title={prev.event ? `Previous event: ${label(prev.event)}` : prev.disabled ? "No earlier event on this camera" : "Previous event on this camera"}>◀ Prev</button>
+          aria-label={`Previous event on this camera${inR}`}
+          title={prev.event ? `Previous event${inR}: ${label(prev.event)}` : prev.disabled ? `No earlier event on this camera${inR}` : `Previous event on this camera${inR}`}>◀ Prev</button>
         <button type="button" className="ghost" title="Back to the start of this event"
           onClick={() => { const to = jumpTarget(cur); seek(to); setWin(zoomWindowWidth(evRange, width, to, nowS())); }}>Event</button>
         <button type="button" className="ghost" disabled={next.disabled} onClick={() => step(nextPlan, next)}
-          aria-label="Next event on this camera"
-          title={next.event ? `Next event: ${label(next.event)}` : next.disabled ? "No later event on this camera" : "Next event on this camera"}>Next ▶</button>
+          aria-label={`Next event on this camera${inR}`}
+          title={next.event ? `Next event${inR}: ${label(next.event)}` : next.disabled ? `No later event on this camera${inR}` : `Next event on this camera${inR}`}>Next ▶</button>
+        {scope.tag && <span className="chip on region-chip small" title="Previous / Next and the ticks on the strip are only this camera's events through the painted region (clear it on Live or the Timeline)">▦ region</span>}
         <span className="ep-time"><strong>{clock(shownT)}</strong> <span className="muted">{relLabel(shownT, cur.start_ts, end)}</span></span>
         <div className="ep-zoom" role="group" aria-label={`Strip zoom: ${halfLabel(width / 2)} (scroll on the strip to zoom, drag to pan)`}>
           <button type="button" className="ghost" disabled={zoomOut == null} onClick={() => zoomTo(zoomOut)}

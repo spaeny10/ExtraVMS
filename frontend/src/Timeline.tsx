@@ -1571,7 +1571,7 @@ export function TimelineView({ cameras, focus = null, onClearFocus, apiFor = loc
       {open !== null && (
         <NavContext.Provider value={detailNav}>
           <EventDetail id={open.id} site={media(serverOf(open.key))} cameraName={(id) => camName(keyFor(serverOf(open.key), id))}
-            onClose={() => setOpen(null)} />
+            onClose={() => setOpen(null)} regionKey={(id) => keyFor(serverOf(open.key), id)} />
         </NavContext.Provider>
       )}
     </div>

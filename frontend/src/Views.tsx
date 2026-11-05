@@ -248,6 +248,9 @@ export function FeedFilterChips({ filter, onChange }: { filter: ClassFilter; onC
 /** The column's muted line when the pills hide every card there is. */
 export const NO_FILTER_MATCH = "Nothing matches these filters";
 
+/** This server's painted regions are stored under the camera id (the hub's under server/camera). */
+const sameKey = (camera: string) => camera;
+
 /** The activity feed filtered by painted regions, with a note and a way to clear them. */
 function RegionNote({ cameras }: { cameras: Camera[] }) {
   const regionMap = useRegions();
@@ -400,7 +403,7 @@ export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: n
             {cards.slice(0, feedShown).map((e) => <EventCard key={e.id} e={e} cameraName={name(e.camera_id)} onOpen={() => setOpen(e.id)} />)}
             <FeedMore shown={feedShown} total={cards.length} onMore={showMore} />
           </aside>
-          {open !== null && <EventDetail id={open} cameraName={name} onClose={() => setOpen(null)} />}
+          {open !== null && <EventDetail id={open} cameraName={name} onClose={() => setOpen(null)} regionKey={sameKey} />}
         </div>
       </LiveBudgetProvider>
     );
@@ -450,7 +453,7 @@ export function LiveView({ cameras, port, recent }: { cameras: Camera[]; port: n
           ))}
           <FeedMore shown={feedShown} total={cards.length} onMore={showMore} />
         </aside>
-        {open !== null && <EventDetail id={open} cameraName={name} onClose={() => setOpen(null)} />}
+        {open !== null && <EventDetail id={open} cameraName={name} onClose={() => setOpen(null)} regionKey={sameKey} />}
       </div>
     </LiveBudgetProvider>
   );

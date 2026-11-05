@@ -46,6 +46,17 @@ export function regionPass(e: { status: string; cells?: string | null; ptz_prese
   return !region || e.status === "open" || (!e.ptz_preset && regionMatches(e.cells, region));
 }
 
+type Passable = { status: string; cells?: string | null; ptz_preset?: string | null };
+/** A view's painted region carried into the event viewer (EventPlayer `region`), so its previous / next and ticks are
+ *  that view's events: `keep` the events through it, `query` asks the server for those only (events API `region`), and
+ *  `tag` sets apart answers cached for another region. No region: everything, as before. */
+export type RegionScope = { tag: string; query: { region?: string }; keep: <T extends Passable>(xs: T[]) => T[] };
+export function regionScope(region: Uint8Array | undefined): RegionScope {
+  if (!region || isEmpty(region)) return { tag: "", query: {}, keep: (xs) => xs };
+  const code = encodeCells(region);
+  return { tag: `@${code}`, query: { region: code }, keep: (xs) => xs.filter((x) => regionPass(x, region)) };
+}
+
 // ---------------------------------------------------------------- store (localStorage-backed, shared by views)
 
 const KEY = "regionFilter.";
