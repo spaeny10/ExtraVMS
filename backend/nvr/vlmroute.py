@@ -255,6 +255,8 @@ class OllamaBackend:
                             yield chunk
                         if msg.get("done"):
                             counts = (msg.get("prompt_eval_count"), msg.get("eval_count"))
+                            if msg.get("done_reason") == "length":
+                                log.warning("local VLM answer cut off at %d tokens (prompt %s tokens)", num_predict, counts[0])
                             break
         finally:
             note_usage(t0, *counts)
@@ -327,7 +329,10 @@ class OpenAIBackend:
                         j = json.loads(data)
                         if isinstance(j.get("usage"), dict):
                             counts = (j["usage"].get("prompt_tokens"), j["usage"].get("completion_tokens"))
-                        delta = (j.get("choices") or [{}])[0].get("delta", {}).get("content")
+                        choice = (j.get("choices") or [{}])[0]
+                        if choice.get("finish_reason") == "length":
+                            log.warning("remote VLM answer cut off at %d tokens", num_predict)
+                        delta = choice.get("delta", {}).get("content")
                         if delta:
                             yield delta
         finally:

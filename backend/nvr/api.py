@@ -31,7 +31,7 @@ from . import assistant, backup, baseline, cells, footage, frames, health, ident
 from . import synopsis as vlm
 from . import advisor, ai_serve, detector, direct, gpumem, hub_agent, inference, lan_cert, lan_guard, sdbackfill, site_actions, siteconfig
 from . import camweb, deterrence, deterrence_api, device_api, speakers_api, talkdown, traffic, traffic_api
-from . import aischedule, clipask, exports, plate, recindex, snapshots, vlmroute
+from . import aischedule, askbrief, clipask, exports, plate, recindex, snapshots, vlmroute
 from . import summary as summary_mod
 from .config import ROOT, settings
 from .db import JOURNEY_CAMS_SQL, LOCKED_SQL, PRIORITY_RANK_SQL, db, event_filters
@@ -1573,10 +1573,13 @@ async def post_chat(event_id: int, body: ChatIn):
                 found = await clipask.evidence(e, body.message, intent)
                 evidence, refs = found["text"], found["refs"]
                 yield json.dumps({"type": "refs", "refs": refs}) + "\n"
+            # what else happened around the event (askbrief.py); the camera's events only when the search evidence
+            # doesn't list them already (and needs the room)
+            brief = await askbrief.build(e, events=intent["mode"] == "clip")
             # chat_stream takes the Qwen gate itself (vlmroute, "chat" priority). Taking it here as well made one
             # Ask wait on its own lock forever and froze every synopsis behind it.
             async for chunk in vlm.chat_stream(e, camera, [(t, b) for t, b, _ in frames], history, body.message,
-                                               evidence=evidence):
+                                               evidence=evidence, brief=brief):
                 answer += chunk
                 yield json.dumps({"type": "delta", "text": chunk}) + "\n"
             msg_id = db.add_chat(event_id, "assistant", answer.strip(), frames=frames_meta, at=body.at, refs=refs)

@@ -181,12 +181,15 @@ def _rows(path: str, lo: float, hi: float) -> list[tuple[float, float]]:
     return [(r["start_ts"], r["end_ts"]) for r in rows]
 
 
-async def recording_spans(path: str, start: float | None = None, end: float | None = None) -> list[dict]:
-    """MediaMTX /list's answer ({start: RFC 3339, duration}, clipped to the window) from the index, the file being
-    written included; back-to-back files are one span (a week of 1-minute files was 1,000 entries)."""
-    if path not in _ready:
-        return await mediamtx.recording_spans(path, start, end)
-    lo, hi = start or 0.0, end or float("inf")
+def indexed(path: str) -> bool:
+    """Does the index know the path's recordings: its first scan is done, or the scans have run and it has no folder
+    (it has never recorded)?"""
+    return path in _ready or (bool(_ready) and not (settings.recordings_dir / path).exists())
+
+
+async def spans_ts(path: str, lo: float, hi: float) -> list[tuple[float, float]]:
+    """The recorded spans of an indexed path overlapping [lo, hi], as (start, end) epoch seconds clipped to it, the file
+    being written included; back-to-back files are one span."""
     spans = await asyncio.to_thread(_rows, path, lo, hi)
     if (live := _live.get(path)) is not None:
         spans.append((live, time.time() - LIVE_LAG_S))
@@ -196,9 +199,13 @@ async def recording_spans(path: str, start: float | None = None, end: float | No
             merged[-1][1] = max(merged[-1][1], e)
         else:
             merged.append([s, e])
-    out = []
-    for s, e in merged:
-        s, e = max(s, lo), min(e, hi)
-        if e > s:
-            out.append({"start": mediamtx.rfc3339(s), "duration": round(e - s, 3)})
-    return out
+    return [(max(s, lo), min(e, hi)) for s, e in merged if min(e, hi) > max(s, lo)]
+
+
+async def recording_spans(path: str, start: float | None = None, end: float | None = None) -> list[dict]:
+    """MediaMTX /list's answer ({start: RFC 3339, duration}, clipped to the window) from the index, the file being
+    written included; back-to-back files are one span (a week of 1-minute files was 1,000 entries)."""
+    if path not in _ready:
+        return await mediamtx.recording_spans(path, start, end)
+    spans = await spans_ts(path, start or 0.0, end or float("inf"))
+    return [{"start": mediamtx.rfc3339(s), "duration": round(e - s, 3)} for s, e in spans]
