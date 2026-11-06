@@ -184,6 +184,62 @@ def test_event_subscription_through_the_forward():
     assert pull[0] == "/onvif/Events/SubManager_1" and pull[2] == "http://192.168.105.12:80/onvif/Events/SubManager_1"
 
 
+AXIS_SUB = """<?xml version="1.0"?><SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope"
+ xmlns:wsa5="http://www.w3.org/2005/08/addressing" xmlns:tev="http://www.onvif.org/ver10/events/wsdl"><SOAP-ENV:Body>
+<tev:CreatePullPointSubscriptionResponse><tev:SubscriptionReference><wsa5:Address>http://192.168.105.115/onvif/services</wsa5:Address>
+<wsa5:ReferenceParameters><dom0:SubscriptionId xmlns:dom0="http://www.axis.com/2009/event">7</dom0:SubscriptionId>
+</wsa5:ReferenceParameters></tev:SubscriptionReference></tev:CreatePullPointSubscriptionResponse></SOAP-ENV:Body></SOAP-ENV:Envelope>"""
+FAULT = """<?xml version="1.0"?><SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope"
+ xmlns:ter="http://www.onvif.org/ver10/error"><SOAP-ENV:Body><SOAP-ENV:Fault><SOAP-ENV:Code><SOAP-ENV:Value>SOAP-ENV:Sender</SOAP-ENV:Value>
+<SOAP-ENV:Subcode><SOAP-ENV:Value>ter:InvalidArgs</SOAP-ENV:Value></SOAP-ENV:Subcode></SOAP-ENV:Code></SOAP-ENV:Fault></SOAP-ENV:Body></SOAP-ENV:Envelope>"""
+
+
+class AxisCamera(FakeCamera):
+    """Every subscription at /onvif/services, told apart by the SubscriptionId reference parameter in the header."""
+    headers_seen: list[dict] = []
+
+    def do_POST(self):
+        raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        root = ET.fromstring(raw)
+        op = onvif_soap.local(next(iter(next(e for e in root if onvif_soap.local(e) == "Body"))))
+        sid = find(next(e for e in root if onvif_soap.local(e) == "Header"), "SubscriptionId")
+        AxisCamera.headers_seen.append({"op": op, "sid": sid.text if sid is not None else None,
+                                        "marked": sid is not None and sid.get("{http://www.w3.org/2005/08/addressing}IsReferenceParameter")})
+        status = 200
+        if op == "CreatePullPointSubscription":
+            reply = AXIS_SUB
+        elif op == "PullMessages":
+            status, reply = (200, (FIX / REPLIES[op]).read_text()) if sid is not None and sid.text == "7" else (400, FAULT)
+        else:
+            reply = (FIX / REPLIES[op]).read_text() if op in REPLIES else EMPTY
+        data = reply.encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/soap+xml")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+def test_axis_subscription_reference_parameters_go_back_in_the_header():
+    """An AXIS M4327-P (2026-11-06) gives every subscriber the address /onvif/services and a SubscriptionId reference
+    parameter; a PullMessages without it is a 400 InvalidArgs fault (what the camera logged every few seconds)."""
+    assert ingest.reference_headers(None) == ""
+    assert ingest.reference_headers(find(body("CreatePullPointSubscriptionResponse.xml"), "SubscriptionReference")) == ""
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), AxisCamera)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    AxisCamera.headers_seen = []
+    cam = {**INTERNAL, "host": "192.168.105.115", "public_host": "127.0.0.1", "public_onvif_port": srv.server_address[1]}
+    got = []
+    puller = ingest.EventPuller(cam, lambda ev: (got.append(ev), puller.stop_event.set()))
+    try:
+        puller._session()
+    finally:
+        srv.shutdown()
+    assert got and got[0].rule == "Gate"
+    pull = next(h for h in AxisCamera.headers_seen if h["op"] == "PullMessages")
+    assert pull == {"op": "PullMessages", "sid": "7", "marked": "true"}, AxisCamera.headers_seen
+
+
 def test_ptz_probe_through_the_forward():
     srv = _serve()
     FakeCamera.seen = []

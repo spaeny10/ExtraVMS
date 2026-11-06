@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import copy
 import datetime as dt
 import logging
 import socket
@@ -221,6 +222,25 @@ class MetadataReader(threading.Thread):
             cam.sock.close()
 
 
+WSA_NS = "http://www.w3.org/2005/08/addressing"
+
+
+def reference_headers(ref: ET.Element | None) -> str:
+    """The subscription's wsa:ReferenceParameters as SOAP header blocks (WS-Addressing: each one is sent back as a
+    header, marked IsReferenceParameter). Most cameras name the subscription by its address alone and send none; an
+    AXIS (M4327-P, 2026-11-06) hands every subscriber the same address, /onvif/services, and tells them apart by a
+    reference parameter (SubscriptionId): without it PullMessages answers 400 ter:InvalidArgs."""
+    params = find(ref, "ReferenceParameters")
+    if params is None:
+        return ""
+    out = []
+    for p in list(params):
+        p = copy.deepcopy(p)
+        p.set(f"{{{WSA_NS}}}IsReferenceParameter", "true")
+        out.append(ET.tostring(p, encoding="unicode"))
+    return "".join(out)
+
+
 class EventPuller(threading.Thread):
     """ONVIF PullPoint subscription on the camera for RuleEngine / VideoSource events."""
 
@@ -259,9 +279,11 @@ class EventPuller(threading.Thread):
         body = onvif.call(events_url, "<tev:CreatePullPointSubscription>"
                                       "<tev:InitialTerminationTime>PT300S</tev:InitialTerminationTime>"
                                       "</tev:CreatePullPointSubscription>")
-        address = text(find(body, "SubscriptionReference"), "Address")   # as the camera reported it
+        ref = find(body, "SubscriptionReference")
+        address = text(ref, "Address")   # as the camera reported it
         if not address:
             raise OnvifError("no subscription address")
+        refs = reference_headers(ref)
         manager = onvif.rewrite(address)    # where the requests go
         self.connected = True
         log.info("[%s] ONVIF event subscription %s%s", c["id"], address, f" (via {manager})" if manager != address else "")
@@ -269,7 +291,7 @@ class EventPuller(threading.Thread):
         def wsa(action: str) -> str:
             # wsa:To keeps the address the camera issued: it names the subscription, whatever route reaches it
             return (f"<wsa:Action>{action}</wsa:Action><wsa:To>{escape(address)}</wsa:To>"
-                    f"<wsa:MessageID>urn:uuid:{uuid.uuid4()}</wsa:MessageID>")
+                    f"<wsa:MessageID>urn:uuid:{uuid.uuid4()}</wsa:MessageID>{refs}")
 
         last_renew = time.time()
         while not self.stop_event.is_set():
