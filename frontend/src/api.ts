@@ -6,6 +6,7 @@ import type { CameraStreams } from "./cameraStreams";
 import type { AnalyticsRule, AudioEncoder, CameraDevice, CameraTime, ClockResult, ImagingSource, TimeBody, TimeDefaults, VideoEncoder } from "./cameraDevice";
 import type { CatalogVoice, Spoken, VoiceEngines, VoiceSetting } from "./talkdownVoice";
 import type { LiveCodecs } from "./codecs";
+import type { AxisDevice, AxisInfo } from "./axis";
 import type { DeterConfig, DeterRequest, DeterRule, DeterRules, Deterrence, DeterrenceBrief, MilesightExtras, MilesightWrite } from "./deterrence";
 import type { CameraTraffic, CameraTrafficServer, Counts, CountsQuery, ImageKind, ImportResult, ListEntry, ListEntryDetail, ListEntryEdit, ListEntryIn, ReadDetail, ReadPlateResult, ReadsPage, ReadsQuery, TrafficAlerts, TrafficStatus } from "./traffic";
 /** include = detect only here; exclude = mask out; area = just a name for a place (never filters);
@@ -840,6 +841,9 @@ export function makeApi(base: string, opts: ApiOptions = {}) {
   milesight: (camera: string) => req<MilesightExtras>(`/api/cameras/${camera}/device/milesight`),
   setMilesight: (camera: string, body: MilesightWrite) =>
     req<MilesightExtras & { written: Record<string, unknown> }>(`/api/cameras/${camera}/device/milesight`, json("PUT", body)),
+  /** an AXIS camera's VAPIX side (axis.py): identity, firmware, scene metadata, Object Analytics; setup is admin */
+  axis: (camera: string) => req<AxisInfo>(`/api/cameras/${camera}/device/axis`),
+  axisSetup: (camera: string) => req<AxisDevice>(`/api/cameras/${camera}/device/axis/setup`, { method: "POST" }),
   // traffic cameras (traffic_api.py): the plate reads they push, counts, plate lists (changes: operator), a camera's
   // traffic setup (read: operator, set up / stop: admin)
   trafficReads: (p: ReadsQuery = {}) => req<ReadsPage>(`/api/traffic/reads?${qs({ ...p, plates: p.plates ? "true" : undefined, all: p.all ? "true" : undefined, noise: p.noise ? "true" : undefined })}`),

@@ -19,7 +19,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import Callable
 
-from . import mediamtx, ruleevents
+from . import axis, mediamtx, ruleevents
 from .config import settings
 from .onvif_soap import ACTION_PULL, Onvif, OnvifError, discover_services, escape, find, find_all, local, simple_items, text
 from .rtsp_client import NoTrack, Rtsp, keepalive, play_track, rtp_payload
@@ -326,12 +326,16 @@ class EventPuller(threading.Thread):
             return None  # initial state dump, not a transition (IO state is worth knowing at startup)
         source = simple_items(find(inner, "Source"))
         data = simple_items(find(inner, "Data"))
+        # "active": AXIS (Object Analytics scenarios, VMD); the others: ONVIF's own and most makers'
         state = next((v.lower() in ("true", "1", "active") for k, v in data.items()
-                      if k.startswith("Is") or k in ("State", "LogicalState")), None)
+                      if k.startswith("Is") or k in ("State", "LogicalState", "active")), None)
+        merged = {**source, **data}
+        if not axis.annotate(self.cam["id"], topic, merged):
+            return None
         return RuleEvent(
             camera_id=self.cam["id"],
             ts=parse_utc(inner.get("UtcTime")) or time.time(),
-            topic=topic, rule=source.get("Rule"), state=state, data={**source, **data}, initial=initial,
+            topic=topic, rule=merged.get("Rule"), state=state, data=merged, initial=initial,
         )
 
 

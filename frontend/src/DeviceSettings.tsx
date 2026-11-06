@@ -17,6 +17,7 @@ import {
 import { MUTE_LABELS, type MilesightDraft, type MilesightExtras, type MilesightWrite, type MsSection, disarmMutes, milesightChanges,
   milesightDraft, milesightProblems, sectionBody } from "./deterrence";
 import { TrafficSetupSection } from "./TrafficSetup";
+import { type AxisInfo, scenarioText, setupMessage, setupState } from "./axis";
 import { confirmDialog, errorText, toast } from "./ui";
 
 export function CameraDevicePanel({ camera, active }: { camera: Camera; active: boolean }) {
@@ -84,6 +85,7 @@ export function CameraDevicePanel({ camera, active }: { camera: Camera; active: 
             ? { ...c, rules: c.rules.map((x) => (x.name === r.name ? r : x)) } : c)) } })} />}</Supported>
         <WebPageNote camera={camera} />
 
+        <AxisSection camera={camera} />
         <MilesightSection camera={camera} />
         <TrafficSetupSection camera={camera} />
 
@@ -422,6 +424,50 @@ function RebootSection({ camera }: { camera: Camera }) {
       {err && <span className="small error">{err}</span>}
     </div>
   );
+}
+
+/* ------------------------------------------------------------------ AXIS */
+
+/** Shown only for an AXIS (it says who it is over VAPIX): firmware, scene metadata, Object Analytics scenarios, and
+ *  "Set up for Axiom" (backend axis.setup: the camera's metadata producer on, this server's paths over VAPIX). */
+function AxisSection({ camera }: { camera: Camera }) {
+  const [a, setA] = useState<AxisInfo | null>(null);
+  const { busy, err, run } = useApply();
+  useEffect(() => {
+    let alive = true;
+    api.axis(camera.id).then((x) => { if (alive) setA(x); }).catch(() => {});   // not an AXIS: nothing shown
+    return () => { alive = false; };
+  }, [camera.id]);
+  if (!a?.supported) return null;
+  const rows = setupState(a);
+  const go = () => run(async () => {
+    if (!(await confirmDialog(`Set up ${camera.name} for Axiom?`, { message: setupMessage(a), confirmLabel: "Set up" }))) return;
+    const r = await api.axisSetup(camera.id);
+    setA(r);
+    if (r.setup?.fallback) toast.error(`${camera.name}: ${r.setup.fallback}`);
+    else toast.success(`${camera.name}: set up for Axiom${r.setup?.sd ? ` (SD ${r.setup.sd})` : ""}`);
+  });
+  const sc = a.analytics;
+  return <>
+    <h3 className="spaced">AXIS</h3>
+    <div className="device-card">
+      <p className="small">
+        <strong>{a.identity.full_name || a.identity.model}</strong>
+        {a.firmware.version && <span className="muted"> · AXIS OS {a.firmware.version}</span>}
+      </p>
+      {a.firmware.old && <p className="small warn-text">Firmware older than {a.firmware.baseline}: upgrade from the camera's web page (Maintenance → Upgrade) for security fixes and better analytics.</p>}
+      <ul className="small axis-setup">
+        {rows.map((r) => <li key={r.text} className={r.ok ? "ok" : "warn"}>{r.ok ? "✓" : "•"} {r.text}</li>)}
+      </ul>
+      {a.metadata.supported === false && a.metadata.error && <p className="small error">The camera answered: {a.metadata.reason}</p>}
+      <button disabled={busy || !a.setup_needed} onClick={go}>{busy ? "Setting up…" : a.setup_needed ? "Set up for Axiom" : "Set up"}</button>
+      {err && <p className="small error">{err}</p>}
+      <h4 className="spaced">Object Analytics scenarios</h4>
+      {!sc.supported ? <p className="small muted">{sc.reason ?? "Not available on this camera"}.</p>
+        : sc.scenarios.length === 0 ? <p className="small muted">None set up. Add scenarios on the camera's web page (Apps → AXIS Object Analytics); each one becomes a rule here.</p>
+        : <ul className="small">{sc.scenarios.map((s) => <li key={s.id}><strong>{s.name}</strong> <span className="muted">{scenarioText(s)}</span></li>)}</ul>}
+    </div>
+  </>;
 }
 
 /* ------------------------------------------------------------------ Milesight extras */

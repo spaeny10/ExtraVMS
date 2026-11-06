@@ -1283,6 +1283,9 @@ body:has(.drag-ghost) { cursor: grabbing; user-select: none; }
 /* Camera tab (CameraDevice.tsx): one card per section / stream, each with its own Apply */
 .device-head { align-items: center; margin-bottom: 4px; }
 .device-card { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; margin-bottom: 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); }
+.axis-setup { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.axis-setup li.ok { color: var(--muted); }
+.axis-setup li.warn { color: var(--t-medium); }
 .device-card > .row { flex-wrap: wrap; align-items: flex-end; }
 /* rows of fields: an even grid, labels and inputs on one line whatever hint sits under a field (a hint under one input
    used to push the whole row up out of line) */

@@ -344,6 +344,24 @@ def sources_text(srcs: list[dict]) -> str | None:
             f"add the other as its own camera to see it too: {other}.")
 
 
+VAPIX_MEDIA = "/axis-media/media.amp"
+VAPIX_CODECS = {"h264": "H.264", "h265": "H.265", "jpeg": "MJPEG"}
+
+
+def vapix_profile(path: str | None, profiles: list[dict], like: dict | None = None) -> dict | None:
+    """An AXIS VAPIX RTSP path (/axis-media/media.amp?camera=1&videocodec=h264[&resolution=WxH], axis.py) as a profile:
+    no ONVIF profile lists it, yet the camera serves it. Its size from `resolution`, else the largest profile's (the
+    view at full size); its source that profile's, so SD takes it as the main stream's own picture."""
+    if not path or urllib.parse.urlsplit(path).path != VAPIX_MEDIA:
+        return None
+    q = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(path).query))
+    top = like or (max(profiles, key=_area) if profiles else {})
+    m = re.fullmatch(r"(\d{2,5})x(\d{2,5})", q.get("resolution", ""))
+    w, h = (int(m.group(1)), int(m.group(2))) if m else (top.get("width"), top.get("height"))
+    return {"token": "vapix", "path": path, "encoding": VAPIX_CODECS.get(q.get("videocodec", "h264").lower(), "H.264"),
+            "width": w, "height": h, "source": top.get("source")}
+
+
 def plan(cam: dict) -> dict:
     """What SD live view (<id>_sub) pulls for this camera, and the stream problems to show:
     {sub_path: camera path for <id>_sub, or None = relay <id> (the main stream) from this MediaMTX,
@@ -357,7 +375,7 @@ def plan(cam: dict) -> dict:
     busy = (st.get("sub_not_found") or {}).get("code") == "453"
     out: dict = {"sub_path": sub_path, "detected": False, "main": None, "sub": None, "problems": [], "suggest": None,
                  "encoding": None}
-    main = next((p for p in profiles if same_path(main_path, p.get("path"))), None)
+    main = next((p for p in profiles if same_path(main_path, p.get("path"))), None) or vapix_profile(main_path, profiles)
     main_enc = (main or (profiles[0] if profiles else {})).get("encoding")
     if busy:   # no connection left on the camera: relay the main stream, whatever it offers (retried: StreamChecker)
         out.update(sub_path=None, encoding=main_enc)
@@ -378,7 +396,8 @@ def plan(cam: dict) -> dict:
     def refused(path: str | None) -> bool:   # MediaMTX got 404 there: whatever the profiles say, don't pull it
         return bool(missing and path and (path == missing or same_path(path, missing)))
 
-    configured = None if refused(sub_path) else next((p for p in profiles if same_path(sub_path, p.get("path"))), None)
+    configured = None if refused(sub_path) else (next((p for p in profiles if same_path(sub_path, p.get("path"))), None)
+                                                 or vapix_profile(sub_path, profiles, ref))
     # the configured sub stream is another sensor's (a dual-sensor camera): SD detects one of the main's source instead
     other_source = configured is not None and not same_source(ref, configured, _several_sources(profiles))
     if configured is not None and not other_source:

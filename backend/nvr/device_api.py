@@ -14,13 +14,15 @@ credentials. Nothing here stores the camera's settings: the camera is asked each
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import logging
+import time
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from . import camdevice, deterrence, milesight
+from . import axis, camdevice, deterrence, milesight
 from .camdevice import Invalid, Unsupported
 from .db import db
 from .onvif_soap import OnvifError
@@ -345,3 +347,71 @@ async def device_set_milesight(camera_id: str, body: MilesightIn, request: Reque
     before, after, written = await _run(cam, work)
     _audit(cam, f"Milesight {', '.join(written)}: {body.model_dump(exclude_none=True)}", who)
     return {**after, "before": before, "written": written}
+
+
+# ---------------------------------------------------------------- AXIS (its VAPIX APIs: axis.py)
+
+@router.get("/api/cameras/{camera_id}/device/axis")
+async def device_axis(camera_id: str, request: Request):
+    """{supported, identity, firmware, metadata, analytics, streams, setup_needed} (axis.read_all): {supported: false,
+    reason} for a camera of another maker or one whose VAPIX API doesn't answer."""
+    require(request, "operator")
+    cam = _camera(camera_id)
+    try:
+        return await _run(cam, axis.read_all)
+    except HTTPException as e:
+        if e.status_code in (409, 502):
+            return {"supported": False, "reason": e.detail}
+        raise
+
+
+@router.post("/api/cameras/{camera_id}/device/axis/setup")
+async def device_axis_setup(camera_id: str, request: Request):
+    """The Camera tab's "Set up for Axiom": the camera's scene metadata producer on (a camera setting), then this
+    server's stream paths for it over VAPIX (main with the metadata, SD the same view smaller), applied as a camera
+    edit would be. Recording must survive it: if the main stream with the metadata isn't up within AXIS_READY_S (a
+    firmware that won't send video and metadata in one session), the main path goes back to video only and
+    setup.fallback says so. Returns {setup: axis.setup(), ...axis.read_all() after}."""
+    who = require(request, "admin")
+    cam = _camera(camera_id)
+    done = await _run(cam, axis.setup)
+    changed_at = time.time()
+    await _axis_paths(camera_id, done["main_path"], done["sub_path"])
+    if axis.has_analytics(done["main_path"]) and not await _stream_up(camera_id, changed_at):
+        plain = done["main_path"].replace("&analytics=polygon", "")
+        await _axis_paths(camera_id, plain, done["sub_path"])
+        done.update(main_path=plain, fallback="the camera didn't start its stream with the scene metadata in it, so the "
+                    "main stream is video only (detections come from Object Analytics events and YOLO)")
+        log.warning("[%s] AXIS setup: no stream with analytics=polygon within %ss; main path back to video only", camera_id, AXIS_READY_S)
+    _audit(cam, f"AXIS setup: {', '.join(done['written']) or 'camera unchanged'}; stream paths {done['main_path']} | "
+                f"{done['sub_path']}", who)
+    after = await _run(_camera(camera_id), axis.read_all)
+    return {**after, "setup": done}
+
+
+AXIS_READY_S = 20
+
+
+async def _axis_paths(camera_id: str, main: str, sub: str) -> None:
+    """Store a camera's stream paths as a camera edit does (api.put_camera: MediaMTX, readers, the stream plan)."""
+    api = _site()
+    row = _camera(camera_id)
+    fields = {k: row[k] for k in api.CameraIn.model_fields if k in row and k != "password" and row[k] is not None}
+    fields.update(enabled=bool(row.get("enabled")), main_path=main, sub_path=sub)
+    await api.put_camera(camera_id, api.CameraIn.model_validate(fields))
+
+
+async def _stream_up(camera_id: str, since: float) -> bool:
+    """MediaMTX's main path for the camera became ready (video flowing) after `since`, within AXIS_READY_S (a ready
+    time from before the change is the old source's)."""
+    from . import mediamtx
+    for _ in range(AXIS_READY_S):
+        await asyncio.sleep(1)
+        try:
+            p = (await mediamtx.path_status()).get(camera_id) or {}
+            at = dt.datetime.fromisoformat(str(p.get("readyTime")).replace("Z", "+00:00")).timestamp() if p.get("readyTime") else 0
+            if p.get("ready") and at >= since - 1:
+                return True
+        except Exception:  # noqa: BLE001 - MediaMTX reloading: ask again
+            continue
+    return False

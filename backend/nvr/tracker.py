@@ -33,7 +33,7 @@ log = logging.getLogger("nvr.tracker")
 # Camera class names -> our canonical labels. Anything else is ignored.
 CLASS_MAP = {"human": "person", "person": "person", "face": "person",
              "vehicle": "vehicle", "car": "vehicle", "truck": "vehicle", "bus": "vehicle",
-             "motorcycle": "vehicle", "bicycle": "vehicle", "nonmotor": "vehicle"}
+             "motorcycle": "vehicle", "bicycle": "vehicle", "bike": "vehicle", "nonmotor": "vehicle"}   # Bike: AXIS
 HELD_LABELS = {"vehicle"}   # a person standing still is never "parked": their tracks are never held
 ORPHAN_CHECK_S = 30.0       # how often the sweep looks for open events no track owns
 

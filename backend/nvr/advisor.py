@@ -636,8 +636,38 @@ def check_clocks(ctx: dict) -> list[Finding]:
     return out
 
 
+def check_axis(ctx: dict) -> list[Finding]:
+    """AXIS cameras (axis.py, who each camera is, refreshed every 30 min): firmware older than the 2024 long-term
+    support track, and a camera not set up for Axiom (no VAPIX stream paths, or its scene metadata not in the stream)."""
+    from . import axis
+    out = []
+    for c in ctx["cameras"]:
+        ident = axis.cached(c["id"])
+        if not ident:
+            continue
+        fw = ident.get("firmware") or ""
+        if axis.firmware_old(fw):
+            out.append(Finding(key=f"axis:firmware:{c['id']}", area="cameras", impact="low", camera_id=c["id"], camera=c["name"],
+                               title=f"{c['name']} runs AXIS OS {fw}",
+                               why=f"Older than {axis.FIRMWARE_BASELINE_TEXT}. Newer AXIS OS has security fixes and better object analytics and scene metadata.",
+                               effect="Security fixes, and better detections from the camera itself.",
+                               steps=[f"Download the current AXIS OS for the {ident.get('model')} from axis.com, then the camera's web page "
+                                      f"({c['host']}) → Maintenance → Upgrade. The camera restarts (a few minutes without video)."],
+                               fingerprint=fw))
+        can_meta = "analytics-metadata-config" in (ident.get("apis") or {})
+        if not axis.uses_vapix(c.get("main_path")) or (can_meta and not axis.has_analytics(c.get("main_path"))):
+            out.append(Finding(key=f"axis:setup:{c['id']}", area="cameras", impact="medium", camera_id=c["id"], camera=c["name"],
+                               title=f"{c['name']} (AXIS {ident.get('model')}) isn't set up for Axiom",
+                               why="Its people and vehicles (AXIS Scene Metadata) aren't in the stream this server reads, so detections wait "
+                                   "for motion and YOLO; and SD live view may show another picture than the recording.",
+                               effect="The camera's own detections open events at once, and SD shows the recorded view, smaller.",
+                               steps=["Settings → Cameras → Edit → Camera → AXIS: press 'Set up for Axiom'."],
+                               fingerprint=f"{c.get('main_path')}"))
+    return out
+
+
 CHECKS = [check_bitrate, check_framerate, check_codecs, check_storage, check_vlm, check_yolo, check_events, check_rules, check_ppe, check_ptz,
-          check_clocks]
+          check_clocks, check_axis]
 
 
 def run_checks(ctx: dict) -> list[Finding]:

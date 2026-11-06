@@ -27,7 +27,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
-from . import assistant, backup, baseline, cells, footage, frames, health, identities, journeys, keep, mediamtx, policy, ptz, retention, streams, zones
+from . import assistant, axis, backup, baseline, cells, footage, frames, health, identities, journeys, keep, mediamtx, policy, ptz, retention, streams, zones
 from . import synopsis as vlm
 from . import advisor, ai_serve, detector, direct, gpumem, hub_agent, inference, lan_cert, lan_guard, sdbackfill, site_actions, siteconfig
 from . import camweb, deterrence, deterrence_api, device_api, speakers_api, talkdown, traffic, traffic_api
@@ -159,6 +159,7 @@ async def lifespan(app: FastAPI):
         ("sd-backfill", state.sd.run()),
         ("sd-status", sdbackfill.status_loop()),
         ("mediamtx-config-check", _mediamtx_config_check()),
+        ("axis-refresh", axis.refresh_loop(lambda: db.cameras(enabled_only=True))),
         ("streams", state.streams.run()),
         ("speaker-check", talkdown.check_loop()),
         ("traffic-retention", traffic.prune_loop()),   # plate reads past traffic_keep_days
@@ -726,6 +727,15 @@ async def scan_cameras(body: ScanIn):
         found = await onvif_soap.scan_subnet(body.subnet, body.ports, body.username or None, body.password)
     except ValueError as e:
         raise HTTPException(422, str(e))
+    # ONVIF can't name a camera that wants a login; an AXIS says who it is over VAPIX without one (axis.identify_at)
+    gate = asyncio.Semaphore(16)
+
+    async def name_axis(d: dict) -> None:
+        async with gate:
+            ident = await asyncio.to_thread(axis.identify_at, "http", d["address"], 80, 1.5)
+        if ident:
+            d.update(manufacturer="AXIS", model=ident["model"], firmware=ident["firmware"])
+    await asyncio.gather(*(name_axis(d) for d in found if d.get("needs_auth") and not d.get("model")))
     known = {(c["host"], c["onvif_port"]): c["id"] for c in db.cameras()}
     for d in found:
         if (d["address"], d["port"]) in known:
@@ -742,6 +752,12 @@ async def put_camera(camera_id: str, cam: CameraIn):
     existing = db.one("SELECT * FROM cameras WHERE id=?", [camera_id])
     if data["password"] is None:
         data["password"] = existing["password"] if existing else ""
+    if existing is None and data["main_path"] == "/main" and data["sub_path"] == "/sub":
+        # a new camera left on the default (Milesight) paths: an AXIS answers 404 on both; give it its own (axis.py)
+        paths = await asyncio.to_thread(axis.paths_for_new, data)
+        if paths:
+            data["main_path"], data["sub_path"] = paths
+            log.info("[%s] an AXIS camera: stream paths %s | %s", camera_id, *paths)
     for k in CAMERA_KEPT_FIELDS:   # a client that doesn't know these fields (older hub UI) must not clear them
         if k not in cam.model_fields_set and existing:
             data[k] = existing.get(k)

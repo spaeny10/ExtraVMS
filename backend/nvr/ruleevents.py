@@ -44,6 +44,7 @@ OBJECT_TOPICS: list[tuple[str, str | None]] = [
     ("linedetector/crossed", None),                # line crossing (a pulse: no state)
     ("crosslinedetector", None),
     ("intrusiondetector", None),
+    ("objectanalytics/device", None),              # AXIS Object Analytics scenarios (axis.annotate adds the classes)
 ]
 MOTION_TOPICS = ("cellmotiondetector/motion", "videosource/motionalarm", "motionregiondetector/motion")
 # event data keys that carry an object type, and the values we know
