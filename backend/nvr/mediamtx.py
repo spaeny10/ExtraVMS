@@ -340,28 +340,32 @@ class MediaMTX:
             return True
         return False
 
-    def file_paths(self) -> set[str]:
-        """The path names mediamtx.yml configures (what MediaMTX should have loaded)."""
+    def file_paths(self) -> dict[str, str | None]:
+        """The paths mediamtx.yml configures (what MediaMTX should have loaded): name -> its source (None: none set)."""
         try:
-            return set((yaml.safe_load(self.config_path.read_text()) or {}).get("paths") or {})
+            paths = (yaml.safe_load(self.config_path.read_text()) or {}).get("paths") or {}
         except (OSError, yaml.YAMLError):
-            return set()
+            return {}
+        return {name: (p or {}).get("source") if isinstance(p, dict) else None for name, p in paths.items()}
 
     async def ensure_loaded(self) -> set[str]:
-        """Make MediaMTX reload mediamtx.yml if its running configuration is missing paths the file has, or still has
-        ones the file dropped: its file watcher can miss a change (DC1 Server 2026-10-12: two writes 24 ms apart when a
-        camera was added; the second, with the new camera, was never loaded and the camera stayed "path not configured"
-        until the file was touched). The same text is swapped in again, which the watcher sees. Returns the paths that
-        differed (empty = in step)."""
+        """Make MediaMTX reload mediamtx.yml if its running configuration is missing paths the file has, still has
+        ones the file dropped, or pulls a path from another source than the file says: its file watcher can miss a
+        change (DC1 Server 2026-10-12: two writes 24 ms apart when a camera was added; the second, with the new camera,
+        was never loaded and the camera stayed "path not configured" until the file was touched. Central 2026-11-06:
+        two cameras readdressed 23 ms apart; the second kept pulling the old address). The same text is swapped in
+        again, which the watcher sees. Returns the paths that differed (empty = in step)."""
         want = self.file_paths()
         if not want:
             return set()
         async with httpx.AsyncClient(timeout=5) as c:
             r = await c.get(f"{settings.mediamtx_api}/v3/config/paths/list", params={"itemsPerPage": 1000})
             r.raise_for_status()
-            loaded = {p["name"] for p in r.json().get("items", []) if not str(p.get("name", "")).startswith("~")}
-        loaded.discard("all_others")
-        differ = want ^ loaded
+            loaded = {p["name"]: p.get("source") for p in r.json().get("items", [])
+                      if not str(p.get("name", "")).startswith("~")}
+        loaded.pop("all_others", None)
+        differ = set(want) ^ set(loaded)
+        differ |= {n for n, src in want.items() if src and n in loaded and loaded[n] != src}
         if differ:
             atomic_write(self.config_path, self.config_path.read_text())
             log.warning("MediaMTX had not loaded mediamtx.yml (%s): asked it to reload", ", ".join(sorted(differ)[:8]))

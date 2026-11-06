@@ -131,6 +131,51 @@ def test_ensure_loaded_makes_mediamtx_reload_a_missed_change():
         mediamtx.httpx.AsyncClient, mediamtx.atomic_write = real_client, real_write
 
 
+def test_ensure_loaded_catches_a_missed_new_address():
+    """Central 2026-11-06: two cameras readdressed 23 ms apart; MediaMTX loaded the first write only, so cam3 kept the
+    old address under the same path name. A different source counts as not loaded; a path with no source (published
+    to) is compared by name only."""
+    import asyncio
+    m = mediamtx.MediaMTX()
+    m.config_path.write_text("paths:\n  cam2:\n    source: rtsp://u:p@10.0.0.113:554/media1/video1\n"
+                             "  cam3:\n    source: rtsp://u:p@10.0.0.113:554/media2/video1\n  pub: {}\n")
+    loaded = {"cam2": "rtsp://u:p@10.0.0.113:554/media1/video1", "cam3": "rtsp://u:p@10.0.0.112:554/media2/video1",
+              "pub": "publisher"}
+
+    class Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"items": [{"name": n, "source": s} for n, s in loaded.items()]}
+
+    class Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, params=None):
+            return Resp()
+
+    writes = []
+    real_client, real_write = mediamtx.httpx.AsyncClient, mediamtx.atomic_write
+    mediamtx.httpx.AsyncClient = Client
+    mediamtx.atomic_write = lambda path, text: writes.append(text)
+    try:
+        assert asyncio.run(m.ensure_loaded()) == {"cam3"}
+        assert writes == [m.config_path.read_text()]
+        loaded["cam3"] = "rtsp://u:p@10.0.0.113:554/media2/video1"
+        assert asyncio.run(m.ensure_loaded()) == set()
+        assert len(writes) == 1
+    finally:
+        mediamtx.httpx.AsyncClient, mediamtx.atomic_write = real_client, real_write
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):
