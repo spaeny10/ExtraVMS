@@ -135,7 +135,11 @@ def _http(cam: dict, fn, what: str) -> httpx.Response:
     if r.status_code == 404:
         raise Unsupported(f"the camera has no {what}")
     if r.status_code in (401, 403):
-        raise WebApiError(f"{what}: the camera refused the login (HTTP {r.status_code}); check the camera's user has operator rights")
+        # AXIS keeps ONVIF accounts apart from its own: an ONVIF-only account streams and answers ONVIF but is refused
+        # here (TSS-DT cam9, 2026-11-06)
+        raise WebApiError(f"{what}: the camera refused the login (HTTP {r.status_code}). AXIS keeps ONVIF accounts apart "
+                          "from its own: use an AXIS account with the Operator or Administrator role (the camera's web page → "
+                          "System → Accounts) as this camera's user here")
     if r.status_code != 200:
         raise WebApiError(f"{what}: HTTP {r.status_code}")
     return r
