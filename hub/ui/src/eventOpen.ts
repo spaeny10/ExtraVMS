@@ -75,6 +75,36 @@ export const SITE_FEED_FILTER_KEY = "siteLiveFeedFilter";
 export const removeLiveEvent = (pool: FleetEvent[], server: string, id: number): FleetEvent[] =>
   pool.filter((x) => !(x.site_id === server && x.id === id));
 
+/**
+ * What the fleet socket last said about each event it changed while the page was open: the newest copy, or null once
+ * the event was merged into another. The deeper lists (painted cameras, the expanded camera) are fetched once, so an
+ * event still open when they were fetched kept its "Tracking" card after the server verified it or folded it into a
+ * group ("5 People"); `applyLatest` lays these over the pool. Cleared on resync, when every list is read again.
+ */
+export type LiveLatest = ReadonlyMap<string, FleetEvent | null>;
+const LATEST_MAX = 1000;
+
+export function noteLive(latest: LiveLatest, key: string, e: FleetEvent | null): Map<string, FleetEvent | null> {
+  const next = new Map(latest);
+  next.delete(key);   // re-inserted last: the oldest notes go first when the map is full
+  next.set(key, e);
+  while (next.size > LATEST_MAX) next.delete(next.keys().next().value as string);
+  return next;
+}
+
+/** The pool with the socket's word laid over it: merged-away events leave, the rest show their newest copy. */
+export function applyLatest(pool: FleetEvent[], latest: LiveLatest): FleetEvent[] {
+  if (!latest.size) return pool;
+  const out: FleetEvent[] = [];
+  for (const x of pool) {
+    const k = poolKey(x);
+    if (!latest.has(k)) { out.push(x); continue; }
+    const e = latest.get(k);
+    if (e && e.status !== "rejected" && e.status !== "masked") out.push(e);
+  }
+  return out;
+}
+
 /** LiveView's pool: the deeper per-camera history of painted cameras merged under the live recent list (recent wins). */
 export function mergePool(scoped: FleetEvent[], recent: FleetEvent[]): FleetEvent[] {
   return [...new Map([...scoped, ...recent].map((e) => [poolKey(e), e])).values()].sort((a, b) => b.start_ts - a.start_ts);

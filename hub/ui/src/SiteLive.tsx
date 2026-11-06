@@ -69,7 +69,7 @@ import { Icon, confirmDialog, promptDialog, swipeHandlers, toast, typingOrDialog
 import { StaleStillBadge, StillAge, useStillFrame, useStillWidth } from "@site/useStillFrame";
 import { type Camera as RegistryCam, type Fleet, type Org, type Server, type Site, type SiteCameraGroup, type SiteLayout, api, lastPictureText,
   stillUrl } from "./api";
-import { type EventRef, SITE_FEED_FILTER_KEY, applyLiveEvent, cameraNameFor, checkingText, feedCards, mergePool, regionFeed, removeLiveEvent, siteRegionKeys,
+import { type EventRef, type LiveLatest, SITE_FEED_FILTER_KEY, applyLatest, applyLiveEvent, noteLive, poolKey, cameraNameFor, checkingText, feedCards, mergePool, regionFeed, removeLiveEvent, siteRegionKeys,
   tagServer } from "./eventOpen";
 import { HubEventDetail } from "./HubEventDetail";
 import { canDeter, canTalkDown } from "./access";
@@ -795,11 +795,14 @@ function useSiteActivity(site: Site, servers: Server[], source: DashboardSource,
   const [offline, setOffline] = useState<string[]>([]);
   // the latest events matching the pills, for the pills they were fetched for (null: the pills don't narrow)
   const [matching, setMatching] = useState<{ key: string; events: FleetEvent[] } | null>(null);
+  // the socket's newest word on each event it changed (eventOpen.applyLatest): keeps the one-time fetches below fresh
+  const [latest, setLatest] = useState<LiveLatest>(() => new Map());
   useEffect(() => {
     if (!enabled) return;
     const own = new Set(serverKey.split(",").filter(Boolean));
     let alive = true;
     setRecent(null);
+    setLatest(new Map());
     // updates that arrive before the first answer are kept: merged over it, the live copy wins
     api.locationEvents(site.id, { limit: RECENT_LIMIT })
       .then((r) => { if (alive) { setRecent((prev) => mergePool(r.events, prev ?? [])); setOffline(r.offline); } })
@@ -809,9 +812,11 @@ function useSiteActivity(site: Site, servers: Server[], source: DashboardSource,
       if (m.type === "event_removed") {
         setRecent((prev) => prev && removeLiveEvent(prev, m.site_id, m.id));
         setMatching((prev) => prev && { ...prev, events: removeLiveEvent(prev.events, m.site_id, m.id) });
+        setLatest((prev) => noteLive(prev, poolKey({ site_id: m.site_id, id: m.id }), null));
       } else if (m.type === "event") {
         const e = { ...m.event, site_id: m.site_id, site_name: m.site_name };
         setRecent((prev) => applyLiveEvent(prev ?? [], e));
+        setLatest((prev) => noteLive(prev, poolKey(e), e));
         // the pills filter the cards anyway: a live event that doesn't match is simply not shown
         setMatching((prev) => prev && { ...prev, events: applyLiveEvent(prev.events, e) });
       }
@@ -826,7 +831,7 @@ function useSiteActivity(site: Site, servers: Server[], source: DashboardSource,
     if (!enabled || !resync) return;
     let alive = true;
     api.locationEvents(site.id, { limit: RECENT_LIMIT })
-      .then((r) => { if (alive) { setRecent(r.events); setOffline(r.offline); } })
+      .then((r) => { if (alive) { setRecent(r.events); setOffline(r.offline); setLatest(new Map()); } })
       .catch(() => {});
     return () => { alive = false; };
   }, [enabled, site.id, resync]);
@@ -851,7 +856,7 @@ function useSiteActivity(site: Site, servers: Server[], source: DashboardSource,
     const name = serversRef.current.find((s) => s.id === server)?.name ?? server;
     return siteApi(server).events({ camera: id, region, status: "open,pending,verified", limit: SCOPED_LIMIT, ...nvrFeedQuery(narrowRef.current) })
       .then((evs) => tagServer(evs, server, name)).catch(() => [] as FleetEvent[]);
-  }, narrowKey);
+  }, `${narrowKey}|${resync}`);   // read again on resync too, as `latest` is cleared then
 
   // the expanded camera's own deeper history: the Site's recent list may hold only a few of its events
   const [focused, setFocused] = useState<FleetEvent[]>([]);
@@ -869,8 +874,8 @@ function useSiteActivity(site: Site, servers: Server[], source: DashboardSource,
   const matched = matching && matching.key === narrowKey ? matching.events : null;
   const pool = useMemo(() => {
     const deeper = [...(scopeKey ? scoped : []), ...focused, ...(matched ?? [])];
-    return deeper.length ? mergePool(deeper, recent ?? []) : recent ?? [];
-  }, [scopeKey, scoped, focused, matched, recent]);
+    return deeper.length ? applyLatest(mergePool(deeper, recent ?? []), latest) : recent ?? [];
+  }, [scopeKey, scoped, focused, matched, recent, latest]);
   return { recent, pool, regionKeys, regionMap, offline, focusKey };
 }
 

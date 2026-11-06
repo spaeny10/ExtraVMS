@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import type { NvrEvent } from "@site/api";
 import type { FleetEvent } from "@site/dashboard/types";
 import { NBYTES, cellIndex, encodeCells, setCell } from "@site/region";
-import { DEFAULT_CLASS_FILTER, SITE_FEED_FILTER_KEY, alertEvent, applyLiveEvent, cameraNameFor, checkingText, classPass, feedCards, isPpeViolation,
-  loadFeedFilter, mergePool, parseClassFilter, poolKey, regionFeed, removeLiveEvent, siteRegionKeys, tagServer, timelineTargetHref } from "./eventOpen";
+import { DEFAULT_CLASS_FILTER, SITE_FEED_FILTER_KEY, alertEvent, applyLatest, applyLiveEvent, cameraNameFor, checkingText, classPass, feedCards, isPpeViolation,
+  loadFeedFilter, mergePool, noteLive, parseClassFilter, poolKey, regionFeed, removeLiveEvent, siteRegionKeys, tagServer, timelineTargetHref } from "./eventOpen";
 
 const ev = (server: string, id: number, cam: string, start: number, extra: Partial<FleetEvent> = {}): FleetEvent =>
   ({ id, camera_id: cam, start_ts: start, end_ts: start + 5, status: "verified", camera_class: "person", site_id: server, site_name: server.toUpperCase(), ...extra }) as FleetEvent;
@@ -47,6 +47,27 @@ describe("cameraNameFor", () => {
 });
 
 describe("activity pool", () => {
+  it("a camera's one-time fetch doesn't keep events the socket has since verified or merged away", () => {
+    // the expanded Kitchen camera was fetched while 3 tracks were open; then 2 merged into the group and 1 verified
+    const focused = [ev("srvA", 40, "cam3", 300, { status: "open" }), ev("srvA", 41, "cam3", 301, { status: "open" }),
+      ev("srvA", 42, "cam3", 302, { status: "open" }), ev("srvA", 23, "cam3", 100, { status: "pending" })];
+    let latest = noteLive(new Map(), "srvA/40", null);
+    latest = noteLive(latest, "srvA/41", null);
+    latest = noteLive(latest, "srvA/42", ev("srvA", 42, "cam3", 302, { status: "verified" }));
+    latest = noteLive(latest, "srvA/23", ev("srvA", 23, "cam3", 100, { status: "verified", end_ts: 500 }));
+    const pool = applyLatest(mergePool(focused, []), latest);
+    expect(pool.map(poolKey)).toEqual(["srvA/42", "srvA/23"]);
+    expect(pool.map((e) => e.status)).toEqual(["verified", "verified"]);
+    expect(applyLatest(pool, noteLive(latest, "srvA/42", ev("srvA", 42, "cam3", 302, { status: "rejected" }))).map(poolKey)).toEqual(["srvA/23"]);
+    expect(applyLatest(focused, new Map())).toBe(focused);
+  });
+  it("keeps the newest notes when full", () => {
+    let latest = new Map<string, FleetEvent | null>();
+    for (let i = 0; i < 1005; i++) latest = noteLive(latest, `s/${i}`, null);
+    expect(latest.size).toBe(1000);
+    expect(latest.has("s/0")).toBe(false);
+    expect(latest.has("s/1004")).toBe(true);
+  });
   it("keys events by server: the same id on two servers is two events", () => {
     expect(poolKey(ev("srvA", 1, "cam1", 0))).not.toBe(poolKey(ev("srvB", 1, "cam1", 0)));
   });
