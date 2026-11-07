@@ -1234,3 +1234,34 @@ if __name__ == "__main__":
             fn()
             print("ok", name)
     print("all passed")
+
+
+def test_a_new_read_is_cut_next_even_behind_a_due_backlog(monkeypatch):
+    """The loop takes one read at a time and looks at the queue again after each cut: a read that arrives while older
+    retries are due is cut next, while it is still fresh enough to search wide (TSS-DT 2026-11-07: taken as a batch,
+    the retries held new reads past FRESH_S, no segment learned its offset, and no vehicle picture came for an hour)."""
+    q = traffic.FromRecording()
+    now = time.time()
+    for rid in range(10, 40):
+        q.add(rid, now - 5, 3)   # older reads' retries, all due
+    cut: list[int] = []
+
+    def fake_cut(read_id):
+        cut.append(read_id)
+        if len(cut) == 1:
+            q.add(1000, time.time() - 1)   # a new read lands during the first cut
+        return True
+
+    monkeypatch.setattr(traffic, "cut_from_recording", fake_cut)
+    monkeypatch.setattr(q, "backfill", lambda now=None: 0)
+
+    async def go():
+        t = asyncio.create_task(q.run())
+        while len(cut) < 5:
+            await asyncio.sleep(0.01)
+        t.cancel()
+    asyncio.run(asyncio.wait_for(go(), 10))
+    assert cut[:3] == [39, 1000, 38]
+    q2 = traffic.FromRecording()
+    q2.add(1, now - 1); q2.add(2, now - 1); q2.add(3, now + 60)
+    assert [x[1] for x in q2.take(now, 1)] == [2] and sorted(q2.queued) == [1, 3]

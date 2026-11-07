@@ -1010,13 +1010,14 @@ class FromRecording:
             self.due.append((at, read_id, tries))
             return True
 
-    def take(self, now: float) -> list[tuple[float, int, int]]:
-        """The reads due now, newest first: a fresh read may still be searched wide, an older one waits less well
-        (TSS-DT 2026-10-29: behind 253 reads queued at start-up the morning's new reads went stale)."""
+    def take(self, now: float, limit: int | None = None) -> list[tuple[float, int, int]]:
+        """The reads due now, newest first (at most `limit`): a fresh read may still be searched wide, an older one
+        waits less well (TSS-DT 2026-10-29: behind 253 reads queued at start-up the morning's new reads went stale)."""
         with self.lock:
-            ready = sorted((x for x in self.due if x[0] <= now), key=lambda x: -x[1])
-            self.due = deque(x for x in self.due if x[0] > now)
-            self.queued -= {x[1] for x in ready}
+            ready = sorted((x for x in self.due if x[0] <= now), key=lambda x: -x[1])[:limit]
+            taken = {x[1] for x in ready}
+            self.due = deque(x for x in self.due if x[1] not in taken)
+            self.queued -= taken
             return ready
 
     def backfill(self, now: float | None = None) -> int:
@@ -1037,21 +1038,28 @@ class FromRecording:
         except Exception:  # noqa: BLE001 - new reads are still queued as they come
             log.exception("traffic: queueing older reads for pictures failed")
         while True:
-            for _at, read_id, tries in self.take(time.time()):
-                r = db.one("SELECT received_at FROM vehicle_reads WHERE id=?", [read_id])
-                started = time.monotonic()
-                try:
-                    done = await loop.run_in_executor(CUT_POOL, cut_from_recording, read_id)
-                except Exception:  # noqa: BLE001 - one read's picture must not stop the rest
-                    log.exception("traffic: vehicle picture from the recording for read %s failed", read_id)
-                    done = True
-                if r and time.time() - r["received_at"] > FRESH_S:
-                    # read back from the recording disk: gently, idle OLD_DUTY times as long as the cut read (a read
-                    # with nothing to search near costs nothing and waits nothing)
-                    await asyncio.sleep(min(OLD_GAP_S, OLD_DUTY * (time.monotonic() - started)))
-                if done is None and tries + 1 < REC_TRIES:
-                    self.add(read_id, time.time() + REC_RETRY_S, tries + 1)
-            await asyncio.sleep(1)
+            # one at a time, the newest due first, the queue looked at again after every cut: taken as a batch, the
+            # retries of older reads (each up to REC_TRIES, idling after each) held new reads until they were too old
+            # for a wide search, so no segment learned its offset and every cut failed (TSS-DT 2026-11-07 16:13 on:
+            # no vehicle picture for an hour)
+            nxt = self.take(time.time(), 1)
+            if not nxt:
+                await asyncio.sleep(1)
+                continue
+            _at, read_id, tries = nxt[0]
+            r = db.one("SELECT received_at FROM vehicle_reads WHERE id=?", [read_id])
+            started = time.monotonic()
+            try:
+                done = await loop.run_in_executor(CUT_POOL, cut_from_recording, read_id)
+            except Exception:  # noqa: BLE001 - one read's picture must not stop the rest
+                log.exception("traffic: vehicle picture from the recording for read %s failed", read_id)
+                done = True
+            if r and time.time() - r["received_at"] > FRESH_S:
+                # read back from the recording disk: gently, idle OLD_DUTY times as long as the cut read (a read
+                # with nothing to search near costs nothing and waits nothing)
+                await asyncio.sleep(min(OLD_GAP_S, OLD_DUTY * (time.monotonic() - started)))
+            if done is None and tries + 1 < REC_TRIES:
+                self.add(read_id, time.time() + REC_RETRY_S, tries + 1)
 
 
 from_recording = FromRecording()

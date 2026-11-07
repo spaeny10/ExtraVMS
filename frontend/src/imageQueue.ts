@@ -70,6 +70,7 @@ export function useQueuedImage(url: string | null, tries = TRIES, retryMs = RETR
   const onLoad = () => { release?.(); };
   const onError = () => {
     release?.();
+    setSrc(null);   // no broken-picture icon while it waits to try again (the holder shows its empty box)
     if (attempt + 1 < tries) setAttempt(attempt + 1); else setFailed(true);
   };
   return { src, failed, onLoad, onError };
