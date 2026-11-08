@@ -361,3 +361,33 @@ if __name__ == "__main__":
             fn()
             print("ok", name)
     print("all passed")
+
+
+def test_a_window_from_the_segments_start_survives_its_trim():
+    """A kept window that starts at the segment's first fragment is written under the segment's own name (trims are
+    named by their start), over the original; the original was then removed, taking the kept footage with it
+    (fred 2026-11-07: event #326's footage, and five more files of 10-28 that each began a segment)."""
+    import shutil
+    from nvr import fmp4
+    cam = {"id": "camtrim"}
+    d = REC / cam["id"]
+    d.mkdir(parents=True, exist_ok=True)
+    fix = Path(__file__).parent / "fixtures" / "av_2track.mp4"
+    start = time.time() - 30 * 86400
+    first = d / fmp4.segment_name(start)
+    shutil.copy(fix, first)
+    shutil.copy(fix, d / fmp4.segment_name(start + 600))   # the newest is never curated
+    real = (keep.keep_windows, keep.policy_for)
+    keep.keep_windows = lambda c, s, e, p: ([{"start": s, "end": s + 2.0, "reasons": ["person"], "score": 1}], False)
+    keep.policy_for = lambda c: {"continuous_days": 7}
+    try:
+        stats = Counter()
+        retention.curate_camera(cam, time.time(), False, stats)
+    finally:
+        keep.keep_windows, keep.policy_for = real
+    assert stats["trimmed"] == 1
+    kept = db.all("SELECT file FROM kept_footage WHERE camera_id=?", [cam["id"]])
+    assert [Path(r["file"]).name for r in kept] == [first.name]
+    assert first.is_file() and first.stat().st_size < fix.stat().st_size   # the trimmed piece, still there
+    db.execute("DELETE FROM kept_footage WHERE camera_id=?", [cam["id"]])
+    shutil.rmtree(d)

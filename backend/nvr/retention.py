@@ -152,7 +152,10 @@ def curate_camera(cam: dict, now: float, dry_run: bool, stats: Counter) -> None:
                         outputs.append(p)
                 del seg
                 after = sum(p.stat().st_size for p in outputs)
-                _remove(f)
+                # a window from the segment's first fragment is named as the segment (trims are named by their start)
+                # and was written over it: that is the kept piece now, not the original to remove (fred 2026-11-07)
+                if f.name not in {p.name for p in outputs}:
+                    _remove(f)
                 stats["trimmed"] += 1
                 stats["freed_bytes"] += before - after
         except OSError as e:  # e.g. MediaMTX is serving the file right now; retry next pass
