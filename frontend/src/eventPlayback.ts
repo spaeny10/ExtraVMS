@@ -505,6 +505,23 @@ export function initialSource(o: { spans: Span[] | null | undefined; from: numbe
   return o.hasClip ? { kind: "clip" } : { kind: "still" };
 }
 
+/**
+ * Previous / next (or a tick) picked an event of `start`..`end`: should a fresh player start on it (its clip, else its
+ * snapshot) because nothing of it is recorded? Known once the listing (`listing`, its `spans`) reaches it. A player
+ * showing a clip or snapshot starts afresh on an event beyond the listing too (the new one lists around it); one
+ * playing the recording waits for the listing there (undefined: not known yet) and asks again when it lands. It used
+ * to go on showing the recording it was on: Next from an Oct 27 event to #326, whose footage was gone, kept the Oct 27
+ * video on screen under #326's header, "End of the recording", "1504:37 before" (fred 2026-11-07).
+ */
+export function freshPlayerFor(o: {
+  spans: Span[] | null | undefined; listing: { from: number; to: number }; showing: Source["kind"] | undefined; start: number; end: number;
+}): boolean | undefined {
+  if (!Array.isArray(o.spans)) return false;   // not listed (failed): try the recording there
+  const listed = o.start - 5 >= o.listing.from && o.end <= o.listing.to;
+  if (!listed && o.showing === "recording") return undefined;
+  return !anyRecorded(o.spans, o.start - 5, o.end);
+}
+
 export type ErrorStep = "retry" | "hd" | "clip" | "still" | "stop";
 
 /**

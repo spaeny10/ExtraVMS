@@ -1,8 +1,8 @@
 import { useCallback, useContext, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { fmtTime, type NvrEvent, type PlaybackQuality, type SiteApi, type TimelineEvent } from "./api";
 import {
-  FarCache, KEY_STEP_S, STEP_STATUSES, afterPlaybackError, anyRecorded, asTimelineEvent, atFrac, centreOn, chunkAt, chunkStep,
-  clampStrip, clipOrigin, clock, coverage, defaultQuality, eventEnd, farNeighbour, followWindow, footageAvailable, halfLabel,
+  FarCache, KEY_STEP_S, STEP_STATUSES, afterPlaybackError, asTimelineEvent, atFrac, centreOn, chunkAt, chunkStep,
+  clampStrip, clipOrigin, clock, coverage, defaultQuality, eventEnd, farNeighbour, followWindow, footageAvailable, freshPlayerFor, halfLabel,
   initialSource, jumpTarget, listedEvents, listingRange, needsListing, nextChunkStart, pauseAtEnd, playStart, prefetchLead,
   relLabel, scaleMarks, sdUsable, snapToRecorded, stepButton, stepPlan, stripLimits, stripWindow, ticks, toFrac, viaHub,
   withSelected, zoomStep, zoomWindowWidth, type Source, type StepButton, type StepPlan, type Win,
@@ -627,7 +627,7 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage, onSel
   const select = (x: TimelineEvent) => {
     const at = nowS();
     const { source: src, spans: sp, listing: l } = st.current;
-    const remount = (src?.kind === "clip" || src?.kind === "still") && Array.isArray(sp) && !anyRecorded(sp, x.start_ts - 5, eventEnd(x, at));
+    const remount = freshPlayerFor({ spans: sp, listing: l, showing: src?.kind, start: x.start_ts, end: eventEnd(x, at) }) === true;
     setPick(x);
     setWin((w) => centreOn(w, x.start_ts, eventEnd(x, at), at));
     if (!remount) {
@@ -641,6 +641,11 @@ export function EventPlayer({ e, site, startAt, onTime, handle, onFootage, onSel
   useEffect(() => {
     const j = jumping;
     if (!j || listing.spans === undefined || (listing.spans !== null && (j.at < listing.from || j.at > listing.to))) return;
+    if (cur.id === j.id && freshPlayerFor({ spans: listing.spans, listing, showing: "recording", start: cur.start_ts, end: eventEnd(cur, nowS()) })) {
+      setJumping(null);   // nothing of it is recorded: a fresh player on it (its clip or snapshot), not this video
+      onSelectEvent?.(cur as TimelineEvent, { remount: true });
+      return;
+    }
     seek(j.at);   // (clears `jumping`)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [listing, jumping]);

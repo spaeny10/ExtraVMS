@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { NvrEvent, TimelineEvent } from "./api";
 import {
-  CLIP_PRE_ROLL_S, EDGE_S, EVENT_MARGIN_S, JUMP_LEAD_S, MID_STALL_S, NEAR_END_S, NEIGHBOUR_RANGE_S, PRE_ROLL_S, START_TIMEOUT_S,
+  freshPlayerFor, CLIP_PRE_ROLL_S, EDGE_S, EVENT_MARGIN_S, JUMP_LEAD_S, MID_STALL_S, NEAR_END_S, NEIGHBOUR_RANGE_S, PRE_ROLL_S, START_TIMEOUT_S,
   STRIP_FILL, STRIP_HALF_S, STUCK_S, ZOOM_HALF_S, afterPlaybackError, atFrac, chunkAt, chunkStep, clipOrigin, coverage,
   defaultQuality, eventEnd, firstRecorded, followWindow, footageAvailable, initialSource, jumpTarget, listingRange, nearChunkEnd,
   needsListing, neighbour, nextChunkStart, pauseAtEnd, playStart, prefetchLead, PREV_SLACK_S, relLabel, scaleMarks, sdUsable,
@@ -639,5 +639,24 @@ describe("previous / next beyond the listing", () => {
       status: "verified", yolo_class: "person", yolo_conf: 0.8, yolo_hits: 3, snapshot: null, clip: null, synopsis: "s", threat: "low",
       error: null, feedback: { verdict: "false_alarm" }, policy: { kind: "ppe", text: "", priority: "medium" } } as NvrEvent;
     expect(asTimelineEvent(e)).toMatchObject({ id: 5, start_ts: OLD, status: "verified", verdict: "false_alarm", has_synopsis: 1, ppe: 1 });
+  });
+});
+
+describe("freshPlayerFor", () => {
+  const listing = { from: 1000, to: 5000 };
+  const rec = [{ start: 1000, end: 2000 }];
+  const at = (o: Partial<Parameters<typeof freshPlayerFor>[0]>) =>
+    freshPlayerFor({ spans: rec, listing, showing: "recording", start: 3000, end: 3010, ...o });
+  it("starts afresh on a listed event with nothing recorded, whatever is on screen", () => {
+    expect(at({})).toBe(true);   // the recording of another event on screen: not kept under this one's header
+    expect(at({ showing: "still" })).toBe(true);
+    expect(at({ start: 1500, end: 1510 })).toBe(false);   // recorded: the player goes on there
+  });
+  it("waits for the listing beyond it while playing the recording; a still or clip starts afresh at once", () => {
+    expect(at({ start: 90000, end: 90010 })).toBeUndefined();   // Next to an event a day on (fred #326)
+    expect(at({ start: 90000, end: 90010, showing: "clip" })).toBe(true);
+  });
+  it("tries the recording when the listing failed", () => {
+    expect(at({ spans: null })).toBe(false);
   });
 });

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import {
   api, fmtDuration, fmtTime, fmtWhen, ppeItemsText, type SiteApi,
   type ChatMessage, type ChatRef, type Feedback, type Journey, type NvrEvent, type Synopsis, type Threat, type TimelineEvent, type Verdict, type WeaponCheck,
@@ -44,14 +44,25 @@ export function EventDetail({ id: initialId, cameraName, onClose, site = api, va
   const chatFor = (eid: number) => (c: ChatMessage[]) => { if (idRef.current === eid) setChatState(c); };
   // The player stays (and keeps playing) when it switched the event itself (onSelectEvent); any other change of event
   // (the page, Journey) or one it asked to start afresh on (no recording there) mounts a new one.
-  const sticky = useRef<{ key: number; ids: Set<number> } | null>(null);
-  let playerKey = e?.id ?? id;
+  // A player that switched to an event and then found nothing of it recorded asks for a fresh one on it (`renewFor`),
+  // even when the viewer already shows that event: the key carries a count, so it differs from the one before.
+  const sticky = useRef<{ key: string; first: number; ids: Set<number> } | null>(null);
+  const renewFor = useRef<number | null>(null);
+  const players = useRef(0);
+  const [, rerender] = useReducer((n: number) => n + 1, 0);
+  let playerKey = `${e?.id ?? id}`;
   if (e) {
-    if (sticky.current?.ids.has(e.id)) playerKey = sticky.current.key;
-    else sticky.current = { key: e.id, ids: new Set([e.id]) };
+    if (renewFor.current === e.id || !sticky.current?.ids.has(e.id)) {
+      renewFor.current = null;
+      sticky.current = { key: `${e.id}.${++players.current}`, first: e.id, ids: new Set([e.id]) };
+    }
+    playerKey = sticky.current!.key;
   }
   const onSelectEvent = useCallback((x: TimelineEvent, o: { remount: boolean }) => {
-    if (!o.remount) sticky.current?.ids.add(x.id);
+    if (o.remount) {
+      renewFor.current = x.id;
+      rerender();   // (the viewer may already show x)
+    } else sticky.current?.ids.add(x.id);
     setId(x.id);
   }, []);
   const [tab, setTab] = useState<"clip" | "details" | "journey" | "chat">("details");
@@ -81,7 +92,7 @@ export function EventDetail({ id: initialId, cameraName, onClose, site = api, va
   const gone = () => { toast.info("This sighting was merged into a longer event"); onClose(); };
   useEffect(() => {
     // switched on the player's strip to an event that has gone meanwhile (merged): say so, the viewer stays open
-    const fromStrip = sticky.current != null && sticky.current.ids.has(id) && id !== sticky.current.key;
+    const fromStrip = sticky.current != null && sticky.current.ids.has(id) && id !== sticky.current.first;
     site.event(id).then(setE).catch(() => (fromStrip ? toast.error("Couldn't load that event") : gone()));
     setChatState([]);
     site.chat(id).then(chatFor(id)).catch(() => {});
