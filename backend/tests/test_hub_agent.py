@@ -377,6 +377,44 @@ def test_video_goes_out_within_the_flush_time():
     asyncio.run(run())
 
 
+def test_a_response_starved_of_credit_is_ended():
+    """The viewer left and the hub never said so (TSS-DT 2026-11-08: SD transcodes held overnight, every SD video
+    refused): once no credit comes for CREDIT_STALL_S the response ends, its app cleans up, and the hub is told."""
+    closed = []
+
+    async def endless_video(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"video/mp4")]})
+        try:
+            while True:
+                await send({"type": "http.response.body", "body": b"v" * 4096, "more_body": True})
+        finally:
+            closed.append(True)   # the playback endpoint frees its transcode slot here
+
+    class Wire:
+        def __init__(self):
+            self.frames: list = []
+
+        async def send(self, raw):
+            self.frames.append(decode(raw))
+
+    async def run():
+        agent = hub_agent.HubAgent(endless_video, None)
+        agent._ws = wire = Wire()
+        s = hub_agent.Stream(7, window=64 * 1024)   # no credit is ever granted beyond this
+        s.push(None)
+        old = hub_agent.CREDIT_STALL_S
+        hub_agent.CREDIT_STALL_S = 0.2
+        try:
+            await asyncio.wait_for(agent._serve({"id": 7, "method": "GET", "path": "/v", "query": "", "headers": {}}, s), 3)
+        finally:
+            hub_agent.CREDIT_STALL_S = old
+        assert closed == [True]
+        assert s.aborted == "stalled"
+        assert {"t": "abort", "id": 7, "reason": "stalled"} in wire.frames
+        assert sum(len(f[1]) for f in wire.frames if isinstance(f, tuple)) <= 64 * 1024
+    asyncio.run(run())
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

@@ -123,6 +123,11 @@ BULK_FRAME = 256 * 1024          # video bodies go up the tunnel in frames of up
 # playback (a 20 s first chunk is 1-1.4 MB: the browser got nothing until the server had encoded nearly all of it),
 # and a 1 MB frame held the one send lock ~0.8 s on a 10 Mbit/s uplink, ahead of every other stream's frames
 BULK_FLUSH_S = 0.05
+# A response the hub has granted no credit for this long is over: its viewer left and the hub never said so (a hub
+# before 2026-11-08 dropped such streams silently). TSS-DT 2026-11-08: four SD playback transcodes waited for credit
+# from the evening before and every SD video failed ("too many transcodes"). A paused <video> stops reading too; it
+# asks again when it plays on.
+CREDIT_STALL_S = 120.0
 
 
 def _fingerprint(token: str) -> str:
@@ -484,6 +489,18 @@ class HubAgent:
         elif t == "ping":
             await self._send({"t": "pong", "ts": m.get("ts")})
 
+    async def _take_credit(self, s: Stream, n: int) -> None:
+        """Window for n more bytes of a response; a stream starved of credit for CREDIT_STALL_S is aborted (both ends)."""
+        try:
+            await asyncio.wait_for(s.take_credit(n), CREDIT_STALL_S)
+        except asyncio.TimeoutError:
+            log.info("hub request %s: no credit from the hub for %.0f s; ending it", s.id, CREDIT_STALL_S)
+            await s.abort("stalled")
+            try:
+                await self._send({"t": "abort", "id": s.id, "reason": "stalled"})
+            except Exception as e:  # noqa: BLE001 - the tunnel is down: the hub has dropped the stream already
+                log.debug("hub request %s: could not send the abort: %s", s.id, e)
+
     # ---- serving a hub request against our own app, in-process
     async def _serve(self, req: dict, s: Stream) -> None:
         headers = [(k.lower().encode(), str(v).encode()) for k, v in (req.get("headers") or {}).items()]
@@ -510,7 +527,7 @@ class HubAgent:
                 data = bytes(pending)
                 pending.clear()
                 for piece in split(data, BULK_FRAME if bulk else CHUNK):
-                    await s.take_credit(len(piece))
+                    await self._take_credit(s, len(piece))
                     if s.aborted:
                         raise asyncio.CancelledError
                     await self._send_bytes(chunk(s.id, piece))

@@ -52,6 +52,22 @@ def _site_and_role(request: Request, site_id: str) -> tuple[dict, dict, str]:
     return u, site, role
 
 
+_leaving: set[asyncio.Task] = set()
+
+
+def end_stream(conn, s) -> None:
+    """A proxied body is over. Ended by the site: forget the stream. Cut short (the viewer left: a phone switching away,
+    a seek, a closed tab): tell the site to stop, or it waits for credit forever and keeps what it was serving. TSS-DT
+    2026-11-08: four SD playback transcodes held since the evening before, so every SD video failed ("too many
+    transcodes"). Not awaited: this runs in a canceled response, where an await would be canceled too."""
+    if s.done.is_set() or s.aborted:
+        conn.finish(s)
+        return
+    t = asyncio.get_running_loop().create_task(conn.abort(s, "client left"))
+    _leaving.add(t)
+    t.add_done_callback(_leaving.discard)
+
+
 @router.api_route("/s/{site_id}/api/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"])
 async def proxy_api(site_id: str, path: str, request: Request):
     auth.csrf_check(request)
@@ -124,7 +140,7 @@ async def proxy_api(site_id: str, path: str, request: Request):
                 yield c
                 await conn.send({"t": "credit", "id": s.id, "bytes": len(c)})
         finally:
-            conn.finish(s)
+            end_stream(conn, s)
             offer = viewing.WHEP_OFFER.match(api_path) if request.method == "POST" else None
             if offer:
                 viewing.offer(u, site, offer.group(1), request.url.path, status, request.client.host if request.client else None,
