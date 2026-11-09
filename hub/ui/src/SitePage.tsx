@@ -20,13 +20,14 @@ import { CentralDetails, CentralPlaceholder, CentralStats, useCentral } from "./
 import { CoverageCard } from "./site/CoverageCard";
 import { HealthPill, MapButton } from "./site/HealthPill";
 import { datacenterLine, instanceFor, siteBandwidth, unenrolledInstances, uploadLine } from "./central";
+import { latestVersion } from "./serverList";
 import { CamerasBox } from "./site/CamerasBox";
 import { CameraWebCard } from "./site/CameraWebCard";
 import { ContactsBox } from "./site/ContactsBox";
 import { MonitoringBox } from "./site/MonitoringBox";
 import { ProceduresBox } from "./site/ProceduresBox";
 import { SiteIncidents } from "./site/SiteIncidents";
-import { ServerActions, ServerCard, useLiveStats } from "./servers";
+import { ServerActions, ServerCard, ServerMenu, useLiveStats } from "./servers";
 import { SiteLive } from "./SiteLive";
 import { SiteTimeline } from "./SiteTimeline";
 import { SiteFind } from "./SiteFind";
@@ -179,17 +180,18 @@ function ServersTab({ site, admin, onChanged }: { site: Site; admin: boolean; on
   const now = Date.now() / 1000;
   // what the Site's servers pull from its cameras (a central instance: the site's cellular upload)
   const upload = uploadLine(siteBandwidth(site.servers));
+  const latest = latestVersion(site.servers);
   return (
     <>
       {upload && <p className="small site-upload">{upload}</p>}
       {site.servers.length === 0 && pending.length === 0 ? <p className="muted">No servers in this site yet.{admin ? <> Enroll one under <a href="/customer/servers" onClick={go("/customer/servers")}>Customer → Servers</a>.</> : ""}</p> : (
-        <div className="site-grid">
+        <div className="site-grid server-grid">
           {site.servers.map((s) => {
             const ci = instanceFor(central?.instances, s.id);
             return (
-              <ServerCard key={s.id} s={s} now={now} href={serverHref(site.id, s.id)} live={live[s.id]}
+              <ServerCard key={s.id} s={s} now={now} href={serverHref(site.id, s.id)} live={live[s.id]} latest={latest}
                 central={ci ? { line: datacenterLine(ci, hubAdmin), stats: <CentralStats ci={ci} />, details: <CentralDetails siteName={site.name} ci={ci} hubAdmin={hubAdmin} enrolled /> } : undefined}>
-                <ServerActions s={s} admin={admin} sites={sites} onChanged={onChanged} />
+                <ServerMenu s={s} admin={admin} sites={sites} onChanged={onChanged} />
               </ServerCard>
             );
           })}

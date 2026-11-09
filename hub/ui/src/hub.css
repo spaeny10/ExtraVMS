@@ -753,3 +753,17 @@ button.sa-ref-row:hover, .sa-ref-row.hot { background: var(--panel-2); border-co
 .qwen-bars > span.zero { background: var(--border); }
 .qwen-cell { white-space: nowrap; }
 @media (max-width: 1100px) { .instances-table .qwen-cell { white-space: normal; } }
+/* server cards (servers.tsx ServerCard): a label / value list, actions along the bottom edge */
+.site-card .stats.kv { grid-template-columns: auto 1fr; align-items: baseline; gap: 5px 14px; }
+.site-card .stats.kv > div { min-width: 0; overflow-wrap: anywhere; }
+.server-grid { grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr)); }
+.server-card { display: flex; flex-direction: column; }
+.server-card .server-flags { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.server-card .server-flags .alerts-chip { margin-top: 0; }
+.server-card .show-cams { align-self: flex-start; margin-top: 8px; font-size: 13px; }
+.server-card .server-body { flex: 1; padding-bottom: 12px; }
+.server-card .server-actions { margin-top: 0; padding-top: 10px; border-top: 1px solid var(--border); align-items: center; }
+.server-card:hover { border-color: var(--border); }
+a.server-card:hover { border-color: var(--accent); }
+.central-setup summary { cursor: pointer; color: var(--text); }
+.central-setup[open] summary { margin-bottom: 4px; }

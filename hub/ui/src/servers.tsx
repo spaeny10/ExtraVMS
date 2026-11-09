@@ -5,61 +5,82 @@
 import { useCallback, useEffect, useState } from "react";
 import { confirmDialog, promptDialog, toast } from "@site/ui";
 import { type Backup, type LiveStats, type Server, type Site, ago, api, fmtTime } from "./api";
-import { consoleHref } from "./nav";
-import { CENTRAL_TAG, fmtGB, fmtMbps, quotaText, serverBandwidth } from "./central";
-import { anyAction, liveStartText, liveStartTitle, serverActions } from "./serverList";
+import { consoleHref, go, siteHref } from "./nav";
+import { CENTRAL_TAG } from "./central";
+import { aiText, anyAction, camDown, cameraCounts, downText, liveStartText, liveStartTitle, networkText, recordingText, serverActions, updateAvailable } from "./serverList";
 
 /**
- * Status card. With `children` (actions) it is a plain box whose name links to `href`; without, the whole card is the link.
- * A central recording server says so under its name (`central.line` replaces the plain tag, e.g. with the host for hub
- * administrators); `central.stats` adds rows to the stats grid and `central.details` a block above the actions (Site →
- * Servers, for those who may read the instance).
+ * Status card: a label / value list (Cameras, Today, Recording, AI, Network, Live start, and a central server's
+ * Connection and Limit), the cameras that are down named under Cameras, the open alerts as a chip. With `children`
+ * (actions) it is a plain box whose name links to `href`, every camera behind "Show all cameras", and the version beside
+ * the actions; without, the whole card is the link. A central recording server says so under its name (`central.line`
+ * replaces the plain tag, e.g. with the host for hub administrators); `central.stats` adds rows and `central.details` a
+ * block above the actions (Site → Servers, for those who may read the instance).
  */
-export function ServerCard({ s, now, href = consoleHref(s.id), central, live, children }: {
+export function ServerCard({ s, now, href = consoleHref(s.id), central, live, latest = null, children }: {
   s: Server; now: number; href?: string; central?: { line?: string; stats?: React.ReactNode; details?: React.ReactNode }; children?: React.ReactNode;
   /** its live tiles' time to first frame (useLiveStats; admins): a "Live start" row once there are enough */
   live?: LiveStats;
+  /** the newest version among the servers shown: an older one gets "update available" */
+  latest?: string | null;
 }) {
+  const [showCams, setShowCams] = useState(false);
   const sm = s.summary ?? {};
   const cams = sm.cameras ?? [];
-  const bad = cams.filter((c) => !c.stream_ready || c.problems?.length);
+  const counts = cameraCounts(s);
+  const down = downText(counts.down);
   const today = Object.entries(sm.today ?? {}).map(([k, v]) => `${v} ${k}`).join(" · ");
-  const diskDays = sm.disk && sm.bitrate_mbps ? Math.round(sm.disk.free_gb / ((sm.bitrate_mbps * 86400) / 8 / 1000)) : null;
-  const cls = `site-card ${s.online ? "" : "offline"} ${s.retired_at ? "retired" : ""}`;
-  const bw = serverBandwidth(s);
+  const net = networkText(s);
+  const liveText = liveStartText(live);
+  const skew = s.clock_skew_s != null && Math.abs(s.clock_skew_s) > 30 ? `clock ${s.clock_skew_s > 0 ? "+" : ""}${Math.round(s.clock_skew_s)} s` : null;
+  const sub = [s.central ? central?.line ?? CENTRAL_TAG : null, s.location].filter(Boolean);
+  const alertsHref = s.location_id ? siteHref(s.location_id, "alerts") : "/alerts";
+  const alertsText = `⚠ ${s.open_alerts} open alert${s.open_alerts > 1 ? "s" : ""}`;
+  const cls = `site-card server-card ${s.online ? "" : "offline"} ${s.retired_at ? "retired" : ""}`;
+  const chips = (
+    <div className="cams">{cams.map((c) => <span key={c.id} className={`cam ${camDown(c) ? "bad" : ""}`} title={(c.problems ?? []).join("; ") || (c.stream_ready ? "streaming" : "no stream")}>
+      {c.name}{c.ptz && !c.ptz.at_home ? " ↗" : ""}</span>)}</div>
+  );
   const body = (
     <>
       <div className="head">
         <span className={`dot ${s.online ? "ok" : "bad"}`} title={s.online ? "Online" : `Offline · last seen ${ago(s.last_seen_at, now)}`} />
         {children ? <a href={href}><strong>{s.name}</strong></a> : <strong>{s.name}</strong>}
         {s.retired_at ? <span className="alert-kind">retired</span> : null}
+        {updateAvailable(s, latest) && <span className="chip small update-chip" title={`Runs ${s.version}; the newest is ${latest}`}>update available</span>}
         <span className="spacer" />
-        <span className="muted small">{s.online ? "online" : `offline · ${ago(s.last_seen_at, now)}`}</span>
+        <span className={`small ${s.online ? "muted" : "bad-text"}`}>{s.online ? "online" : `offline · ${ago(s.last_seen_at, now)}`}</span>
       </div>
-      {s.central && <div className="loc central-tag">{central?.line ?? CENTRAL_TAG}</div>}
-      {s.location && <div className="loc">{s.location}</div>}
-      <div className="stats">
-        <div><span>Cameras</span> {cams.length - bad.length}/{cams.length} up</div>
-        <div><span>Today</span> {today || "—"}</div>
-        <div><span>Disk</span> {sm.disk ? `${sm.disk.free_gb.toLocaleString()} GB free${diskDays != null && isFinite(diskDays) ? ` · ~${diskDays} d` : ""}` : "—"}</div>
-        <div><span>AI</span> {sm.yolo_ready ? "YOLO ✓" : "YOLO …"} · {sm.vlm_ready ? "Otso ✓" : "Otso …"}{sm.queues?.synopsis ? ` (${sm.queues.synopsis} waiting)` : ""}</div>
-        <div><span>Stream</span> {sm.bitrate_mbps != null ? `${sm.bitrate_mbps} Mbps` : "—"}</div>
-        {bw && <div><span>Upload</span> {fmtMbps(bw.mbps)}{bw.month_gb != null ? ` · ${fmtGB(bw.month_gb)} this month` : ""}</div>}
-        {live && liveStartText(live) && <div title={liveStartTitle(live)}><span>Live start</span> {liveStartText(live)}</div>}
-        {s.central && <div><span>Storage</span> {quotaText(s.central.used_gb, s.central.quota_gb)}</div>}
-        {s.central && central?.stats}
-        <div><span>Version</span> {s.version ?? "—"}{s.clock_skew_s != null && Math.abs(s.clock_skew_s) > 30 ? ` · clock ${s.clock_skew_s > 0 ? "+" : ""}${Math.round(s.clock_skew_s)} s` : ""}</div>
-      </div>
-      {cams.length > 0 && (
-        <div className="cams">{cams.map((c) => <span key={c.id} className={`cam ${!c.stream_ready || c.problems?.length ? "bad" : ""}`} title={(c.problems ?? []).join("; ") || (c.stream_ready ? "streaming" : "no stream")}>
-          {c.name}{c.ptz && !c.ptz.at_home ? " ↗" : ""}</span>)}</div>
+      {sub.length > 0 && <div className={`loc ${s.central ? "central-tag" : ""}`}>{sub.join(" · ")}</div>}
+      {(s.open_alerts > 0 || skew) && (
+        <div className="server-flags">
+          {s.open_alerts > 0 && (children ? <a className="chip small warn alerts-chip" href={alertsHref} onClick={go(alertsHref)}>{alertsText}</a> : <span className="chip small warn alerts-chip">{alertsText}</span>)}
+          {skew && <span className="small bad-text" title="The server's clock differs from the hub's">{skew}</span>}
+        </div>
       )}
-      {sm.site_link_down && <div className="alerts">⚠ No camera reachable: the link to the site may be down</div>}
-      {s.open_alerts > 0 && <div className="alerts">⚠ {s.open_alerts} open alert{s.open_alerts > 1 ? "s" : ""}</div>}
+      <div className="stats kv">
+        <span>Cameras</span>
+        <div>
+          {counts.total ? `${counts.up}/${counts.total} up` : "—"}
+          {sm.site_link_down ? <div className="small bad-text">No camera reachable: the link to the site may be down</div>
+            : down && <div className="small bad-text">{down}</div>}
+        </div>
+        <span>Today</span><div>{today || "—"}</div>
+        <span>Recording</span><div title={s.central ? "Storage used of this server's allocation" : "Free disk, and how long it lasts at the cameras' current bitrate"}>{recordingText(s)}</div>
+        <span>AI</span><div>{aiText(s)}</div>
+        {net && <><span>Network</span><div title="What the cameras send this server">{net}</div></>}
+        {liveText && live && <><span>Live start</span><div title={liveStartTitle(live)}>{liveText}</div></>}
+        {s.central && central?.stats}
+        {!children && <><span>Version</span><div>{s.version ?? "—"}</div></>}
+      </div>
+      {children && cams.length > 0 && <button className="linkish show-cams" aria-expanded={showCams} onClick={() => setShowCams(!showCams)}>{showCams ? "Hide cameras" : `Show all ${cams.length} cameras`}</button>}
+      {children && showCams && chips}
       {central?.details}
     </>
   );
-  return children ? <div className={cls}>{body}<div className="row server-actions">{children}</div></div> : <a className={cls} href={href}>{body}</a>;
+  return children
+    ? <div className={cls}><div className="server-body">{body}</div><div className="row server-actions"><span className="muted small" title="Software version">v{s.version ?? "?"}</span><span className="spacer" />{children}</div></div>
+    : <a className={cls} href={href}>{body}</a>;
 }
 
 /**

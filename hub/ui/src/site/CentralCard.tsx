@@ -33,14 +33,15 @@ export function useCentral(siteId: string, on: boolean, onSettled: () => void): 
   return data;
 }
 
-/** Rows for the card's stats grid: the connection and the camera limit (the storage row is the card's own). */
+/** Label / value pairs for the card's list: the connection and the camera limit (the storage row is the card's own). */
 export function CentralStats({ ci }: { ci: CentralInstance }) {
   const over = overLimit(ci.camera_count, ci.camera_limit);
   return (
     <>
-      <div><span>Connection</span> {connectionText(ci)}</div>
-      <div title={over ? "More cameras than the limit (it was lowered): they keep recording, new ones are refused" : undefined}>
-        <span>Limit</span> {limitText(ci.camera_count, ci.camera_limit)}</div>
+      <span>Connection</span><div>{connectionText(ci)}</div>
+      <span>Limit</span>
+      <div className={over ? "bad-text" : undefined} title={over ? "More cameras than the limit (it was lowered): they keep recording, new ones are refused" : undefined}>
+        {limitText(ci.camera_count, ci.camera_limit)}</div>
     </>
   );
 }
@@ -53,20 +54,31 @@ function Steps({ phase }: { phase: string }) {
   );
 }
 
-/** The card's central block: progress (when not running), camera addresses, the hint, the Peplink sheet. */
+/**
+ * The card's central block. What needs attention shows at once: the progress while it is not running, a failure, camera
+ * addresses not on the host yet. The reference (camera addresses, the hint, the Peplink sheet, the Hosts page link) is
+ * folded under "Datacenter setup" on an enrolled server's card; a placeholder card shows it open.
+ */
 export function CentralDetails({ siteName, ci, hubAdmin, enrolled }: { siteName: string; ci: CentralInstance; hubAdmin: boolean; enrolled: boolean }) {
   const resolved = resolvedLines([...(ci.camera_network?.hosts ?? []), ...(ci.camera_network?.auto?.hosts ?? [])], ci.camera_network?.resolved);
+  const reference = (
+    <>
+      <p className="central-cameras" title={resolved.join("\n") || undefined}>{reachableText(ci)}</p>
+      {enrolled && <p className="muted">{addCamerasHint(ci.camera_limit)}</p>}
+      {hubAdmin && ci.camera_network?.auto_on === false && <p className="muted">Automatic camera addresses start once this instance's Site networks are saved on the Hosts page.</p>}
+      <PeplinkSheet ci={ci} siteName={siteName} />
+      {hubAdmin && <p className="central-manage"><a href={HOSTS_HREF} onClick={go(HOSTS_HREF)}>Manage on the Hosts page</a> <span className="muted">(storage, camera limit, Site networks, removal)</span></p>}
+    </>
+  );
   return (
     <div className="central-block small">
       {ci.state === "failed" || ci.state === "deleting"
         ? <p className={ci.state === "failed" ? "bad" : "muted"}>{PHASE_LABEL[ci.phase] ?? ci.phase}{hubAdmin && ci.last_error ? `: ${ci.last_error}` : ""}</p>
         : ci.phase !== "running" && <Steps phase={ci.phase} />}
-      <p className="central-cameras" title={resolved.join("\n") || undefined}>{reachableText(ci)}</p>
-      {enrolled && <p className="muted">{addCamerasHint(ci.camera_limit)}</p>}
       {hubAdmin && ci.camera_network?.pending && <p className="bad">Camera addresses not on the host yet{ci.camera_network.sync_error ? `: ${ci.camera_network.sync_error}` : " (sent within a minute)"}</p>}
-      {hubAdmin && ci.camera_network?.auto_on === false && <p className="muted">Automatic camera addresses start once this instance's Site networks are saved on the Hosts page.</p>}
-      <PeplinkSheet ci={ci} siteName={siteName} />
-      {hubAdmin && <p className="central-manage"><a href={HOSTS_HREF} onClick={go(HOSTS_HREF)}>Manage on the Hosts page</a> <span className="muted">(storage, camera limit, Site networks, removal)</span></p>}
+      {enrolled
+        ? <details className="central-setup"><summary>Datacenter setup <span className="muted">camera addresses, Peplink</span></summary>{reference}</details>
+        : reference}
     </div>
   );
 }
@@ -83,8 +95,8 @@ export function CentralPlaceholder({ siteName, ci, hubAdmin }: { siteName: strin
         <span className="muted small">{failed ? "failed" : ci.state === "deleting" ? "removing" : "not enrolled yet"}</span>
       </div>
       <div className="loc">{datacenterLine(ci, hubAdmin)}</div>
-      <div className="stats">
-        <div><span>Storage</span> {quotaText(ci.used_gb, ci.quota_gb)}</div>
+      <div className="stats kv">
+        <span>Storage</span><div>{quotaText(ci.used_gb, ci.quota_gb)}</div>
         <CentralStats ci={ci} />
       </div>
       <CentralDetails siteName={siteName} ci={ci} hubAdmin={hubAdmin} enrolled={false} />
