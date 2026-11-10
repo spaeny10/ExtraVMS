@@ -44,6 +44,8 @@ PAGE_CSP = ("default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; medi
             "frame-ancestors 'none'; base-uri 'none'")
 FILE_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; media-src 'self'; sandbox"
 TRIES, TRY_WINDOW_S = 5, 600          # wrong passcodes per link and address before a pause
+EVENTS_FILE = "events.json"           # in the link's folder: the export's events (exports' `events`), shown on the page
+EVENTS_SHOWN = 50
 _tries: dict[tuple[str, str], list[float]] = {}
 _tasks: set[asyncio.Task] = set()
 
@@ -149,6 +151,7 @@ async def _copy(row: dict, u: dict, role: str) -> None:
                     await asyncio.to_thread(shutil.copyfile, p, d / n)
             files, zip_name = job.files, job.zip_name
             rng = (job.start, job.end)
+            events = job.events
         else:
             conn = registry.get(src["server"])
             if conn is None:
@@ -164,6 +167,9 @@ async def _copy(row: dict, u: dict, role: str) -> None:
                 await exports._fetch(conn, f"/api/exports/{src['id']}/files/{n}", d / n, part, by)
             await exports._fetch(conn, f"/api/exports/{src['id']}/download", d / zip_name, part, by)
             rng = (st.get("start"), st.get("end"))
+            events = st.get("events") or []
+        # the events with Otso's descriptions, for the page (not a file of the link: not listed, not downloadable)
+        (d / EVENTS_FILE).write_text(json.dumps(events), encoding="utf-8")
         _set(row["id"], state="ready", files=[{k: f.get(k) for k in ("name", "bytes", "sha256", "kind")} for f in files],
              zip_name=zip_name, range_start=rng[0], range_end=rng[1])
     except Exception as e:  # noqa: BLE001 - shown with the link
@@ -261,7 +267,10 @@ h1{{font-size:20px;margin:0 0 4px}}.muted{{color:#9aa3b2}}.card{{background:#171
 video{{width:100%;max-height:70vh;background:#000;border-radius:8px}}a.btn,button{{display:inline-block;background:#3b82f6;color:#fff;border:0;
 border-radius:8px;padding:8px 14px;text-decoration:none;font-weight:600;font-size:14px;cursor:pointer}}a.sub{{color:#93b4f8}}
 input{{font:inherit;padding:8px;border-radius:8px;border:1px solid #2a2f3a;background:#0f1115;color:inherit}}
-.row{{display:flex;gap:10px;align-items:center;flex-wrap:wrap}}.mono{{font-family:ui-monospace,monospace;font-size:11px;word-break:break-all}}</style>
+.row{{display:flex;gap:10px;align-items:center;flex-wrap:wrap}}h2{{font-size:16px;margin:0 0 4px}}.small{{font-size:13px}}
+.ev{{border-top:1px solid #2a2f3a;padding:10px 0 2px}}.ev p{{margin:4px 0}}.ev.focus{{border-left:3px solid #3b82f6;padding-left:10px}}
+.pri{{font-size:12px;border:1px solid #2a2f3a;border-radius:99px;padding:0 8px}}.pri.high,.pri.critical{{border-color:#ef4444;color:#fca5a5}}
+.pri.medium{{border-color:#f59e0b;color:#fcd34d}}.warn{{color:#fca5a5}}.mono{{font-family:ui-monospace,monospace;font-size:11px;word-break:break-all}}</style>
 </head><body><main>{body}</main></body></html>"""
     return HTMLResponse(doc, status_code=status, headers={"content-security-policy": PAGE_CSP, "x-robots-tag": "noindex, nofollow",
                                                           "referrer-policy": "no-referrer", "cache-control": "no-store"})
@@ -303,16 +312,52 @@ aria-label="Passcode"><button type="submit">Open</button></form>""")
         for f in sorted(row.get("files") or [], key=lambda f: (f.get("kind") != "grid", f["name"])) if f["name"].endswith(".mp4"))
     report = next((f["name"] for f in row.get("files") or [] if f["name"] == "report.html"), None)
     sums = "".join(f"<div class=mono>{e(f.get('sha256') or '')}  {e(f['name'])}</div>" for f in row.get("files") or [])
+    happened = events_html(_events(row), bool(report))
     body = f"""<h1>{e(row['title'])}</h1>
 <p class=muted>{_t(row.get('range_start'))}{' to ' + _t(row.get('range_end')) if row.get('range_end') else ''} · shared by
 {e(row.get('created_email') or '')} · this link works until {_t(row['expires_at'])}</p>
 {f'<p>{e(row["note"])}</p>' if row.get('note') else ''}
 <div class="row card"><a class=btn href="{base}{e(row['zip_name'] or '')}?dl=1">Download all ({e(row['zip_name'] or 'zip')})</a>
 {f'<a class=sub href="{base}{e(report)}">Report</a>' if report else ''}</div>
+{happened}
 <p class=muted>If a video doesn't play here (some cameras record H.265), download it: VLC plays every file.</p>
 {videos}
 <details class=card><summary>Checksums (SHA-256)</summary>{sums}</details>"""
     return _page(row["title"], body)
+
+
+def _events(row: dict) -> list[dict]:
+    """The link's events (events.json; none for a link made before 2026-11-10 or from a server that doesn't send them)."""
+    try:
+        evs = json.loads((link_dir(row["id"]) / EVENTS_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return [ev for ev in evs if isinstance(ev, dict)] if isinstance(evs, list) else []
+
+
+def events_html(events: list[dict], has_report: bool) -> str:
+    """"What happened": each event's camera, what, when and priority, Otso's description and a broken rule; the event
+    the export was made from first. Nothing when there are none."""
+    if not events:
+        return ""
+    e = html.escape
+
+    def one(ev: dict) -> str:
+        pri = str(ev.get("priority") or "none")
+        head = " · ".join(x for x in (str(ev.get("server") or ""), str(ev.get("camera") or ""), str(ev.get("what") or ""),
+                                      _t(ev.get("start_ts"))[-8:]) if x)
+        return (f"<div class='ev{' focus' if ev.get('focus') else ''}'><div class=row><strong>{e(head)}</strong>"
+                + (f"<span class='pri {e(pri)}'>{e(pri)} priority</span>" if pri not in ("none", "") else "")
+                + ("<span class=muted>the event this export was made from</span>" if ev.get("focus") else "") + "</div>"
+                + (f"<p>{e(str(ev['synopsis']))}</p>" if ev.get("synopsis") else "<p class=muted>No description.</p>")
+                + (f"<p class=warn>Rule: {e(str(ev['rule']))}</p>" if ev.get("rule") else "") + "</div>")
+
+    more = len(events) - EVENTS_SHOWN
+    tail = f"<p class=muted>{more} more {'in the Report' if has_report else 'not shown'}.</p>" if more > 0 else ""
+    n = len(events)
+    return (f"<section class=card><h2>What happened <span class=muted>{n} event{'s' if n != 1 else ''}</span></h2>"
+            "<p class='muted small'>Descriptions written by Otso, Axiom Vision's AI, from the video. Check them against the footage.</p>"
+            + "".join(one(ev) for ev in events[:EVENTS_SHOWN]) + tail + "</section>")
 
 
 @router.post("/x/{token}")

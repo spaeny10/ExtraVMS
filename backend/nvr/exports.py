@@ -73,6 +73,8 @@ class Job:
     progress: float = 0.0
     files: list[dict] = field(default_factory=list)    # {name, bytes, sha256, camera?, kind}
     missing: list[dict] = field(default_factory=list)  # cameras with no recording in the range: {id, name, why}
+    # the verified events in the range, with Otso's descriptions (event_summaries): a share link shows them on its page
+    events: list[dict] = field(default_factory=list)
     zip_name: str = ""
     zip_bytes: int = 0
     error: str | None = None
@@ -317,7 +319,9 @@ async def _build(job: Job, encoder: str | None) -> None:
         _lock(job, [c for c, _ in made if c["id"] != "grid"])
     tile_files = [{"name": t.name, "bytes": t.stat().st_size, "sha256": "", "camera": c["id"], "kind": "tile"} for c, t in tiles]
     report = d / "report.html"
-    report.write_text(report_html(job, _events(job)), encoding="utf-8")
+    events = _events(job)
+    job.events = event_summaries(job, events)
+    report.write_text(report_html(job, events), encoding="utf-8")
     job.files.append({"name": report.name, "bytes": report.stat().st_size, "sha256": sha256(report), "kind": "report"})
     sums = d / "checksums.txt"
     sums.write_text("".join(f"{f['sha256']}  {f['name']}\n" for f in job.files), encoding="utf-8")
@@ -368,6 +372,21 @@ def _events(job: Job) -> list[dict]:
         except ValueError:
             r["policy"] = None
     return rows
+
+
+EVENTS_MAX = 200   # on the job (and a share link's page); the report lists them all
+
+
+def event_summaries(job: Job, events: list[dict]) -> list[dict]:
+    """The events as a share link's page shows them: camera name, what, when, priority, Otso's description, the rule a
+    PPE event broke; `focus` = the event the export was started from (first)."""
+    names = {c["id"]: c["name"] for c in job.cameras}
+    out = [{"id": ev["id"], "camera": names.get(ev["camera_id"], ev["camera_id"]), "what": ev.get("camera_class") or "",
+            "start_ts": ev["start_ts"], "end_ts": ev.get("end_ts"), "priority": ev.get("priority") or "none",
+            "synopsis": ev.get("synopsis") or "", "rule": (ev.get("policy") or {}).get("text") or "", "focus": ev["id"] == job.event_id}
+           for ev in events]
+    out.sort(key=lambda x: (not x["focus"], x["start_ts"]))
+    return out[:EVENTS_MAX]
 
 
 def _t(t: float | None) -> str:

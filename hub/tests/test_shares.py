@@ -23,6 +23,10 @@ def _hub_export(tmp_path, location_id: str, user_id: str) -> exports.HubExport:
     job.files = [{"name": "TSS_cam2.mp4", "bytes": 5012, "sha256": "abc", "kind": "video"},
                  {"name": "report.html", "bytes": 30, "sha256": "def", "kind": "report"}]
     job.zip_name = "export_Share-Site.zip"
+    job.events = [{"id": 7, "server": "TSS", "camera": "Porch", "what": "person", "start_ts": job.start + 30, "end_ts": job.start + 41,
+                   "priority": "high", "synopsis": "Two men <b>carry</b> a box off the porch.", "rule": "", "focus": False},
+                  {"id": 8, "server": "TSS", "camera": "Gate", "what": "vehicle", "start_ts": job.start + 90, "end_ts": None,
+                   "priority": "none", "synopsis": "", "rule": "No hard hat in PPE zone 1", "focus": False}]
     exports._jobs[job.id] = job
     exports._save(job)
     return job
@@ -74,6 +78,11 @@ def test_share_link_lifecycle(client, superuser, tmp_path, monkeypatch):
     assert r.status_code == 303
     page = anon.get(path)
     assert "For the insurer" in page.text and "TSS_cam2.mp4" in page.text and "Download all" in page.text
+    # what happened: Otso's descriptions on the page, escaped, with the camera, priority and a broken rule
+    assert "What happened" in page.text and "2 events" in page.text and "TSS · Porch · person" in page.text
+    assert "Two men &lt;b&gt;carry&lt;/b&gt; a box off the porch." in page.text and "<b>carry" not in page.text
+    assert "high priority" in page.text and "Rule: No hard hat in PPE zone 1" in page.text and "No description." in page.text
+    assert anon.get(path + "/f/events.json").status_code == 404          # kept for the page, not a file of the link
     v = anon.get(path + "/f/TSS_cam2.mp4", headers={"range": "bytes=0-99"})
     assert v.status_code == 206 and len(v.content) == 100
     z = anon.get(path + "/f/export_Share-Site.zip?dl=1")
@@ -104,6 +113,18 @@ def test_share_link_lifecycle(client, superuser, tmp_path, monkeypatch):
     shares.sweep()
     assert anon.get(path2).status_code == 404 and not shares.link_dir(r2["id"]).exists()
     assert root.get(f"/api/shares/{r2['id']}").json()["status"] == "expired"
+
+
+def test_a_server_export_s_events_are_on_the_hub_clock():
+    part = {"server_name": "DC1", "offset": 12.0, "remote": {"events": [{"id": 3, "camera": "Porch", "start_ts": 1012.0, "end_ts": 1020.0, "focus": True}]}}
+    assert exports.part_events(part) == [{"id": 3, "camera": "Porch", "start_ts": 1000.0, "end_ts": 1008.0, "focus": False, "server": "DC1"}]
+    assert exports.part_events({"server_name": "Old", "offset": 0, "remote": {}}) == []     # a server before events
+
+
+def test_no_events_no_section():
+    assert shares.events_html([], True) == ""
+    many = [{"camera": "C", "start_ts": 0, "synopsis": f"s{i}"} for i in range(shares.EVENTS_SHOWN + 3)]
+    assert "3 more in the Report" in shares.events_html(many, True)
 
 
 def test_passcode_tries_are_limited(client, superuser, tmp_path, monkeypatch):

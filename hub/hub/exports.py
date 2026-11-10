@@ -68,6 +68,8 @@ class HubExport:
     progress: float = 0.0
     files: list[dict] = field(default_factory=list)
     missing: list[dict] = field(default_factory=list)
+    # each server's events in the range with Otso's descriptions (its job's `events`), on the hub's clock, by time
+    events: list[dict] = field(default_factory=list)
     zip_name: str = ""
     zip_bytes: int = 0
     error: str | None = None
@@ -278,6 +280,7 @@ async def _build(job: HubExport) -> None:
     for part, conn in ok:
         prefix = safe_name(part["server_name"])
         job.missing += [{**m, "name": f"{part['server_name']} · {m['name']}"} for m in part["remote"].get("missing", [])]
+        job.events += part_events(part)
         for f in part["remote"]["files"]:
             if f["kind"] == "tile":
                 dest = tmp / f"{prefix}_{f['name']}"
@@ -293,6 +296,7 @@ async def _build(job: HubExport) -> None:
             else:
                 job.files.append({"name": dest.name, "bytes": dest.stat().st_size, "sha256": await asyncio.to_thread(sha256, dest),
                                   "camera": f.get("camera"), "kind": f["kind"], "server": part["server_name"]})
+    job.events.sort(key=lambda ev: ev["start_ts"])
     # 4. the grid across servers
     if job.grid and tiles:
         _progress(job, 0.92, "grid video")
@@ -314,6 +318,17 @@ async def _build(job: HubExport) -> None:
     await asyncio.to_thread(_zip, d, job.zip_name, [f["name"] for f in job.files] + [sums.name])
     job.zip_bytes = (d / job.zip_name).stat().st_size
     shutil.rmtree(tmp, ignore_errors=True)
+
+
+def part_events(part: dict) -> list[dict]:
+    """A server's events (its export job's `events`, servers 2026-11-10 on) on the hub's clock, named with the server."""
+    off = float(part.get("offset") or 0.0)
+    out = []
+    for ev in (part.get("remote") or {}).get("events") or []:
+        end = ev.get("end_ts")
+        out.append({**ev, "server": part["server_name"], "start_ts": ev["start_ts"] - off, "end_ts": end - off if end is not None else None,
+                    "focus": False})
+    return out
 
 
 def _zip(d: Path, name: str, files: list[str]) -> None:

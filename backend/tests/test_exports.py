@@ -95,6 +95,9 @@ def test_original_with_audio_grid_report_checksums_zip_and_locks():
     report = (d / "report.html").read_text(encoding="utf-8")
     assert "A man in a black jacket" in report and "No hard hat in PPE zone 1" in report and "Dock: no recording" in report
     assert "shawn@example.com" in report and "World HQ" in report
+    # the events with Otso's descriptions ride on the job, for a share link's page (hub shares.py)
+    assert job.events == [{"id": eid, "camera": "Front Gate", "what": "person", "start_ts": T0 + 3, "end_ts": T0 + 6, "priority": "medium",
+                           "synopsis": "A man in a black jacket walks to the gate.", "rule": "No hard hat in PPE zone 1", "focus": True}]
     sums = dict(line.split("  ")[::-1] for line in (d / "checksums.txt").read_text().splitlines())
     for n in names:
         assert sums[n] == hashlib.sha256((d / n).read_bytes()).hexdigest()
