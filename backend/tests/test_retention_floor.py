@@ -1,11 +1,13 @@
-"""Event media must not be able to fill the disk: the data-volume floor, the prune catch-up, the event-rate guard
-and the no-database emergency free used at startup. Disk space is faked (each byte on disk counts as 1 GB) so the
-floor logic runs against a scratch data_dir. Run as a script (test.ps1) or under pytest."""
+"""Event media must not be able to fill the disk: the data-volume floor, the prune catch-up, the event-rate guard,
+the no-database emergency free used at startup; and the full recordings disk (kept footage first, then continuous).
+Disk space is faked (each byte on disk counts as 1 GB) so the floor logic runs against a scratch data_dir. Run as a
+script (test.ps1) or under pytest."""
 import os
 import sys
 import tempfile
 import time
 from collections import Counter, namedtuple
+from contextlib import contextmanager
 from pathlib import Path
 
 ROOT_TMP = Path(tempfile.mkdtemp(prefix="nvr-floor-test-"))
@@ -355,12 +357,6 @@ def test_enforce_frees_the_data_disk_before_curating():
     assert seen and seen[0] >= 100, "the floor ran before curation (which writes rows)"
 
 
-if __name__ == "__main__":
-    for name, fn in list(globals().items()):
-        if name.startswith("test_"):
-            fn()
-            print("ok", name)
-    print("all passed")
 
 
 def test_a_window_from_the_segments_start_survives_its_trim():
@@ -391,3 +387,205 @@ def test_a_window_from_the_segments_start_survives_its_trim():
     assert first.is_file() and first.stat().st_size < fix.stat().st_size   # the trimmed piece, still there
     db.execute("DELETE FROM kept_footage WHERE camera_id=?", [cam["id"]])
     shutil.rmtree(d)
+
+
+# ---------------------------------------------------------------- the recordings disk: kept and continuous footage
+
+def rec_reset() -> None:
+    reset()
+    db.execute("DELETE FROM kept_footage")
+    d = REC / "cam1"
+    d.mkdir(parents=True, exist_ok=True)
+    for f in d.glob("*.mp4"):
+        f.unlink()
+    retention._continuous_breach = None
+
+
+def make_segment(age_days: float, size: int = 30) -> Path:
+    """A recording file of cam1 that started `age_days` ago (continuous footage: no kept_footage row)."""
+    from nvr import fmp4
+    f = REC / "cam1" / fmp4.segment_name(time.time() - age_days * 86400)
+    f.write_bytes(b"k" * size)
+    return f
+
+
+def make_kept(age_days: float, score: float, size: int = 30) -> Path:
+    f = make_segment(age_days, size)
+    start = time.time() - age_days * 86400
+    db.execute("INSERT INTO kept_footage (camera_id, start_ts, end_ts, file, reasons, score, bytes, created_at) "
+               "VALUES (?,?,?,?,?,?,?,?)", ["cam1", start, start + 60, str(f), '["person"]', score, size, time.time()])
+    return f
+
+
+def lock(age_days: float, seconds: float = 60, event_id: int | None = None) -> None:
+    start = time.time() - age_days * 86400
+    db.execute("INSERT INTO locks (camera_id, start_ts, end_ts, event_id, note, created_at) VALUES (?,?,?,?,?,?)",
+               ["cam1", start - 1, start + seconds, event_id, "", time.time()])
+
+
+def kept_names() -> set[str]:
+    return {Path(r["file"]).name for r in db.all("SELECT file FROM kept_footage")}
+
+
+@contextmanager
+def rec_disk(free: float, lag: bool = False):
+    """The recordings disk on a volume of its own with `free` GB free, each byte of footage counting as 1 GB.
+    lag: the filesystem's figure never moves, as on ZFS in the seconds after a delete."""
+    files = lambda: sum(f.stat().st_size for f in (REC / "cam1").glob("*.mp4"))   # noqa: E731
+    base = files()
+    real = (retention.free_gb, retention._remove)
+
+    def remove(f: Path) -> int:
+        size = f.stat().st_size
+        f.unlink()
+        return int(size * GB)
+
+    retention.free_gb = lambda: free if lag else free + base - files()
+    retention._remove = remove
+    disk["shared"] = False
+    try:
+        yield
+    finally:
+        retention.free_gb, retention._remove = real
+        disk["shared"] = True
+
+
+def test_a_full_recordings_disk_gives_up_the_least_important_kept_footage_first():
+    rec_reset()
+    low, low_older, high = make_kept(20, score=30), make_kept(30, score=30), make_kept(40, score=90)
+    continuous, newest = make_segment(0.5), make_segment(0.001)
+    with rec_disk(free=75):   # floor 100: 25 GB short, one 30 GB file is enough
+        stats = Counter()
+        retention.enforce_disk_floor(False, stats)
+        assert stats["deleted_kept"] == 1 and not low_older.exists(), "the oldest of the least important goes first"
+        assert low.exists() and high.exists() and continuous.exists() and newest.exists()
+        assert kept_names() == {low.name, high.name}, "its row went with it"
+        assert not stats["deleted_continuous"] and retention._continuous_breach is None
+    with rec_disk(free=45):   # 55 GB short: the other low one, then the important one
+        stats = Counter()
+        retention.enforce_disk_floor(False, stats)
+        assert stats["deleted_kept"] == 2 and not low.exists() and not high.exists()
+        assert continuous.exists() and not stats["deleted_continuous"] and retention._continuous_breach is None
+
+
+def test_locked_kept_footage_is_never_given_up():
+    rec_reset()
+    locked, other = make_kept(30, score=30), make_kept(20, score=90)
+    lock(30)
+    make_segment(0.001)
+    with rec_disk(free=75):
+        stats = Counter()
+        retention.enforce_disk_floor(False, stats)
+    assert locked.exists() and not other.exists(), "the locked file stays although it scores lowest"
+    assert kept_names() == {locked.name}
+
+
+def test_a_full_recordings_disk_counts_what_it_deleted_when_free_space_lags():
+    """ZFS hands a deleted file's space back seconds later. Judged by statvfs alone, a Site at its quota lost all of
+    its kept footage and then its continuous footage, with a capacity alert, for the sake of two files."""
+    rec_reset()
+    kept = [make_kept(30 - i, score=30) for i in range(4)]
+    continuous = [make_segment(0.9), make_segment(0.8)]
+    make_segment(0.001)
+    with rec_disk(free=60, lag=True):   # 40 GB short: two 30 GB files
+        stats = Counter()
+        retention.enforce_disk_floor(False, stats)
+    assert stats["deleted_kept"] == 2, stats
+    assert [f.exists() for f in kept] == [False, False, True, True]
+    assert all(f.exists() for f in continuous) and not stats["deleted_continuous"]
+    assert retention._continuous_breach is None, "no capacity alert: enough was freed"
+
+
+def test_continuous_footage_goes_last_skips_locks_and_raises_the_alert():
+    rec_reset()
+    kept = make_kept(30, score=90)
+    oldest, locked, third = make_segment(0.9), make_segment(0.8), make_segment(0.7)
+    lock(0.8)
+    newest = make_segment(0.001)
+    try:
+        with rec_disk(free=20):   # 80 GB short: the kept file (30), then two continuous files (30 each)
+            stats = Counter()
+            retention.enforce_disk_floor(False, stats)
+            assert not kept.exists() and stats["deleted_kept"] == 1, "kept footage goes before continuous"
+            assert not oldest.exists() and not third.exists() and stats["deleted_continuous"] == 2
+            assert locked.exists(), "a locked stretch of continuous footage stays"
+            assert newest.exists(), "never the file being written"
+            assert retention._continuous_breach and "continuous" in retention._continuous_breach["message"]
+            retention._update_alert()
+            assert retention.alert and retention.alert["kind"] == "continuous"
+    finally:
+        retention._continuous_breach = None
+        retention._update_alert()
+
+
+def test_floor_steps_share_what_they_freed_when_free_space_lags():
+    """Each data-disk step counted its own deletions, but the next step asked statvfs again: with ZFS still reporting
+    the old figure, event pictures inside the continuous window went, and then a locked event's."""
+    reset()
+    now = time.time()
+
+    def event(ts: float) -> int:
+        eid = make_event(ts, clip_gb=0, crops=0)
+        (DATA / "events" / str(eid) / "crop_0.jpg").write_bytes(b"c" * 1000)
+        return eid
+
+    locked = event(now - 4 * 86400)
+    lock(4, event_id=locked)
+    old = [event(now - 3 * 86400 + i) for i in range(4)]       # past the 1-day window
+    new = [event(now - 3600 + i) for i in range(3)]            # inside it
+    real = (diskguard.shutil.disk_usage, retention.free_gb, settings.event_media_min_free_gb)
+    diskguard.shutil.disk_usage = lambda p: Usage(0, 0, 0)     # the data disk reports 0 free, whatever is deleted
+    retention.free_gb = lambda: 1e6                            # the recordings disk has room
+    settings.event_media_min_free_gb = 2500e-9                 # 2,500 bytes wanted: three 1,001-byte folders
+    disk["shared"] = False
+    try:
+        stats = Counter()
+        retention.enforce_disk_floor(False, stats, now)
+    finally:
+        diskguard.shutil.disk_usage, retention.free_gb, settings.event_media_min_free_gb = real
+        disk["shared"] = True
+        retention._continuous_breach = None
+    has = lambda i: (DATA / "events" / str(i) / "crop_0.jpg").exists()   # noqa: E731
+    assert stats["floor_event_clips_deleted"] == 3, stats
+    assert [has(i) for i in old] == [False, False, False, True]
+    assert all(has(i) for i in new), "nothing inside the continuous window was touched"
+    assert has(locked), "the locked event keeps its pictures"
+
+
+# ---------------------------------------------------------------- the keep rules' event lookup
+
+def test_keep_windows_reads_only_the_events_that_can_reach_the_stretch():
+    """The lookup had no lower bound on an event's start, so it read every earlier event of the camera on each call:
+    351 ms a call at 98,640 events (fred 2026-11-10), and retention passes of 46 minutes."""
+    reset()
+    t = time.time() - 5 * 86400
+    for i in range(50):
+        db.create_event(camera_id="cam1", track_id="t", camera_class="vehicle", start_ts=t - 86400 + i * 60,
+                        end_ts=t - 86400 + i * 60 + 10, status="rejected")
+    db.create_event(camera_id="cam1", track_id="t", camera_class="person", start_ts=t, end_ts=t + 500, status="verified")
+    cam = next(c for c in db.cameras() if c["id"] == "cam1")
+    assert abs(keep.longest_event_s(db, "cam1") - 500) < 0.01
+    seen = []
+    real = db.all
+    db.all = lambda sql, params=(): (seen.append((sql, list(params))), real(sql, params))[1]
+    try:
+        windows, _ = keep.keep_windows(cam, t + 400, t + 460, keep.policy_for(cam))
+    finally:
+        db.all = real
+    assert len(windows) == 1 and windows[0]["reasons"] == ["person"], "an event that began 400 s before the stretch"
+    assert (windows[0]["start"], windows[0]["end"]) == (t + 400, t + 460)
+    sql, params = next((s, p) for s, p in seen if "FROM events" in s)
+    plan = " ".join(r["detail"] for r in db.all("EXPLAIN QUERY PLAN " + sql, params))
+    assert "start_ts>? AND start_ts<?" in plan, plan                 # both ends of the range come from the index
+    plan = " ".join(r["detail"] for r in db.all(
+        "EXPLAIN QUERY PLAN SELECT MAX(COALESCE(end_ts, start_ts) - start_ts) AS s FROM events WHERE camera_id=?", ["cam1"]))
+    assert "events_cam_len" in plan, plan                            # the longest event is one index lookup
+    assert keep.longest_event_s(db, "no-such-camera") == 0.0
+
+
+if __name__ == "__main__":
+    for name, fn in list(globals().items()):
+        if name.startswith("test_"):
+            fn()
+            print("ok", name)
+    print("all passed")

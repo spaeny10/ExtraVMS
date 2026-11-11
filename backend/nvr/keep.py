@@ -114,8 +114,12 @@ def keep_windows(camera: dict, start: float, end: float, policy: dict) -> tuple[
     include_zones = [z for z in zones.normalize(camera.get("zones")) if z["type"] == "include"]
 
     db = _db()
-    events = db.all(f"SELECT {EVENT_COLS} FROM events WHERE camera_id=? AND start_ts <= ? AND COALESCE(end_ts, start_ts) >= ? "
-                    "AND status != 'masked'", [camera["id"], end + pb, start - pa])
+    # An event that reaches this stretch started no earlier than the camera's longest event before it. Without that
+    # lower bound the index gave only "started before the end", so every call read all of the camera's earlier events
+    # (fred 2026-11-10: 351 ms a call at 98,640 events, and retention passes of 46 minutes).
+    events = db.all(f"SELECT {EVENT_COLS} FROM events WHERE camera_id=? AND start_ts <= ? AND start_ts >= ? "
+                    "AND COALESCE(end_ts, start_ts) >= ? AND status != 'masked'",
+                    [camera["id"], end + pb, start - pa - longest_event_s(db, camera["id"]) - 1.0, start - pa])
     noted = saved_notes(db, [e["id"] for e in events])
     for e in events:
         s, t = e["start_ts"] - pb, (e["end_ts"] or e["start_ts"]) + pa
@@ -153,6 +157,13 @@ def keep_windows(camera: dict, start: float, end: float, policy: dict) -> tuple[
         else:
             windows.append({"start": s, "end": t, "reasons": [why], "score": sc})
     return windows, defer
+
+
+def longest_event_s(db, camera_id: str) -> float:
+    """The camera's longest event, in seconds (0 when it has none). One index lookup (events_cam_len), so it is asked
+    on every call rather than cached: an event that just ended is counted at once."""
+    row = db.one("SELECT MAX(COALESCE(end_ts, start_ts) - start_ts) AS s FROM events WHERE camera_id=?", [camera_id])
+    return max(0.0, float(row["s"] or 0.0)) if row else 0.0
 
 
 # The event columns own_reasons reads (keep_windows' query; retention.purge_rejected_media and snapshot_shrink too).

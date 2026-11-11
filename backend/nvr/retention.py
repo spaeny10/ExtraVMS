@@ -6,7 +6,8 @@
   losslessly with `fmp4.trim`, so MediaMTX playback and the timeline still work); the rest is deleted.
 - Kept footage stays until the disk needs space; then the lowest-importance, oldest kept files go first.
   Locked footage is never deleted. Only as a last resort is continuous footage inside the window deleted,
-  which raises a capacity alert.
+  which raises a capacity alert. Every step that frees space counts what it deleted (Space): the filesystem's own
+  figure can lag behind.
 - Events keep no clip of their own (2026-10-22): an event's video is its stretch of this recording, which the keep
   rules hold around it. Older events may still have a clip.mp4 (nvr.clip_cleanup removes those the recording covers).
 - Event media (keyframes, crops, PPE pictures, legacy clips; never snapshot.jpg) past the window follows the same
@@ -85,6 +86,28 @@ def data_floor() -> tuple[float, float]:
         # legitimately runs with little free space; Oct 5 2026 a bigger floor there deleted every clip on the desktop).
         floor = float(min(20.0, max(2.0, total_gb * 0.10)))
     return floor, floor + total_gb * settings.disk_floor_hysteresis_pct / 100
+
+
+class Space:
+    """Free space on one volume as a retention pass knows it: what the filesystem reports, or what it reported when
+    the pass began plus what the pass has deleted since, whichever is more.
+
+    ZFS hands a deleted file's space back a few seconds later. A loop that deletes until statvfs shows room goes on
+    deleting long after there is room, and the next step (kept footage -> continuous footage, expired event media ->
+    locked) starts although the one before freed enough. One Space is shared by every step of a pass; recordings and
+    data_dir on the same disk share one. The next pass measures afresh, so a figure that was too hopeful (footage
+    recorded meanwhile, space a snapshot still holds) is put right then."""
+
+    def __init__(self, measure) -> None:
+        self.measure = measure        # () -> GB free, from the filesystem
+        self.start = measure()
+        self.freed = 0                # bytes this pass deleted on the volume
+
+    def add(self, n: int) -> None:
+        self.freed += max(0, int(n))
+
+    def free_gb(self) -> float:
+        return max(self.measure(), self.start + self.freed / 1e9)
 
 
 def camera_segments(camera_id: str) -> list[tuple[float, Path]]:
@@ -191,23 +214,24 @@ def null_clips(ids: list[int]) -> None:
 
 
 def free_event_media(target_gb: float, dry_run: bool, stats: Counter, *, horizons: dict[str, float] | None = None,
-                     locked: bool = False) -> int:
+                     locked: bool = False, space: Space | None = None) -> int:
     """Delete event media (keyframes, crops, PPE pictures, chat frames, a legacy clip.mp4; never snapshot.jpg)
     oldest-first, ignoring keep windows, until the data volume has `target_gb` free. The event's video is in the
     recordings (or kept_footage), so these pictures are the cheapest thing to lose when the disk is full.
 
     Files first, rows after (one UPDATE at the end for the legacy clips, allowed to fail: null_clips), and what was
     freed is counted as well as measured: ZFS returns the space of a deleted file a few seconds later, and judging by
-    statvfs alone deleted far more than needed. horizons: only events older than their camera's continuous window.
+    statvfs alone deleted far more than needed. space: the pass's Space for the data volume, so a later step knows
+    what an earlier one freed. horizons: only events older than their camera's continuous window.
     locked: False skips events under a footage lock (or overlapped by one); True deletes only those, the very last
     resort. Returns the events emptied.
     """
     n = freed = 0
-    start_free = data_free_gb()
+    space = space or Space(data_free_gb)
     cleared: list[int] = []
 
     def short() -> bool:
-        return max(data_free_gb(), start_free + freed / 1e9) < target_gb
+        return space.free_gb() < target_gb
 
     last = (float("-inf"), -1)
     stop_at = max(horizons.values(), default=float("-inf")) if horizons is not None else float("inf")
@@ -240,6 +264,7 @@ def free_event_media(target_gb: float, dry_run: bool, stats: Counter, *, horizon
                 got = diskguard.delete_event_media(d)
                 n += 1
                 freed += got
+                space.add(got)
                 if r["clip"] is not None:
                     cleared.append(r["id"])
     finally:
@@ -264,18 +289,22 @@ def data_floor_step(dtarget: float, dry_run: bool, stats: Counter, **kw) -> None
         freed = diskguard.emergency_free(settings.data_dir, int(dtarget * 1e9), min_age_s=0, backup_dir=settings.backup_dir)
         stats["freed_bytes"] += freed
         stats["floor_fs_only_bytes"] += freed
+        if kw.get("space"):
+            kw["space"].add(freed)
 
 
-def enforce_data_floor(dry_run: bool, stats: Counter, now: float) -> None:
+def enforce_data_floor(dry_run: bool, stats: Counter, now: float, space: Space | None = None) -> None:
     """Steps 1 (and 3) of enforce_disk_floor for the data disk alone: run before the curation pass, which writes rows."""
     dfloor, dtarget = data_floor()
-    if data_free_gb() < dfloor:
-        data_floor_step(dtarget, dry_run, stats, horizons=_horizons(now))
-    if data_free_gb() < dfloor and not same_volume():
-        data_floor_step(dtarget, dry_run, stats)
+    space = space or Space(data_free_gb)
+    if space.free_gb() < dfloor:
+        data_floor_step(dtarget, dry_run, stats, horizons=_horizons(now), space=space)
+    if space.free_gb() < dfloor and not same_volume():
+        data_floor_step(dtarget, dry_run, stats, space=space)
 
 
-def enforce_disk_floor(dry_run: bool, stats: Counter, now: float | None = None) -> None:
+def enforce_disk_floor(dry_run: bool, stats: Counter, now: float | None = None, rec: Space | None = None,
+                       data: Space | None = None) -> None:
     """Hold the free-space floor on both volumes, the recordings disk and the data_dir disk. They are often the
     same disk; then free space is shared and each step sees what the previous one freed. Cheapest loss first:
 
@@ -286,23 +315,27 @@ def enforce_disk_floor(dry_run: bool, stats: Counter, now: float | None = None) 
     5. data disk: locked events' media, only when nothing else is left
 
     The data disk is measured on its own filesystem (statvfs of data_dir: on a central instance its quota'd
-    dataset), and its steps delete files before touching any row (data_floor_step).
+    dataset), and its steps delete files before touching any row (data_floor_step). A step runs only when the ones
+    before it did not free enough, by what they deleted as well as by what the filesystem reports (rec, data: the
+    pass's Space for each volume, the same one when they share a disk).
     """
     global _continuous_breach
     now = now or time.time()
     floor = keep.site_policy()["min_free_gb"]
     dfloor, dtarget = data_floor()
-    if data_free_gb() < dfloor:
-        data_floor_step(dtarget, dry_run, stats, horizons=_horizons(now))
-    if free_gb() < floor:
-        _free_kept(floor, dry_run, stats)
-    if data_free_gb() < dfloor:
-        data_floor_step(dtarget, dry_run, stats)
-    if free_gb() < floor:
-        _free_continuous(floor, dry_run, stats)
-    if data_free_gb() < dfloor:
-        data_floor_step(dtarget, dry_run, stats, locked=True)
-    if stats["deleted_continuous"] or free_gb() < floor:
+    data = data or Space(data_free_gb)
+    rec = rec or (data if same_volume() else Space(free_gb))
+    if data.free_gb() < dfloor:
+        data_floor_step(dtarget, dry_run, stats, horizons=_horizons(now), space=data)
+    if rec.free_gb() < floor:
+        _free_kept(floor, dry_run, stats, rec)
+    if data.free_gb() < dfloor:
+        data_floor_step(dtarget, dry_run, stats, space=data)
+    if rec.free_gb() < floor:
+        _free_continuous(floor, dry_run, stats, rec)
+    if data.free_gb() < dfloor:
+        data_floor_step(dtarget, dry_run, stats, locked=True, space=data)
+    if stats["deleted_continuous"] or rec.free_gb() < floor:
         _continuous_breach = {"at": time.time(), "free_gb": round(free_gb(), 1), "floor_gb": round(floor, 1),
                               "message": "Disk is too small to hold the continuous window for all cameras; "
                                          "oldest continuous footage was deleted. Add storage, lower continuous days or the free-space floor."}
@@ -311,10 +344,12 @@ def enforce_disk_floor(dry_run: bool, stats: Counter, now: float | None = None) 
         _continuous_breach = None
 
 
-def _free_kept(floor: float, dry_run: bool, stats: Counter) -> None:
-    """The least important kept footage first, never locked."""
+def _free_kept(floor: float, dry_run: bool, stats: Counter, space: Space | None = None) -> None:
+    """The least important kept footage first (the oldest of equals), never locked, until the recordings disk has
+    `floor` GB free by the pass's count (Space)."""
+    space = space or Space(free_gb)
     for r in db.all("SELECT * FROM kept_footage ORDER BY score ASC, start_ts ASC"):
-        if free_gb() >= floor:
+        if space.free_gb() >= floor:
             return
         if keep.is_locked(r["camera_id"], r["start_ts"], r["end_ts"]):
             continue
@@ -322,20 +357,23 @@ def _free_kept(floor: float, dry_run: bool, stats: Counter) -> None:
             log.info("dry-run: would delete kept %s (score %s)", r["file"], r["score"])
             continue
         try:
-            stats["freed_bytes"] += _remove(Path(r["file"])) if Path(r["file"]).exists() else 0
+            got = _remove(Path(r["file"])) if Path(r["file"]).exists() else 0
+            stats["freed_bytes"] += got
+            space.add(got)
             db.execute("DELETE FROM kept_footage WHERE id=?", [r["id"]])
             stats["deleted_kept"] += 1
         except OSError as e:
             log.warning("could not delete %s: %s", r["file"], e)
 
 
-def _free_continuous(floor: float, dry_run: bool, stats: Counter) -> None:
+def _free_continuous(floor: float, dry_run: bool, stats: Counter, space: Space | None = None) -> None:
     """Last resort: oldest continuous footage (enforce_disk_floor raises the alert)."""
+    space = space or Space(free_gb)
     curated = _curated_files()
     oldest = sorted((s, f, cam["id"]) for cam in db.cameras()
                     for s, f in camera_segments(cam["id"])[:-1] if str(f) not in curated)
     for s, f, cam_id in oldest:
-        if free_gb() >= floor:
+        if space.free_gb() >= floor:
             break
         if keep.is_locked(cam_id, s, s + 600):
             continue
@@ -343,7 +381,9 @@ def _free_continuous(floor: float, dry_run: bool, stats: Counter) -> None:
             log.warning("dry-run: would delete continuous %s to free space", f.name)
             continue
         try:
-            stats["freed_bytes"] += _remove(f)
+            got = _remove(f)
+            stats["freed_bytes"] += got
+            space.add(got)
             stats["deleted_continuous"] += 1
         except OSError as e:
             log.warning("could not delete %s: %s", f, e)
@@ -605,15 +645,22 @@ def enforce() -> dict:
     dry_run = settings.retention_dry_run
     stats: Counter = Counter()
     floor, _ = data_floor()
+    # What the pass frees is counted per volume (Space), so no step deletes for space an earlier one already freed.
+    data = Space(data_free_gb)
+    rec = data if same_volume() else Space(free_gb)
     # Under the data floor: free event media before anything writes rows (curation does), files first.
-    enforce_data_floor(dry_run, stats, now)
+    enforce_data_floor(dry_run, stats, now, data)
     # Short of space on the data disk: clear expired media before the (slower) curation rather than after it.
-    early = data_free_gb() < 1.5 * floor
+    early = data.free_gb() < 1.5 * floor
     if early:
+        before = stats["freed_bytes"]
         prune_event_media(now, dry_run, stats)
+        data.add(stats["freed_bytes"] - before)
+    before = stats["freed_bytes"]
     for cam in db.cameras():
         curate_camera(cam, now, dry_run, stats)
-    enforce_disk_floor(dry_run, stats, now)
+    rec.add(stats["freed_bytes"] - before)
+    enforce_disk_floor(dry_run, stats, now, rec, data)
     if not early:
         prune_event_media(now, dry_run, stats)
     purge_masked(now, dry_run, stats)
