@@ -487,9 +487,12 @@ MIGRATIONS = [
     # clip chat that searched beyond the clip (clipask.py): the sightings the answer was written from, JSON
     # [{event_id, camera_id, start_ts, match: this | same | possible | found, score, via, label, snapshot}]
     ("chat_messages", "refs", "TEXT"),
+    # what the camera's metadata said about the object beyond its box (camattrs.py): weighted votes, JSON
+    # {vehicle_type|vehicle_color|top_color|bottom_color|helmet|hat: {value: [sightings, weight]}}. NULL = nothing said
+    ("events", "camera_attrs", "TEXT"),
 ]
 JSON_FIELDS = ("path", "rules", "detections", "synopsis_json", "synopsis_original", "feedback", "anomaly_json", "areas", "policy",
-               "migrated_from", "tracks")
+               "migrated_from", "tracks", "camera_attrs")
 
 # ---- event filters shared by browse (/api/events), search and the Find summary strip
 UNUSUAL_MIN = 0.75   # anomaly at/above this is "unusual" (frontend UNUSUAL_MIN)

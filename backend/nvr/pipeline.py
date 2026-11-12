@@ -13,7 +13,7 @@ import cv2
 import httpx
 import numpy as np
 
-from . import aischedule, baseline, cells, detector, frames, gpumem, identities, inference, journeys, plate, policy, ppe, retention, traffic, vlmroute, weaponcheck, zones, merge
+from . import aischedule, baseline, camattrs, cells, detector, frames, gpumem, identities, inference, journeys, plate, policy, ppe, retention, traffic, vlmroute, weaponcheck, zones, merge
 from . import reverify as reverify_mod
 from . import synopsis as vlm
 from .config import settings
@@ -838,6 +838,9 @@ class Pipeline:
         if ppe_res and ppe_res.get("verdict") == "compliant":  # so "who wore a hard hat in the yard" finds it too
             notes.append(f"Wore the required PPE in '{ppe_res.get('zone')}': "
                          + ", ".join(ppe.ITEM_WORDS[i] for i in ppe_res.get("required") or []))
+        saw = camattrs.describe(e.get("camera_attrs"), e["camera_class"])
+        if saw:  # the camera's own read of it, so "white truck" / "green shirt" find it before (or without) Otso
+            notes.append(f"The camera saw: {saw}")
         if e.get("plate"):  # so "plate ABC123", a partial plate and "tag number" find it (plate.search_terms)
             notes.append(f"License plate {plate.display(e['plate'], e.get('plate_region'))}")
         if e.get("ptz_preset"):  # so "when the camera was on the parking lot" finds it
@@ -849,7 +852,7 @@ class Pipeline:
         labels = " ".join(filter(None, [
             *(a["name"] for a in (e.get("areas") or [])),
             e["camera_class"], e["yolo_class"], *s.get("tags", []), *(o.get("type", "") for o in s.get("objects", [])),
-            *ppe.tags(ppe_res),
+            *ppe.tags(ppe_res), saw,
             (fb.get("verdict") or "").replace("_", " "), fb.get("correct_class"),
             plate.search_terms(e.get("plate"), e.get("plate_raw"), e.get("plate_region")),
         ]))

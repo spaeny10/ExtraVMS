@@ -36,7 +36,7 @@ import time
 
 import numpy as np
 
-from . import cells, ruleevents, zones
+from . import camattrs, cells, ruleevents, zones
 from .config import settings
 from .db import db
 
@@ -276,6 +276,7 @@ def apply(a: dict, b: dict, reason: str = "") -> dict:
     people = n if n >= 2 else None
     db.update_event(a["id"], end_ts=max(a["end_ts"] or a["start_ts"], b["end_ts"]), path=path, rules=rules,
                     cells=cells.for_event(path), status="pending", tracks=tracks, people=people,
+                    camera_attrs=camattrs.merge(a.get("camera_attrs"), b.get("camera_attrs")),
                     camera_conf=max(a.get("camera_conf") or 0, b.get("camera_conf") or 0),
                     synopsis=None, synopsis_json=None, threat=None, error=None, detections=None, snapshot=None, clip=None,
                     areas=None, anomaly=None, anomaly_json=None, priority=None, policy=None, watched=None,

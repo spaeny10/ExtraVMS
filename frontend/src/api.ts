@@ -3,6 +3,7 @@ import type { DashboardConfig } from "./dashboard/types";
 import type { ActionPlanCore, ActionResult } from "./ActionCard";
 import type { CardRange, RestoredSpan, SdStatus } from "./sdcard";
 import type { CameraStreams } from "./cameraStreams";
+import type { CameraAttrs } from "./cameraAttrs";
 import type { AnalyticsRule, AudioEncoder, CameraDevice, CameraTime, ClockResult, ImagingSource, TimeBody, TimeDefaults, VideoEncoder } from "./cameraDevice";
 import type { CatalogVoice, Spoken, VoiceEngines, VoiceSetting } from "./talkdownVoice";
 import type { LiveCodecs } from "./codecs";
@@ -61,6 +62,8 @@ export type PpeResult = {
   zone: string; required: PpeItem[]; dwell_s: number;
   verdict: "violation" | "compliant" | "unclear" | "unavailable" | "error";
   violation: PpeItem[]; items?: Partial<Record<PpeItem, PpeCall>>; detector?: Partial<Record<PpeItem, PpeCall>>;
+  /** the camera's own helmet read (Milesight metadata), when it had one */
+  camera?: Partial<Record<PpeItem, PpeCall>>;
   vlm?: ({ head?: string; torso?: string; model?: string } & Partial<Record<PpeItem, PpeCall>>) | null;
   overruled?: PpeItem[]; marked?: string | null; error?: string;
 };
@@ -316,6 +319,8 @@ export type NvrEvent = {
   plate_raw?: string | null;
   plate_region?: string | null;
   plate_conf?: "medium" | "high" | null;
+  /** what the camera's metadata said about it beyond the box (cameraAttrs.ts) */
+  camera_attrs?: CameraAttrs | null;
   score?: number;
   // detail only
   path?: number[][];

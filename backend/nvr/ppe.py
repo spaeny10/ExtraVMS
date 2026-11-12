@@ -26,7 +26,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from . import aischedule, inference, snapshots, zones
+from . import aischedule, camattrs, inference, snapshots, zones
 from .config import ROOT, settings
 
 log = logging.getLogger("nvr.ppe")
@@ -252,6 +252,17 @@ def vlm_all() -> bool:
     return settings.ppe_vlm_all and aischedule.full()
 
 
+def with_camera(detector: dict, camera: dict) -> dict:
+    """The first opinion per item from the PPE detector and the camera's own read (camattrs.ppe_calls: a Milesight
+    8477 says whether a face wears a helmet). Agreement stands; one side unclear -> the other's answer; disagreement
+    -> unclear, so Qwen looks. A "missing" from either still goes to Qwen like any missing item (needs_vlm)."""
+    out = {}
+    for item, d in detector.items():
+        c = camera.get(item, "unclear")
+        out[item] = d if c in ("unclear", d) else c if d == "unclear" else "unclear"
+    return out
+
+
 def needs_vlm(detector: dict) -> bool:
     return vlm_all() or any(v != "present" for v in detector.values())
 
@@ -326,9 +337,11 @@ def detect_event(detector: Detector, coco_model, event: dict, check: dict) -> di
     targets = [s["ts"] for s in have] + [t - shift for t in extra]   # frame time
     # from the recording (events keep no clip of their own; an older event's clip.mp4 fills in what is gone)
     imgs = event_frames(event, targets) if targets else {}
+    camera = camattrs.ppe_calls(event.get("camera_attrs"), check["required"])
     if not imgs:
-        return {"frames": [], "detector": {i: "unclear" for i in check["required"]}, "crops": [], "images": {},
-                "error": "no recording"}
+        unclear = {i: "unclear" for i in check["required"]}
+        return {"frames": [], "detector": unclear, "camera": camera, "first": with_camera(unclear, camera), "crops": [],
+                "images": {}, "error": "no recording"}
     boxes_by_ts: dict[float, list[float]] = {s["ts"]: s["match"]["box"] for s in have}
     extra_ts = [t - shift for t in extra if t - shift in imgs]
     if extra_ts and coco_model is not None:
@@ -348,9 +361,10 @@ def detect_event(detector: Detector, coco_model, event: dict, check: dict) -> di
     frames = [{"ts": t, "box": [round(v, 4) for v in boxes_by_ts[t]], "scores": item_scores(d, boxes_by_ts[t])}
               for t, d in zip(ts_list, dets)]
     det_calls = assess(frames, check["required"])
+    first = with_camera(det_calls, camera)
     area = lambda f: (f["box"][2] - f["box"][0]) * (f["box"][3] - f["box"][1])
-    crops = [crop_jpeg(imgs[f["ts"]], f["box"]) for f in sorted(frames, key=area, reverse=True)[:3]] if needs_vlm(det_calls) else []
-    return {"frames": frames, "detector": det_calls, "crops": crops,
+    crops = [crop_jpeg(imgs[f["ts"]], f["box"]) for f in sorted(frames, key=area, reverse=True)[:3]] if needs_vlm(first) else []
+    return {"frames": frames, "detector": det_calls, "camera": camera, "first": first, "crops": crops,
             "images": {f["ts"]: imgs[f["ts"]] for f in frames}}
 
 
@@ -407,9 +421,11 @@ async def check_event(event: dict, zone_list: list[dict] | None, run_gpu, detect
         vlm = None
         if found["crops"] and settings.ppe_vlm_confirm and vlm_ready:
             vlm = await confirm_with_vlm(found["crops"])
-        final = decide(c["required"], found["detector"], vlm, vlm_first=vlm_all())
+        final = decide(c["required"], found.get("first", found["detector"]), vlm, vlm_first=vlm_all())
+        camera = found.get("camera") or {}
         res = {"zone": c["zone"], "required": c["required"], "priority": c["priority"], "dwell_s": c["dwell_s"],
                "window": c["window"], **final, "detector": found["detector"], "vlm": vlm,
+               **({"camera": camera} if any(v != "unclear" for v in camera.values()) else {}),
                "frames": found["frames"], "model": settings.ppe_model, "seconds": round(time.time() - t0, 2),
                "checked_at": round(time.time(), 1), **({"error": found["error"]} if found.get("error") else {})}
         res["_images"] = found["images"]

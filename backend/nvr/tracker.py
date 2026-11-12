@@ -22,7 +22,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 
-from . import ingest, parked, ruleevents, zones
+from . import camattrs, ingest, parked, ruleevents, zones
 from .config import settings
 from . import cells
 from .db import db
@@ -34,6 +34,12 @@ log = logging.getLogger("nvr.tracker")
 CLASS_MAP = {"human": "person", "person": "person", "face": "person",
              "vehicle": "vehicle", "car": "vehicle", "truck": "vehicle", "bus": "vehicle",
              "motorcycle": "vehicle", "bicycle": "vehicle", "bike": "vehicle", "nonmotor": "vehicle"}   # Bike: AXIS
+BODY_CLASSES = {"human", "person"}
+# A camera that also boxes people's bodies: its face boxes are parts of those people, not more people. The Milesight
+# 8477 pano (2026-11-12) numbers faces apart from bodies (ids 9, 14, 18 beside 276, 297) and often sends them in
+# documents of their own, so a face opened a second person event beside the body's. Faces still open tracks on a
+# camera that never boxed a body in this long.
+FACE_WITH_BODY_S = 600.0
 HELD_LABELS = {"vehicle"}   # a person standing still is never "parked": their tracks are never held
 ORPHAN_CHECK_S = 30.0       # how often the sweep looks for open events no track owns
 
@@ -77,6 +83,7 @@ class Track:
     event_id: int | None = None
     away: str | None = None     # PTZ camera turned away from home when the track opened (preset name / "away")
     source: str = "metadata"    # ruleevents.SOURCE: opened by the camera's ONVIF detection event, no boxes
+    attrs: dict = field(default_factory=dict)   # camattrs votes: what the camera said about it (colours, helmet...)
     on: bool = True             # rule-event track: the camera has not said state=false yet
     last_on: float = 0.0        # rule-event track: wall time of the last state=true
     # rule-event track: the camera's detectors (topic|rule) that said true and not false yet. Two topics can name one
@@ -108,6 +115,7 @@ class Tracker:
         self.holds: dict[tuple[str, str], Hold] = {}   # (camera, camera track id): parked vehicles (see moved)
         self._retired: list[Track] = []   # tracks whose id the camera gave to another kind of object: the sweep closes them
         self._orphans_at = time.time()    # the first orphan check waits a round: start-up closes the old ones (recover)
+        self.body_seen: dict[str, float] = {}   # camera -> wall time it last boxed a body (see FACE_WITH_BODY_S)
 
     def set_zones(self, camera_id: str, zone_list: list[dict]) -> None:
         self.zones[camera_id] = zones.normalize(zone_list)
@@ -163,10 +171,19 @@ class Tracker:
         else:
             self.watch.heard(f.camera_id, now)
         cam = self.camera(f.camera_id) if f.objects else None
+        if any(o.cls.lower() in BODY_CLASSES for o in f.objects):
+            self.body_seen[f.camera_id] = now
+        faces_are_parts = now - self.body_seen.get(f.camera_id, -FACE_WITH_BODY_S) < FACE_WITH_BODY_S
+        for oid, attrs in f.attrs.items():   # what the camera sent about an object apart from its box
+            t = self.tracks.get((f.camera_id, oid))
+            if t is not None:
+                camattrs.add(t.attrs, attrs, t.label)
         for o in f.objects:
             label = CLASS_MAP.get(o.cls.lower())
             if not label or not ruleevents.opens(label, cam):
                 continue   # not a label we know, or one this camera opens no events for ("Open events for")
+            if faces_are_parts and o.cls.lower() == "face":
+                continue   # part of a person the camera boxes as a body too
             key = (f.camera_id, o.object_id)
             t = self.tracks.get(key)
             if t is None or t.label != label:
@@ -179,6 +196,11 @@ class Tracker:
             t.last_ts, t.last_wall = f.ts, now
             t.max_conf = max(t.max_conf, o.conf)
             t.path.append([round(f.ts, 3), *(round(v, 4) for v in o.box), o.conf])
+            if o.attrs:
+                # the pano's helmet check sends each look as a new one-frame "Human" (ids 0, 1, 2... on top of body
+                # 276): what a first sighting says goes to the established track it sits on, if there is one
+                host = self._host(f.camera_id, label, o.box, now, key) if len(t.path) == 1 else None
+                camattrs.add((host or t).attrs, o.attrs, label)
             away = self.away_preset(f.camera_id)
             if away and not t.away:
                 t.away = away
@@ -199,9 +221,22 @@ class Tracker:
                 t.event_id = db.create_event(
                     camera_id=t.camera_id, track_id=t.object_id, camera_class=t.label,
                     camera_conf=t.max_conf, start_ts=t.first_ts, path=t.path, status="open",
-                    cells=cells.for_event(t.path), ptz_preset=t.away,
+                    cells=cells.for_event(t.path), ptz_preset=t.away, camera_attrs=t.attrs or None,
                 )
                 log.info("[%s] event %s opened: %s track %s", t.camera_id, t.event_id, t.label, t.object_id)
+
+    def _host(self, camera_id: str, label: str, box, now: float, exclude: tuple) -> Track | None:
+        """The longest-running track of this label on the camera, seen in the last second, whose last box holds the
+        centre of `box`."""
+        cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+        best = None
+        for key, t in self.tracks.items():
+            if key == exclude or t.camera_id != camera_id or t.label != label or now - t.last_wall > 1.0 or len(t.path) < 2:
+                continue
+            last = t.path[-1]
+            if last[1] <= cx <= last[3] and last[2] <= cy <= last[4] and (best is None or len(t.path) > len(best.path)):
+                best = t
+        return best
 
     def on_rule_event(self, e: RuleEvent) -> None:
         if e.initial:
@@ -342,6 +377,7 @@ class Tracker:
         away = self.away_between(t.camera_id, t.first_ts, t.last_ts) or t.away
         db.update_event(t.event_id, end_ts=t.last_ts, path=t.path, rules=t.rules,
                         camera_conf=t.max_conf, status="pending", cells=cells.for_event(t.path),
+                        **({"camera_attrs": t.attrs} if t.attrs else {}),
                         **({"ptz_preset": away} if away else {}))
         log.info("[%s] event %s closed after %.1fs (%d samples)", t.camera_id, t.event_id,
                  t.last_ts - t.first_ts, len(t.path))
@@ -420,7 +456,7 @@ class Tracker:
                 nt = self.tracks[key] = Track(t.camera_id, t.object_id, t.label, t.last_ts, t.last_ts, t.last_wall,
                                               in_zone=t.in_zone if rule else False, source=t.source, on=t.on,
                                               last_on=t.last_on, states=set(t.states), streak=t.streak,
-                                              hold_since=t.hold_since)
+                                              hold_since=t.hold_since, attrs=camattrs.merge(t.attrs, None) or {})
                 if rule:
                     nt.away = self.away_preset(t.camera_id)
                     nt.path.append(ruleevents.point(nt.first_ts))

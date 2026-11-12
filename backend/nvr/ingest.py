@@ -19,7 +19,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import Callable
 
-from . import axis, mediamtx, ruleevents
+from . import axis, camattrs, mediamtx, ruleevents
 from .config import settings
 from .onvif_soap import ACTION_PULL, Onvif, OnvifError, discover_services, escape, find, find_all, local, simple_items, text
 from .rtsp_client import NoTrack, Rtsp, keepalive, play_track, rtp_payload
@@ -35,6 +35,7 @@ class DetectedObject:
     cls: str
     conf: float
     box: tuple[float, float, float, float]  # left, top, right, bottom, normalized 0..1, origin top-left
+    attrs: dict = field(default_factory=dict)   # camattrs.from_object: {key: (value, weight)}, e.g. top_color
 
 
 @dataclass
@@ -42,6 +43,8 @@ class MetaFrame:
     camera_id: str
     ts: float                      # epoch seconds (camera clock + configured offset)
     objects: list[DetectedObject] = field(default_factory=list)
+    # attributes the camera sent as an Object of their own (no box), by ObjectId: they belong to that id's track
+    attrs: dict[str, dict] = field(default_factory=dict)
 
 
 @dataclass
@@ -82,23 +85,28 @@ def parse_metadata(camera_id: str, xml: bytes, offset: float = 0.0) -> list[Meta
             nx, ny = x * sx + tx, y * sy + ty
             return (nx + 1) / 2, (1 - ny) / 2
 
-        objs = []
+        objs, extra = [], {}
         for obj in (e for e in frame.iter() if local(e) == "Object"):
+            attrs = camattrs.from_object(obj)
             box = find(obj, "BoundingBox")
             if box is None:
+                if attrs and obj.get("ObjectId") is not None:
+                    extra.setdefault(obj.get("ObjectId"), {}).update(attrs)
                 continue
             x1, y1 = to_img(float(box.get("left")), float(box.get("top")))
             x2, y2 = to_img(float(box.get("right")), float(box.get("bottom")))
-            types = [t for t in find_all(obj, "Type") if t.text]
-            best = max(types, key=lambda t: float(t.get("Likelihood", 0)), default=None)
+            # the object's class: Appearance/Class/Type (VehicleInfo/Type "Car" is an attribute, not the class)
+            cls_el = find(obj, "Class")
+            types = [t for t in find_all(cls_el if cls_el is not None else obj, "Type") if t.text]
+            best = max(types, key=lambda t: camattrs.likelihood(t), default=None)
             cls = best.text.strip() if best is not None else (text(obj, "ObjectType") or "Unknown")
-            conf = float(best.get("Likelihood", 0)) if best is not None else 0.0
+            conf = camattrs.likelihood(best) if best is not None else 0.0
             clamp = lambda v: min(max(v, 0.0), 1.0)
             objs.append(DetectedObject(
                 object_id=obj.get("ObjectId"), cls=cls, conf=conf,
-                box=(clamp(min(x1, x2)), clamp(min(y1, y2)), clamp(max(x1, x2)), clamp(max(y1, y2))),
+                box=(clamp(min(x1, x2)), clamp(min(y1, y2)), clamp(max(x1, x2)), clamp(max(y1, y2))), attrs=attrs,
             ))
-        frames.append(MetaFrame(camera_id, ts + offset, objs))
+        frames.append(MetaFrame(camera_id, ts + offset, objs, extra))
     return frames
 
 

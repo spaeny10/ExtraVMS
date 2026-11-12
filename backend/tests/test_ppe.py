@@ -259,6 +259,36 @@ def test_compliant_person_has_no_rule_and_a_fact():
     assert "wore the required hard hat and hi-vis vest" in synopsis.ppe_fact(db.event(eid))
 
 
+# ---------------------------------------------------------------- the camera's own helmet read (camattrs.py)
+
+def test_with_camera_combines_first_opinions():
+    assert ppe.with_camera({"hard_hat": "unclear", "vest": "present"}, {"hard_hat": "present", "vest": "unclear"}) ==         {"hard_hat": "present", "vest": "present"}
+    assert ppe.with_camera({"hard_hat": "present"}, {"hard_hat": "missing"}) == {"hard_hat": "unclear"}   # disagree: ask Qwen
+    assert ppe.with_camera({"hard_hat": "missing"}, {"hard_hat": "missing"}) == {"hard_hat": "missing"}
+    assert ppe.with_camera({"hard_hat": "missing"}, {}) == {"hard_hat": "missing"}
+
+
+def test_camera_helmet_settles_what_the_detector_cannot_see():
+    """A Milesight 8477 says whether a face wears a helmet: where the detector can't tell, that stands without Qwen."""
+    eid = make(walk(T0 + 600, 12), start=T0 + 600)
+    db.update_event(eid, camera_attrs={"helmet": {"yes": [6, 3.0]}})
+    res, _ = run_check(eid, [vest(0.8)], vlm_answer={"hard_hat": "no", "hi_vis_vest": "no"})
+    assert res["detector"]["hard_hat"] == "unclear" and res["camera"] == {"hard_hat": "present", "vest": "unclear"}
+    assert res["verdict"] == "compliant" and VLM_CALLS == [] and res["vlm"] is None
+
+
+def test_camera_and_detector_disagreeing_ask_qwen():
+    eid = make(walk(T0 + 700, 12), start=T0 + 700)
+    db.update_event(eid, camera_attrs={"helmet": {"no": [8, 4.0]}})
+    res, _ = run_check(eid, [hat(0.85), vest(0.8)], vlm_answer={"hard_hat": "no", "hi_vis_vest": "yes"})
+    assert res["detector"]["hard_hat"] == "present" and VLM_CALLS, "the detector alone would not have asked"
+    assert res["verdict"] == "violation" and res["violation"] == ["hard_hat"]
+    # a camera that said it only twice, or both ways, has no say
+    db.update_event(eid, camera_attrs={"helmet": {"no": [2, 1.0]}})
+    res, _ = run_check(eid, [hat(0.85), vest(0.8)], vlm_answer={"hard_hat": "no", "hi_vis_vest": "yes"})
+    assert res["verdict"] == "compliant" and VLM_CALLS == [] and "camera" not in res
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

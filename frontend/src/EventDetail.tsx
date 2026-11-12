@@ -3,6 +3,7 @@ import {
   api, fmtDuration, fmtTime, fmtWhen, ppeItemsText, type SiteApi,
   type ChatMessage, type ChatRef, type Feedback, type Journey, type NvrEvent, type Synopsis, type Threat, type TimelineEvent, type Verdict, type WeaponCheck,
 } from "./api";
+import { cameraAttrsDetail, cameraSaw } from "./cameraAttrs";
 import { refChips, refSummary, refTarget, stripHandles } from "./chatRefs";
 import { EventPlayer, type EventPlayerHandle } from "./EventPlayer";
 import { clipOrigin } from "./eventPlayback";
@@ -325,6 +326,8 @@ function Details({ e, site, setE, notes, onUnsave, seek }: {
   const tags = s?.tags ?? [];
   const frames = e.detections?.samples?.length ?? 0;
   const ppe = e.detections?.ppe;
+  const saw = cameraSaw(e.camera_attrs, e.camera_class);
+  const attrsDetail = cameraAttrsDetail(e.camera_attrs);
   const rules = e.rules?.length ? [...new Set(e.rules.map((r) => r.topic.split("/").slice(-2, -1)[0] || r.topic))] : [];
 
   return (
@@ -353,6 +356,9 @@ function Details({ e, site, setE, notes, onUnsave, seek }: {
             <p className="d-summary">{e.synopsis ?? <span className="muted">{placeholder(e)}</span>}</p>
             {e.areas?.length ? (
               <div className="d-line" title="Named places the person walked into, in order">📍 {e.areas.map((a) => `${a.name} (+${Math.max(0, Math.round(a.from - e.start_ts))} s)`).join(" → ")}</div>
+            ) : null}
+            {saw ? (
+              <div className="d-line" title="From the camera's own analytics, as it tracked the object (details under Verification)">📷 Camera saw: {saw}</div>
             ) : null}
             {e.camera_class === "vehicle" && e.status === "verified" ? (
               <div className="d-line plate-line" title="Read by Otso from the sharpest full-resolution frames of this vehicle, only when the plate is clearly legible">
@@ -436,10 +442,12 @@ function Details({ e, site, setE, notes, onUnsave, seek }: {
               <tr><td>YOLO</td><td>{e.yolo_class ?? "—"} {e.yolo_conf != null && `· ${(e.yolo_conf * 100).toFixed(0)}%`}</td></tr>
               <tr><td>Agreement</td><td>{e.yolo_hits ?? 0} of {frames} frames (need {e.detections?.needed ?? "—"}){e.detections?.time_shift_s ? ` · clock shift ${e.detections.time_shift_s} s` : ""}</td></tr>
               {e.detections?.rejected && <tr><td>Rejected</td><td>{rejectedReason(e)}{e.detections.parked ? ` · ${e.detections.parked.cls} sat still ${e.detections.parked.via === "memory" ? "on a remembered parking spot" : "while the camera's boxes were small movements on it"}` : ""}</td></tr>}
+              {attrsDetail && <tr><td>Camera saw</td><td>{attrsDetail}</td></tr>}
               {rules.length > 0 && <tr><td>Rules</td><td>{rules.join(", ")}</td></tr>}
               {ppe && <tr><td>PPE check</td><td>
                 {ppe.error ? `${ppe.verdict}: ${ppe.error}` : <>
                   detector: {ppeItemsText(ppe.detector, ppe.required)}
+                  {ppe.camera ? <> · camera: {ppeItemsText(ppe.camera, ppe.required.filter((i) => i === "hard_hat"))}</> : null}
                   {ppe.vlm ? <> · Otso: {ppeItemsText(ppe.vlm, ppe.required)}{ppe.vlm.head ? ` (head: ${ppe.vlm.head})` : ""}</> : " · Otso not needed"}
                   {ppe.overruled?.length ? " · Otso changed the detector's answer" : ""} · {ppe.dwell_s.toFixed(0)} s in zone
                 </>}
