@@ -499,7 +499,7 @@ export function FindView({ cameras = NO_CAMERAS, live = null, source: given, ask
               </select>
             )}
             <span className="row small color-filter" title="The color of the vehicle, or of a person's top or bottoms (Otso's description first, then the camera's own read, then the picture)">
-              <span className={`color-swatch${filters.color ? "" : " empty"}`} style={filters.color ? { background: SWATCH[filters.color as keyof typeof SWATCH] } : undefined} />
+              <span className={`color-swatch${filters.color ? "" : " any-color"}`} style={filters.color ? { background: SWATCH[filters.color as keyof typeof SWATCH] } : undefined} />
               <select value={filters.color} onChange={(e) => setF({ color: e.target.value })} aria-label="Color">
                 <option value="">Any color</option>
                 {COLOR_NAMES.map((c) => <option key={c} value={c}>{c[0].toUpperCase() + c.slice(1)}</option>)}
