@@ -4,6 +4,7 @@ import type { ActionPlanCore, ActionResult } from "./ActionCard";
 import type { CardRange, RestoredSpan, SdStatus } from "./sdcard";
 import type { CameraStreams } from "./cameraStreams";
 import type { CameraAttrs } from "./cameraAttrs";
+import type { EventColors } from "./eventColors";
 import type { AnalyticsRule, AudioEncoder, CameraDevice, CameraTime, ClockResult, ImagingSource, TimeBody, TimeDefaults, VideoEncoder } from "./cameraDevice";
 import type { CatalogVoice, Spoken, VoiceEngines, VoiceSetting } from "./talkdownVoice";
 import type { LiveCodecs } from "./codecs";
@@ -321,6 +322,8 @@ export type NvrEvent = {
   plate_conf?: "medium" | "high" | null;
   /** what the camera's metadata said about it beyond the box (cameraAttrs.ts) */
   camera_attrs?: CameraAttrs | null;
+  /** the object's colors for Find (backend colors.py): Otso's, else the camera's, else read from the crops */
+  colors?: EventColors | null;
   score?: number;
   // detail only
   path?: number[][];
@@ -570,6 +573,8 @@ const json = (method: string, body: unknown): RequestInit => ({
 export type EventQuery = {
   camera?: string; status?: string; label?: string; since?: number; until?: number; min_yolo?: number;
   priority?: string; flags?: string[]; place?: string; ppe_zone?: string; attention?: boolean; limit?: number; offset?: number;
+  /** the object's color (backend colors.py), on color_part (vehicle | top | bottom) or any */
+  color?: string; color_part?: string;
 };
 const eventQs = ({ flags, attention, ...rest }: EventQuery & Record<string, unknown>) =>
   ({ ...rest, flags: flags?.length ? flags.join(",") : undefined, attention: attention ? "true" : undefined }) as Record<string, string | number | undefined>;

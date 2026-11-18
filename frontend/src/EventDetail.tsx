@@ -4,6 +4,7 @@ import {
   type ChatMessage, type ChatRef, type Feedback, type Journey, type NvrEvent, type Synopsis, type Threat, type TimelineEvent, type Verdict, type WeaponCheck,
 } from "./api";
 import { cameraAttrsDetail, cameraSaw } from "./cameraAttrs";
+import { colorsText } from "./eventColors";
 import { refChips, refSummary, refTarget, stripHandles } from "./chatRefs";
 import { EventPlayer, type EventPlayerHandle } from "./EventPlayer";
 import { clipOrigin } from "./eventPlayback";
@@ -327,6 +328,8 @@ function Details({ e, site, setE, notes, onUnsave, seek }: {
   const frames = e.detections?.samples?.length ?? 0;
   const ppe = e.detections?.ppe;
   const saw = cameraSaw(e.camera_attrs, e.camera_class);
+  const named = colorsText(e.colors);
+  const by = [...new Set(Object.values(e.colors?.by ?? {}))].map((b) => b === "otso" ? "Otso" : b === "camera" ? "the camera" : "the picture");
   const attrsDetail = cameraAttrsDetail(e.camera_attrs);
   const rules = e.rules?.length ? [...new Set(e.rules.map((r) => r.topic.split("/").slice(-2, -1)[0] || r.topic))] : [];
 
@@ -356,6 +359,9 @@ function Details({ e, site, setE, notes, onUnsave, seek }: {
             <p className="d-summary">{e.synopsis ?? <span className="muted">{placeholder(e)}</span>}</p>
             {e.areas?.length ? (
               <div className="d-line" title="Named places the person walked into, in order">📍 {e.areas.map((a) => `${a.name} (+${Math.max(0, Math.round(a.from - e.start_ts))} s)`).join(" → ")}</div>
+            ) : null}
+            {named ? (
+              <div className="d-line" title={`Used by Find's color filter. From ${by.join(" and ")}.`}>🎨 Colors: {named}</div>
             ) : null}
             {saw ? (
               <div className="d-line" title="From the camera's own analytics, as it tracked the object (details under Verification)">📷 Camera saw: {saw}</div>

@@ -1,6 +1,7 @@
 /** Find views: built-in presets per role, saved views, the default view, URL (de)serialization and the
  * client-side filter check for live events. Pure functions (no DOM) so they are unit-tested in findViews.test.ts. */
 import { UNUSUAL_MIN, type Camera, type NvrEvent, type SavedFindView } from "./api";
+import { COLOR_NAMES, colorMatches, type ColorPart } from "./eventColors";
 
 export type FindFlag = "rule" | "ppe" | "unusual" | "watched" | "multicam" | "locked" | "corrected" | "false_alarm";
 export const FLAGS: { id: FindFlag; label: string; title: string }[] = [
@@ -31,6 +32,8 @@ export type FindFilters = {
   place: string;          // named area (zone type "area")
   sort: "newest" | "priority";
   attention: boolean;     // priority medium+ OR a broken rule OR unusual OR watched
+  color: string;          // "" | a COLOR_NAMES word: the object's color (eventColors.ts)
+  colorPart: ColorPart;   // "" = vehicle, top or bottoms
 };
 export type FindMode = "events" | "grouped";
 export type FindView = {
@@ -42,6 +45,7 @@ export type FindView = {
 
 export const DEFAULT_FILTERS: FindFilters = {
   camera: "", label: "", hours: 24, day: "", minYolo: 0, status: "verified", priority: "", flags: [], place: "", sort: "newest", attention: false,
+  color: "", colorPart: "",
 };
 
 export const SUGGESTIONS = [
@@ -98,7 +102,7 @@ export function activeFilterCount(f: FindFilters, browsing = true): number {
   const d = DEFAULT_FILTERS;
   return [
     f.camera !== d.camera, f.label !== d.label, !!f.day || f.hours !== d.hours, f.priority !== d.priority,
-    f.place !== d.place, f.minYolo > 0, f.attention,
+    f.place !== d.place, f.minYolo > 0, f.attention, !!f.color,
     browsing && f.status !== d.status, browsing && f.sort !== d.sort,
   ].filter(Boolean).length + f.flags.length;
 }
@@ -141,6 +145,8 @@ export function buildQuery(viewId: string, f: FindFilters, base: FindFilters, q:
   if (f.place !== base.place) p.set("place", f.place);
   if (f.sort !== base.sort) p.set("sort", f.sort);
   if (f.attention !== base.attention) p.set("attn", f.attention ? "1" : "0");
+  if (f.color !== base.color) p.set("color", f.color || "any");
+  if (f.colorPart !== base.colorPart) p.set("cpart", f.colorPart || "any");
   if (q) p.set("q", q);
   if (mode !== viewMode) p.set("mode", mode);
   return p.toString();
@@ -161,6 +167,8 @@ export function parseQuery(search: string): UrlState {
   if (p.has("place")) patch.place = p.get("place") ?? "";
   if (p.has("sort")) { const so = p.get("sort"); if (so === "newest" || so === "priority") patch.sort = so; }
   if (p.has("attn")) patch.attention = p.get("attn") === "1";
+  if (p.has("color")) { const c = p.get("color") ?? ""; if (c === "any") patch.color = ""; else if ((COLOR_NAMES as readonly string[]).includes(c)) patch.color = c; }
+  if (p.has("cpart")) { const c = p.get("cpart") ?? ""; if (c === "any") patch.colorPart = ""; else if (c === "vehicle" || c === "top" || c === "bottom") patch.colorPart = c; }
   const m = p.get("mode");
   return { view: p.get("view") || undefined, patch, q: p.get("q") ?? "", mode: m === "grouped" || m === "events" ? m : undefined };
 }
@@ -181,6 +189,7 @@ export function eventQuery(f: FindFilters, now = Date.now()) {
     camera: f.camera || undefined, status: f.status || undefined, label: f.label || undefined, min_yolo: f.minYolo || undefined,
     since, until, priority: f.priority || undefined, flags: f.flags.length ? f.flags : undefined, place: f.place || undefined,
     attention: f.attention || undefined,
+    color: f.color || undefined, color_part: (f.color && f.colorPart) || undefined,
   };
 }
 
@@ -200,7 +209,8 @@ export function matchesFilters(e: NvrEvent, f: FindFilters, now = Date.now()): b
     && (!f.priority || rank >= RANK[f.priority])
     && f.flags.every((x) => flag[x])
     && (!f.place || !!e.areas?.some((a) => a.name === f.place))
-    && (!f.attention || rank >= 2 || !!e.policy || unusual || !!e.watched);
+    && (!f.attention || rank >= 2 || !!e.policy || unusual || !!e.watched)
+    && (!f.color || colorMatches(e.colors, f.color, f.colorPart));
 }
 
 /** Named areas (zones of type "area") on the chosen camera, or on every camera. */

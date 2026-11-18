@@ -1150,6 +1150,10 @@ def _find_servers(u: dict, loc: dict) -> list[dict]:
                   key=lambda s: (s["name"].casefold(), s["id"]))
 
 
+# an event's object colors (the server's colors.COLORS): Find's color filter
+COLORS = ("black", "white", "gray", "red", "orange", "yellow", "green", "blue", "purple", "pink", "brown")
+
+
 async def _site_find(location_id: str, u: dict, path: str, params: dict, camera: str | None, cursor: str | None,
                      limit: int, sort: str) -> dict:
     loc, _ = auth.location_access(u, location_id)
@@ -1175,11 +1179,14 @@ async def location_find_events(location_id: str, camera: str | None = Query(None
                                flags: str | None = Query(None, max_length=200), place: str | None = Query(None, max_length=120),
                                ppe_zone: str | None = Query(None, max_length=120), attention: bool = False,
                                sort: Literal["newest", "priority"] = "newest", limit: int = Query(60, ge=1, le=200),
-                               cursor: str | None = Query(None, max_length=4000), u: dict = Depends(user)):
+                               cursor: str | None = Query(None, max_length=4000),
+                               color: Literal[COLORS] | None = None, color_part: Literal["vehicle", "top", "bottom"] | None = None,
+                               u: dict = Depends(user)):
     """Browse a Site's events with a server's /api/events filters (camera = <server>:<camera>). Newest first (by
     start time across servers) or by priority; `next` is the cursor for the following page (null = that's all)."""
     params = {"status": status, "label": label, "since": since, "until": until, "min_yolo": min_yolo or None, "priority": priority,
-              "flags": flags, "place": place, "ppe_zone": ppe_zone, "attention": "true" if attention else None, "sort": sort}
+              "flags": flags, "place": place, "ppe_zone": ppe_zone, "attention": "true" if attention else None, "sort": sort,
+              "color": color, "color_part": color_part}
     return await _site_find(location_id, u, "/api/events", params, camera, cursor, limit, sort)
 
 
@@ -1190,10 +1197,13 @@ async def location_find_search(location_id: str, q: str = Query(min_length=1, ma
                                priority: Literal["low", "medium", "high"] | None = None, flags: str | None = Query(None, max_length=200),
                                place: str | None = Query(None, max_length=120), ppe_zone: str | None = Query(None, max_length=120),
                                attention: bool = False, limit: int = Query(100, ge=1, le=200),
-                               cursor: str | None = Query(None, max_length=4000), u: dict = Depends(user)):
+                               cursor: str | None = Query(None, max_length=4000),
+                               color: Literal[COLORS] | None = None, color_part: Literal["vehicle", "top", "bottom"] | None = None,
+                               u: dict = Depends(user)):
     """Search a Site's events by meaning (each server's /api/search with the same filters), merged by relevance."""
     params = {"q": q, "status": status, "label": label, "since": since, "until": until, "min_yolo": min_yolo or None, "priority": priority,
-              "flags": flags, "place": place, "ppe_zone": ppe_zone, "attention": "true" if attention else None}
+              "flags": flags, "place": place, "ppe_zone": ppe_zone, "attention": "true" if attention else None,
+              "color": color, "color_part": color_part}
     return await _site_find(location_id, u, "/api/search", params, camera, cursor, limit, "score")
 
 

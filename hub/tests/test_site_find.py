@@ -121,6 +121,12 @@ def test_browse_priority_and_filters_forwarded(world):
     assert not world["co"].queries
     assert root.get(url, params={"flags": "bogus"}).status_code == 400
     assert root.get(url, params={"cursor": "not json"}).status_code == 400
+    # the object's color (the server's colors.py) goes to each server as it is
+    root.get(url, params={"color": "green", "color_part": "top"})
+    q = world["ca"].queries[-1]
+    assert q["color"] == "green" and q["color_part"] == "top"
+    assert root.get(url, params={"color": "chartreuse"}).status_code == 422
+    assert root.get(url, params={"color": "red", "color_part": "hat"}).status_code == 422
 
 
 def test_cursor_cannot_reach_another_site(world):

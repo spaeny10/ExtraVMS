@@ -1469,3 +1469,8 @@ body:has(.drag-ghost) { cursor: grabbing; user-select: none; }
   .plates-filters select { flex: 1 1 140px; }
   .plates-add-form .field { flex: 1 1 140px; }
 }
+
+/* Find: the color filter's swatch beside its select */
+.color-filter { gap: 4px; align-items: center; }
+.color-swatch { width: 14px; height: 14px; border-radius: 50%; border: 1px solid var(--border); flex: none; }
+.color-swatch.empty { background: conic-gradient(#d43c3c, #e8c930, #3f9a4a, #3a6fd8, #8a4fc8, #d43c3c); opacity: 0.55; }

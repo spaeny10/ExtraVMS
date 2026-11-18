@@ -22,12 +22,19 @@ from .config import settings
 
 log = logging.getLogger("nvr.synopsis")
 
+COLOR_WORDS = ("black", "white", "gray", "red", "orange", "yellow", "green", "blue", "purple", "pink", "brown")   # colors.COLORS
+
 SCHEMA = {
     "type": "object",
     "properties": {
         "summary": {"type": "string", "description": "1-3 sentence factual description of the event"},
         "objects": {"type": "array", "items": {"type": "object", "properties": {
-            "type": {"type": "string"}, "description": {"type": "string"}}, "required": ["type", "description"]}},
+            "type": {"type": "string"}, "description": {"type": "string"},
+            # one word each from colors.COLORS, so Find can filter on them (colors.py): "none" when it doesn't apply
+            "color": {"type": "string", "enum": [*COLOR_WORDS, "none"], "description": "a vehicle's main body color"},
+            "top_color": {"type": "string", "enum": [*COLOR_WORDS, "none"], "description": "a person's shirt/jacket color"},
+            "bottom_color": {"type": "string", "enum": [*COLOR_WORDS, "none"], "description": "a person's pants/shorts color"}},
+            "required": ["type", "description", "color", "top_color", "bottom_color"]}},
         "activity": {"type": "string"},
         "threat_level": {"type": "string", "enum": ["none", "low", "medium", "high"]},
         "threat_reason": {"type": "string"},
@@ -57,7 +64,10 @@ SYSTEM = (
     "medium = suspicious (loitering, checking doors/cars, face concealed at night), high = clear criminal or dangerous act. "
     "A 'Location (confirmed by the NVR)' line says where the object really is and overrides general scene notes "
     "about background traffic. For vehicles set towing=true only when the vehicle is pulling or hitched to a trailer "
-    "or equipment (and name it in towed); parked trailers nearby do not count. Use American English spelling."
+    "or equipment (and name it in towed); parked trailers nearby do not count. "
+    "For each object pick its colors from the list: color = a vehicle's main body color (silver counts as gray), "
+    "top_color and bottom_color = a person's shirt or jacket and pants or shorts (navy counts as blue, olive as green, "
+    "khaki or tan as brown); 'none' when it doesn't apply or you can't tell. Use American English spelling."
 )
 
 

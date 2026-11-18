@@ -490,9 +490,12 @@ MIGRATIONS = [
     # what the camera's metadata said about the object beyond its box (camattrs.py): weighted votes, JSON
     # {vehicle_type|vehicle_color|top_color|bottom_color|helmet|hat: {value: [sightings, weight]}}. NULL = nothing said
     ("events", "camera_attrs", "TEXT"),
+    # the object's colors for Find (colors.py): JSON {vehicle | top | bottom: color, by: {part: otso | camera | picture},
+    # picture: {...}}. NULL = not named (not verified, not a person or vehicle, or nothing could tell)
+    ("events", "colors", "TEXT"),
 ]
 JSON_FIELDS = ("path", "rules", "detections", "synopsis_json", "synopsis_original", "feedback", "anomaly_json", "areas", "policy",
-               "migrated_from", "tracks", "camera_attrs")
+               "migrated_from", "tracks", "camera_attrs", "colors")
 
 # ---- event filters shared by browse (/api/events), search and the Find summary strip
 UNUSUAL_MIN = 0.75   # anomaly at/above this is "unusual" (frontend UNUSUAL_MIN)
@@ -503,6 +506,8 @@ JOURNEY_CAMS_SQL = ("(SELECT COUNT(DISTINCT je.value) FROM journeys, json_each(j
                     "WHERE journeys.id = events.journey_id)")
 # detections can be large and older rows may not be an object: only parse it when it is valid JSON
 PPE_ZONE_SQL = "json_extract(CASE WHEN json_valid(detections) THEN detections END, '$.ppe.zone')"
+COLOR_NAMES = ("black", "white", "gray", "red", "orange", "yellow", "green", "blue", "purple", "pink", "brown")   # colors.COLORS
+COLOR_PARTS = ("vehicle", "top", "bottom")
 FLAG_SQL = {
     "rule": "policy IS NOT NULL",
     "ppe": "json_extract(policy, '$.kind') = 'ppe'",
@@ -521,11 +526,12 @@ def event_filters(camera: str | None = None, label: str | None = None, threat: s
                   status: str | None = None, since: float | None = None, until: float | None = None,
                   min_yolo: float = 0, keep_unverified: bool = True, priority: str | None = None,
                   flags: str | list[str] | None = None, place: str | None = None, ppe_zone: str | None = None,
-                  attention: bool = False) -> tuple[list[str], list]:
+                  attention: bool = False, color: str | None = None, color_part: str | None = None) -> tuple[list[str], list]:
     """WHERE clauses + params for the event filters; all optional and AND-combined.
 
     keep_unverified: with min_yolo, events still being tracked/verified (no YOLO score yet) stay in (browse).
     flags: names from FLAG_SQL (list or comma string); unknown names or priorities raise ValueError.
+    color: the object's color (colors.py: events.colors), on color_part (vehicle | top | bottom) or any of them.
     """
     where, params = [], []
     if min_yolo and min_yolo > 0:
@@ -558,6 +564,15 @@ def event_filters(camera: str | None = None, label: str | None = None, threat: s
         where.append(f"(json_extract(policy, '$.kind') = 'ppe' AND {PPE_ZONE_SQL} = ?)"); params.append(ppe_zone)
     if attention:
         where.append(ATTENTION_SQL)
+    if color:
+        if color not in COLOR_NAMES:
+            raise ValueError(f"unknown color {color!r} (known: {', '.join(COLOR_NAMES)})")
+        if color_part and color_part not in COLOR_PARTS:
+            raise ValueError(f"unknown color part {color_part!r} (known: {', '.join(COLOR_PARTS)})")
+        parts = [color_part] if color_part else list(COLOR_PARTS)
+        col = "CASE WHEN json_valid(colors) THEN colors END"
+        where.append("(" + " OR ".join(f"json_extract({col}, '$.{p}') = ?" for p in parts) + ")")
+        params += [color] * len(parts)
     return where, params
 
 

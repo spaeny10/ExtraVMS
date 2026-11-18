@@ -1175,7 +1175,9 @@ async def list_events(camera: str | None = None, status: str | None = None, labe
                       limit: int = Query(50, le=500), priority: str | None = None, flags: str | None = None,
                       place: str | None = None, ppe_zone: str | None = None, attention: bool = False,
                       sort: Literal["newest", "priority", "oldest"] = "newest", offset: int = 0,
-                      region: Annotated[str | None, Query(max_length=200)] = None):
+                      region: Annotated[str | None, Query(max_length=200)] = None,
+                      color: Annotated[str | None, Query(max_length=20)] = None,
+                      color_part: Annotated[str | None, Query(max_length=10)] = None):
     """Browse events. priority: at least this level; flags: comma list (rule, ppe, unusual, watched, multicam,
     locked, corrected, false_alarm), all must hold; place: walked into this named area; attention: anything that
     needs a look. sort=priority pages by offset (before_id only makes sense for newest-first). sort=oldest: by start
@@ -1183,10 +1185,11 @@ async def list_events(camera: str | None = None, status: str | None = None, labe
     before it answers 422).
     region: a painted 32x18 cell bitmap (cells.py encoding, the UI's region.ts): only events whose path crossed it
     while a PTZ camera was at its home view, plus open events (their path isn't complete yet), as regionPass does
-    in the UI. Matched here so a burst of non-matching events can't crowd the matches out of `limit`."""
+    in the UI. Matched here so a burst of non-matching events can't crowd the matches out of `limit`.
+    color / color_part: the object's color (colors.py), on vehicle | top | bottom or any."""
     where, params = _event_filters(camera=camera, label=label, threat=threat, status=status, since=since,
                                    until=until, min_yolo=min_yolo, priority=priority, flags=flags, place=place,
-                                   ppe_zone=ppe_zone, attention=attention)
+                                   ppe_zone=ppe_zone, attention=attention, color=color, color_part=color_part)
     if before_id:
         where.append("id<?"); params.append(before_id)
     order = {"priority": f"{PRIORITY_RANK_SQL} DESC, id DESC", "oldest": "start_ts ASC, id ASC"}.get(sort, "id DESC")
@@ -1197,7 +1200,7 @@ async def list_events(camera: str | None = None, status: str | None = None, labe
         ids = await asyncio.to_thread(_region_ids, where, params, order, region, limit, max(0, int(offset or 0)))
         where, params, offset = [f"id IN ({','.join('?' * len(ids))})"] if ids else ["0"], list(ids), 0
     sql = ("SELECT id, camera_id, track_id, camera_class, camera_conf, start_ts, end_ts, status, yolo_class, "
-           "yolo_conf, yolo_hits, snapshot, clip, synopsis, threat, priority, anomaly, anomaly_json, watched, areas, policy, cells, ptz_preset, error, corrected_at, feedback, people, plate, plate_region, plate_conf, "
+           "yolo_conf, yolo_hits, snapshot, clip, synopsis, threat, priority, anomaly, anomaly_json, watched, areas, policy, cells, ptz_preset, error, corrected_at, feedback, people, plate, plate_region, plate_conf, colors, "
            f"{LOCKED_SQL} AS locked, journey_id, {JOURNEY_CAMS_SQL} AS journey_cameras FROM events"
            + (f" WHERE {' AND '.join(where)}" if where else "") + f" ORDER BY {order} LIMIT ? OFFSET ?")
     rows = db.all(sql, [*params, limit, max(0, int(offset or 0))])
@@ -1215,11 +1218,13 @@ async def list_events(camera: str | None = None, status: str | None = None, labe
 async def events_summary(camera: str | None = None, status: str | None = None, label: str | None = None,
                          since: float | None = None, until: float | None = None, min_yolo: float = 0,
                          priority: str | None = None, flags: str | None = None, place: str | None = None,
-                         ppe_zone: str | None = None, attention: bool = False):
+                         ppe_zone: str | None = None, attention: bool = False,
+                         color: Annotated[str | None, Query(max_length=20)] = None,
+                         color_part: Annotated[str | None, Query(max_length=10)] = None):
     """Find's compliance strip: counts for the filter window by broken-rule kind, PPE zone, camera and day."""
     where, params = _event_filters(camera=camera, label=label, status=status, since=since, until=until,
                                    min_yolo=min_yolo, priority=priority, flags=flags, place=place,
-                                   ppe_zone=ppe_zone, attention=attention)
+                                   ppe_zone=ppe_zone, attention=attention, color=color, color_part=color_part)
     return db.summary(where, params)
 
 
@@ -1349,6 +1354,10 @@ async def reprocess(event_id: int):
 class ObjectIn(BaseModel):
     type: str
     description: str = ""
+    # colors.COLORS words or "none" (Otso's answer carries them; a correction keeps them)
+    color: str | None = None
+    top_color: str | None = None
+    bottom_color: str | None = None
 
 
 class SynopsisIn(BaseModel):
@@ -1651,16 +1660,19 @@ async def search(q: str, camera: str | None = None, since: float | None = None, 
                  label: str | None = None, min_yolo: float = Query(0, ge=0, le=1),
                  limit: int = Query(30, le=200), offset: int = 0, status: str | None = None,
                  priority: str | None = None, flags: str | None = None, place: str | None = None,
-                 ppe_zone: str | None = None, attention: bool = False):
+                 ppe_zone: str | None = None, attention: bool = False,
+                 color: Annotated[str | None, Query(max_length=20)] = None,
+                 color_part: Annotated[str | None, Query(max_length=10)] = None):
     win = assistant.time_window(q)
     if win:  # "…today", "…last night": the phrase sets the window (unless given) and isn't searched for as a word
         q = win["text"]
         if since is None and until is None:
             since, until = win["since"], win["until"]
     emb = await vlm.embed(f"search_query: {q}") if state.pipeline.vlm_ready else None
-    _event_filters(status=status, priority=priority, flags=flags)  # 400 on unknown names
+    _event_filters(status=status, priority=priority, flags=flags, color=color, color_part=color_part)  # 400 on unknown names
     rows = db.search(q, emb, limit, camera, since, until, label or query_label(q), min_yolo, offset=max(0, offset),
-                     status=status, priority=priority, flags=flags, place=place, ppe_zone=ppe_zone, attention=attention)
+                     status=status, priority=priority, flags=flags, place=place, ppe_zone=ppe_zone, attention=attention,
+                     color=color, color_part=color_part)
     return [state.pipeline.annotate(r) for r in rows]
 
 

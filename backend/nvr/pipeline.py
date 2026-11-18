@@ -13,7 +13,7 @@ import cv2
 import httpx
 import numpy as np
 
-from . import aischedule, baseline, camattrs, cells, detector, frames, gpumem, identities, inference, journeys, plate, policy, ppe, retention, traffic, vlmroute, weaponcheck, zones, merge
+from . import aischedule, baseline, camattrs, cells, colors, detector, frames, gpumem, identities, inference, journeys, plate, policy, ppe, retention, traffic, vlmroute, weaponcheck, zones, merge
 from . import reverify as reverify_mod
 from . import synopsis as vlm
 from .config import settings
@@ -224,6 +224,7 @@ class Pipeline:
         asyncio.create_task(self._reid_backfill(), name="reid-backfill")
         asyncio.create_task(self._vehicle_backfill(), name="vehicle-backfill")
         asyncio.create_task(self._cells_backfill(), name="cells-backfill")
+        asyncio.create_task(self._colors_backfill(), name="colors-backfill")
         asyncio.create_task(self.hold_loop(), name="synopsis-hold")
         asyncio.create_task(self.retry_loop(), name="synopsis-retry")
         asyncio.create_task(self.catchup_loop(), name="synopsis-catchup")
@@ -332,6 +333,12 @@ class Pipeline:
         if result["status"] == "verified" and label == "vehicle":
             clip = await self.get_clip()
             await asyncio.get_running_loop().run_in_executor(self.gpu, identities.embed_vehicle, clip, event_id)
+        if result["status"] == "verified":
+            # the object's colors for Find, from the crops before a busy camera's crops are dropped below (colors.py)
+            try:
+                await asyncio.get_running_loop().run_in_executor(self.decode, colors.event_colors, event_id)
+            except Exception:  # noqa: BLE001 - colors must not stop verification
+                log.exception("colors for event %s failed", event_id)
         # Verified (snapshot, re-ID and fingerprint are made); a camera over the hourly event limit keeps the snapshot
         # only, or its crops and keyframes fill the disk (retention.EventRateGuard).
         if retention.rate_guard.check(e["camera_id"]):
@@ -698,6 +705,26 @@ class Pipeline:
         except Exception:
             log.exception("region cells backfill failed")
 
+    async def _colors_backfill(self) -> None:
+        """One-time: Find's colors for the last colors.BACKFILL_DAYS of people and vehicles (from Otso's answers, the
+        camera's read and the saved crops), a batch at a time on the decode pool so new events go first."""
+        if db.get_setting(colors.BACKFILL_SETTING):
+            return
+        await asyncio.sleep(120)   # after start-up's own work
+        loop, last, seen, named = asyncio.get_running_loop(), 0, 0, 0
+        since = time.time() - colors.BACKFILL_DAYS * 86400
+        try:
+            while True:
+                last, n, k = await loop.run_in_executor(self.decode, colors.backfill_batch, last, since)
+                seen, named = seen + n, named + k
+                if not last:
+                    break
+                await asyncio.sleep(1.0)
+            db.set_setting(colors.BACKFILL_SETTING, {"at": time.time(), "events": seen, "named": named})
+            log.info("colors: named %d of %d earlier events", named, seen)
+        except Exception:
+            log.exception("colors backfill failed (it runs again after a restart)")
+
     async def _vehicle_backfill(self) -> None:
         """One-time: CLIP fingerprints for vehicles verified before they existed (from their saved crops)."""
         try:
@@ -822,6 +849,8 @@ class Pipeline:
         e = db.event(event_id)
         if not e or e["status"] != "verified" and not e["synopsis"]:
             return
+        if (new := colors.refresh(e)) is not None:   # Otso's answer (or a correction) names colors: they come first
+            e = {**e, "colors": new}
         s = e.get("synopsis_json") or {}
         fb = e.get("feedback") or {}
         notes = [m["content"] for m in db.chat(event_id) if m["saved"]]
@@ -839,6 +868,8 @@ class Pipeline:
             notes.append(f"Wore the required PPE in '{ppe_res.get('zone')}': "
                          + ", ".join(ppe.ITEM_WORDS[i] for i in ppe_res.get("required") or []))
         saw = camattrs.describe(e.get("camera_attrs"), e["camera_class"])
+        if (named := colors.describe(e.get("colors"), colors.label_of(e))):   # "green top, black bottoms"
+            notes.append(f"Colors: {named}")
         if saw:  # the camera's own read of it, so "white truck" / "green shirt" find it before (or without) Otso
             notes.append(f"The camera saw: {saw}")
         if e.get("plate"):  # so "plate ABC123", a partial plate and "tag number" find it (plate.search_terms)
@@ -852,7 +883,7 @@ class Pipeline:
         labels = " ".join(filter(None, [
             *(a["name"] for a in (e.get("areas") or [])),
             e["camera_class"], e["yolo_class"], *s.get("tags", []), *(o.get("type", "") for o in s.get("objects", [])),
-            *ppe.tags(ppe_res), saw,
+            *ppe.tags(ppe_res), saw, named,
             (fb.get("verdict") or "").replace("_", " "), fb.get("correct_class"),
             plate.search_terms(e.get("plate"), e.get("plate_raw"), e.get("plate_region")),
         ]))

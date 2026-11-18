@@ -12,6 +12,7 @@ import {
   fromSaved, hourGroups, matchesFilters, parseQuery, placeNames, resolveFilters, sameFilters, toSaved,
   type FindFilters, type FindFlag, type FindMode, type FindView as View, type UrlState,
 } from "./findViews";
+import { COLOR_NAMES, PART_LABELS, SWATCH, colorFilterText, type ColorPart } from "./eventColors";
 import { FootageResults } from "./FootageSearch";
 import { IdentitiesView } from "./Identities";
 import { promptDialog, SkeletonGrid, toast } from "./ui";
@@ -412,6 +413,7 @@ export function FindView({ cameras = NO_CAMERAS, live = null, source: given, ask
     filters.priority ? `${filters.priority}+ priority` : "",
     ...filters.flags.map((f) => FLAGS.find((x) => x.id === f)?.label.replace(/^[^\p{L}]+/u, "").toLowerCase() ?? f),
     filters.place ? `in ${filters.place}` : "",
+    colorFilterText(filters.color, filters.colorPart),
     ppeZone ? `PPE zone ${ppeZone}` : "",
     browsing && status !== "verified" ? STATUSES.find(([v]) => v === status)?.[1].toLowerCase() ?? "" : "",
   ].filter(Boolean).join(" · ");
@@ -496,6 +498,19 @@ export function FindView({ cameras = NO_CAMERAS, live = null, source: given, ask
                 {places.map((p) => <option key={p} value={p}>📍 {p}</option>)}
               </select>
             )}
+            <span className="row small color-filter" title="The color of the vehicle, or of a person's top or bottoms (Otso's description first, then the camera's own read, then the picture)">
+              <span className={`color-swatch${filters.color ? "" : " empty"}`} style={filters.color ? { background: SWATCH[filters.color as keyof typeof SWATCH] } : undefined} />
+              <select value={filters.color} onChange={(e) => setF({ color: e.target.value })} aria-label="Color">
+                <option value="">Any color</option>
+                {COLOR_NAMES.map((c) => <option key={c} value={c}>{c[0].toUpperCase() + c.slice(1)}</option>)}
+              </select>
+              {filters.color && (
+                <select value={filters.colorPart} onChange={(e) => setF({ colorPart: e.target.value as ColorPart })} aria-label="On">
+                  {PART_LABELS.filter(([p]) => filters.label === "vehicle" ? p === "" || p === "vehicle" : filters.label === "person" ? p !== "vehicle" : true)
+                    .map(([p, l]) => <option key={l} value={p}>{l}</option>)}
+                </select>
+              )}
+            </span>
             {browsing && (
               <div className="segmented" title="Order of the list">
                 <button className={filters.sort === "newest" ? "active" : ""} onClick={() => setF({ sort: "newest" })}>Newest</button>
