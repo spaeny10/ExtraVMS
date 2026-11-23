@@ -84,6 +84,74 @@ def test_trim_log_keeps_the_tail_and_appends_after():
     assert p.read_bytes() == b"next\n"                    # no gap of zeros where the old content was
 
 
+def test_restart_backs_off_while_it_keeps_exiting():
+    w = synopsis.OllamaServer.restart_wait
+    assert [w(n) for n in range(9)] == [5, 5, 10, 20, 40, 80, 160, 300, 300]
+
+
+def _serve_exits(runs: list[float]):
+    """Run OllamaServer._serve against a fake `ollama serve` that exits with 1 after each of `runs` seconds (a fake
+    clock); returns the waits it chose and the warnings it logged."""
+    import logging
+    waits, warnings, clock = [], [], {"t": 0.0}
+    runs = list(runs)
+
+    class Proc:
+        pid, returncode = 4242, None
+
+        async def wait(self):
+            clock["t"] += runs.pop(0)
+            self.returncode = 1
+            return 1
+
+    async def spawn(*a, **kw):
+        return Proc()
+
+    class Stop(Exception):
+        pass
+
+    async def sleep(s):
+        waits.append(s)
+        if not runs:
+            raise Stop
+
+    class Catch(logging.Handler):
+        def emit(self, r):
+            if r.levelno >= logging.WARNING:
+                warnings.append(r.getMessage())
+
+    real = (synopsis.asyncio.create_subprocess_exec, synopsis.asyncio.sleep, synopsis.time.monotonic,
+            synopsis.port_listeners, synopsis.open_log)
+    synopsis.asyncio.create_subprocess_exec, synopsis.asyncio.sleep = spawn, sleep
+    synopsis.time.monotonic = lambda: clock["t"]
+    synopsis.port_listeners = lambda port: []
+    synopsis.open_log = lambda path: None
+    h = Catch()
+    synopsis.log.addHandler(h)
+    try:
+        asyncio.run(synopsis.OllamaServer()._serve("primary"))
+    except Stop:
+        pass
+    finally:
+        (synopsis.asyncio.create_subprocess_exec, synopsis.asyncio.sleep, synopsis.time.monotonic,
+         synopsis.port_listeners, synopsis.open_log) = real
+        synopsis.log.removeHandler(h)
+    return waits, warnings
+
+
+def test_an_ollama_that_cannot_start_is_not_warned_about_every_5_s():
+    waits, warnings = _serve_exits([0.1] * 12)
+    assert waits == [5, 10, 20, 40, 80, 160, 300, 300, 300, 300, 300, 300], waits
+    assert len(warnings) == 2, warnings                # the first exit, and when it reaches the slowest retry
+    assert "keeps exiting" in warnings[1] and "ollama.log" in warnings[1]
+
+
+def test_an_ollama_that_ran_a_while_restarts_quickly_again():
+    waits, warnings = _serve_exits([0.1, 0.1, 0.1, 3600, 0.1])
+    assert waits == [5, 10, 20, 5, 5], waits          # a long run resets the back-off
+    assert len(warnings) == 3, warnings               # each new streak's first exit is a warning
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

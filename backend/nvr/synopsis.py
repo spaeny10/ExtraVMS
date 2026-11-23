@@ -311,20 +311,43 @@ class OllamaServer:
                     await asyncio.to_thread(trim_log, settings.runtime_dir / name, self.LOG_MAX, self.LOG_KEEP)
             await asyncio.sleep(600)
 
+    RETRY_S = 5            # restart after an exit; doubles while it keeps exiting within QUICK_EXIT_S of starting
+    MAX_RETRY_S = 300
+    QUICK_EXIT_S = 30
+
+    @classmethod
+    def restart_wait(cls, quick_exits: int) -> float:
+        """Seconds before the next start after `quick_exits` exits in a row that each came within QUICK_EXIT_S."""
+        return min(cls.RETRY_S * 2 ** max(quick_exits - 1, 0), cls.MAX_RETRY_S)
+
     async def _serve(self, role: str) -> None:
         env = ollama_env(vlmroute.router.models[role])
-        log_file = open_log(settings.runtime_dir / self.LOGS[role])
+        log_path = settings.runtime_dir / self.LOGS[role]
+        log_file = open_log(log_path)
         port = _port(vlmroute.router.models[role].url)
+        quick_exits = 0
         while True:
             if port:
                 await reclaim_port(port, role, {p.pid for p in self.procs.values() if p and p.returncode is None})
             # own process group / session so stop() can take the model runners (llama-server) down with the server
             kw ={"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
+            t0 = time.monotonic()
             self.procs[role] = await asyncio.create_subprocess_exec(str(settings.ollama_exe), "serve", env=env,
                                                                     stdout=log_file, stderr=log_file, **kw)
             code = await self.procs[role].wait()
-            log.warning("ollama serve (%s) exited (%s); restarting in 5s", role, code)
-            await asyncio.sleep(5)
+            # One that can't start (a port another program holds, a broken install) used to be restarted and warned
+            # about every 5 s for as long as the NVR ran (171,000 log lines on TSS-DT in Oct): it backs off to 5 min
+            # and warns on the first exit and when it reaches the slowest retry; the rest are debug.
+            quick_exits = quick_exits + 1 if time.monotonic() - t0 < self.QUICK_EXIT_S else 0
+            wait = self.restart_wait(quick_exits)
+            if quick_exits <= 1:
+                log.warning("ollama serve (%s) exited (%s); restarting in %ds", role, code, wait)
+            elif wait >= self.MAX_RETRY_S and self.restart_wait(quick_exits - 1) < self.MAX_RETRY_S:
+                log.warning("ollama serve (%s) keeps exiting at once (%s, %d times in a row): retrying every %d s; see %s",
+                            role, code, quick_exits, wait, log_path)
+            else:
+                log.debug("ollama serve (%s) exited (%s) again; restarting in %ds", role, code, wait)
+            await asyncio.sleep(wait)
 
     async def stop(self, role: str | None = None) -> None:
         """Stop `ollama serve` and its runner children (one instance, or both). Terminating only the server orphaned
